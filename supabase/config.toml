@@ -417,3 +417,7 @@ enabled = true
 # (spec 04).
 [functions.stripe-webhook]
 verify_jwt = false
+
+# Nightly walk materializer (phase 06): 14-day horizon at 03:00 UTC.
+[functions.materialize-walks]
+schedule = "0 3 * * *"

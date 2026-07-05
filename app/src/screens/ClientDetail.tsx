@@ -11,6 +11,7 @@ import { Sheet } from "@/components/Sheet";
 import { Spinner } from "@/components/Spinner";
 import { WalkCard } from "@/components/WalkCard";
 import { CredentialRow, PutCredentialSheet } from "@/components/VaultFlows";
+import { ScheduleTab } from "@/components/ScheduleEditor";
 import {
   adjustCredits,
   createCheckout,
@@ -36,7 +37,7 @@ import { formatLedgerEntry } from "@/lib/credits";
 import { dateLondon, gbp } from "@/lib/format";
 import type { Clients, CreditLedger, Operators, Pets, Plans, Properties } from "@/lib/types";
 
-type Tab = "pets" | "plan" | "walks" | "access";
+type Tab = "pets" | "plan" | "walks" | "schedule" | "access";
 
 export default function ClientDetail() {
   const { id } = useParams<{ id: string }>();
@@ -82,6 +83,7 @@ export default function ClientDetail() {
     { key: "pets", label: "Pets" },
     { key: "plan", label: "Plan & credits" },
     { key: "walks", label: "Walks" },
+    { key: "schedule", label: "Schedule" },
     { key: "access", label: "Access" },
   ];
 
@@ -131,6 +133,7 @@ export default function ClientDetail() {
           <PlanTab client={client} operator={operator} onChanged={() => void reload()} />
         )}
         {tab === "walks" && <WalksTab clientId={client.id} />}
+        {tab === "schedule" && <ScheduleTab clientId={client.id} />}
         {tab === "access" && <AccessTab client={client} />}
       </div>
     </div>

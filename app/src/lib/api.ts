@@ -517,3 +517,59 @@ export async function signedPetPhotoUrl(path: string, expiresIn = 3600): Promise
   if (error) throw new Error(error.message);
   return data.signedUrl;
 }
+
+// ── recurring schedules (phase 06) ─────────────────────────────────────────
+export async function createSchedule(
+  row: TableInsert<"recurring_schedules">,
+): Promise<RecurringSchedules> {
+  const { data, error } = await supabase
+    .from("recurring_schedules").insert(row).select().single();
+  return must(data, error);
+}
+
+export async function updateSchedule(
+  id: string,
+  patch: TableUpdate<"recurring_schedules">,
+): Promise<RecurringSchedules> {
+  const { data, error } = await supabase
+    .from("recurring_schedules").update(patch).eq("id", id).select().single();
+  return must(data, error);
+}
+
+export async function listSchedulePets(scheduleId: string): Promise<string[]> {
+  const { data, error } = await supabase
+    .from("schedule_pets").select("pet_id").eq("schedule_id", scheduleId);
+  return must(data, error).map((r) => r.pet_id);
+}
+
+export async function setSchedulePets(
+  scheduleId: string,
+  operatorId: string,
+  petIds: string[],
+): Promise<void> {
+  const { error: delErr } = await supabase
+    .from("schedule_pets").delete().eq("schedule_id", scheduleId);
+  if (delErr) throw new Error(delErr.message);
+  if (petIds.length === 0) return;
+  const { error } = await supabase.from("schedule_pets").insert(
+    petIds.map((petId) => ({ schedule_id: scheduleId, pet_id: petId, operator_id: operatorId })),
+  );
+  if (error) throw new Error(error.message);
+}
+
+/**
+ * Deactivate a schedule and cancel its FUTURE materialized scheduled walks
+ * (phase 06 deletion semantics — past walks are kept).
+ */
+export async function deactivateSchedule(scheduleId: string, today: string): Promise<void> {
+  const { error } = await supabase
+    .from("recurring_schedules").update({ active: false }).eq("id", scheduleId);
+  if (error) throw new Error(error.message);
+  const { error: wErr } = await supabase
+    .from("walks")
+    .update({ status: "cancelled" })
+    .eq("schedule_id", scheduleId)
+    .eq("status", "scheduled")
+    .gte("scheduled_date", today);
+  if (wErr) throw new Error(wErr.message);
+}
