@@ -37,7 +37,7 @@ Authoritative specs live in `docs/spec/`. Build plan in `docs/phases/00–08`. S
 One phase per session: `/clear` → plan mode against `docs/phases/NN-*.md` → approve → execute → `/validate` → commit → tick the phase below and append one status line.
 
 ## Phase status
-- [ ] 00 foundations-and-database
+- [x] 00 foundations-and-database
 - [ ] 01 edge-functions
 - [ ] 02 frontend-foundation
 - [ ] 03 component-kit-and-hooks
@@ -46,3 +46,6 @@ One phase per session: `/clear` → plan mode against `docs/phases/NN-*.md` → 
 - [ ] 06 scheduling
 - [ ] 07 client-portal
 - [ ] 08 notifications-and-pwa
+
+## Status log
+- phase(00): schema + credit engine + RLS + seed + smoke all green on the no-Docker local stack (scripts/db-reset.sh; docs/dev/local-stack.md). Ledger chain ordered by seq (documented in 0002); pre-commit adversarial review caught and fixed a TOCTOU in fn_expire_credits.
