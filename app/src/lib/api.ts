@@ -430,3 +430,90 @@ export async function previewInviteAuthed(token: string): Promise<InvitePreview 
   const row = Array.isArray(data) ? data[0] : data;
   return (row as InvitePreview | undefined) ?? null;
 }
+
+// ── access credentials (phase 05) ──────────────────────────────────────────
+// IMPORTANT: never select * on access_credentials — the ciphertext column
+// has no SELECT grant (invariant 2) and a wildcard select would be denied.
+const CRED_META =
+  "id, operator_id, property_id, entry_method, label, key_location_hint, rotated_at, revoked_at, created_at";
+
+export interface CredentialMeta {
+  id: string;
+  operator_id: string;
+  property_id: string;
+  entry_method: Database["public"]["Enums"]["entry_method"];
+  label: string | null;
+  key_location_hint: string | null;
+  rotated_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+}
+
+export async function listCredentials(propertyId?: string): Promise<CredentialMeta[]> {
+  let query = supabase.from("access_credentials").select(CRED_META).is("revoked_at", null);
+  if (propertyId) query = query.eq("property_id", propertyId);
+  const { data, error } = await query.order("created_at");
+  return must(data as CredentialMeta[] | null, error);
+}
+
+export interface CredentialLogRow {
+  id: string;
+  credential_id: string;
+  accessed_by: string;
+  purpose: string;
+  accessed_at: string;
+}
+
+export async function listCredentialLog(credentialId: string): Promise<CredentialLogRow[]> {
+  const { data, error } = await supabase
+    .from("credential_access_log")
+    .select("id, credential_id, accessed_by, purpose, accessed_at")
+    .eq("credential_id", credentialId)
+    .order("accessed_at", { ascending: false });
+  return must(data as CredentialLogRow[] | null, error);
+}
+
+// ── detailed walk listing (dashboard / calendar cards) ─────────────────────
+export interface WalkDetailed extends Walks {
+  walk_pets: { pets: { name: string } | null }[];
+  property: { label: string } | null;
+  client: { full_name: string } | null;
+}
+
+export async function listWalksDetailed(filters: WalkFilters = {}): Promise<WalkDetailed[]> {
+  let query = supabase
+    .from("walks")
+    .select("*, walk_pets(pets(name)), property:properties(label), client:clients(full_name)");
+  if (filters.clientId) query = query.eq("client_id", filters.clientId);
+  if (filters.date) query = query.eq("scheduled_date", filters.date);
+  if (filters.from) query = query.gte("scheduled_date", filters.from);
+  if (filters.to) query = query.lte("scheduled_date", filters.to);
+  if (filters.status) query = query.eq("status", filters.status);
+  const { data, error } = await query.order("scheduled_date").order("window_start");
+  return must(data as unknown as WalkDetailed[] | null, error);
+}
+
+export function walkPetNames(walk: WalkDetailed): string[] {
+  return walk.walk_pets.flatMap((wp) => (wp.pets ? [wp.pets.name] : []));
+}
+
+// ── pet photos ─────────────────────────────────────────────────────────────
+export async function uploadPetPhoto(
+  operatorId: string,
+  petId: string,
+  file: Blob,
+): Promise<string> {
+  const path = `${operatorId}/${petId}/${crypto.randomUUID()}.jpg`;
+  const { error } = await supabase.storage.from("pet-photos").upload(path, file, {
+    contentType: "image/jpeg",
+  });
+  if (error) throw new Error(error.message);
+  return path;
+}
+
+export async function signedPetPhotoUrl(path: string, expiresIn = 3600): Promise<string> {
+  const { data, error } = await supabase.storage.from("pet-photos")
+    .createSignedUrl(path, expiresIn);
+  if (error) throw new Error(error.message);
+  return data.signedUrl;
+}

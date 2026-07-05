@@ -1,6 +1,7 @@
 // Route table (spec 06).
 import { lazy, Suspense } from "react";
 import { Route, Routes } from "react-router-dom";
+import { OperatorShell } from "@/components/OperatorShell";
 import { RequireRole } from "@/components/RequireRole";
 import SignIn from "@/screens/SignIn";
 import Onboard from "@/screens/Onboard";
@@ -24,6 +25,15 @@ import NotFound from "@/screens/NotFound";
 const DevKit = import.meta.env.DEV ? lazy(() => import("@/screens/DevKit")) : null;
 
 function operator(el: React.ReactNode) {
+  return (
+    <RequireRole role="operator">
+      <OperatorShell>{el}</OperatorShell>
+    </RequireRole>
+  );
+}
+
+// Walk Mode owns the full viewport — no nav chrome.
+function operatorBare(el: React.ReactNode) {
   return <RequireRole role="operator">{el}</RequireRole>;
 }
 
@@ -42,7 +52,7 @@ export default function App() {
       <Route path="/calendar" element={operator(<Calendar />)} />
       <Route path="/roster" element={operator(<Roster />)} />
       <Route path="/clients/:id" element={operator(<ClientDetail />)} />
-      <Route path="/walks/:id/live" element={operator(<WalkMode />)} />
+      <Route path="/walks/:id/live" element={operatorBare(<WalkMode />)} />
       <Route path="/vault" element={operator(<AccessVault />)} />
       <Route path="/billing" element={operator(<BillingConsole />)} />
 
