@@ -22,8 +22,9 @@ npm --prefix app run build
 
 ## 4. Edge functions (if `supabase/functions/` has entrypoints)
 ```
-deno check supabase/functions/**/index.ts
-deno test supabase/functions/_tests/ 2>/dev/null || echo "SKIP: no _tests"
+deno check supabase/functions/*/index.ts
+# ./ prefix required: deno skips _-prefixed paths without it
+deno test ./supabase/functions/_tests/ 2>/dev/null || echo "SKIP: no _tests"
 ```
 
 ## 5. Database reset (if `supabase/migrations/` non-empty; requires `supabase start` running)

@@ -412,3 +412,8 @@ enabled = true
 # declarative_schema_path = "./database"
 # JSON string passed through to pg-delta SQL formatting.
 # format_options = "{\"keywordCase\":\"upper\",\"indent\":2,\"maxWidth\":80,\"commaStyle\":\"trailing\"}"
+
+# stripe-webhook authenticates via the Stripe signature header, not a JWT
+# (spec 04).
+[functions.stripe-webhook]
+verify_jwt = false

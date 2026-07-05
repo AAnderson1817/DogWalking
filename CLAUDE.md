@@ -38,7 +38,7 @@ One phase per session: `/clear` → plan mode against `docs/phases/NN-*.md` → 
 
 ## Phase status
 - [x] 00 foundations-and-database
-- [ ] 01 edge-functions
+- [x] 01 edge-functions
 - [ ] 02 frontend-foundation
 - [ ] 03 component-kit-and-hooks
 - [ ] 04 auth-screens
@@ -49,3 +49,4 @@ One phase per session: `/clear` → plan mode against `docs/phases/NN-*.md` → 
 
 ## Status log
 - phase(00): schema + credit engine + RLS + seed + smoke all green on the no-Docker local stack (scripts/db-reset.sh; docs/dev/local-stack.md). Ledger chain ordered by seq (documented in 0002); pre-commit adversarial review caught and fixed a TOCTOU in fn_expire_credits.
+- phase(01): five edge functions + _lib with dep-injected handlers; 38 deno tests green (crypto roundtrip/tamper, locally-signed webhook signatures, idempotency for webhook/complete-walk/overage, vault rate limit); functions-serve boot check deferred to a Docker environment (docs/dev/local-stack.md).
