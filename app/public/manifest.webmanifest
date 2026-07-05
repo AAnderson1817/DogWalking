@@ -1,0 +1,35 @@
+{
+  "name": "PawTrail",
+  "short_name": "PawTrail",
+  "description": "Dog-walking operations: schedules, live GPS walks, report cards, credits.",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#0E2A23",
+  "background_color": "#F6F4EE",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-maskable-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

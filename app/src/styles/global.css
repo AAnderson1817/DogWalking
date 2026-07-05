@@ -1,0 +1,83 @@
+/* Trailhead base styles (spec 05): reset, fonts, type rules, signature
+   pulse-live, walk-mode inversion, reduced-motion guard. */
+@import "./tokens.css";
+
+/* ── self-hosted fonts ─────────────────────────────────────────────────── */
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/inter-var.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Space Grotesk";
+  src: url("/fonts/space-grotesk-var.woff2") format("woff2");
+  font-weight: 300 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ── reset ─────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+* { margin: 0; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: var(--fs-16);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100dvh;
+}
+img, picture, video, canvas, svg { display: block; max-width: 100%; }
+input, button, textarea, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+a { color: inherit; }
+
+/* ── layout (spec 05): mobile-first, 640px centered ────────────────────── */
+#root { min-height: 100dvh; display: flex; flex-direction: column; }
+.page {
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto;
+  padding: var(--s-4);
+  padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px)); /* BottomNav space */
+  flex: 1;
+}
+
+/* ── type rules (spec 05) ──────────────────────────────────────────────── */
+h1, h2, h3, .display {
+  font-family: var(--font-display);
+  font-feature-settings: "tnum";
+}
+h1 { font-size: var(--fs-24); font-weight: 600; }
+.section-label {
+  font-size: var(--fs-12);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-2);
+  font-weight: 600;
+}
+.numeral {
+  font-family: var(--font-display);
+  font-feature-settings: "tnum";
+}
+.walkmode .numeral { font-size: var(--fs-32); }
+
+/* ── signature: pulse-live (spec 05) ───────────────────────────────────── */
+@keyframes pulse-live { 0%{box-shadow:0 0 0 0 rgb(45 212 191/.45)} 70%{box-shadow:0 0 0 12px rgb(45 212 191/0)} 100%{box-shadow:0 0 0 0 rgb(45 212 191/0)} }
+.pulse-live { width:10px;height:10px;border-radius:var(--r-full);background:var(--teal-live);animation:pulse-live 2s infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-live { animation: none; box-shadow: 0 0 0 3px rgb(45 212 191 / 0.25); }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ── walk mode: night-walk surface ─────────────────────────────────────── */
+.walkmode { background: var(--bg); color: var(--text); }

@@ -39,7 +39,7 @@ One phase per session: `/clear` → plan mode against `docs/phases/NN-*.md` → 
 ## Phase status
 - [x] 00 foundations-and-database
 - [x] 01 edge-functions
-- [ ] 02 frontend-foundation
+- [x] 02 frontend-foundation
 - [ ] 03 component-kit-and-hooks
 - [ ] 04 auth-screens
 - [ ] 05 operator-core
@@ -50,3 +50,4 @@ One phase per session: `/clear` → plan mode against `docs/phases/NN-*.md` → 
 ## Status log
 - phase(00): schema + credit engine + RLS + seed + smoke all green on the no-Docker local stack (scripts/db-reset.sh; docs/dev/local-stack.md). Ledger chain ordered by seq (documented in 0002); pre-commit adversarial review caught and fixed a TOCTOU in fn_expire_credits.
 - phase(01): five edge functions + _lib with dep-injected handlers; 38 deno tests green (crypto roundtrip/tamper, locally-signed webhook signatures, idempotency for webhook/complete-walk/overage, vault rate limit); functions-serve boot check deferred to a Docker environment (docs/dev/local-stack.md).
+- phase(02): Trailhead tokens + shell, self-hosted variable fonts, full lib layer (env/supabase/types/api/credits/format/auth-context), 15 routed placeholder screens behind RequireRole, manifest + generated icons; types.ts via scripts/gen-types.py (no-Docker typegen); 17 vitest green; headless-browser check confirms / → /signin with tokens applied.
