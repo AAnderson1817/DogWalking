@@ -573,3 +573,48 @@ export async function deactivateSchedule(scheduleId: string, today: string): Pro
     .gte("scheduled_date", today);
   if (wErr) throw new Error(wErr.message);
 }
+
+// ── portal (phase 07) ──────────────────────────────────────────────────────
+export interface MyOperatorView {
+  id: string;
+  display_name: string;
+  business_name: string;
+  cancellation_cutoff_hours: number;
+}
+
+/** The caller's operator identity + cutoff via v_my_operator (both personas). */
+export async function getMyOperatorView(): Promise<MyOperatorView | null> {
+  const { data, error } = await supabase
+    .from("v_my_operator")
+    .select("id, display_name, business_name, cancellation_cutoff_hours")
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  return data as MyOperatorView | null;
+}
+
+export async function getPlan(planId: string): Promise<Plans | null> {
+  const { data, error } = await supabase
+    .from("plans").select("*").eq("id", planId).maybeSingle();
+  if (error) throw new Error(error.message);
+  return data;
+}
+
+/** Client-persona cancellation (guarded server-side by the 0008 trigger). */
+export async function cancelOwnWalk(walkId: string): Promise<void> {
+  const { error } = await supabase
+    .from("walks").update({ status: "cancelled" }).eq("id", walkId);
+  if (error) throw new Error(error.message);
+}
+
+/** True while the walk can still be cancelled by the client. */
+export function withinCancellationWindow(
+  scheduledDate: string,
+  windowStart: string,
+  cutoffHours: number,
+  nowMs: number = Date.now(),
+): boolean {
+  // Walk times are operator wall-clock (Europe/London); this mirrors the
+  // 0008 guard closely enough for UI gating — the trigger is authoritative.
+  const start = new Date(`${scheduledDate}T${windowStart}`).getTime();
+  return nowMs <= start - cutoffHours * 3600_000;
+}

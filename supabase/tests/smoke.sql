@@ -533,6 +533,77 @@ begin
   raise notice 'invite claim + partial-column guards: OK';
 end $$;
 
+-- ═══ Portal booking & cancellation policies (0008) ════════════════════════
+do $$
+declare
+  v_walk uuid;
+  v_prop uuid := '99999999-0000-4000-d000-00000000000a';
+  v_service uuid;
+begin
+  reset session authorization;
+  select id into v_service from service_types
+   where operator_id = '99999999-0000-4000-a000-000000000001' and is_default;
+
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000000003","role":"authenticated"}', true);
+  set local session authorization authenticated;
+
+  -- Client A books a one-off walk far in the future → allowed.
+  insert into walks (operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status)
+  values ('99999999-0000-4000-a000-000000000001', '99999999-0000-4000-c000-00000000000a',
+          v_prop, v_service, current_date + 10, '10:00', '11:00', 'scheduled')
+  returning id into v_walk;
+
+  -- ...and may cancel it (well before the 12 h cutoff).
+  update walks set status = 'cancelled' where id = v_walk;
+  if (select status from walks where id = v_walk) <> 'cancelled' then
+    raise exception 'FAIL: client could not cancel own future walk';
+  end if;
+
+  -- Booking for another client is invisible/blocked by RLS.
+  begin
+    insert into walks (operator_id, client_id, property_id, service_type_id,
+                       scheduled_date, window_start, window_end, status)
+    values ('99999999-0000-4000-a000-000000000001', '99999999-0000-4000-c000-0000000000a2',
+            v_prop, v_service, current_date + 10, '10:00', '11:00', 'scheduled');
+    raise exception 'FAIL: client booked a walk for another client';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  -- Cancelling inside the cutoff window is rejected by the guard.
+  reset session authorization;
+  insert into walks (id, operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status)
+  values ('99999999-0000-4000-2000-000000000009', '99999999-0000-4000-a000-000000000001',
+          '99999999-0000-4000-c000-00000000000a', v_prop, v_service,
+          current_date, localtime(0), localtime(0) + interval '1 hour', 'scheduled');
+
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000000003","role":"authenticated"}', true);
+  set local session authorization authenticated;
+  begin
+    update walks set status = 'cancelled'
+     where id = '99999999-0000-4000-2000-000000000009';
+    raise exception 'FAIL: client cancelled inside the cutoff window';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  -- Clients may not touch other columns even on their own scheduled walks.
+  begin
+    update walks set notes = 'client-forged note'
+     where id = '99999999-0000-4000-2000-000000000009';
+    raise exception 'FAIL: client updated walk fields other than status';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  reset session authorization;
+  raise notice 'portal booking & cutoff guards: OK';
+end $$;
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;

@@ -1,6 +1,7 @@
 // Route table (spec 06).
 import { lazy, Suspense } from "react";
 import { Route, Routes } from "react-router-dom";
+import { BottomNav } from "@/components/BottomNav";
 import { OperatorShell } from "@/components/OperatorShell";
 import { RequireRole } from "@/components/RequireRole";
 import SignIn from "@/screens/SignIn";
@@ -15,6 +16,7 @@ import AccessVault from "@/screens/AccessVault";
 import BillingConsole from "@/screens/BillingConsole";
 import PortalHome from "@/screens/PortalHome";
 import Booking from "@/screens/Booking";
+import PortalWalks from "@/screens/PortalWalks";
 import WalkDetail from "@/screens/WalkDetail";
 import PortalBilling from "@/screens/PortalBilling";
 import PetProfiles from "@/screens/PetProfiles";
@@ -38,7 +40,12 @@ function operatorBare(el: React.ReactNode) {
 }
 
 function portal(el: React.ReactNode) {
-  return <RequireRole role="client">{el}</RequireRole>;
+  return (
+    <RequireRole role="client">
+      {el}
+      <BottomNav persona="client" />
+    </RequireRole>
+  );
 }
 
 export default function App() {
@@ -58,6 +65,7 @@ export default function App() {
 
       <Route path="/portal" element={portal(<PortalHome />)} />
       <Route path="/portal/book" element={portal(<Booking />)} />
+      <Route path="/portal/walks" element={portal(<PortalWalks />)} />
       <Route path="/portal/walks/:id" element={portal(<WalkDetail />)} />
       <Route path="/portal/billing" element={portal(<PortalBilling />)} />
       <Route path="/portal/pets" element={portal(<PetProfiles />)} />

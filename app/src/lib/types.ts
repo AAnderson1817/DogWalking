@@ -66,6 +66,7 @@ export type Database = {
           credit_balance: number;
           created_at: string;
           updated_at: string;
+          current_period_end: string | null;
         };
         Insert: {
           id?: string;
@@ -84,6 +85,7 @@ export type Database = {
           credit_balance?: number;
           created_at?: string;
           updated_at?: string;
+          current_period_end?: string | null;
         };
         Update: {
           id?: string;
@@ -102,6 +104,7 @@ export type Database = {
           credit_balance?: number;
           created_at?: string;
           updated_at?: string;
+          current_period_end?: string | null;
         };
         Relationships: [];
       };
@@ -226,6 +229,7 @@ export type Database = {
           low_credit_threshold: number;
           created_at: string;
           updated_at: string;
+          cancellation_cutoff_hours: number;
         };
         Insert: {
           id: string;
@@ -238,6 +242,7 @@ export type Database = {
           low_credit_threshold?: number;
           created_at?: string;
           updated_at?: string;
+          cancellation_cutoff_hours?: number;
         };
         Update: {
           id?: string;
@@ -250,6 +255,7 @@ export type Database = {
           low_credit_threshold?: number;
           created_at?: string;
           updated_at?: string;
+          cancellation_cutoff_hours?: number;
         };
         Relationships: [];
       };
@@ -767,6 +773,7 @@ export type Database = {
           id: string | null;
           display_name: string | null;
           business_name: string | null;
+          cancellation_cutoff_hours: number | null;
         };
         Relationships: [];
       };
@@ -830,6 +837,10 @@ export type Database = {
         Args: Record<string, never>;
         Returns: unknown;
       };
+      fn_guard_walks_client_update: {
+        Args: Record<string, never>;
+        Returns: unknown;
+      };
       fn_is_service_session: {
         Args: Record<string, never>;
         Returns: boolean;
@@ -841,6 +852,12 @@ export type Database = {
       fn_ledger_block_mutation: {
         Args: Record<string, never>;
         Returns: unknown;
+      };
+      fn_materialize_walks: {
+        Args: {
+          p_horizon_days: number;
+        };
+        Returns: number;
       };
       fn_notify_low_credit: {
         Args: {

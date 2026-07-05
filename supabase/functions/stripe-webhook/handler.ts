@@ -144,10 +144,13 @@ export async function handleStripeEvent(
     case "customer.subscription.updated": {
       const client = await deps.findClientByCustomer(String(obj.customer ?? ""));
       if (!client) return { status: "ignored" };
-      await deps.updateClient(client.id, {
+      const fields: Record<string, unknown> = {
         stripe_subscription_id: obj.id ?? null,
         subscription_status: mapSubscriptionStatus(obj),
-      });
+      };
+      const periodEnd = subscriptionPeriodEnd(obj);
+      if (periodEnd) fields.current_period_end = periodEnd;
+      await deps.updateClient(client.id, fields);
       return { status: "processed" };
     }
 
@@ -190,6 +193,15 @@ async function resolvePlan(
     }
   }
   return null;
+}
+
+/** Renewal date cache for the billing console (phase 07). Newer Stripe API
+ * versions carry the period on the subscription item. */
+function subscriptionPeriodEnd(sub: Record<string, unknown>): string | null {
+  const direct = sub.current_period_end as number | undefined;
+  const item = (sub.items as { data?: Array<{ current_period_end?: number }> })?.data?.[0];
+  const epoch = direct ?? item?.current_period_end;
+  return epoch ? new Date(epoch * 1000).toISOString() : null;
 }
 
 /** Map a Stripe subscription object onto our subscription_status enum. */

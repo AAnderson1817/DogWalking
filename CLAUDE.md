@@ -44,7 +44,7 @@ One phase per session: `/clear` → plan mode against `docs/phases/NN-*.md` → 
 - [x] 04 auth-screens
 - [x] 05 operator-core
 - [x] 06 scheduling
-- [ ] 07 client-portal
+- [x] 07 client-portal
 - [ ] 08 notifications-and-pwa
 
 ## Status log
@@ -55,3 +55,4 @@ One phase per session: `/clear` → plan mode against `docs/phases/NN-*.md` → 
 - phase(04): SignIn (password + magic link), Onboard with role refresh, ClaimInvite (signup → fn_preview_invite via new 0006 migration → fn_claim_invite → dead-ends), working reauth() password sheet; 40 vitest green incl. role-resolution matrix; smoke extended with invite-preview assertions; docs/dev/auth-manual-test.md.
 - phase(05): Dashboard (today/live/low-credit/failed strips), Roster with invite handoff, 4-tab ClientDetail, AccessVault + shared vault flows (reauth → purpose → 30s reveal, rotate, soft-revoke, audit sheet), full WalkMode (start → GPS broadcast + batched inserts → photos → toggles → complete-walk → billing banner → report preview, exit guard); 47 vitest green incl. dashboard selectors; mapbox-gl split to a lazy chunk; docs/dev/operator-manual-test.md.
 - phase(06): fn_materialize_walks in 0007 (set-based, 14-day horizon, pause/paused-client/date-bound skips, pet copying, ON CONFLICT idempotency) + thin materialize-walks edge fn with 03:00 UTC cron; tests/materializer.sql proves idempotency/no-resurrection through /validate; Schedule tab (days picker, pause-window editor, deactivate-cancels-future) + Calendar day/week with drag-reschedule, action sheet, one-off creation.
+- phase(07): 0008 adds cancellation cutoff (12h default, guard-trigger enforced), cached current_period_end, client booking/cancel policies + photo-read storage policies; change-plan (Stripe proration + fraction fallback) and billing-portal edge fns; PortalHome/Booking (overage confirm)/PortalWalks/WalkDetail (live subscribe)/PortalBilling/PetProfiles + operator BillingConsole (renewals, past-due, overage re-charge, plan change); smoke extended with booking/cutoff guards; docs/dev/portal-manual-test.md.
