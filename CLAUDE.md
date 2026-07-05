@@ -1,0 +1,48 @@
+# PawTrail — solo-first dog-walking operations SaaS
+
+React PWA (Vite 5, React 18, TS strict, react-router-dom 6) + Supabase (Postgres 16, Auth, RLS, Realtime, Storage) + Deno edge functions + Stripe Billing + Mapbox (SVG fallback). Currency GBP (pence integers). Timezone Europe/London (UTC in DB).
+
+Authoritative specs live in `docs/spec/`. Build plan in `docs/phases/00–08`. Specs win over improvisation; if a spec is ambiguous, ask before deviating.
+
+## Layout
+- `app/` — frontend (Vite)
+- `supabase/` — `migrations/`, `functions/`, `tests/`, `seed.sql`
+- `docs/spec/` — specs (source of truth)
+- `docs/phases/` — phase files, one per session
+
+## Commands
+- Frontend typecheck: `npx tsc --noEmit -p app`
+- Frontend build: `npm --prefix app run build`
+- DB reset + migrate + seed: `supabase db reset`
+- Smoke tests: `psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/smoke.sql`
+- Edge typecheck: `deno check supabase/functions/**/index.ts`
+- Full validation: `/validate`
+
+## Non-negotiable invariants
+1. Credit balance mutations happen ONLY inside `SECURITY DEFINER` functions that take a per-client row lock (`SELECT … FOR UPDATE`). No code path ever `UPDATE`s `clients.credit_balance` or `INSERT`s into `credit_ledger` directly from an API role.
+2. `access_credentials` ciphertext columns are unreadable by `anon` and `authenticated` (column-privilege REVOKE). Every read goes through the audited RPC + `credential-vault` edge function. Plaintext secrets are never logged.
+3. Overage semantics: a walk is EITHER fully credit-funded OR fully charged at `plans.overage_rate_pence`. Never partial credit consumption.
+4. Rollover is single-lot carryover (v1 simplification, documented in `docs/spec/02-credit-engine.md`). Do not implement per-grant FIFO.
+5. Every function touching credits or crossing tenants: `SECURITY DEFINER`, `SET search_path = public`, `REVOKE ALL … FROM PUBLIC, anon`, explicit `GRANT EXECUTE` only where required.
+6. Migrations are append-only once applied. Never edit an existing file in `supabase/migrations/` — create a new migration.
+7. Every tenant table carries `operator_id`; every RLS policy scopes on it.
+
+## Conventions
+- TS strict; named exports for lib/components; default export only for route screens.
+- Money = integer pence. Dates stored UTC (`timestamptz`), rendered Europe/London via `lib/format.ts`.
+- Styling: CSS custom properties from `docs/spec/05-design-system.md` (Trailhead theme). No Tailwind.
+- Commit format: `phase(NN): summary`.
+
+## Workflow
+One phase per session: `/clear` → plan mode against `docs/phases/NN-*.md` → approve → execute → `/validate` → commit → tick the phase below and append one status line.
+
+## Phase status
+- [ ] 00 foundations-and-database
+- [ ] 01 edge-functions
+- [ ] 02 frontend-foundation
+- [ ] 03 component-kit-and-hooks
+- [ ] 04 auth-screens
+- [ ] 05 operator-core
+- [ ] 06 scheduling
+- [ ] 07 client-portal
+- [ ] 08 notifications-and-pwa
