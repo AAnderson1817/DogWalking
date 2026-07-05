@@ -1,6 +1,7 @@
 /* Trailhead base styles (spec 05): reset, fonts, type rules, signature
    pulse-live, walk-mode inversion, reduced-motion guard. */
 @import "./tokens.css";
+@import "./components.css";
 
 /* ── self-hosted fonts ─────────────────────────────────────────────────── */
 @font-face {

@@ -1,4 +1,5 @@
 // Route table (spec 06).
+import { lazy, Suspense } from "react";
 import { Route, Routes } from "react-router-dom";
 import { RequireRole } from "@/components/RequireRole";
 import SignIn from "@/screens/SignIn";
@@ -17,6 +18,10 @@ import WalkDetail from "@/screens/WalkDetail";
 import PortalBilling from "@/screens/PortalBilling";
 import PetProfiles from "@/screens/PetProfiles";
 import NotFound from "@/screens/NotFound";
+
+// Dev-only component gallery; the statically-false DEV guard removes both
+// the route and the chunk from production builds (verified in build output).
+const DevKit = import.meta.env.DEV ? lazy(() => import("@/screens/DevKit")) : null;
 
 function operator(el: React.ReactNode) {
   return <RequireRole role="operator">{el}</RequireRole>;
@@ -46,6 +51,17 @@ export default function App() {
       <Route path="/portal/walks/:id" element={portal(<WalkDetail />)} />
       <Route path="/portal/billing" element={portal(<PortalBilling />)} />
       <Route path="/portal/pets" element={portal(<PetProfiles />)} />
+
+      {DevKit && (
+        <Route
+          path="/dev/kit"
+          element={
+            <Suspense fallback={null}>
+              <DevKit />
+            </Suspense>
+          }
+        />
+      )}
 
       <Route path="*" element={<NotFound />} />
     </Routes>

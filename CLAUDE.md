@@ -40,7 +40,7 @@ One phase per session: `/clear` → plan mode against `docs/phases/NN-*.md` → 
 - [x] 00 foundations-and-database
 - [x] 01 edge-functions
 - [x] 02 frontend-foundation
-- [ ] 03 component-kit-and-hooks
+- [x] 03 component-kit-and-hooks
 - [ ] 04 auth-screens
 - [ ] 05 operator-core
 - [ ] 06 scheduling
@@ -51,3 +51,4 @@ One phase per session: `/clear` → plan mode against `docs/phases/NN-*.md` → 
 - phase(00): schema + credit engine + RLS + seed + smoke all green on the no-Docker local stack (scripts/db-reset.sh; docs/dev/local-stack.md). Ledger chain ordered by seq (documented in 0002); pre-commit adversarial review caught and fixed a TOCTOU in fn_expire_credits.
 - phase(01): five edge functions + _lib with dep-injected handlers; 38 deno tests green (crypto roundtrip/tamper, locally-signed webhook signatures, idempotency for webhook/complete-walk/overage, vault rate limit); functions-serve boot check deferred to a Docker environment (docs/dev/local-stack.md).
 - phase(02): Trailhead tokens + shell, self-hosted variable fonts, full lib layer (env/supabase/types/api/credits/format/auth-context), 15 routed placeholder screens behind RequireRole, manifest + generated icons; types.ts via scripts/gen-types.py (no-Docker typegen); 17 vitest green; headless-browser check confirms / → /signin with tokens applied.
+- phase(03): 9 primitives + 6 composites + useGeolocation/useWalkChannel with throttle/batch logic extracted pure (geo.ts, gps-batcher.ts, map-fit.ts); 36 vitest green incl. 4s/8m-vs-6s/12m throttle matrix, 10-point/60s/end() flush, SVG polyline fit; /dev/kit gallery browser-checked with zero console errors and verified absent from the prod bundle.
