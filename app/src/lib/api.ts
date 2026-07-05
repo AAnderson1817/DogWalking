@@ -7,6 +7,7 @@ import type {
   Clients,
   CreditLedger,
   Notifications,
+  Operators,
   Payments,
   Pets,
   Plans,
@@ -383,4 +384,49 @@ export async function signedPhotoUrl(path: string, expiresIn = 3600): Promise<st
     .createSignedUrl(path, expiresIn);
   if (error) throw new Error(error.message);
   return data.signedUrl;
+}
+
+// ── operators (phase 04) ───────────────────────────────────────────────────
+export async function getMyOperator(): Promise<Operators | null> {
+  const { data: userData } = await supabase.auth.getUser();
+  const uid = userData.user?.id;
+  if (!uid) return null;
+  const { data, error } = await supabase
+    .from("operators").select("*").eq("id", uid).maybeSingle();
+  if (error) throw new Error(error.message);
+  return data;
+}
+
+export async function createOperator(row: {
+  id: string;
+  business_name: string;
+  display_name: string;
+  email: string;
+  phone?: string | null;
+}): Promise<Operators> {
+  const { data, error } = await supabase.from("operators").insert(row).select().single();
+  return must(data, error);
+}
+
+export async function updateOperator(
+  id: string,
+  patch: TableUpdate<"operators">,
+): Promise<Operators> {
+  const { data, error } = await supabase
+    .from("operators").update(patch).eq("id", id).select().single();
+  return must(data, error);
+}
+
+export interface InvitePreview {
+  full_name: string;
+  business_name: string;
+  already_claimed: boolean;
+}
+
+/** Preview an invite as the (just-signed-up) authenticated claimer. */
+export async function previewInviteAuthed(token: string): Promise<InvitePreview | null> {
+  const { data, error } = await supabase.rpc("fn_preview_invite", { p_token: token });
+  if (error) throw new Error(error.message);
+  const row = Array.isArray(data) ? data[0] : data;
+  return (row as InvitePreview | undefined) ?? null;
 }

@@ -1,7 +1,8 @@
 // Session + resolved persona (spec 06). Role resolution on session:
 // operators row by uid ⇒ operator, else clients row by auth_user_id ⇒
-// client, else null (fresh signup → Onboard). reauth() opens the
-// password-confirm sheet (wired in phase 04).
+// client, else null (fresh signup → Onboard). reauth() opens a
+// password-confirm sheet and resolves to the entered password (or null on
+// cancel) — the string is handed straight to vault calls, never stored.
 import {
   createContext,
   useCallback,
@@ -10,10 +11,14 @@ import {
   useMemo,
   useRef,
   useState,
+  type FormEvent,
   type ReactNode,
 } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "./supabase";
+import { Sheet } from "@/components/Sheet";
+import { Input } from "@/components/fields";
+import { Button } from "@/components/Button";
 
 export type Role = "operator" | "client" | null;
 
@@ -25,6 +30,8 @@ export interface AuthState {
   loading: boolean;
   /** Password-confirm for vault calls; resolves to the password or null. */
   reauth: () => Promise<string | null>;
+  /** Re-run role resolution (after Onboard creates the operators row, or a claim links a client). */
+  refreshRole: () => Promise<void>;
   signOut: () => Promise<void>;
 }
 
@@ -65,6 +72,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [clientId, setClientId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const resolvedFor = useRef<string | null>(null);
+  const sessionRef = useRef<Session | null>(null);
+
+  const applyRole = useCallback(async (uid: string) => {
+    const resolved = await resolveRole(uid, realQueries);
+    resolvedFor.current = uid;
+    setRole(resolved.role);
+    setOperatorId(resolved.operatorId);
+    setClientId(resolved.clientId);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -72,6 +88,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async function apply(next: Session | null) {
       if (cancelled) return;
       setSession(next);
+      sessionRef.current = next;
       const uid = next?.user?.id ?? null;
       if (!uid) {
         resolvedFor.current = null;
@@ -83,12 +100,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       if (resolvedFor.current === uid) return; // role already resolved
       try {
-        const resolved = await resolveRole(uid, realQueries);
-        if (cancelled) return;
-        resolvedFor.current = uid;
-        setRole(resolved.role);
-        setOperatorId(resolved.operatorId);
-        setClientId(resolved.clientId);
+        if (!cancelled) await applyRole(uid);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -102,11 +114,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       cancelled = true;
       sub.subscription.unsubscribe();
     };
+  }, [applyRole]);
+
+  const refreshRole = useCallback(async () => {
+    const uid = sessionRef.current?.user?.id;
+    if (uid) await applyRole(uid);
+  }, [applyRole]);
+
+  // ── reauth sheet ─────────────────────────────────────────────────────────
+  const [reauthOpen, setReauthOpen] = useState(false);
+  const reauthResolver = useRef<((password: string | null) => void) | null>(null);
+
+  const reauth = useCallback((): Promise<string | null> => {
+    setReauthOpen(true);
+    return new Promise<string | null>((resolve) => {
+      reauthResolver.current = resolve;
+    });
   }, []);
 
-  const reauth = useCallback(async (): Promise<string | null> => {
-    // Replaced by the password-confirm Sheet in phase 04.
-    throw new Error("reauth() is wired in phase 04");
+  const settleReauth = useCallback((password: string | null) => {
+    setReauthOpen(false);
+    reauthResolver.current?.(password);
+    reauthResolver.current = null;
   }, []);
 
   const signOut = useCallback(async () => {
@@ -118,11 +147,63 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo(
-    () => ({ session, role, operatorId, clientId, loading, reauth, signOut }),
-    [session, role, operatorId, clientId, loading, reauth, signOut],
+    () => ({ session, role, operatorId, clientId, loading, reauth, refreshRole, signOut }),
+    [session, role, operatorId, clientId, loading, reauth, refreshRole, signOut],
   );
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+  return (
+    <AuthContext.Provider value={value}>
+      {children}
+      <ReauthSheet open={reauthOpen} onSettle={settleReauth} />
+    </AuthContext.Provider>
+  );
+}
+
+function ReauthSheet({
+  open,
+  onSettle,
+}: {
+  open: boolean;
+  onSettle: (password: string | null) => void;
+}) {
+  const [password, setPassword] = useState("");
+
+  function submit(e: FormEvent) {
+    e.preventDefault();
+    if (!password) return;
+    onSettle(password);
+    setPassword("");
+  }
+
+  function cancel() {
+    onSettle(null);
+    setPassword("");
+  }
+
+  return (
+    <Sheet open={open} onClose={cancel} title="Confirm it's you">
+      <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: "var(--s-3)" }}>
+        <p style={{ color: "var(--text-2)", fontSize: "var(--fs-14)" }}>
+          Access credentials are protected. Re-enter your password to continue;
+          every reveal is recorded in the audit trail.
+        </p>
+        <Input
+          label="Password"
+          type="password"
+          autoComplete="current-password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          autoFocus
+        />
+        <Button type="submit" full disabled={!password}>
+          Confirm
+        </Button>
+        <Button type="button" variant="ghost" full onClick={cancel}>
+          Cancel
+        </Button>
+      </form>
+    </Sheet>
+  );
 }
 
 export function useAuth(): AuthState {

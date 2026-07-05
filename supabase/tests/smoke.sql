@@ -489,6 +489,16 @@ begin
   perform set_config('request.jwt.claims',
     '{"sub":"99999999-0000-4000-a000-000000000004","role":"authenticated"}', true);
   set local session authorization authenticated;
+
+  -- preview shows the invitee without exposing the clients row (0006)
+  if (select full_name from fn_preview_invite('99999999-9999-4999-a999-999999999999'))
+       is distinct from 'Smoke Claimer' then
+    raise exception 'FAIL: invite preview did not return the invitee';
+  end if;
+  if (select count(*) from fn_preview_invite('99999999-0000-4000-a000-000000000009')) <> 0 then
+    raise exception 'FAIL: invite preview leaked rows for a bogus token';
+  end if;
+
   select fn_claim_invite('99999999-9999-4999-a999-999999999999') into v_client;
   if v_client <> '99999999-0000-4000-c000-00000000000f' then
     raise exception 'FAIL: claim returned wrong client';

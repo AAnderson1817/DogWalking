@@ -848,6 +848,12 @@ export type Database = {
         };
         Returns: boolean;
       };
+      fn_preview_invite: {
+        Args: {
+          p_token: string;
+        };
+        Returns: Array<{ full_name: string; business_name: string; already_claimed: boolean }>;
+      };
       fn_read_credential: {
         Args: {
           p_credential: string;
