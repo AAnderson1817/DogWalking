@@ -8,7 +8,21 @@ import type { RealtimeChannel } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
 import { insertGpsPoints } from "@/lib/api";
 import { GpsBatcher } from "@/lib/gps-batcher";
+import { GpsOutbox, makeIdbOutboxStore, type OutboxBatch } from "@/lib/gps-outbox";
 import type { GeoPoint } from "@/lib/geo";
+
+function sendBatch(batch: OutboxBatch): Promise<void> {
+  return insertGpsPoints(
+    batch.points.map((p) => ({
+      walk_id: batch.walkId,
+      operator_id: batch.operatorId,
+      recorded_at: new Date(p.t).toISOString(),
+      lat: p.lat,
+      lng: p.lng,
+      accuracy_m: p.acc ?? null,
+    })),
+  );
+}
 
 export interface WalkChannelBroadcast {
   mode: "broadcast";
@@ -36,24 +50,31 @@ export function useWalkChannel(
   const [livePoints, setLivePoints] = useState<GeoPoint[]>([]);
   const [ended, setEnded] = useState(false);
 
+  // Phase 08: flushes land in a durable IndexedDB outbox that drains with
+  // backoff and backfills after reloads/reconnects.
+  const outbox = useMemo(
+    () => (mode === "broadcast" ? new GpsOutbox(makeIdbOutboxStore(), sendBatch) : null),
+    [mode],
+  );
+
   const batcher = useMemo(
     () =>
-      new GpsBatcher((points) =>
-        insertGpsPoints(
-          points.map((p) => ({
-            walk_id: walkId,
-            operator_id: operatorId ?? "",
-            recorded_at: new Date(p.t).toISOString(),
-            lat: p.lat,
-            lng: p.lng,
-            accuracy_m: p.acc ?? null,
-          })),
-        ).catch((e: unknown) => {
-          console.error("gps flush failed:", e instanceof Error ? e.message : e);
-        }),
-      ),
-    [walkId, operatorId],
+      new GpsBatcher((points) => {
+        void outbox?.enqueue(walkId, operatorId ?? "", points);
+      }),
+    [walkId, operatorId, outbox],
   );
+
+  useEffect(() => {
+    if (!outbox) return;
+    void outbox.drain(); // backfill anything left from a previous session
+    const onUp = () => void outbox.drain();
+    window.addEventListener("online", onUp);
+    return () => {
+      window.removeEventListener("online", onUp);
+      outbox.dispose();
+    };
+  }, [outbox]);
 
   useEffect(() => {
     const channel = supabase.channel(`walk:${walkId}`);

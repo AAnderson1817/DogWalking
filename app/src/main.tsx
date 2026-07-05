@@ -6,6 +6,13 @@ import { AuthProvider } from "@/lib/auth-context";
 import App from "@/App";
 import "@/styles/global.css";
 
+// Service worker (phase 08): production builds only — dev stays uncached.
+if (import.meta.env.PROD && "serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    void navigator.serviceWorker.register("/sw.js");
+  });
+}
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <ErrorBoundary>

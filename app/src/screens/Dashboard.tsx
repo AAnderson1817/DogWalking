@@ -5,13 +5,14 @@ import { Link, useNavigate } from "react-router-dom";
 import { Badge } from "@/components/Badge";
 import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
+import { InstallPrompt } from "@/components/InstallPrompt";
 import { LiveWalkBanner } from "@/components/LiveWalkBanner";
+import { NotificationBell } from "@/components/NotificationInbox";
 import { Spinner } from "@/components/Spinner";
 import { WalkCard } from "@/components/WalkCard";
 import {
   getMyOperator,
   listClients,
-  listNotifications,
   listPayments,
   listWalksDetailed,
   walkPetNames,
@@ -25,7 +26,6 @@ import {
   lowCreditClients,
   todayLondon,
   todaysWalks,
-  unreadCount,
 } from "@/lib/selectors";
 import type { Clients, Operators, Payments } from "@/lib/types";
 
@@ -36,7 +36,6 @@ export default function Dashboard() {
   const [walks, setWalks] = useState<WalkDetailed[] | null>(null);
   const [clients, setClients] = useState<Clients[]>([]);
   const [payments, setPayments] = useState<Payments[]>([]);
-  const [unread, setUnread] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -44,19 +43,17 @@ export default function Dashboard() {
     async function load() {
       try {
         const today = todayLondon();
-        const [op, todayWalks, allClients, pays, notifs] = await Promise.all([
+        const [op, todayWalks, allClients, pays] = await Promise.all([
           getMyOperator(),
           listWalksDetailed({ date: today }),
           listClients(),
           listPayments(),
-          listNotifications(true),
         ]);
         if (cancelled) return;
         setOperator(op);
         setWalks(todayWalks);
         setClients(allClients);
         setPayments(pays);
-        setUnread(unreadCount(notifs));
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : "failed to load");
       }
@@ -107,14 +104,10 @@ export default function Dashboard() {
           <span className="section-label">{dateLondon(new Date())}</span>
           <h1>Today</h1>
         </div>
-        <span
-          className="badge badge--neutral"
-          aria-label={`${unread} unread notifications`}
-          title="Unread notifications"
-        >
-          🔔 {unread}
-        </span>
+        <NotificationBell persona="operator" />
       </div>
+
+      <InstallPrompt />
 
       <section style={{ marginTop: "var(--s-4)", display: "flex", flexDirection: "column", gap: "var(--s-3)" }}>
         {ordered.length === 0 ? (

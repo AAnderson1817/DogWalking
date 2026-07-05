@@ -25,6 +25,7 @@ import {
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { useGeolocation } from "@/hooks/useGeolocation";
+import { useOnline } from "@/hooks/useOnline";
 import { useWalkChannel } from "@/hooks/useWalkChannel";
 import { pathDistanceM } from "@/lib/geo";
 import { distanceKm, elapsed, gbp } from "@/lib/format";
@@ -57,6 +58,7 @@ function WalkModeInner({ walkId }: { walkId: string }) {
   const active = walk?.status === "in_progress" && !result;
   const geo = useGeolocation(active ?? false);
   const channel = useWalkChannel(walkId, "broadcast", auth.operatorId ?? "");
+  const online = useOnline();
   const sentCount = useRef(0);
 
   useEffect(() => {
@@ -285,8 +287,26 @@ function WalkModeInner({ walkId }: { walkId: string }) {
     <div className="walkmode" style={{ minHeight: "100dvh", background: "var(--bg)", color: "var(--text)" }}>
       <div className="page" style={{ display: "flex", flexDirection: "column", gap: "var(--s-4)", paddingBottom: "var(--s-8)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: "var(--s-2)" }}>
-          <span className="pulse-live" aria-hidden />
+          {online ? (
+            <span className="pulse-live" aria-hidden />
+          ) : (
+            <span
+              aria-label="offline"
+              style={{
+                width: 10,
+                height: 10,
+                borderRadius: "var(--r-full)",
+                background: "var(--ink-faint)",
+                flexShrink: 0,
+              }}
+            />
+          )}
           <span style={{ fontWeight: 600 }}>{petNames || "Walking"}</span>
+          {!online && (
+            <span style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>
+              offline — points queued, they'll sync on reconnect
+            </span>
+          )}
         </div>
 
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>

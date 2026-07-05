@@ -5,6 +5,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { Card } from "@/components/Card";
 import { CreditMeter } from "@/components/CreditMeter";
 import { EmptyState } from "@/components/EmptyState";
+import { NotificationBell } from "@/components/NotificationInbox";
 import { Spinner } from "@/components/Spinner";
 import { WalkCard } from "@/components/WalkCard";
 import {
@@ -71,8 +72,13 @@ export default function PortalHome() {
 
   return (
     <div className="page">
-      <span className="section-label">{operator?.business_name ?? "Your walker"}</span>
-      <h1>Hi, {client.full_name.split(" ")[0]}</h1>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div>
+          <span className="section-label">{operator?.business_name ?? "Your walker"}</span>
+          <h1>Hi, {client.full_name.split(" ")[0]}</h1>
+        </div>
+        <NotificationBell persona="client" />
+      </div>
 
       <section style={{ marginTop: "var(--s-4)" }}>
         <span className="section-label">Next walk</span>

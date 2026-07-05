@@ -15,10 +15,17 @@ serveFunction(async (req) => {
     await requireOperator(req);
   }
 
-  const { data, error } = await adminClient().rpc("fn_materialize_walks", {
+  const db = adminClient();
+  const { data, error } = await db.rpc("fn_materialize_walks", {
     p_horizon_days: 14,
   });
   if (error) throw new HttpError(500, "materialize_failed", "walk materialization failed");
 
-  return jsonOk({ created: (data as number) ?? 0 });
+  // Daily rollover-lot expiry sweep rides on the same cron (spec 04 /
+  // phase 08 wiring). Advisory: a sweep failure must not block the walks.
+  let expired = 0;
+  const sweep = await db.rpc("fn_expire_credits");
+  if (!sweep.error) expired = (sweep.data as number) ?? 0;
+
+  return jsonOk({ created: (data as number) ?? 0, expired_clients: expired });
 });

@@ -45,7 +45,7 @@ One phase per session: `/clear` → plan mode against `docs/phases/NN-*.md` → 
 - [x] 05 operator-core
 - [x] 06 scheduling
 - [x] 07 client-portal
-- [ ] 08 notifications-and-pwa
+- [x] 08 notifications-and-pwa
 
 ## Status log
 - phase(00): schema + credit engine + RLS + seed + smoke all green on the no-Docker local stack (scripts/db-reset.sh; docs/dev/local-stack.md). Ledger chain ordered by seq (documented in 0002); pre-commit adversarial review caught and fixed a TOCTOU in fn_expire_credits.
@@ -56,3 +56,4 @@ One phase per session: `/clear` → plan mode against `docs/phases/NN-*.md` → 
 - phase(05): Dashboard (today/live/low-credit/failed strips), Roster with invite handoff, 4-tab ClientDetail, AccessVault + shared vault flows (reauth → purpose → 30s reveal, rotate, soft-revoke, audit sheet), full WalkMode (start → GPS broadcast + batched inserts → photos → toggles → complete-walk → billing banner → report preview, exit guard); 47 vitest green incl. dashboard selectors; mapbox-gl split to a lazy chunk; docs/dev/operator-manual-test.md.
 - phase(06): fn_materialize_walks in 0007 (set-based, 14-day horizon, pause/paused-client/date-bound skips, pet copying, ON CONFLICT idempotency) + thin materialize-walks edge fn with 03:00 UTC cron; tests/materializer.sql proves idempotency/no-resurrection through /validate; Schedule tab (days picker, pause-window editor, deactivate-cancels-future) + Calendar day/week with drag-reschedule, action sheet, one-off creation.
 - phase(07): 0008 adds cancellation cutoff (12h default, guard-trigger enforced), cached current_period_end, client booking/cancel policies + photo-read storage policies; change-plan (Stripe proration + fraction fallback) and billing-portal edge fns; PortalHome/Booking (overage confirm)/PortalWalks/WalkDetail (live subscribe)/PortalBilling/PetProfiles + operator BillingConsole (renewals, past-due, overage re-charge, plan change); smoke extended with booking/cutoff guards; docs/dev/portal-manual-test.md.
+- phase(08): 0009 walk_scheduled/walk_cancelled triggers close the notification audit; bell inboxes with deep links (both personas); env-gated send-notification email fn (pine template); fn_expire_credits on the daily cron; versioned SW (shell precache, SWR data GETs, network-only mutations — offline shell reload verified headlessly, docs/dev/pwa-check.md); IndexedDB GPS outbox with backoff + reconnect backfill (grey-dot indicator); install prompt + iOS meta. Final /validate fully green — v1 feature-complete.
