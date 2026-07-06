@@ -20,14 +20,19 @@ jobs:
       - name: Install
         run: npm ci --prefix app
 
+      # Run inside app/ so npx resolves app/node_modules/.bin/tsc — from the
+      # repo root it would fetch the abandoned `tsc` npm package instead.
       - name: Typecheck
-        run: npx tsc --noEmit -p app
+        working-directory: app
+        run: npx tsc --noEmit -p .
 
       - name: Unit tests
-        run: npm --prefix app run test -- --run
+        working-directory: app
+        run: npm run test -- --run
 
       - name: Build
-        run: npm --prefix app run build
+        working-directory: app
+        run: npm run build
 
       - name: Secret-leak grep (validate gate 7)
         run: |
@@ -74,7 +79,7 @@ jobs:
         ports:
           - 54322:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -86,15 +91,17 @@ jobs:
       - name: Reset — shim + migrations 0001..NNNN + seed
         run: ./scripts/db-reset.sh
 
+      # psql RAISE NOTICE output (including the PASS markers) goes to
+      # stderr — merge streams before the tee/grep.
       - name: Smoke suite (credit engine + full spec-03 security matrix)
         run: |
-          psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/smoke.sql \
+          psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/smoke.sql 2>&1 \
             | tee /tmp/smoke.out
           grep -q "SMOKE PASS" /tmp/smoke.out
 
       - name: Materializer suite (idempotency, skips, no resurrection)
         run: |
-          psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/materializer.sql \
+          psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/materializer.sql 2>&1 \
             | tee /tmp/mat.out
           grep -q "MATERIALIZER PASS" /tmp/mat.out
 
