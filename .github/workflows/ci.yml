@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  frontend:
+    name: Frontend — tsc, vitest, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install
+        run: npm ci --prefix app
+
+      - name: Typecheck
+        run: npx tsc --noEmit -p app
+
+      - name: Unit tests
+        run: npm --prefix app run test -- --run
+
+      - name: Build
+        run: npm --prefix app run build
+
+      - name: Secret-leak grep (validate gate 7)
+        run: |
+          if grep -RInE "(VAULT_MASTER_KEY|SERVICE_ROLE|sk_live|sk_test)" \
+               app/src supabase/functions --include='*.ts' --include='*.tsx' \
+               | grep -v 'Deno.env.get' | grep -v env.ts | grep -q .; then
+            echo "FAIL: literal secret reference found"; exit 1
+          fi
+          echo "PASS: no secret literals"
+
+  edge-functions:
+    name: Edge functions — deno check + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Typecheck entrypoints
+        run: deno check supabase/functions/*/index.ts
+
+      - name: Tests
+        # ./ prefix required: deno skips _-prefixed paths without it
+        run: deno test ./supabase/functions/_tests/
+
+      - name: No secret logging grep (phase 01 gate)
+        run: |
+          if grep -RInE "console\.(log|error|warn|info)\(.*\b(secret|password|ciphertext|plaintext|decrypted)" \
+               supabase/functions/ | grep -q .; then
+            echo "FAIL: potential secret logging"; exit 1
+          fi
+          echo "PASS: no secret logging"
+
+  database:
+    name: Database — migrations, smoke, materializer
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 54322:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      LOCAL_DB_URL: postgresql://postgres:postgres@localhost:54322/postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reset — shim + migrations 0001..NNNN + seed
+        run: ./scripts/db-reset.sh
+
+      - name: Smoke suite (credit engine + full spec-03 security matrix)
+        run: |
+          psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/smoke.sql \
+            | tee /tmp/smoke.out
+          grep -q "SMOKE PASS" /tmp/smoke.out
+
+      - name: Materializer suite (idempotency, skips, no resurrection)
+        run: |
+          psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/materializer.sql \
+            | tee /tmp/mat.out
+          grep -q "MATERIALIZER PASS" /tmp/mat.out
+
+      - name: Invariant grep — no direct credit_balance writes (phase 00 gate)
+        run: |
+          if grep -RiE "update +clients +set +credit_balance" supabase/migrations \
+               | grep -v "fn_ledger_apply" | grep -vi "credit_balance = credit_balance" | grep -q .; then
+            echo "FAIL: direct credit_balance write outside the ledger trigger"; exit 1
+          fi
+          echo "PASS: balance writes confined to the ledger trigger"

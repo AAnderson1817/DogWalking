@@ -1,0 +1,95 @@
+name: Deploy staging (Supabase)
+
+# Applies migrations and deploys all edge functions to the staging Supabase
+# project. Run it from the Actions tab (workflow_dispatch) or by pushing to
+# main. One-time project setup lives in docs/dev/staging-setup.md.
+#
+# Required repository secrets:
+#   SUPABASE_ACCESS_TOKEN   personal access token (supabase.com/dashboard/account/tokens)
+#   SUPABASE_PROJECT_REF    the project's ref (Settings → General)
+#   SUPABASE_DB_PASSWORD    the project's database password
+# For the optional "sync edge secrets" step:
+#   STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, VAULT_MASTER_KEY, APP_BASE_URL
+#   and optionally RESEND_API_KEY, NOTIFY_FROM_EMAIL
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sync_secrets:
+        description: "Also push edge-function secrets from GitHub secrets"
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    name: Apply migrations
+    runs-on: ubuntu-latest
+    environment: staging
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Link project
+        run: supabase link --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
+
+      - name: Push migrations
+        run: supabase db push
+
+  deploy-functions:
+    name: Deploy edge functions
+    needs: migrate
+    runs-on: ubuntu-latest
+    environment: staging
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      # Deploys every function directory; config.toml carries
+      # verify_jwt=false for stripe-webhook and the materializer cron note.
+      - name: Deploy all functions
+        run: supabase functions deploy --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
+
+  sync-secrets:
+    name: Sync edge secrets (opt-in)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.sync_secrets }}
+    needs: migrate
+    runs-on: ubuntu-latest
+    environment: staging
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Push edge-function secrets
+        run: |
+          args=()
+          add() { if [ -n "$2" ]; then args+=("$1=$2"); else echo "skip: $1 not set"; fi; }
+          add STRIPE_SECRET_KEY   "${{ secrets.STRIPE_SECRET_KEY }}"
+          add STRIPE_WEBHOOK_SECRET "${{ secrets.STRIPE_WEBHOOK_SECRET }}"
+          add VAULT_MASTER_KEY    "${{ secrets.VAULT_MASTER_KEY }}"
+          add APP_BASE_URL        "${{ secrets.APP_BASE_URL }}"
+          add RESEND_API_KEY      "${{ secrets.RESEND_API_KEY }}"
+          add NOTIFY_FROM_EMAIL   "${{ secrets.NOTIFY_FROM_EMAIL }}"
+          if [ ${#args[@]} -eq 0 ]; then echo "nothing to sync"; exit 0; fi
+          supabase secrets set "${args[@]}" --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
