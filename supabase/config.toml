@@ -418,6 +418,11 @@ enabled = true
 [functions.stripe-webhook]
 verify_jwt = false
 
-# Nightly walk materializer (phase 06): 14-day horizon at 03:00 UTC.
+# Nightly walk materializer (phase 06): 14-day horizon, 03:00 UTC.
+# NOTE: the hosted CLI config rejects a `schedule` key here — on hosted
+# Supabase the cron is a dashboard step (Integrations → Cron → daily
+# "0 3 * * *" invoking the materialize-walks edge function; see
+# docs/dev/staging-setup.md §5). Local stacks can invoke it manually or
+# from the Calendar screen's "Run materializer" button.
 [functions.materialize-walks]
-schedule = "0 3 * * *"
+verify_jwt = true
