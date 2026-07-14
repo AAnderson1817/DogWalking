@@ -154,6 +154,67 @@ begin
     end if;
   end;
 
+  -- NULL-origin escape (0013): a schedule walk inserted without origin_date
+  -- must be defaulted by the trigger, occupy its slot, and never duplicate.
+  declare
+    v_null_day date;
+    v_dup int;
+  begin
+    select min(scheduled_date) into v_null_day from walks
+      where schedule_id = '88888888-0000-4000-1000-000000000001' and status = 'scheduled';
+    -- simulate a direct PostgREST-style insert omitting origin_date on a NEW day
+    insert into walks (operator_id, client_id, property_id, service_type_id,
+                       schedule_id, scheduled_date, window_start, window_end, status)
+    select operator_id, client_id, property_id, service_type_id,
+           schedule_id, scheduled_date + 100, window_start, window_end, 'scheduled'
+      from walks where schedule_id = '88888888-0000-4000-1000-000000000001' limit 1;
+    if exists (select 1 from walks
+                where schedule_id is not null and origin_date is null) then
+      raise exception 'MATERIALIZER FAIL: origin_date not defaulted on insert';
+    end if;
+    perform fn_materialize_walks(14);
+    select count(*) into v_dup from (
+      select schedule_id, scheduled_date from walks
+       where schedule_id is not null and status = 'scheduled'
+       group by 1, 2 having count(*) > 1) d;
+    if v_dup <> 0 then
+      raise exception 'MATERIALIZER FAIL: duplicate live schedule walks exist (%)', v_dup;
+    end if;
+  end;
+
+  -- Pause cancels materialized walks; clearing the pause restores them (0013).
+  declare
+    v_target date;
+    v_status text;
+  begin
+    select min(scheduled_date) into v_target from walks
+      where schedule_id = '88888888-0000-4000-1000-000000000001'
+        and status = 'scheduled' and scheduled_date > current_date;
+    if v_target is null then
+      raise exception 'MATERIALIZER FAIL: no future walk to pause-test against';
+    end if;
+    update recurring_schedules
+       set paused_from = v_target, paused_until = v_target
+     where id = '88888888-0000-4000-1000-000000000001';
+    select status into v_status from walks
+      where schedule_id = '88888888-0000-4000-1000-000000000001'
+        and scheduled_date = v_target
+        and origin_date = scheduled_date;
+    if v_status is distinct from 'cancelled' then
+      raise exception 'MATERIALIZER FAIL: pause did not cancel in-window walk (%)', v_status;
+    end if;
+    update recurring_schedules
+       set paused_from = null, paused_until = null
+     where id = '88888888-0000-4000-1000-000000000001';
+    select status into v_status from walks
+      where schedule_id = '88888888-0000-4000-1000-000000000001'
+        and scheduled_date = v_target
+        and origin_date = scheduled_date;
+    if v_status is distinct from 'scheduled' then
+      raise exception 'MATERIALIZER FAIL: clearing pause did not restore walk (%)', v_status;
+    end if;
+  end;
+
   -- Authenticated callers are rejected (service only).
   begin
     perform set_config('request.jwt.claims',

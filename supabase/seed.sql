@@ -120,11 +120,11 @@ select '00000000-0000-4000-2000-000000000001', '00000000-0000-4000-a000-00000000
 
 -- A scheduled walk for today (dashboard fixture).
 insert into walks (id, operator_id, client_id, property_id, service_type_id,
-                   scheduled_date, window_start, window_end, status, schedule_id)
+                   scheduled_date, window_start, window_end, status, schedule_id, origin_date)
 select '00000000-0000-4000-2000-000000000002', '00000000-0000-4000-a000-000000000001',
        '00000000-0000-4000-c000-000000000001', '00000000-0000-4000-d000-000000000001',
        st.id, current_date, '12:00', '13:00', 'scheduled',
-       '00000000-0000-4000-1000-000000000001'
+       '00000000-0000-4000-1000-000000000001', current_date
   from service_types st
  where st.operator_id = '00000000-0000-4000-a000-000000000001' and st.is_default;
 

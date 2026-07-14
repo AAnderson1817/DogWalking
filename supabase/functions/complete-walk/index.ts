@@ -34,7 +34,10 @@ function makeDeps(): CompleteWalkDeps {
         storage_path: p,
         taken_at: new Date().toISOString(),
       }));
-      const { error } = await db.from("walk_photos").insert(rows);
+      // Idempotent under uq_walk_photos_path so the replay backfill is safe.
+      const { error } = await db
+        .from("walk_photos")
+        .upsert(rows, { onConflict: "walk_id,storage_path", ignoreDuplicates: true });
       if (error) throw new HttpError(500, "db_error", "photo insert failed");
     },
 
@@ -67,6 +70,17 @@ function makeDeps(): CompleteWalkDeps {
     async insertNotification(row) {
       const { error } = await db.from("notifications").insert(row);
       if (error) throw new HttpError(500, "db_error", "notification insert failed");
+    },
+
+    async hasCompleteNotification(walkId) {
+      const { data, error } = await db
+        .from("notifications")
+        .select("id")
+        .eq("walk_id", walkId)
+        .eq("type", "walk_complete")
+        .limit(1);
+      if (error) throw new HttpError(500, "db_error", "notification lookup failed");
+      return (data?.length ?? 0) > 0;
     },
 
     async notifyLowCredit(clientId) {

@@ -1,6 +1,14 @@
 // stripe-webhook event dispatch (spec 04), dependency-injected for tests.
-// Signature verification and the idempotency ledger happen in index.ts /
-// recordEvent; this module maps verified events onto DB effects.
+// Signature verification happens in index.ts; this module maps verified
+// events onto DB effects.
+//
+// Idempotency (re-review hardening): stripe_events is a STATEFUL claim
+// ledger — rows are never deleted. claimEvent inserts status='processing';
+// markProcessed flips it after effects succeed. A duplicate delivery of an
+// event whose claim is 'processing' is NOT acknowledged (in_flight → the
+// HTTP layer returns 409 so Stripe keeps retrying) — acking it while the
+// claimant could still fail is how grants got lost. A claim stuck in
+// 'processing' past its lease is taken over by the next retry.
 
 export interface StripeEventLike {
   id: string;
@@ -23,50 +31,67 @@ export interface PlanRow {
   stripe_price_id: string | null;
 }
 
+export type ClaimResult = "fresh" | "duplicate" | "in_flight";
+
 export interface WebhookDeps {
-  /** Claim the event by inserting into stripe_events; false ⇒ already claimed
-   * (duplicate). The row is the idempotency guard and must only remain if
-   * effects succeed — see unrecordEvent. */
-  recordEvent(id: string, type: string, payload: unknown): Promise<boolean>;
-  /** Release the idempotency claim so Stripe's retry re-processes the event
-   * (called when an effect throws after the claim). */
-  unrecordEvent(id: string): Promise<void>;
+  /** Claim the event: 'fresh' (we process it), 'duplicate' (already
+   * processed — ack), 'in_flight' (another attempt holds a live claim —
+   * do NOT ack; let Stripe retry). */
+  claimEvent(id: string, type: string, payload: unknown): Promise<ClaimResult>;
+  /** Mark the claim durable after all effects succeeded. */
+  markProcessed(id: string): Promise<void>;
   findClientByCustomer(customerId: string): Promise<ClientRow | null>;
   getPlan(planId: string): Promise<PlanRow | null>;
   findPlanByPriceId(operatorId: string, priceId: string): Promise<PlanRow | null>;
   updateClient(id: string, fields: Record<string, unknown>): Promise<void>;
-  applyRollover(clientId: string): Promise<void>;
-  grantCredits(clientId: string, amount: number, note: string): Promise<void>;
+  /** Atomic + idempotent invoice effects (fn_apply_invoice_paid RPC):
+   * payment row + rollover + cycle grant in one transaction keyed on the
+   * invoice id. Returns false when the invoice was already applied. */
+  applyInvoicePaid(args: {
+    clientId: string;
+    credits: number;
+    invoiceId: string;
+    amountPence: number;
+    currency: string;
+    receiptUrl: string | null;
+  }): Promise<boolean>;
+  /** True when a payments row already exists for this invoice id. */
+  hasPaymentForInvoice(invoiceId: string): Promise<boolean>;
   insertPayment(row: Record<string, unknown>): Promise<void>;
   insertNotification(row: Record<string, unknown>): Promise<void>;
 }
 
+export class InFlightError extends Error {
+  constructor() {
+    super("event claim is in flight");
+  }
+}
+
 /**
- * Process one verified Stripe event. Returns what happened; the HTTP layer
- * always replies 200 to verified events regardless (spec 04).
+ * Process one verified Stripe event. 'duplicate'/'ignored'/'processed' are
+ * acked with 200 by the HTTP layer; InFlightError → 409; any other throw →
+ * 500 (the claim stays 'processing' and the next retry takes it over after
+ * the lease).
  */
 export async function handleStripeEvent(
   event: StripeEventLike,
   deps: WebhookDeps,
 ): Promise<{ status: "processed" | "duplicate" | "ignored" }> {
-  const fresh = await deps.recordEvent(event.id, event.type, event);
-  if (!fresh) return { status: "duplicate" };
+  const claim = await deps.claimEvent(event.id, event.type, event);
+  if (claim === "duplicate") return { status: "duplicate" };
+  if (claim === "in_flight") throw new InFlightError();
 
-  // Effects run AFTER the claim but the claim is only durable if they
-  // succeed: on any failure we release it so Stripe's automatic retry
-  // re-processes instead of the event being lost as a "duplicate".
-  try {
-    return await applyEvent(event, deps);
-  } catch (e) {
-    await deps.unrecordEvent(event.id).catch(() => {});
-    throw e;
-  }
+  const result = await applyEvent(event, deps);
+  await deps.markProcessed(event.id);
+  return result;
 }
+
+const CYCLE_REASONS = new Set(["subscription_create", "subscription_cycle"]);
 
 async function applyEvent(
   event: StripeEventLike,
   deps: WebhookDeps,
-): Promise<{ status: "processed" | "duplicate" | "ignored" }> {
+): Promise<{ status: "processed" | "ignored" }> {
   const obj = event.data.object;
 
   switch (event.type) {
@@ -88,17 +113,31 @@ async function applyEvent(
 
     case "invoice.paid": {
       if (!invoiceSubscriptionId(obj)) return { status: "ignored" };
-      // Only a new subscription or a renewal is a credit-cycle boundary.
-      // Proration/manual/threshold invoices must NOT grant a fresh cycle or
-      // trigger rollover (which, on rollover 'none', would wipe the balance
-      // mid-period). A missing billing_reason is treated as a cycle for
-      // backwards-compatibility with older fixtures.
-      const reason = typeof obj.billing_reason === "string" ? obj.billing_reason : "";
-      if (reason && reason !== "subscription_create" && reason !== "subscription_cycle") {
-        return { status: "ignored" };
-      }
       const client = await deps.findClientByCustomer(String(obj.customer ?? ""));
       if (!client) return { status: "ignored" };
+      const invoiceId = typeof obj.id === "string" ? obj.id : event.id;
+      const currency = String(obj.currency ?? "usd");
+
+      // Only a new subscription or a renewal is a credit-cycle boundary.
+      // Prorations/manual invoices must not grant a cycle or trigger
+      // rollover (which, on rollover 'none', would wipe the balance
+      // mid-period) — but the money movement is still recorded.
+      const reason = typeof obj.billing_reason === "string" ? obj.billing_reason : "";
+      if (!CYCLE_REASONS.has(reason)) {
+        if (!(await deps.hasPaymentForInvoice(invoiceId))) {
+          await deps.insertPayment({
+            operator_id: client.operator_id,
+            client_id: client.id,
+            type: "subscription",
+            amount_pence: (obj.amount_paid as number) ?? 0,
+            currency: currency.toUpperCase(),
+            status: "succeeded",
+            stripe_invoice_id: invoiceId,
+            receipt_url: obj.hosted_invoice_url ?? null,
+          });
+        }
+        return { status: "processed" };
+      }
 
       const plan = await resolvePlan(client, obj, deps);
       if (!plan) return { status: "ignored" };
@@ -106,21 +145,13 @@ async function applyEvent(
         await deps.updateClient(client.id, { plan_id: plan.id });
       }
 
-      // Cycle boundary: rollover BEFORE the new cycle's grant (spec 02).
-      await deps.applyRollover(client.id);
-      await deps.grantCredits(
-        client.id,
-        plan.credits_per_cycle,
-        `cycle grant ${obj.id ?? event.id}`,
-      );
-      await deps.insertPayment({
-        operator_id: client.operator_id,
-        client_id: client.id,
-        type: "subscription",
-        amount_pence: (obj.amount_paid as number) ?? 0,
-        status: "succeeded",
-        stripe_invoice_id: obj.id ?? null,
-        receipt_url: obj.hosted_invoice_url ?? null,
+      await deps.applyInvoicePaid({
+        clientId: client.id,
+        credits: plan.credits_per_cycle,
+        invoiceId,
+        amountPence: (obj.amount_paid as number) ?? 0,
+        currency,
+        receiptUrl: (obj.hosted_invoice_url as string | null) ?? null,
       });
       return { status: "processed" };
     }
@@ -134,6 +165,7 @@ async function applyEvent(
         client_id: client.id,
         type: "subscription",
         amount_pence: (obj.amount_due as number) ?? 0,
+        currency: String(obj.currency ?? "usd").toUpperCase(),
         status: "failed",
         stripe_invoice_id: obj.id ?? null,
         receipt_url: null,
@@ -175,14 +207,21 @@ async function applyEvent(
       const client = await deps.findClientByCustomer(String(obj.customer ?? ""));
       if (!client) return { status: "ignored" };
       const subId = typeof obj.id === "string" ? obj.id : null;
+      const mapped = mapSubscriptionStatus(obj);
       // A customer can carry a stale/second subscription; only act on the
       // one bound to the client so an old sub can't clobber the active one.
       if (client.stripe_subscription_id && subId && client.stripe_subscription_id !== subId) {
         return { status: "ignored" };
       }
+      // Unbound client (checkout.session.completed not yet delivered —
+      // Stripe does not guarantee ordering): only let a LIVE subscription
+      // bind; a stale sub's cancelled/past_due update must not seed state.
+      if (!client.stripe_subscription_id && mapped !== "active" && mapped !== "paused") {
+        return { status: "ignored" };
+      }
       const fields: Record<string, unknown> = {
         stripe_subscription_id: subId,
-        subscription_status: mapSubscriptionStatus(obj),
+        subscription_status: mapped,
       };
       const periodEnd = subscriptionPeriodEnd(obj);
       if (periodEnd) fields.current_period_end = periodEnd;
@@ -194,10 +233,10 @@ async function applyEvent(
       const client = await deps.findClientByCustomer(String(obj.customer ?? ""));
       if (!client) return { status: "ignored" };
       const subId = typeof obj.id === "string" ? obj.id : null;
-      // Ignore deletion of a subscription that isn't the client's current one
-      // (e.g. an old cancelled sub) so it can't flip an active account to
-      // cancelled.
-      if (client.stripe_subscription_id && subId && client.stripe_subscription_id !== subId) {
+      // Never let a deletion of a sub that isn't the client's current one
+      // (stale sub, or any sub while unbound mid-checkout) flip the account.
+      if (!client.stripe_subscription_id) return { status: "ignored" };
+      if (subId && client.stripe_subscription_id !== subId) {
         return { status: "ignored" };
       }
       await deps.updateClient(client.id, { subscription_status: "cancelled" });

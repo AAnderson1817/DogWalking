@@ -416,8 +416,48 @@ begin
   if n <> 1 then
     raise exception 'FAIL: operator cannot read credential metadata';
   end if;
+  -- 0013: INSERT of ciphertext is also denied (plaintext-into-vault via
+  -- PostgREST); only the credential-vault edge fn (service role) writes it.
+  begin
+    insert into access_credentials
+      (operator_id, property_id, entry_method, ciphertext, label)
+    values ('99999999-0000-4000-a000-000000000001',
+            '99999999-0000-4000-d000-00000000000a', 'door_code',
+            '\x00'::bytea, 'smuggled');
+    raise exception 'FAIL: operator inserted access_credentials.ciphertext';
+  exception when insufficient_privilege then
+    null;  -- expected
+  end;
   reset session authorization;
   raise notice 'security 3 (ciphertext column privilege): OK';
+end $$;
+
+-- ═══ Security assertion 3b: one live overage payment per walk (0013) ══════
+do $$
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  insert into payments (operator_id, client_id, walk_id, type, amount_pence,
+                        currency, status)
+  values ('99999999-0000-4000-a000-000000000001',
+          '99999999-0000-4000-c000-00000000000a',
+          '99999999-0000-4000-2000-000000000001', 'overage', 2500, 'USD', 'succeeded');
+  begin
+    insert into payments (operator_id, client_id, walk_id, type, amount_pence,
+                          currency, status)
+    values ('99999999-0000-4000-a000-000000000001',
+            '99999999-0000-4000-c000-00000000000a',
+            '99999999-0000-4000-2000-000000000001', 'overage', 2500, 'USD', 'pending');
+    raise exception 'FAIL: second live overage payment for one walk was accepted';
+  exception when unique_violation then
+    null;  -- expected
+  end;
+  -- a failed attempt row is still allowed (re-charge path)
+  insert into payments (operator_id, client_id, walk_id, type, amount_pence,
+                        currency, status)
+  values ('99999999-0000-4000-a000-000000000001',
+          '99999999-0000-4000-c000-00000000000a',
+          '99999999-0000-4000-2000-000000000001', 'overage', 2500, 'USD', 'failed');
+  raise notice 'security 3b (overage payment uniqueness): OK';
 end $$;
 
 -- ═══ Security assertion 4: direct ledger insert denied ════════════════════

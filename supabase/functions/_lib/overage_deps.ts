@@ -4,6 +4,9 @@ import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import type Stripe from "npm:stripe@17";
 import type { OverageDeps, OveragePayment } from "./overage.ts";
 
+const PAYMENT_COLS =
+  "id, walk_id, type, amount_pence, status, stripe_payment_intent_id, receipt_url, created_at";
+
 export function makeOverageDeps(db: SupabaseClient, stripe: Stripe): OverageDeps {
   return {
     async getWalk(id) {
@@ -16,13 +19,12 @@ export function makeOverageDeps(db: SupabaseClient, stripe: Stripe): OverageDeps
       return data;
     },
 
-    async getSucceededOveragePayment(walkId) {
-      // Short-circuit on a succeeded OR in-flight (pending) charge — never
-      // re-charge for a walk that already has a live payment. Only a 'failed'
-      // row leaves the walk chargeable again.
+    async getLiveOveragePayment(walkId) {
+      // A succeeded OR in-flight (pending) charge blocks new attempts; only
+      // 'failed' rows leave the walk chargeable again.
       const { data, error } = await db
         .from("payments")
-        .select("id, walk_id, type, amount_pence, status, stripe_payment_intent_id, receipt_url")
+        .select(PAYMENT_COLS)
         .eq("walk_id", walkId)
         .eq("type", "overage")
         .in("status", ["succeeded", "pending"])
@@ -31,6 +33,15 @@ export function makeOverageDeps(db: SupabaseClient, stripe: Stripe): OverageDeps
         .maybeSingle();
       if (error) throw new Error("payment lookup failed");
       return data as OveragePayment | null;
+    },
+
+    async retrievePaymentIntent(piId) {
+      const pi = await stripe.paymentIntents.retrieve(piId, { expand: ["latest_charge"] });
+      const charge = pi.latest_charge as Stripe.Charge | null;
+      return {
+        status: pi.status,
+        receipt_url: charge && typeof charge !== "string" ? charge.receipt_url : null,
+      };
     },
 
     async getClientBilling(clientId) {
@@ -49,7 +60,7 @@ export function makeOverageDeps(db: SupabaseClient, stripe: Stripe): OverageDeps
       };
     },
 
-    async createOffSessionPaymentIntent({ customerId, amountPence, walkId, clientId }) {
+    async createOffSessionPaymentIntent({ customerId, amountPence, walkId, clientId, attemptKey }) {
       // Resolve a chargeable payment method: the customer default, else the
       // first card on file.
       const customer = await stripe.customers.retrieve(customerId);
@@ -79,10 +90,10 @@ export function makeOverageDeps(db: SupabaseClient, stripe: Stripe): OverageDeps
           metadata: { walk_id: walkId, client_id: clientId },
           expand: ["latest_charge"],
         },
-        // One overage charge per walk, ever: a retry after a crash between
-        // Stripe confirming and our payment row committing returns the SAME
-        // PaymentIntent instead of charging the card twice.
-        { idempotencyKey: `overage_${walkId}` },
+        // Per-attempt key: a crash-retry of THIS attempt replays; a new
+        // attempt (fresh claim row) gets a new key. A fixed per-walk key
+        // would replay a stored decline for ~24h and brick the re-charge.
+        { idempotencyKey: attemptKey },
       );
       const charge = pi.latest_charge as Stripe.Charge | null;
       return {
@@ -96,15 +107,36 @@ export function makeOverageDeps(db: SupabaseClient, stripe: Stripe): OverageDeps
       const { data, error } = await db
         .from("payments")
         .insert(row)
-        .select("id, walk_id, type, amount_pence, status, stripe_payment_intent_id, receipt_url")
+        .select(PAYMENT_COLS)
         .single();
       if (error) throw new Error("payment insert failed");
+      return data as OveragePayment;
+    },
+
+    async updatePayment(id, fields) {
+      const { data, error } = await db
+        .from("payments")
+        .update(fields)
+        .eq("id", id)
+        .select(PAYMENT_COLS)
+        .single();
+      if (error) throw new Error("payment update failed");
       return data as OveragePayment;
     },
 
     async insertNotification(row) {
       const { error } = await db.from("notifications").insert(row);
       if (error) throw new Error("notification insert failed");
+    },
+
+    isCardError(err) {
+      const e = err as { type?: string; code?: string } | null;
+      return e?.type === "StripeCardError" ||
+        e?.code === "card_declined" ||
+        e?.code === "authentication_required" ||
+        e?.code === "expired_card" ||
+        e?.code === "incorrect_cvc" ||
+        e?.code === "insufficient_funds";
     },
   };
 }

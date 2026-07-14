@@ -59,6 +59,8 @@ export interface CompleteWalkDeps {
     body: string;
     walk_id: string | null;
   }): Promise<void>;
+  /** True when a walk_complete notification already exists for the walk. */
+  hasCompleteNotification(walkId: string): Promise<boolean>;
   notifyLowCredit(clientId: string): Promise<boolean>;
   broadcast(topic: string, event: string, payload: unknown): Promise<void>;
 }
@@ -79,8 +81,24 @@ export async function completeWalk(
     throw new HttpError(404, "walk_not_found", "walk not found");
   }
 
-  // Idempotent replay: already completed → return the stored outcome.
+  // Idempotent replay: already completed → return the stored outcome, but
+  // first backfill side effects a partially-failed earlier attempt may have
+  // dropped (photos are upsert-idempotent via uq_walk_photos_path; the
+  // notification is inserted only if absent).
   if (walk.status === "completed") {
+    if (body.photo_paths?.length) {
+      await deps.insertPhotos(walk, body.photo_paths);
+    }
+    if (!(await deps.hasCompleteNotification(walk.id))) {
+      await deps.insertNotification({
+        operator_id: walk.operator_id,
+        client_id: walk.client_id,
+        type: "walk_complete",
+        title: "Walk complete",
+        body: "Your walk report card is ready.",
+        walk_id: walk.id,
+      });
+    }
     return { walk, billing: await storedBilling(walk, deps) };
   }
   if (walk.status !== "in_progress") {
