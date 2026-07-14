@@ -34,7 +34,15 @@ export default function Onboard() {
         <p style={{ color: "var(--text-2)", textAlign: "center" }}>
           Couldn't confirm your account. Check your connection and try again.
         </p>
-        <Button onClick={() => void auth.refreshRole()}>Retry</Button>
+        <Button
+          disabled={busy}
+          onClick={() => {
+            setBusy(true);
+            void auth.refreshRole().finally(() => setBusy(false));
+          }}
+        >
+          {busy ? <Spinner /> : "Retry"}
+        </Button>
       </div>
     );
   }

@@ -28,8 +28,11 @@ export interface WalkChannelBroadcast {
   mode: "broadcast";
   /** Broadcast a point to live subscribers and enqueue its DB insert. */
   sendPoint: (point: GeoPoint) => void;
-  /** Flush remaining queued inserts + announce the walk ended. */
+  /** Flush remaining queued inserts (awaiting a drain so the final batch
+   * isn't stranded) + announce the walk ended. */
   end: () => Promise<void>;
+  /** Points for this walk still queued in the outbox (for resume seeding). */
+  pendingPoints: () => Promise<GeoPoint[]>;
 }
 
 export interface WalkChannelSubscribe {
@@ -104,12 +107,20 @@ export function useWalkChannel(
   );
 
   const end = useCallback(async () => {
-    batcher.end();
+    batcher.end(); // flush the in-memory batch into the durable outbox
+    // Await a drain so the final batch is persisted to the DB before the
+    // walk completes (it was fire-and-forget, which could strand it).
+    await outbox?.drain();
     await channelRef.current?.send({ type: "broadcast", event: "ended", payload: { walkId } });
-  }, [batcher, walkId]);
+  }, [batcher, outbox, walkId]);
+
+  const pendingPoints = useCallback(
+    () => outbox?.pendingFor(walkId) ?? Promise.resolve([]),
+    [outbox, walkId],
+  );
 
   if (mode === "broadcast") {
-    return { mode, sendPoint, end };
+    return { mode, sendPoint, end, pendingPoints };
   }
   return { mode, livePoints, ended };
 }

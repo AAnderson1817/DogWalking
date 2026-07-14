@@ -32,17 +32,41 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # A real job (not a job-level `if`) that FAILS when the trigger isn't a
+  # successful push-CI run from this repo. A skipped `if` would let the run
+  # still conclude 'success' and fire the chained smoke test after a red CI;
+  # a failing gate turns the whole run red so nothing downstream runs.
+  gate:
+    name: Deploy gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify CI passed on a push to this repo
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "manual dispatch — allowed"; exit 0
+          fi
+          conclusion="${{ github.event.workflow_run.conclusion }}"
+          evt="${{ github.event.workflow_run.event }}"
+          repo="${{ github.event.workflow_run.head_repository.full_name }}"
+          if [ "$conclusion" = "success" ] && [ "$evt" = "push" ] \
+             && [ "$repo" = "${{ github.repository }}" ]; then
+            echo "CI green on a push to ${{ github.repository }} — deploying"; exit 0
+          fi
+          echo "Refusing to deploy: conclusion=$conclusion event=$evt repo=$repo"
+          exit 1
+
   migrate:
     name: Apply migrations
+    needs: gate
     runs-on: ubuntu-latest
-    # Skip if CI failed; dispatch runs have no triggering workflow to check.
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     environment: staging
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
       SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - uses: supabase/setup-cli@v1
         with:
@@ -63,6 +87,8 @@ jobs:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - uses: supabase/setup-cli@v1
         with:
@@ -83,6 +109,8 @@ jobs:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - uses: supabase/setup-cli@v1
         with:

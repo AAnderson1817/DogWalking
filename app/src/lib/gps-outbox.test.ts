@@ -122,17 +122,38 @@ describe("GpsOutbox", () => {
     expect(sent.map((b) => b.points.length)).toEqual([1, 2, 3]);
   });
 
-  it("drops a poison batch after maxAttempts so it can't block the queue", async () => {
-    const { outbox, store, sent, timers } = makeHarness({ poisonFirst: true, maxAttempts: 3 });
+  it("drops a poison batch only after exactly maxAttempts, then unblocks the queue", async () => {
+    let online = false; // enqueue offline so no drains fire during setup
+    const { outbox, store, sent } = makeHarness({
+      poisonFirst: true,
+      maxAttempts: 3,
+      online: () => online,
+    });
     await outbox.enqueue("poison", "op-1", pts(1)); // will always fail
     await outbox.enqueue("walk-2", "op-1", pts(2)); // stuck behind it
-    // Retry until the poison batch is dropped (attempts reach maxAttempts).
-    for (let i = 0; i < 5 && store.rows.size > 0; i++) {
-      const t = timers.splice(0);
-      for (const timer of t) timer.fn();
+    online = true;
+
+    // Each drain = one send attempt on the head (poison) batch. It must
+    // survive until attempt maxAttempts — a premature drop is silent loss.
+    for (let i = 1; i <= 2; i++) {
       await outbox.drain();
+      const poison = [...store.rows.values()].find((b) => b.walkId === "poison");
+      expect(poison, `poison must survive attempt ${i}`).toBeDefined();
+      expect(poison!.attempts).toBe(i);
+      expect(sent.some((b) => b.walkId === "walk-2")).toBe(false); // still blocked
     }
-    expect(store.rows.size).toBe(0); // poison dropped, good batch sent
+    // The 3rd failed send hits maxAttempts → drop → the queue drains.
+    await outbox.drain();
+    expect([...store.rows.values()].some((b) => b.walkId === "poison")).toBe(false);
     expect(sent.some((b) => b.walkId === "walk-2")).toBe(true);
+    expect(store.rows.size).toBe(0);
+  });
+
+  it("pendingFor returns queued points for a walk", async () => {
+    const { outbox } = makeHarness({ online: () => false }); // stay queued
+    await outbox.enqueue("walk-1", "op-1", pts(3));
+    await outbox.enqueue("walk-2", "op-1", pts(2));
+    expect((await outbox.pendingFor("walk-1")).length).toBe(3);
+    expect((await outbox.pendingFor("walk-9")).length).toBe(0);
   });
 });

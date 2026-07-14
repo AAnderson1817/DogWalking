@@ -29,7 +29,7 @@ Single Vite React-TS PWA in `app/`, serving both personas behind role-gated rout
 - `types.ts` — `supabase gen types typescript --local > app/src/lib/types.ts` after every migration phase; domain aliases exported.
 - `api.ts` — typed wrappers for all reads/writes and edge invocations (`supabase.functions.invoke`). All data access flows through here; screens never call `supabase.from` directly.
 - `credits.ts` — client-side helpers: effective walk cost, low-credit predicate, ledger formatting.
-- `format.ts` — `gbp(pence)`, `walkTime(date, window)`, `dateLondon(ts)`, `distanceKm(m)`, `elapsed(start)`. All display times Europe/London.
+- `format.ts` — `money(cents)`, `walkTime(date, window)`, `dateLocal(ts)`, `timeLocal(ts)`, `time12(t)`, `distanceKm(m)`, `elapsed(start)`. All display times America/Chicago (US Central), 12-hour.
 - `auth-context.tsx` — session + resolved persona: `{ session, role: 'operator'|'client'|null, operatorId, clientId, reauth() }`. Role resolution on session: `operators` row by uid, else `clients` by `auth_user_id`.
 
 ## hooks/

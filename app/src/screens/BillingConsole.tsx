@@ -7,6 +7,7 @@ import { Badge } from "@/components/Badge";
 import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
+import { LoadError, loadErrorMessage } from "@/components/LoadError";
 import { Select } from "@/components/fields";
 import { Sheet } from "@/components/Sheet";
 import { Spinner } from "@/components/Spinner";
@@ -39,14 +40,15 @@ export default function BillingConsole() {
 
   useEffect(() => {
     setLoadError(null);
-    void load().catch((e) => setLoadError(e instanceof Error ? e.message : "failed to load"));
+    void load().catch((e) => setLoadError(loadErrorMessage(e)));
   }, [load]);
 
   if (loadError && clients === null) {
     return (
-      <div className="page">
-        <Card><EmptyState title="Couldn't load the billing console" hint={loadError} /></Card>
-      </div>
+      <LoadError title="Couldn't load the billing console" message={loadError} onRetry={() => {
+        setLoadError(null);
+        return load().catch((e) => setLoadError(loadErrorMessage(e)));
+      }} />
     );
   }
   if (clients === null) {

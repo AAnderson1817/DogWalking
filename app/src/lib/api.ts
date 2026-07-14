@@ -147,6 +147,28 @@ export async function createWalk(row: TableInsert<"walks">): Promise<Walks> {
   return must(data, error);
 }
 
+/** Atomic client self-booking (fn_book_walk, migration 0013): inserts the
+ * walk and its walk_pets in one transaction, so a failure can't leave an
+ * orphan petless walk that a retry would double-book. Returns the walk id. */
+export async function bookWalk(args: {
+  property_id: string;
+  service_type_id: string;
+  scheduled_date: string;
+  window_start: string;
+  window_end: string;
+  pet_ids: string[];
+}): Promise<string> {
+  const { data, error } = await supabase.rpc("fn_book_walk", {
+    p_property: args.property_id,
+    p_service: args.service_type_id,
+    p_date: args.scheduled_date,
+    p_window_start: args.window_start,
+    p_window_end: args.window_end,
+    p_pet_ids: args.pet_ids,
+  });
+  return must(data as string | null, error);
+}
+
 export async function updateWalk(id: string, patch: TableUpdate<"walks">): Promise<Walks> {
   const { data, error } = await supabase.from("walks").update(patch).eq("id", id).select().single();
   return must(data, error);

@@ -51,7 +51,7 @@ pick a preset and change it during the walk.
    - re-POST safety: reload the completed walk page — report renders, no
      second debit (idempotent).
 5. Overage path: zero the client's balance (`fn_adjust_credits` negative),
-   run a second walk end-to-end → amber "Overage £X" banner; with a Stripe
+   run a second walk end-to-end → amber "Overage $X" banner; with a Stripe
    test card on the customer a `payments` row `type=overage` appears;
    without one, a `failed` payment row + payment_failed notifications.
 6. Report card preview shows photos, route polyline, potty/fed facts,

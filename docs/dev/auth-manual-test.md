@@ -14,7 +14,7 @@ the confirm link when it appears.
 4. With no persona row you land on `/onboard`. Fill "Business name" =
    Test Walks, "Your name" = Op. Submit.
 5. You land on `/` (Dashboard). In Studio verify: `operators` row with your
-   auth uid, defaults `GBP` / `Europe/London` / threshold 2, and TWO seeded
+   auth uid, defaults `USD` / `America/Chicago` / threshold 2, and TWO seeded
    `service_types` rows ("Private walk 30" default, "Private walk 60").
 6. Revisit `/onboard` — it skips straight back to `/` (guard).
 

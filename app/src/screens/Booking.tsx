@@ -6,13 +6,14 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react
 import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
+import { LoadError, loadErrorMessage } from "@/components/LoadError";
 import { Input, Select } from "@/components/fields";
 import { Sheet } from "@/components/Sheet";
 import { Spinner } from "@/components/Spinner";
 import { WalkCard } from "@/components/WalkCard";
 import {
+  bookWalk,
   cancelOwnWalk,
-  createWalk,
   getMyClient,
   getMyOperatorView,
   getPlan,
@@ -20,7 +21,6 @@ import {
   listProperties,
   listServiceTypes,
   listWalksDetailed,
-  setWalkPets,
   walkPetNames,
   withinCancellationWindow,
   type MyOperatorView,
@@ -78,7 +78,7 @@ export default function Booking() {
 
   useEffect(() => {
     setLoadError(null);
-    void load().catch((e) => setLoadError(e instanceof Error ? e.message : "failed to load"));
+    void load().catch((e) => setLoadError(loadErrorMessage(e)));
   }, [load]);
 
   const service = services.find((s) => s.id === serviceId) ?? null;
@@ -120,17 +120,17 @@ export default function Booking() {
     setBusy(true);
     setError(null);
     try {
-      const walk = await createWalk({
-        operator_id: operator.id,
-        client_id: client.id,
+      // Atomic: the walk and its pets are created in one transaction, so a
+      // mid-write failure can't orphan a petless walk and a retry can't
+      // double-book.
+      await bookWalk({
         property_id: propertyId,
         service_type_id: serviceId,
         scheduled_date: date,
         window_start: ws,
         window_end: we,
-        status: "scheduled",
+        pet_ids: selectedPets,
       });
-      await setWalkPets(walk.id, operator.id, selectedPets);
       setBooked(true);
       setDate("");
       setConfirmOverage(false);
@@ -154,9 +154,10 @@ export default function Booking() {
 
   if (loadError && !client) {
     return (
-      <div className="page">
-        <Card><EmptyState title="Couldn't load booking" hint={loadError} /></Card>
-      </div>
+      <LoadError title="Couldn't load booking" message={loadError} onRetry={() => {
+        setLoadError(null);
+        return load().catch((e) => setLoadError(loadErrorMessage(e)));
+      }} />
     );
   }
   if (!client || !operator) {
@@ -259,10 +260,13 @@ export default function Booking() {
           )}
 
           {error && <span className="field__error">{error}</span>}
+          {/* Only hard-block on an unbookable account (no address/pets); every
+              other precondition is validated in submit() with a specific
+              message, so those branches stay reachable. */}
           <Button
             type="submit"
             full
-            disabled={busy || !date || properties.length === 0 || pets.length === 0 || (needsOverage && !confirmOverage)}
+            disabled={busy || properties.length === 0 || pets.length === 0}
           >
             {busy ? <Spinner /> : "Request walk"}
           </Button>

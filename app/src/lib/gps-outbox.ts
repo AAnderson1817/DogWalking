@@ -75,6 +75,14 @@ export class GpsOutbox {
     return (await this.store.all()).length;
   }
 
+  /** Points for a walk still queued (not yet inserted) — used to seed the
+   * distance/route baseline on a mid-walk resume so queued batches aren't
+   * missed from the total. */
+  async pendingFor(walkId: string): Promise<GeoPoint[]> {
+    const all = await this.store.all();
+    return all.filter((b) => b.walkId === walkId).flatMap((b) => b.points);
+  }
+
   /** Push everything queued; on failure reschedule with backoff. */
   async drain(): Promise<void> {
     if (this.draining) return;

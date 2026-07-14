@@ -5,6 +5,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { Card } from "@/components/Card";
 import { CreditMeter } from "@/components/CreditMeter";
 import { EmptyState } from "@/components/EmptyState";
+import { LoadError, loadErrorMessage } from "@/components/LoadError";
 import { NotificationBell } from "@/components/NotificationInbox";
 import { Spinner } from "@/components/Spinner";
 import { WalkCard } from "@/components/WalkCard";
@@ -59,9 +60,17 @@ export default function PortalHome() {
 
   if (error && !client) {
     return (
-      <div className="page">
-        <Card><EmptyState title="Couldn't load your portal" hint={error} /></Card>
-      </div>
+      <LoadError
+        title="Couldn't load your portal"
+        message={error}
+        onRetry={() => {
+          setError(null);
+          setLoading(true);
+          return load()
+            .catch((e) => setError(loadErrorMessage(e)))
+            .finally(() => setLoading(false));
+        }}
+      />
     );
   }
   if (loading || !client) {

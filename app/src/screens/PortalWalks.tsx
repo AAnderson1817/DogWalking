@@ -1,9 +1,10 @@
 // PortalWalks (phase 07): the Walks tab — upcoming bookings and past
 // report cards.
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
+import { LoadError, loadErrorMessage } from "@/components/LoadError";
 import { Spinner } from "@/components/Spinner";
 import { WalkCard } from "@/components/WalkCard";
 import { listWalksDetailed, walkPetNames, type WalkDetailed } from "@/lib/api";
@@ -15,18 +16,20 @@ export default function PortalWalks() {
   const [walks, setWalks] = useState<WalkDetailed[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const reload = useCallback(() => {
     setError(null);
-    void listWalksDetailed({})
+    return listWalksDetailed({})
       .then(setWalks)
-      .catch((e) => setError(e instanceof Error ? e.message : "failed to load walks"));
+      .catch((e) => setError(loadErrorMessage(e)));
   }, []);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
 
   if (error && walks === null) {
     return (
-      <div className="page">
-        <Card><EmptyState title="Couldn't load your walks" hint={error} /></Card>
-      </div>
+      <LoadError title="Couldn't load your walks" message={error} onRetry={reload} />
     );
   }
   if (walks === null) {

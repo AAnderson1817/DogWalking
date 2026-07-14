@@ -14,7 +14,7 @@ import { claimInvite, previewInviteAuthed, type InvitePreview } from "@/lib/api"
 import { useAuth } from "@/lib/auth-context";
 import { supabase } from "@/lib/supabase";
 
-type Stage = "loading" | "signup" | "confirm" | "dead-end" | "check-email";
+type Stage = "loading" | "signup" | "confirm" | "dead-end" | "check-email" | "role-error" | "claimed";
 
 export default function ClaimInvite() {
   const { token } = useParams<{ token: string }>();
@@ -69,7 +69,8 @@ export default function ClaimInvite() {
       return;
     }
     if (!auth.session) setStage("signup");
-    else if (!auth.roleError) void loadPreview();
+    else if (auth.roleError) setStage("role-error"); // don't strand on a spinner
+    else void loadPreview();
   }, [auth.loading, auth.session, auth.role, auth.roleError, navigate, loadPreview]);
 
   async function signUp(e: FormEvent) {
@@ -100,17 +101,15 @@ export default function ClaimInvite() {
     setError(null);
     try {
       await claimInvite(token);
-      // Branch on the freshly resolved role instead of navigating blindly:
-      // a silent bounce off /portal would land the client on the operator
-      // onboarding form (same failure family as the Onboard fix).
+      // The invite is now burned (fn_claim_invite is single-use). Branch on
+      // the freshly resolved role instead of navigating blindly — but never
+      // re-invoke claimInvite on retry (it would dead-end on the used token);
+      // the 'claimed' stage retries role resolution only.
       const role = await auth.refreshRole();
       if (role === "client") {
         navigate("/portal", { replace: true });
       } else {
-        setError(
-          "Invite accepted, but your portal access could not be confirmed. " +
-            "Reload this page to continue.",
-        );
+        setStage("claimed");
       }
     } catch (err) {
       setDeadEndReason(
@@ -201,6 +200,63 @@ export default function ClaimInvite() {
                 We sent a confirmation link to {email}. Open it, then return to
                 this invite link to finish.
               </p>
+            </div>
+          </Card>
+        )}
+
+        {stage === "role-error" && (
+          <Card>
+            <div style={{ textAlign: "center", padding: "var(--s-2) 0" }}>
+              <p style={{ fontWeight: 600 }}>Couldn't reach your account</p>
+              <p style={{ color: "var(--text-2)", marginTop: "var(--s-2)" }}>
+                Check your connection and try again.
+              </p>
+              <div style={{ marginTop: "var(--s-4)" }}>
+                <Button
+                  full
+                  disabled={busy}
+                  onClick={() => {
+                    setBusy(true);
+                    void auth
+                      .refreshRole()
+                      .then((role) => {
+                        if (role === "client") navigate("/portal", { replace: true });
+                        else void loadPreview();
+                      })
+                      .finally(() => setBusy(false));
+                  }}
+                >
+                  {busy ? <Spinner /> : "Retry"}
+                </Button>
+              </div>
+            </div>
+          </Card>
+        )}
+
+        {stage === "claimed" && (
+          <Card>
+            <div style={{ textAlign: "center", padding: "var(--s-2) 0" }}>
+              <p style={{ fontWeight: 600 }}>Invite accepted</p>
+              <p style={{ color: "var(--text-2)", marginTop: "var(--s-2)" }}>
+                We're finishing setting up your portal access.
+              </p>
+              <div style={{ marginTop: "var(--s-4)" }}>
+                <Button
+                  full
+                  disabled={busy}
+                  onClick={() => {
+                    setBusy(true);
+                    void auth
+                      .refreshRole()
+                      .then((role) => {
+                        if (role === "client") navigate("/portal", { replace: true });
+                      })
+                      .finally(() => setBusy(false));
+                  }}
+                >
+                  {busy ? <Spinner /> : "Continue to my portal"}
+                </Button>
+              </div>
             </div>
           </Card>
         )}

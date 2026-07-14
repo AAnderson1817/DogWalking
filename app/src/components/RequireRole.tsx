@@ -1,12 +1,14 @@
 // Route guard (spec 06): unauthenticated → /signin; wrong persona → own
 // home; authenticated with no persona row yet → /onboard.
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Navigate, useLocation } from "react-router-dom";
 import { useAuth, type Role } from "@/lib/auth-context";
+import { Spinner } from "./Spinner";
 
 export function RequireRole({ role, children }: { role: Exclude<Role, null>; children: ReactNode }) {
   const auth = useAuth();
   const location = useLocation();
+  const [retrying, setRetrying] = useState(false);
 
   if (auth.loading) {
     return (
@@ -18,7 +20,8 @@ export function RequireRole({ role, children }: { role: Exclude<Role, null>; chi
   if (!auth.session) {
     return <Navigate to="/signin" replace state={{ from: location.pathname }} />;
   }
-  if (auth.roleError) {
+  // A resolved role wins over a stale error flag from a concurrent attempt.
+  if (auth.roleError && auth.role === null) {
     // Resolution failed rather than resolving to "no persona" — never send a
     // signed-in user to onboarding on a transient error.
     return (
@@ -26,8 +29,15 @@ export function RequireRole({ role, children }: { role: Exclude<Role, null>; chi
         <p style={{ color: "var(--text-2)", textAlign: "center" }}>
           Couldn't load your account. Check your connection and try again.
         </p>
-        <button className="btn btn--primary" onClick={() => void auth.refreshRole()}>
-          Retry
+        <button
+          className="btn btn--primary"
+          disabled={retrying}
+          onClick={() => {
+            setRetrying(true);
+            void auth.refreshRole().finally(() => setRetrying(false));
+          }}
+        >
+          {retrying ? <Spinner /> : "Retry"}
         </button>
       </div>
     );

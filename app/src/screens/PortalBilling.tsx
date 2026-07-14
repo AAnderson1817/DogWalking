@@ -1,10 +1,11 @@
 // PortalBilling (phase 07): plan card, read-only ledger, payments with
 // receipt links, Stripe customer-portal launch for self-service.
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Badge } from "@/components/Badge";
 import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
+import { LoadError, loadErrorMessage } from "@/components/LoadError";
 import { Spinner } from "@/components/Spinner";
 import {
   billingPortal,
@@ -28,8 +29,10 @@ export default function PortalBilling() {
 
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  useEffect(() => {
-    async function load() {
+  const reload = useCallback(() => {
+    setLoadError(null);
+    setLoading(true);
+    return (async () => {
       const me = await getMyClient();
       if (!me) throw new Error("We couldn't load your account. Please try again.");
       const [p, lg, pay] = await Promise.all([
@@ -41,19 +44,14 @@ export default function PortalBilling() {
       setPlan(p);
       setLedger(lg);
       setPayments(pay);
-    }
-    void load()
-      .catch((e) => setLoadError(e instanceof Error ? e.message : "failed to load"))
+    })()
+      .catch((e) => setLoadError(loadErrorMessage(e)))
       .finally(() => setLoading(false));
   }, []);
 
-  if (loadError && !client) {
-    return (
-      <div className="page">
-        <Card><EmptyState title="Couldn't load billing" hint={loadError} /></Card>
-      </div>
-    );
-  }
+  useEffect(() => {
+    void reload();
+  }, [reload]);
 
   async function openPortal() {
     setBusy(true);
@@ -68,6 +66,9 @@ export default function PortalBilling() {
     }
   }
 
+  if (loadError && !client) {
+    return <LoadError title="Couldn't load billing" message={loadError} onRetry={reload} />;
+  }
   if (loading || !client) {
     return (
       <div className="page" style={{ display: "grid", placeItems: "center" }}>

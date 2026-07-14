@@ -30,6 +30,12 @@ import { useWalkChannel } from "@/hooks/useWalkChannel";
 import { pathDistanceM } from "@/lib/geo";
 import { distanceKm, elapsed, money, time12 } from "@/lib/format";
 import { compressImage } from "@/lib/image";
+import {
+  clearWalkSnapshot,
+  isNetworkError,
+  loadWalkSnapshot,
+  saveWalkSnapshot,
+} from "@/lib/walk-snapshot";
 import type { Pets, Walks } from "@/lib/types";
 
 export default function WalkMode() {
@@ -53,6 +59,7 @@ function WalkModeInner({ walkId }: { walkId: string }) {
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<CompleteWalkResult | null>(null);
   const [reportPhotoUrls, setReportPhotoUrls] = useState<string[]>([]);
+  const [offlineResumed, setOfflineResumed] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
   const active = walk?.status === "in_progress" && !result;
@@ -68,11 +75,25 @@ function WalkModeInner({ walkId }: { walkId: string }) {
         setPets(await listWalkPets(walkId));
         setNotes(w.notes ?? "");
         // Resuming an in-progress walk after a reload: seed the route and
-        // distance baseline from points already saved, so the report doesn't
-        // silently lose everything walked before the reload.
+        // distance baseline from points already saved AND any still queued in
+        // the offline outbox, so the report doesn't silently lose everything
+        // walked before the reload (especially after an offline stretch, when
+        // most of the trail is still in the outbox, not the DB yet).
         if (w.status === "in_progress") {
-          const points = await listWalkGpsPoints(walkId);
-          setResumedPoints(points.map((p) => ({ lat: p.lat, lng: p.lng })));
+          const [saved, queued] = await Promise.all([
+            listWalkGpsPoints(walkId),
+            channel.pendingPoints(),
+          ]);
+          const seen = new Set<string>();
+          const merged: Array<{ lat: number; lng: number }> = [];
+          for (const p of [...saved.map((x) => ({ lat: x.lat, lng: x.lng })), ...queued]) {
+            const key = `${p.lat},${p.lng}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              merged.push({ lat: p.lat, lng: p.lng });
+            }
+          }
+          setResumedPoints(merged);
         }
         // Re-entering a completed walk: show its report.
         if (w.status === "completed") {
@@ -92,7 +113,21 @@ function WalkModeInner({ walkId }: { walkId: string }) {
           setStaticPoints(points.map((p) => ({ lat: p.lat, lng: p.lng })));
         }
       })
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : "walk not found"));
+      .catch((e: unknown) => {
+        // Offline mid-walk reload: the SW keeps REST network-only, so getWalk
+        // fails. Fall back to the local snapshot to keep recording rather than
+        // dead-ending (which would stop GPS for the rest of the walk).
+        const snap = loadWalkSnapshot(walkId);
+        if (snap && isNetworkError(e)) {
+          setWalk(snap as unknown as Walks);
+          setOfflineResumed(true);
+          void channel.pendingPoints().then((queued) =>
+            setResumedPoints(queued.map((p) => ({ lat: p.lat, lng: p.lng }))),
+          );
+          return;
+        }
+        setError(e instanceof Error ? e.message : "walk not found");
+      });
   }, [walkId]);
 
   const [staticPoints, setStaticPoints] = useState<Array<{ lat: number; lng: number }>>([]);
@@ -141,6 +176,10 @@ function WalkModeInner({ walkId }: { walkId: string }) {
         started_at: new Date().toISOString(),
       });
       setWalk(updated);
+      // Snapshot the in-progress walk locally so a mid-walk reload while
+      // offline (dead zone) can re-enter recording mode without a network
+      // getWalk — REST is network-only in the SW.
+      saveWalkSnapshot(updated);
     } catch (e) {
       setError(e instanceof Error ? e.message : "could not start walk");
     } finally {
@@ -185,6 +224,7 @@ function WalkModeInner({ walkId }: { walkId: string }) {
       setResult(res);
       setWalk(res.walk as unknown as Walks);
       setReportPhotoUrls(photoPreviews);
+      clearWalkSnapshot(walkId); // walk is done; drop the offline-resume snapshot
     } catch (e) {
       setError(e instanceof Error ? e.message : "complete-walk failed");
     } finally {
@@ -239,7 +279,7 @@ function WalkModeInner({ walkId }: { walkId: string }) {
           <ReportCard
             report={{
               photoUrls: reportPhotoUrls.filter(Boolean),
-              routePoints: geo.points.length > 0 ? geo.points : staticPoints,
+              routePoints: routePoints.length > 0 ? routePoints : staticPoints,
               distanceM: (result.walk as unknown as Walks).distance_m ?? distance,
               pottyPee: toggles.potty_pee || (walk.potty_pee ?? null),
               pottyPoo: toggles.potty_poo || (walk.potty_poo ?? null),
@@ -318,7 +358,9 @@ function WalkModeInner({ walkId }: { walkId: string }) {
           <span style={{ fontWeight: 600 }}>{petNames || "Walking"}</span>
           {!online && (
             <span style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>
-              offline — points queued, they'll sync on reconnect
+              {offlineResumed
+                ? "resumed offline — points queued, they'll sync on reconnect"
+                : "offline — points queued, they'll sync on reconnect"}
             </span>
           )}
         </div>

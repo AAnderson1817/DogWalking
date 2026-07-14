@@ -118,8 +118,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch {
         // Resolution failed (network/5xx/token race). Do NOT leave role=null
         // masquerading as "no persona"; flag the error so guards can offer a
-        // retry instead of dumping the user on the onboarding form.
-        if (!cancelled) setRoleError(true);
+        // retry instead of dumping the user on the onboarding form. But if a
+        // concurrent apply() already resolved this same user (getSession +
+        // onAuthStateChange both fire on load), don't clobber that success
+        // with a stale rejection.
+        if (!cancelled && resolvedFor.current !== uid) setRoleError(true);
       } finally {
         if (!cancelled) setLoading(false);
       }

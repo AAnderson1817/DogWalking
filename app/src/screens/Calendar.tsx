@@ -8,6 +8,7 @@ import { Badge } from "@/components/Badge";
 import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
+import { LoadError, loadErrorMessage } from "@/components/LoadError";
 import { Input, Select } from "@/components/fields";
 import { Sheet } from "@/components/Sheet";
 import { Spinner } from "@/components/Spinner";
@@ -66,7 +67,7 @@ export default function Calendar() {
 
   useEffect(() => {
     setLoadError(null);
-    void load().catch((e) => setLoadError(e instanceof Error ? e.message : "failed to load"));
+    void load().catch((e) => setLoadError(loadErrorMessage(e)));
   }, [load]);
 
   async function reschedule(walkId: string, date: string, windowStart?: string, windowEnd?: string) {
@@ -98,9 +99,10 @@ export default function Calendar() {
 
   if (loadError && walks === null) {
     return (
-      <div className="page">
-        <Card><EmptyState title="Couldn't load the calendar" hint={loadError} /></Card>
-      </div>
+      <LoadError title="Couldn't load the calendar" message={loadError} onRetry={() => {
+        setLoadError(null);
+        return load().catch((e) => setLoadError(loadErrorMessage(e)));
+      }} />
     );
   }
   if (walks === null) {
@@ -195,7 +197,10 @@ export default function Calendar() {
               onDrop={(e) => {
                 e.preventDefault();
                 if (dragId) {
-                  void reschedule(dragId, day);
+                  setNotice(null);
+                  void reschedule(dragId, day).catch((err) =>
+                    setNotice(err instanceof Error ? err.message : "couldn't move the walk"),
+                  );
                   setDragId(null);
                 }
               }}

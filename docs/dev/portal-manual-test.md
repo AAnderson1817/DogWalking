@@ -25,7 +25,7 @@ the billing flows.
 
 ## 3. Overage-confirmed booking
 1. Drain the balance to 0 (operator Adjust). Book again: amber cost card
-   demands the explicit overage confirmation showing £ at the plan rate;
+   demands the explicit overage confirmation showing $ at the plan rate;
    the button stays disabled until ticked.
 2. Complete the walk (operator) → overage charge path: `payments` row
    `type=overage` (succeeded with a test card; failed otherwise, visible

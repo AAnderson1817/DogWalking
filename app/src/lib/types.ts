@@ -587,6 +587,8 @@ export type Database = {
           payload: Json | null;
           processed_at: string;
           created_at: string;
+          status: string;
+          claimed_at: string;
         };
         Insert: {
           id: string;
@@ -594,6 +596,8 @@ export type Database = {
           payload?: Json | null;
           processed_at?: string;
           created_at?: string;
+          status?: string;
+          claimed_at?: string;
         };
         Update: {
           id?: string;
@@ -601,6 +605,8 @@ export type Database = {
           payload?: Json | null;
           processed_at?: string;
           created_at?: string;
+          status?: string;
+          claimed_at?: string;
         };
         Relationships: [];
       };
@@ -713,6 +719,8 @@ export type Database = {
           report_sent_at: string | null;
           created_at: string;
           updated_at: string;
+          origin_date: string | null;
+          cancel_reason: string | null;
         };
         Insert: {
           id?: string;
@@ -738,6 +746,8 @@ export type Database = {
           report_sent_at?: string | null;
           created_at?: string;
           updated_at?: string;
+          origin_date?: string | null;
+          cancel_reason?: string | null;
         };
         Update: {
           id?: string;
@@ -763,6 +773,8 @@ export type Database = {
           report_sent_at?: string | null;
           created_at?: string;
           updated_at?: string;
+          origin_date?: string | null;
+          cancel_reason?: string | null;
         };
         Relationships: [];
       };
@@ -787,11 +799,37 @@ export type Database = {
         };
         Returns: number;
       };
+      fn_apply_invoice_paid: {
+        Args: {
+          p_client: string;
+          p_credits: number;
+          p_invoice_id: string;
+          p_amount_pence: number;
+          p_currency: string;
+          p_receipt_url: string;
+        };
+        Returns: boolean;
+      };
       fn_apply_rollover: {
         Args: {
           p_client: string;
         };
         Returns: number;
+      };
+      fn_book_walk: {
+        Args: {
+          p_property: string;
+          p_service: string;
+          p_date: string;
+          p_window_start: string;
+          p_window_end: string;
+          p_pet_ids: string[];
+        };
+        Returns: string;
+      };
+      fn_cancel_paused_walks: {
+        Args: Record<string, never>;
+        Returns: unknown;
       };
       fn_change_plan: {
         Args: {
@@ -812,6 +850,10 @@ export type Database = {
           p_walk: string;
         };
         Returns: Array<{ outcome: string; cost: number; new_balance: number }>;
+      };
+      fn_default_walk_origin: {
+        Args: Record<string, never>;
+        Returns: unknown;
       };
       fn_expire_credits: {
         Args: Record<string, never>;
@@ -865,6 +907,10 @@ export type Database = {
         };
         Returns: boolean;
       };
+      fn_notify_walk_changes: {
+        Args: Record<string, never>;
+        Returns: unknown;
+      };
       fn_preview_invite: {
         Args: {
           p_token: string;
@@ -878,6 +924,10 @@ export type Database = {
           p_operator: string;
         };
         Returns: Array<{ ciphertext: string; label: string; entry_method: Database["public"]["Enums"]["entry_method"] }>;
+      };
+      fn_refund_cancelled_debit: {
+        Args: Record<string, never>;
+        Returns: unknown;
       };
       fn_seed_operator_defaults: {
         Args: Record<string, never>;

@@ -1,6 +1,7 @@
 // Recurring schedule management (phase 06), used from ClientDetail's
 // Schedule tab: days-of-week picker, window, service type, pets, start/end
 // dates, pause-window editor, deactivate (cancels future scheduled walks).
+import { loadErrorMessage } from "@/components/LoadError";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Badge } from "./Badge";
 import { Button } from "./Button";
@@ -54,14 +55,24 @@ export function ScheduleTab({ clientId }: { clientId: string }) {
     setPets(ps);
   }, [clientId]);
 
-  useEffect(() => {
+  const runLoad = useCallback(() => {
     setLoadError(null);
-    void load().catch((e) => setLoadError(e instanceof Error ? e.message : "failed to load schedules"));
+    return load().catch((e) => setLoadError(loadErrorMessage(e)));
   }, [load]);
+
+  useEffect(() => {
+    void runLoad();
+  }, [runLoad]);
 
   if (loadError) {
     return (
-      <Card><EmptyState title="Couldn't load schedules" hint={loadError} /></Card>
+      <Card>
+        <EmptyState
+          title="Couldn't load schedules"
+          hint={loadError}
+          action={<Button onClick={() => void runLoad()}>Retry</Button>}
+        />
+      </Card>
     );
   }
   if (schedules === null) return <Spinner />;

@@ -54,7 +54,27 @@ export default function SignIn() {
           <p style={{ color: "var(--text-2)" }}>Walks, credits, report cards.</p>
         </div>
         <Card>
-          {magicSent ? (
+          {auth.session && auth.roleError ? (
+            <div style={{ textAlign: "center", padding: "var(--s-4) 0" }}>
+              <p style={{ fontWeight: 600 }}>Couldn't load your account</p>
+              <p style={{ color: "var(--text-2)", marginTop: "var(--s-2)" }}>
+                You're signed in, but we couldn't reach the server. Check your
+                connection and try again.
+              </p>
+              <div style={{ marginTop: "var(--s-4)" }}>
+                <Button
+                  full
+                  disabled={busy}
+                  onClick={() => {
+                    setBusy(true);
+                    void auth.refreshRole().finally(() => setBusy(false));
+                  }}
+                >
+                  {busy ? <Spinner /> : "Retry"}
+                </Button>
+              </div>
+            </div>
+          ) : magicSent ? (
             <div style={{ textAlign: "center", padding: "var(--s-4) 0" }}>
               <p style={{ fontWeight: 600 }}>Check your email</p>
               <p style={{ color: "var(--text-2)", marginTop: "var(--s-2)" }}>
