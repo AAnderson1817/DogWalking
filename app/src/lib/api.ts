@@ -613,7 +613,7 @@ export function withinCancellationWindow(
   cutoffHours: number,
   nowMs: number = Date.now(),
 ): boolean {
-  // Walk times are operator wall-clock (Europe/London); this mirrors the
+  // Walk times are operator wall-clock (America/Chicago); this mirrors the
   // 0008 guard closely enough for UI gating — the trigger is authoritative.
   const start = new Date(`${scheduledDate}T${windowStart}`).getTime();
   return nowMs <= start - cutoffHours * 3600_000;

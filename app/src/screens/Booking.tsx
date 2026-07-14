@@ -28,7 +28,7 @@ import {
 } from "@/lib/api";
 import { effectiveWalkCost } from "@/lib/credits";
 import { money, walkTime } from "@/lib/format";
-import { todayLondon } from "@/lib/selectors";
+import { todayLocal } from "@/lib/selectors";
 import type { Clients, Pets, Plans, Properties, ServiceTypes } from "@/lib/types";
 
 export default function Booking() {
@@ -59,7 +59,7 @@ export default function Booking() {
       listServiceTypes(),
       listProperties(me.id),
       listPets(me.id),
-      listWalksDetailed({ from: todayLondon() }),
+      listWalksDetailed({ from: todayLocal() }),
       me.plan_id ? getPlan(me.plan_id) : Promise.resolve(null),
     ]);
     setClient(me);
@@ -179,7 +179,7 @@ export default function Booking() {
 
       <Card style={{ marginTop: "var(--s-4)" }}>
         <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: "var(--s-3)" }}>
-          <Input label="Date" type="date" required min={todayLondon()} value={date} onChange={(e) => setDate(e.target.value)} />
+          <Input label="Date" type="date" required min={todayLocal()} value={date} onChange={(e) => setDate(e.target.value)} />
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--s-2)" }}>
             <Input label="From" type="time" value={ws} onChange={(e) => setWs(e.target.value)} />
             <Input label="To" type="time" value={we} onChange={(e) => setWe(e.target.value)} />

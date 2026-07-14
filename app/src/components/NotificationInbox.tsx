@@ -5,7 +5,7 @@ import { useNavigate } from "react-router-dom";
 import { Sheet } from "./Sheet";
 import { Spinner } from "./Spinner";
 import { listNotifications, markNotificationRead } from "@/lib/api";
-import { dateLondon, timeLondon } from "@/lib/format";
+import { dateLocal, timeLocal } from "@/lib/format";
 import type { Notifications } from "@/lib/types";
 
 function deepLink(n: Notifications, persona: "operator" | "client"): string | null {
@@ -122,7 +122,7 @@ export function NotificationBell({ persona }: { persona: "operator" | "client" }
                       <div style={{ color: "var(--text-2)", fontSize: "var(--fs-14)" }}>{n.body}</div>
                     )}
                     <div style={{ color: "var(--ink-faint)", fontSize: "var(--fs-12)", marginTop: 2 }}>
-                      {dateLondon(n.created_at)} · {timeLondon(n.created_at)}
+                      {dateLocal(n.created_at)} · {timeLocal(n.created_at)}
                     </div>
                   </div>
                   {!n.read_at && (

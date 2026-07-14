@@ -7,7 +7,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { Spinner } from "@/components/Spinner";
 import { WalkCard } from "@/components/WalkCard";
 import { listWalksDetailed, walkPetNames, type WalkDetailed } from "@/lib/api";
-import { todayLondon } from "@/lib/selectors";
+import { todayLocal } from "@/lib/selectors";
 import { walkTime } from "@/lib/format";
 
 export default function PortalWalks() {
@@ -26,7 +26,7 @@ export default function PortalWalks() {
     );
   }
 
-  const today = todayLondon();
+  const today = todayLocal();
   const upcoming = walks
     .filter((w) => (w.status === "scheduled" || w.status === "in_progress") && w.scheduled_date >= today)
     .sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date) || a.window_start.localeCompare(b.window_start));

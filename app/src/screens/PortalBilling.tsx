@@ -14,7 +14,7 @@ import {
   listPayments,
 } from "@/lib/api";
 import { formatLedgerEntry } from "@/lib/credits";
-import { dateLondon, money } from "@/lib/format";
+import { dateLocal, money } from "@/lib/format";
 import type { Clients, CreditLedger, Payments, Plans } from "@/lib/types";
 
 export default function PortalBilling() {
@@ -85,7 +85,7 @@ export default function PortalBilling() {
               </Badge>
               {client.current_period_end && (
                 <span style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>
-                  renews {dateLondon(client.current_period_end)}
+                  renews {dateLocal(client.current_period_end)}
                 </span>
               )}
             </div>
@@ -116,7 +116,7 @@ export default function PortalBilling() {
                   <tr key={entry.id} style={{ borderBottom: "1px solid var(--mist)" }}>
                     <td style={{ padding: "var(--s-2) 0" }}>
                       <div style={{ fontWeight: 600 }}>{line.label}</div>
-                      <div style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>{dateLondon(line.createdAt)}</div>
+                      <div style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>{dateLocal(line.createdAt)}</div>
                     </td>
                     <td className="numeral" style={{ textAlign: "right", fontWeight: 600 }}>{line.amount}</td>
                     <td className="numeral" style={{ textAlign: "right", color: "var(--text-2)", paddingLeft: "var(--s-3)" }}>
@@ -152,7 +152,7 @@ export default function PortalBilling() {
               >
                 <div>
                   <div style={{ fontWeight: 600 }}>{p.type}</div>
-                  <div style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>{dateLondon(p.created_at)}</div>
+                  <div style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>{dateLocal(p.created_at)}</div>
                 </div>
                 <div style={{ display: "flex", gap: "var(--s-2)", alignItems: "center" }}>
                   <span className="numeral" style={{ fontWeight: 600 }}>{money(p.amount_pence)}</span>

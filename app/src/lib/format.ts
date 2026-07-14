@@ -1,7 +1,8 @@
-// Display formatting (spec 06). Money is integer cents (USD); all display times
-// are Europe/London regardless of the device timezone (UTC in the DB).
+// Display formatting (spec 06). Money is integer cents (USD); all display
+// times are US Central (America/Chicago — Intl handles CST/CDT) regardless
+// of the device timezone (UTC in the DB).
 
-const LONDON = "Europe/London";
+const DISPLAY_TZ = "America/Chicago";
 
 /** 12345 → "$123.45" (integer cents; *_pence columns hold cents since the USD switch) */
 export function money(cents: number): string {
@@ -12,42 +13,49 @@ export function money(cents: number): string {
   return `${sign}$${dollars.toLocaleString("en-US")}.${rem}`;
 }
 
-/** "2026-07-05T11:30:00Z" → "5 Jul 2026" (London calendar date). */
-export function dateLondon(ts: string | Date): string {
-  return new Intl.DateTimeFormat("en-GB", {
-    timeZone: LONDON,
+/** "2026-07-05T11:30:00Z" → "Jul 5, 2026" (Central calendar date). */
+export function dateLocal(ts: string | Date): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: DISPLAY_TZ,
     day: "numeric",
     month: "short",
     year: "numeric",
   }).format(typeof ts === "string" ? new Date(ts) : ts);
 }
 
-/** "2026-07-05T11:30:00Z" → "12:30" (London wall clock, 24h). */
-export function timeLondon(ts: string | Date): string {
-  return new Intl.DateTimeFormat("en-GB", {
-    timeZone: LONDON,
-    hour: "2-digit",
+/** "2026-07-05T16:30:00Z" → "11:30 AM" (Central wall clock, 12h). */
+export function timeLocal(ts: string | Date): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: DISPLAY_TZ,
+    hour: "numeric",
     minute: "2-digit",
-    hour12: false,
-  }).format(typeof ts === "string" ? new Date(ts) : ts);
+    hour12: true,
+  })
+    .format(typeof ts === "string" ? new Date(ts) : ts)
+    .replace(/\u202f/g, " "); // ICU 72+ emits a narrow no-break space before AM/PM
+}
+
+/** Wall-clock walk-window time "13:00:00" → "1:00 PM" (stored as plain time). */
+export function time12(t: string): string {
+  const [hStr = "0", m = "00"] = t.split(":");
+  const h = Number(hStr);
+  const suffix = h < 12 ? "AM" : "PM";
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}:${m} ${suffix}`;
 }
 
 /**
- * Walk slot label: scheduled date + window.
- * ("2026-07-06", "12:00:00", "13:00:00") → "Mon 6 Jul, 12:00–13:00"
+ * Walk slot label: scheduled date + window (wall-clock times).
+ * ("2026-07-06", "12:00:00", "13:00:00") → "Mon, Jul 6, 12:00 PM–1:00 PM"
  */
 export function walkTime(date: string, windowStart: string, windowEnd: string): string {
-  const day = new Intl.DateTimeFormat("en-GB", {
-    timeZone: LONDON,
+  const day = new Intl.DateTimeFormat("en-US", {
     weekday: "short",
     day: "numeric",
     month: "short",
+    timeZone: "UTC",
   }).format(new Date(`${date}T12:00:00Z`));
-  return `${day}, ${hhmm(windowStart)}–${hhmm(windowEnd)}`;
-}
-
-function hhmm(t: string): string {
-  return t.slice(0, 5);
+  return `${day}, ${time12(windowStart)}–${time12(windowEnd)}`;
 }
 
 /** 2140 → "2.1 km"; 640 → "0.6 km"; null-safe for unset distances. */

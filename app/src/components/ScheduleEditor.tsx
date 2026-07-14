@@ -9,6 +9,7 @@ import { EmptyState } from "./EmptyState";
 import { Input, Select } from "./fields";
 import { Sheet } from "./Sheet";
 import { Spinner } from "./Spinner";
+import { time12 } from "@/lib/format";
 import {
   createSchedule,
   deactivateSchedule,
@@ -21,7 +22,7 @@ import {
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { supabase } from "@/lib/supabase";
-import { todayLondon } from "@/lib/selectors";
+import { todayLocal } from "@/lib/selectors";
 import type { Pets, Properties, RecurringSchedules, ServiceTypes } from "@/lib/types";
 
 const DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]; // iso 1..7
@@ -87,7 +88,7 @@ export function ScheduleTab({ clientId }: { clientId: string }) {
                   {s.days_of_week.map((d) => DAY_LABELS[d - 1]).join(" · ")}
                 </div>
                 <div style={{ color: "var(--text-2)", fontSize: "var(--fs-14)" }}>
-                  {s.window_start.slice(0, 5)}–{s.window_end.slice(0, 5)} · {serviceName(s.service_type_id)} · {propertyLabel(s.property_id)}
+                  {time12(s.window_start)}–{time12(s.window_end)} · {serviceName(s.service_type_id)} · {propertyLabel(s.property_id)}
                 </div>
                 {s.paused_from && (
                   <div style={{ fontSize: "var(--fs-12)", color: "var(--orange-deep)", marginTop: "var(--s-1)", fontWeight: 800 }}>
@@ -146,7 +147,7 @@ function ScheduleSheet({
   const [windowEnd, setWindowEnd] = useState(schedule?.window_end.slice(0, 5) ?? "13:00");
   const [serviceId, setServiceId] = useState(schedule?.service_type_id ?? serviceTypes[0]?.id ?? "");
   const [propertyId, setPropertyId] = useState(schedule?.property_id ?? properties[0]?.id ?? "");
-  const [startDate, setStartDate] = useState(schedule?.start_date ?? todayLondon());
+  const [startDate, setStartDate] = useState(schedule?.start_date ?? todayLocal());
   const [endDate, setEndDate] = useState(schedule?.end_date ?? "");
   const [pausedFrom, setPausedFrom] = useState(schedule?.paused_from ?? "");
   const [pausedUntil, setPausedUntil] = useState(schedule?.paused_until ?? "");
@@ -208,7 +209,7 @@ function ScheduleSheet({
     if (!window.confirm("Deactivate this schedule? Future scheduled walks will be cancelled; past walks are kept.")) return;
     setBusy(true);
     try {
-      await deactivateSchedule(schedule.id, todayLondon());
+      await deactivateSchedule(schedule.id, todayLocal());
       onSaved();
     } finally {
       setBusy(false);

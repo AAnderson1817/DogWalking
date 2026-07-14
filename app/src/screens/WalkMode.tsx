@@ -28,7 +28,7 @@ import { useGeolocation } from "@/hooks/useGeolocation";
 import { useOnline } from "@/hooks/useOnline";
 import { useWalkChannel } from "@/hooks/useWalkChannel";
 import { pathDistanceM } from "@/lib/geo";
-import { distanceKm, elapsed, money } from "@/lib/format";
+import { distanceKm, elapsed, money, time12 } from "@/lib/format";
 import { compressImage } from "@/lib/image";
 import type { Pets, Walks } from "@/lib/types";
 
@@ -252,7 +252,7 @@ function WalkModeInner({ walkId }: { walkId: string }) {
             <span className="section-label">Ready to walk</span>
             <h1>{petNames || "Walk"}</h1>
             <p style={{ color: "var(--text-2)" }}>
-              {walk.scheduled_date} · {walk.window_start.slice(0, 5)}–{walk.window_end.slice(0, 5)}
+              {walk.scheduled_date} · {time12(walk.window_start)}–{time12(walk.window_end)}
             </p>
           </div>
           {reactive.length > 0 && (

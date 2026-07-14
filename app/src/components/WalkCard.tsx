@@ -3,6 +3,7 @@
 import { Badge, type BadgeStatus } from "./Badge";
 import { Card } from "./Card";
 import { PetFace } from "./PetAvatar";
+import { time12 } from "@/lib/format";
 
 export interface WalkCardData {
   windowStart: string; // "12:00:00"
@@ -14,10 +15,6 @@ export interface WalkCardData {
   clientName?: string;
 }
 
-function hhmm(t: string): string {
-  return t.slice(0, 5);
-}
-
 export function WalkCard({ walk, onClick }: { walk: WalkCardData; onClick?: () => void }) {
   return (
     <Card
@@ -27,7 +24,7 @@ export function WalkCard({ walk, onClick }: { walk: WalkCardData; onClick?: () =
     >
       <div className="walk-card__top">
         <span className="walk-card__time">
-          {hhmm(walk.windowStart)}–{hhmm(walk.windowEnd)}
+          {time12(walk.windowStart)}–{time12(walk.windowEnd)}
         </span>
         <Badge status={walk.isOverage ? "overage" : walk.status} />
       </div>

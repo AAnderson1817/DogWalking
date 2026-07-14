@@ -17,7 +17,7 @@ import {
   listPayments,
   listPlans,
 } from "@/lib/api";
-import { dateLondon, money } from "@/lib/format";
+import { dateLocal, money } from "@/lib/format";
 import type { Clients, Payments, Plans } from "@/lib/types";
 
 export default function BillingConsole() {
@@ -96,7 +96,7 @@ export default function BillingConsole() {
                   </Link>
                   <div style={{ color: "var(--text-2)", fontSize: "var(--fs-14)" }}>
                     {planName(c.plan_id)}
-                    {c.current_period_end ? ` · renews ${dateLondon(c.current_period_end)}` : " · renewal date syncs from Stripe"}
+                    {c.current_period_end ? ` · renews ${dateLocal(c.current_period_end)}` : " · renewal date syncs from Stripe"}
                   </div>
                 </div>
                 <div style={{ display: "flex", gap: "var(--s-2)", alignItems: "center" }}>
@@ -143,7 +143,7 @@ export default function BillingConsole() {
                 <div>
                   <span style={{ fontWeight: 600 }}>{clientName(p.client_id)}</span>
                   <div style={{ color: "var(--text-2)", fontSize: "var(--fs-14)" }}>
-                    walk overage · {dateLondon(p.created_at)}
+                    walk overage · {dateLocal(p.created_at)}
                   </div>
                 </div>
                 <div style={{ display: "flex", gap: "var(--s-2)", alignItems: "center" }}>

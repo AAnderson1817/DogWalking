@@ -19,8 +19,8 @@ import {
   type MyOperatorView,
   type WalkDetailed,
 } from "@/lib/api";
-import { dateLondon } from "@/lib/format";
-import { todayLondon } from "@/lib/selectors";
+import { dateLocal } from "@/lib/format";
+import { todayLocal } from "@/lib/selectors";
 import type { Clients, Notifications, Plans } from "@/lib/types";
 
 export default function PortalHome() {
@@ -60,7 +60,7 @@ export default function PortalHome() {
     );
   }
 
-  const today = todayLondon();
+  const today = todayLocal();
   const upcoming = walks
     .filter((w) => (w.status === "scheduled" || w.status === "in_progress") && w.scheduled_date >= today)
     .sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date) || a.window_start.localeCompare(b.window_start));
@@ -92,7 +92,7 @@ export default function PortalHome() {
                 </div>
               )}
               <div>
-                <span className="section-label">{dateLondon(`${next.scheduled_date}T12:00:00Z`)}</span>
+                <span className="section-label">{dateLocal(`${next.scheduled_date}T12:00:00Z`)}</span>
                 <WalkCard
                   walk={{
                     windowStart: next.window_start,

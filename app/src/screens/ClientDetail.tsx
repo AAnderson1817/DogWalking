@@ -34,7 +34,7 @@ import {
 import { useAuth } from "@/lib/auth-context";
 import { compressImage } from "@/lib/image";
 import { formatLedgerEntry } from "@/lib/credits";
-import { dateLondon, money } from "@/lib/format";
+import { dateLocal, money } from "@/lib/format";
 import type { Clients, CreditLedger, Operators, Pets, Plans, Properties } from "@/lib/types";
 
 type Tab = "pets" | "plan" | "walks" | "schedule" | "access";
@@ -453,7 +453,7 @@ function PlanTab({
                     <td style={{ padding: "var(--s-2) 0" }}>
                       <div style={{ fontWeight: 600 }}>{line.label}</div>
                       <div style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>
-                        {dateLondon(line.createdAt)}{line.note ? ` · ${line.note}` : ""}
+                        {dateLocal(line.createdAt)}{line.note ? ` · ${line.note}` : ""}
                       </div>
                     </td>
                     <td className="numeral" style={{ textAlign: "right", fontWeight: 600 }}>{line.amount}</td>
@@ -513,7 +513,7 @@ function WalksTab({ clientId }: { clientId: string }) {
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-2)" }}>
       {walks.map((w) => (
         <div key={w.id}>
-          <span className="section-label">{dateLondon(`${w.scheduled_date}T12:00:00Z`)}</span>
+          <span className="section-label">{dateLocal(`${w.scheduled_date}T12:00:00Z`)}</span>
           <WalkCard
             walk={{
               windowStart: w.window_start,

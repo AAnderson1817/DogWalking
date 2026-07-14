@@ -5,7 +5,7 @@ import {
   failedPayments,
   liveWalk,
   lowCreditClients,
-  todayLondon,
+  todayLocal,
   todaysWalks,
   unreadCount,
 } from "./selectors";
@@ -74,11 +74,12 @@ describe("failedPayments / unreadCount", () => {
   });
 });
 
-describe("todayLondon", () => {
-  it("uses the London calendar day (BST midnight boundary)", () => {
-    // 23:30 UTC on 15 Jul is 00:30 on 16 Jul in London (BST).
-    expect(todayLondon(Date.parse("2026-07-15T23:30:00Z"))).toBe("2026-07-16");
-    // Winter: UTC == London.
-    expect(todayLondon(Date.parse("2026-01-15T23:30:00Z"))).toBe("2026-01-15");
+describe("todayLocal", () => {
+  it("uses the US Central calendar day (CDT midnight boundary)", () => {
+    // 04:30 UTC on 16 Jul is 23:30 on 15 Jul in Central (CDT, UTC-5).
+    expect(todayLocal(Date.parse("2026-07-16T04:30:00Z"))).toBe("2026-07-15");
+    expect(todayLocal(Date.parse("2026-07-16T05:30:00Z"))).toBe("2026-07-16");
+    // Winter (CST, UTC-6): 05:30 UTC is still the previous day.
+    expect(todayLocal(Date.parse("2026-01-16T05:30:00Z"))).toBe("2026-01-15");
   });
 });

@@ -17,7 +17,7 @@ import {
   type CredentialMeta,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { dateLondon, timeLondon } from "@/lib/format";
+import { dateLocal, timeLocal } from "@/lib/format";
 
 const ENTRY_METHODS = [
   "key_on_file",
@@ -137,7 +137,7 @@ export function CredentialRow({
           <div style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>
             {entryMethodLabel(credential.entry_method)}
             {credential.key_location_hint ? ` · ${credential.key_location_hint}` : ""}
-            {credential.rotated_at ? ` · rotated ${dateLondon(credential.rotated_at)}` : ""}
+            {credential.rotated_at ? ` · rotated ${dateLocal(credential.rotated_at)}` : ""}
           </div>
         </div>
         <div style={{ display: "flex", gap: "var(--s-1)", flexShrink: 0 }}>
@@ -222,7 +222,7 @@ export function CredentialRow({
               <div key={row.id} style={{ borderBottom: "1px solid var(--mist)", paddingBottom: "var(--s-2)" }}>
                 <div style={{ fontWeight: 600, fontSize: "var(--fs-14)" }}>{row.purpose}</div>
                 <div style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>
-                  {dateLondon(row.accessed_at)} · {timeLondon(row.accessed_at)}
+                  {dateLocal(row.accessed_at)} · {timeLocal(row.accessed_at)}
                 </div>
               </div>
             ))}

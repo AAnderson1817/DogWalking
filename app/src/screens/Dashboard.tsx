@@ -20,12 +20,12 @@ import {
   type WalkDetailed,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { dateLondon, money } from "@/lib/format";
+import { dateLocal, money } from "@/lib/format";
 import {
   failedPayments,
   liveWalk,
   lowCreditClients,
-  todayLondon,
+  todayLocal,
   todaysWalks,
 } from "@/lib/selectors";
 import type { Clients, Operators, Payments } from "@/lib/types";
@@ -43,7 +43,7 @@ export default function Dashboard() {
     let cancelled = false;
     async function load() {
       try {
-        const today = todayLondon();
+        const today = todayLocal();
         const [op, todayWalks, allClients, pays] = await Promise.all([
           getMyOperator(),
           listWalksDetailed({ date: today }),
@@ -83,7 +83,7 @@ export default function Dashboard() {
     );
   }
 
-  const today = todayLondon();
+  const today = todayLocal();
   const ordered = todaysWalks(walks, today);
   const live = liveWalk(walks) as WalkDetailed | null;
   const low = lowCreditClients(clients, operator?.low_credit_threshold ?? 2) as Clients[];
@@ -102,7 +102,7 @@ export default function Dashboard() {
 
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div>
-          <span className="section-label">{dateLondon(new Date())}</span>
+          <span className="section-label">{dateLocal(new Date())}</span>
           <h1 style={{ fontSize: "var(--fs-32)" }}>
             Today <span style={{ color: "var(--brand)" }}>·</span>
           </h1>
@@ -172,7 +172,7 @@ export default function Dashboard() {
                 <div>
                   <span style={{ fontWeight: 600 }}>{clientName(p.client_id)}</span>
                   <span style={{ color: "var(--text-2)", marginLeft: "var(--s-2)", fontSize: "var(--fs-14)" }}>
-                    {p.type} · {dateLondon(p.created_at)}
+                    {p.type} · {dateLocal(p.created_at)}
                   </span>
                 </div>
                 <div style={{ display: "flex", gap: "var(--s-2)", alignItems: "center" }}>

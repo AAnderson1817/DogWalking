@@ -1,5 +1,5 @@
 // Onboard (phase 04): first-run operator setup. Creates the operators row
-// (defaults USD / Europe/London / threshold 2 come from the schema) and
+// (defaults USD / America/Chicago / threshold 2 come from the schema) and
 // lands on the Dashboard. Skips straight through if a persona exists.
 import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
@@ -102,7 +102,7 @@ export default function Onboard() {
           />
           {error && <span className="field__error">{error}</span>}
           <p style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>
-            Currency USD · timezone Europe/London · low-credit alerts at 2 —
+            Currency USD · timezone US Central · low-credit alerts at 2 —
             adjustable later.
           </p>
           <Button type="submit" full disabled={busy || !businessName.trim() || !displayName.trim()}>

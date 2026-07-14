@@ -26,7 +26,8 @@ import {
   type WalkDetailed,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { todayLondon } from "@/lib/selectors";
+import { time12 } from "@/lib/format";
+import { todayLocal } from "@/lib/selectors";
 import type { Clients, Pets, Properties, ServiceTypes } from "@/lib/types";
 
 const DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -47,7 +48,7 @@ function weekStart(iso: string): string {
 export default function Calendar() {
   const navigate = useNavigate();
   const [view, setView] = useState<"day" | "week">("day");
-  const [anchor, setAnchor] = useState(() => todayLondon());
+  const [anchor, setAnchor] = useState(() => todayLocal());
   const [walks, setWalks] = useState<WalkDetailed[] | null>(null);
   const [selected, setSelected] = useState<WalkDetailed | null>(null);
   const [oneOffDate, setOneOffDate] = useState<string | null>(null);
@@ -124,7 +125,7 @@ export default function Calendar() {
           </span>
           <div>
             <button
-              onClick={() => setAnchor(todayLondon())}
+              onClick={() => setAnchor(todayLocal())}
               style={{ background: "none", border: 0, color: "var(--pine-600)", fontSize: "var(--fs-12)", cursor: "pointer" }}
             >
               Jump to today
@@ -190,7 +191,7 @@ export default function Calendar() {
                 }
               }}
               style={{
-                background: day === todayLondon() ? "var(--mist)" : "var(--surface)",
+                background: day === todayLocal() ? "var(--mist)" : "var(--surface)",
                 borderRadius: "var(--r-md)",
                 padding: "var(--s-1)",
                 minHeight: 160,
@@ -234,7 +235,7 @@ export default function Calendar() {
                       border: w.status === "cancelled" || w.status === "no_show" ? "1px solid var(--mist)" : 0,
                     }}
                   >
-                    {w.window_start.slice(0, 5)} {walkPetNames(w)[0] ?? w.client?.full_name ?? ""}
+                    {time12(w.window_start)} {walkPetNames(w)[0] ?? w.client?.full_name ?? ""}
                   </div>
                 );
               })}
@@ -338,7 +339,7 @@ function WalkActionSheet({
         <div style={{ display: "flex", gap: "var(--s-2)", alignItems: "center" }}>
           <Badge status={walk.is_overage ? "overage" : walk.status} />
           <span style={{ color: "var(--text-2)", fontSize: "var(--fs-14)" }}>
-            {walk.scheduled_date} · {walk.window_start.slice(0, 5)}–{walk.window_end.slice(0, 5)}
+            {walk.scheduled_date} · {time12(walk.window_start)}–{time12(walk.window_end)}
           </span>
         </div>
 

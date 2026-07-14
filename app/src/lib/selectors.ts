@@ -2,12 +2,12 @@
 // Generics are structural (string-typed) so both generated Row types and
 // plain test fixtures satisfy them.
 
-const LONDON = "Europe/London";
+const DISPLAY_TZ = "America/Chicago";
 
-/** Today's calendar date in Europe/London as YYYY-MM-DD. */
-export function todayLondon(nowMs: number = Date.now()): string {
+/** Today's calendar date in US Central as YYYY-MM-DD. */
+export function todayLocal(nowMs: number = Date.now()): string {
   return new Intl.DateTimeFormat("en-CA", {
-    timeZone: LONDON,
+    timeZone: DISPLAY_TZ,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
