@@ -1,17 +1,22 @@
 name: Staging smoke test
 
-# On-demand check that the deployed edge functions accept scheduled
-# (service-role) invocations — calls materialize-walks exactly the way the
-# dashboard cron job does. The service key is fetched at runtime via the
+# Post-deploy check that the edge functions accept scheduled (service-role)
+# invocations — calls materialize-walks exactly the way the dashboard cron
+# job does. Runs automatically after each successful staging deploy, or on
+# demand from the Actions tab. The service key is fetched at runtime via the
 # management API (existing SUPABASE_ACCESS_TOKEN secret), masked, and never
 # printed to the log.
 
 on:
   workflow_dispatch:
+  workflow_run:
+    workflows: ["Deploy staging (Supabase)"]
+    types: [completed]
 
 jobs:
   smoke:
     name: Invoke materialize-walks as the cron would
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     environment: staging
     steps:
