@@ -13,11 +13,22 @@ import { walkTime } from "@/lib/format";
 export default function PortalWalks() {
   const navigate = useNavigate();
   const [walks, setWalks] = useState<WalkDetailed[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    void listWalksDetailed({}).then(setWalks);
+    setError(null);
+    void listWalksDetailed({})
+      .then(setWalks)
+      .catch((e) => setError(e instanceof Error ? e.message : "failed to load walks"));
   }, []);
 
+  if (error && walks === null) {
+    return (
+      <div className="page">
+        <Card><EmptyState title="Couldn't load your walks" hint={error} /></Card>
+      </div>
+    );
+  }
   if (walks === null) {
     return (
       <div className="page" style={{ display: "grid", placeItems: "center" }}>

@@ -57,9 +57,20 @@ export default function ClaimInvite() {
       navigate("/portal", { replace: true });
       return;
     }
+    // An operator (or any already-provisioned account) must not consume a
+    // client invite — fn_claim_invite would bind their uid and burn the
+    // token, leaving them dual-persona with no reachable portal.
+    if (auth.role === "operator") {
+      setDeadEndReason(
+        "You're signed in as an operator. Open this invite in a private window, " +
+          "or sign out first, to claim it for the client.",
+      );
+      setStage("dead-end");
+      return;
+    }
     if (!auth.session) setStage("signup");
-    else void loadPreview();
-  }, [auth.loading, auth.session, auth.role, navigate, loadPreview]);
+    else if (!auth.roleError) void loadPreview();
+  }, [auth.loading, auth.session, auth.role, auth.roleError, navigate, loadPreview]);
 
   async function signUp(e: FormEvent) {
     e.preventDefault();

@@ -55,6 +55,7 @@ export default function Calendar() {
   const [dragId, setDragId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const from = view === "day" ? anchor : weekStart(anchor);
   const to = view === "day" ? anchor : addDays(weekStart(anchor), 6);
@@ -64,7 +65,8 @@ export default function Calendar() {
   }, [from, to]);
 
   useEffect(() => {
-    void load();
+    setLoadError(null);
+    void load().catch((e) => setLoadError(e instanceof Error ? e.message : "failed to load"));
   }, [load]);
 
   async function reschedule(walkId: string, date: string, windowStart?: string, windowEnd?: string) {
@@ -94,6 +96,13 @@ export default function Calendar() {
     [view, anchor],
   );
 
+  if (loadError && walks === null) {
+    return (
+      <div className="page">
+        <Card><EmptyState title="Couldn't load the calendar" hint={loadError} /></Card>
+      </div>
+    );
+  }
   if (walks === null) {
     return (
       <div className="page" style={{ display: "grid", placeItems: "center" }}>
@@ -298,12 +307,14 @@ function WalkActionSheet({
   const [ws, setWs] = useState("");
   const [we, setWe] = useState("");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (walk) {
       setDate(walk.scheduled_date);
       setWs(walk.window_start.slice(0, 5));
       setWe(walk.window_end.slice(0, 5));
+      setError(null);
     }
   }, [walk]);
 
@@ -313,9 +324,12 @@ function WalkActionSheet({
   async function mark(status: "cancelled" | "no_show") {
     if (!walk) return;
     setBusy(true);
+    setError(null);
     try {
       await updateWalk(walk.id, { status });
       onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "could not update the walk");
     } finally {
       setBusy(false);
     }
@@ -325,9 +339,12 @@ function WalkActionSheet({
     e.preventDefault();
     if (!walk) return;
     setBusy(true);
+    setError(null);
     try {
       await reschedule(walk.id, date, ws, we);
       onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "could not reschedule the walk");
     } finally {
       setBusy(false);
     }
@@ -371,6 +388,8 @@ function WalkActionSheet({
             </Button>
           </div>
         )}
+
+        {error && <span className="field__error">{error}</span>}
       </div>
     </Sheet>
   );

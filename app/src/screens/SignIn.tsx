@@ -19,13 +19,14 @@ export default function SignIn() {
   const [busy, setBusy] = useState(false);
   const [magicSent, setMagicSent] = useState(false);
 
-  // Redirect once a session exists and the role is resolved.
+  // Redirect once a session exists and the role is resolved. Never redirect
+  // to onboarding when resolution errored — that's not a "no persona" signal.
   useEffect(() => {
-    if (auth.loading || !auth.session) return;
+    if (auth.loading || !auth.session || auth.roleError) return;
     if (auth.role === "operator") navigate("/", { replace: true });
     else if (auth.role === "client") navigate("/portal", { replace: true });
     else navigate("/onboard", { replace: true });
-  }, [auth.loading, auth.session, auth.role, navigate]);
+  }, [auth.loading, auth.session, auth.role, auth.roleError, navigate]);
 
   async function submit(e: FormEvent) {
     e.preventDefault();

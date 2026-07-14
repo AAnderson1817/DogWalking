@@ -35,6 +35,35 @@ export function timeLocal(ts: string | Date): string {
     .replace(/\u202f/g, " "); // ICU 72+ emits a narrow no-break space before AM/PM
 }
 
+/**
+ * UTC epoch ms for a wall-clock date+time interpreted in the business
+ * timezone (America/Chicago), independent of the device timezone. Used for
+ * cutoff math so a traveling client isn't gated by their local clock.
+ */
+export function businessWallClockToMs(dateStr: string, timeStr: string): number {
+  const dp = dateStr.split("-").map(Number);
+  const tp = timeStr.split(":").map(Number);
+  const y = dp[0] ?? 1970, mo = dp[1] ?? 1, d = dp[2] ?? 1;
+  const h = tp[0] ?? 0, mi = tp[1] ?? 0, s = tp[2] ?? 0;
+  const guessUtc = Date.UTC(y, mo - 1, d, h, mi, s);
+  // Correct the guess by the zone's offset at that instant.
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: DISPLAY_TZ,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(new Date(guessUtc));
+  const p: Record<string, number> = {};
+  for (const part of parts) if (part.type !== "literal") p[part.type] = Number(part.value);
+  const hour = (p.hour ?? 0) === 24 ? 0 : (p.hour ?? 0); // Intl can emit "24" at midnight
+  const asIfUtc = Date.UTC(p.year ?? y, (p.month ?? mo) - 1, p.day ?? d, hour, p.minute ?? mi, p.second ?? s);
+  return guessUtc - (asIfUtc - guessUtc);
+}
+
 /** Wall-clock walk-window time "13:00:00" → "1:00 PM" (stored as plain time). */
 export function time12(t: string): string {
   const [hStr = "0", m = "00"] = t.split(":");

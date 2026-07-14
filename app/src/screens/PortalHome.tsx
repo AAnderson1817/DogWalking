@@ -31,10 +31,11 @@ export default function PortalHome() {
   const [walks, setWalks] = useState<WalkDetailed[]>([]);
   const [notifications, setNotifications] = useState<Notifications[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const me = await getMyClient();
-    if (!me) return;
+    if (!me) throw new Error("We couldn't load your account. Please try again.");
     const [op, ws, ns, p] = await Promise.all([
       getMyOperatorView(),
       listWalksDetailed({}),
@@ -49,9 +50,20 @@ export default function PortalHome() {
   }, []);
 
   useEffect(() => {
-    void load().finally(() => setLoading(false));
+    setError(null);
+    setLoading(true);
+    void load()
+      .catch((e) => setError(e instanceof Error ? e.message : "failed to load"))
+      .finally(() => setLoading(false));
   }, [load]);
 
+  if (error && !client) {
+    return (
+      <div className="page">
+        <Card><EmptyState title="Couldn't load your portal" hint={error} /></Card>
+      </div>
+    );
+  }
   if (loading || !client) {
     return (
       <div className="page" style={{ display: "grid", placeItems: "center" }}>

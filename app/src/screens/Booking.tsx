@@ -51,9 +51,11 @@ export default function Booking() {
   const [error, setError] = useState<string | null>(null);
   const [booked, setBooked] = useState(false);
 
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   const load = useCallback(async () => {
     const me = await getMyClient();
-    if (!me) return;
+    if (!me) throw new Error("We couldn't load your account. Please try again.");
     const [op, sts, props, ps, walks, p] = await Promise.all([
       getMyOperatorView(),
       listServiceTypes(),
@@ -75,7 +77,8 @@ export default function Booking() {
   }, []);
 
   useEffect(() => {
-    void load();
+    setLoadError(null);
+    void load().catch((e) => setLoadError(e instanceof Error ? e.message : "failed to load"));
   }, [load]);
 
   const service = services.find((s) => s.id === serviceId) ?? null;
@@ -149,6 +152,13 @@ export default function Booking() {
     }
   }
 
+  if (loadError && !client) {
+    return (
+      <div className="page">
+        <Card><EmptyState title="Couldn't load booking" hint={loadError} /></Card>
+      </div>
+    );
+  }
   if (!client || !operator) {
     return (
       <div className="page" style={{ display: "grid", placeItems: "center" }}>

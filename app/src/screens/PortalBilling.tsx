@@ -26,10 +26,12 @@ export default function PortalBilling() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   useEffect(() => {
     async function load() {
       const me = await getMyClient();
-      if (!me) return;
+      if (!me) throw new Error("We couldn't load your account. Please try again.");
       const [p, lg, pay] = await Promise.all([
         me.plan_id ? getPlan(me.plan_id) : Promise.resolve(null),
         listLedger(me.id),
@@ -40,8 +42,18 @@ export default function PortalBilling() {
       setLedger(lg);
       setPayments(pay);
     }
-    void load().finally(() => setLoading(false));
+    void load()
+      .catch((e) => setLoadError(e instanceof Error ? e.message : "failed to load"))
+      .finally(() => setLoading(false));
   }, []);
+
+  if (loadError && !client) {
+    return (
+      <div className="page">
+        <Card><EmptyState title="Couldn't load billing" hint={loadError} /></Card>
+      </div>
+    );
+  }
 
   async function openPortal() {
     setBusy(true);

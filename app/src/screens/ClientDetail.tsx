@@ -544,6 +544,7 @@ function AccessTab({ client }: { client: Clients }) {
   const [postcode, setPostcode] = useState("");
   const [notes, setNotes] = useState("");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const [props, creds] = await Promise.all([listProperties(client.id), listCredentials()]);
@@ -559,6 +560,7 @@ function AccessTab({ client }: { client: Clients }) {
     e.preventDefault();
     if (!auth.operatorId) return;
     setBusy(true);
+    setError(null);
     try {
       await createProperty({
         operator_id: auth.operatorId,
@@ -571,6 +573,8 @@ function AccessTab({ client }: { client: Clients }) {
       });
       setAddPropOpen(false);
       await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "could not add the property");
     } finally {
       setBusy(false);
     }
@@ -623,6 +627,7 @@ function AccessTab({ client }: { client: Clients }) {
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
           />
+          {error && <span className="field__error">{error}</span>}
           <Button type="submit" full disabled={busy || !label.trim()}>
             {busy ? <Spinner /> : "Save property"}
           </Button>

@@ -1,6 +1,7 @@
 // Typed data-access layer (spec 06). ALL reads/writes and edge invocations
 // flow through here; screens never call supabase.from directly. Wrappers for
 // later-phase surfaces exist as typed stubs so screens can bind early.
+import { businessWallClockToMs } from "./format";
 import { supabase } from "./supabase";
 import type { Database } from "./types";
 import type {
@@ -613,8 +614,10 @@ export function withinCancellationWindow(
   cutoffHours: number,
   nowMs: number = Date.now(),
 ): boolean {
-  // Walk times are operator wall-clock (America/Chicago); this mirrors the
-  // 0008 guard closely enough for UI gating — the trigger is authoritative.
-  const start = new Date(`${scheduledDate}T${windowStart}`).getTime();
+  // Walk times are operator wall-clock (America/Chicago); interpret them in
+  // that zone rather than the device's, so a traveling client isn't gated by
+  // their local clock. This mirrors the 0008 guard for UI purposes — the
+  // trigger remains authoritative.
+  const start = businessWallClockToMs(scheduledDate, windowStart);
   return nowMs <= start - cutoffHours * 3600_000;
 }

@@ -28,6 +28,10 @@ export interface AuthState {
   operatorId: string | null;
   clientId: string | null;
   loading: boolean;
+  /** True when role resolution FAILED (query error) rather than resolving to
+   * a genuine null persona. Guards keep a signed-in user off the onboarding
+   * form on a transient failure. */
+  roleError: boolean;
   /** Password-confirm for vault calls; resolves to the password or null. */
   reauth: () => Promise<string | null>;
   /** Re-run role resolution (after Onboard creates the operators row, or a
@@ -57,12 +61,17 @@ export async function resolveRole(
 
 const realQueries = {
   async operatorExists(id: string): Promise<boolean> {
-    const { data } = await supabase.from("operators").select("id").eq("id", id).maybeSingle();
+    // Throw on a real query error instead of swallowing it: a transient
+    // failure must NOT read as "no operators row", which would resolve an
+    // existing operator to role=null and strand them on the onboarding form.
+    const { data, error } = await supabase.from("operators").select("id").eq("id", id).maybeSingle();
+    if (error) throw error;
     return Boolean(data);
   },
   async clientIdFor(userId: string): Promise<string | null> {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("clients").select("id").eq("auth_user_id", userId).maybeSingle();
+    if (error) throw error;
     return data?.id ?? null;
   },
 };
@@ -73,12 +82,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [operatorId, setOperatorId] = useState<string | null>(null);
   const [clientId, setClientId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [roleError, setRoleError] = useState(false);
   const resolvedFor = useRef<string | null>(null);
   const sessionRef = useRef<Session | null>(null);
 
   const applyRole = useCallback(async (uid: string): Promise<Role> => {
     const resolved = await resolveRole(uid, realQueries);
     resolvedFor.current = uid;
+    setRoleError(false);
     setRole(resolved.role);
     setOperatorId(resolved.operatorId);
     setClientId(resolved.clientId);
@@ -104,6 +115,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (resolvedFor.current === uid) return; // role already resolved
       try {
         if (!cancelled) await applyRole(uid);
+      } catch {
+        // Resolution failed (network/5xx/token race). Do NOT leave role=null
+        // masquerading as "no persona"; flag the error so guards can offer a
+        // retry instead of dumping the user on the onboarding form.
+        if (!cancelled) setRoleError(true);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -121,7 +137,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const refreshRole = useCallback(async (): Promise<Role> => {
     const uid = sessionRef.current?.user?.id;
-    return uid ? await applyRole(uid) : null;
+    if (!uid) return null;
+    try {
+      return await applyRole(uid);
+    } catch {
+      setRoleError(true);
+      return null;
+    }
   }, [applyRole]);
 
   // ── reauth sheet ─────────────────────────────────────────────────────────
@@ -147,11 +169,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setRole(null);
     setOperatorId(null);
     setClientId(null);
+    setRoleError(false);
   }, []);
 
   const value = useMemo(
-    () => ({ session, role, operatorId, clientId, loading, reauth, refreshRole, signOut }),
-    [session, role, operatorId, clientId, loading, reauth, refreshRole, signOut],
+    () => ({ session, role, operatorId, clientId, loading, roleError, reauth, refreshRole, signOut }),
+    [session, role, operatorId, clientId, loading, roleError, reauth, refreshRole, signOut],
   );
 
   return (

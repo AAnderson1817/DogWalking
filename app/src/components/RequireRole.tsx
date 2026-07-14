@@ -18,6 +18,20 @@ export function RequireRole({ role, children }: { role: Exclude<Role, null>; chi
   if (!auth.session) {
     return <Navigate to="/signin" replace state={{ from: location.pathname }} />;
   }
+  if (auth.roleError) {
+    // Resolution failed rather than resolving to "no persona" — never send a
+    // signed-in user to onboarding on a transient error.
+    return (
+      <div className="page" style={{ display: "grid", placeItems: "center", gap: "var(--s-3)" }}>
+        <p style={{ color: "var(--text-2)", textAlign: "center" }}>
+          Couldn't load your account. Check your connection and try again.
+        </p>
+        <button className="btn btn--primary" onClick={() => void auth.refreshRole()}>
+          Retry
+        </button>
+      </div>
+    );
+  }
   if (auth.role === null) {
     return <Navigate to="/onboard" replace />;
   }

@@ -20,12 +20,24 @@ export default function Onboard() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (auth.loading) return;
+    if (auth.loading || auth.roleError) return;
     if (!auth.session) navigate("/signin", { replace: true });
     else if (auth.role === "operator") navigate("/", { replace: true });
     else if (auth.role === "client") navigate("/portal", { replace: true });
-  }, [auth.loading, auth.session, auth.role, navigate]);
+  }, [auth.loading, auth.session, auth.role, auth.roleError, navigate]);
 
+  // Show the form only when the user genuinely has no persona. If resolution
+  // errored, hold on a retryable state rather than the operator setup form.
+  if (auth.roleError) {
+    return (
+      <div className="page" style={{ display: "grid", placeItems: "center", gap: "var(--s-3)" }}>
+        <p style={{ color: "var(--text-2)", textAlign: "center" }}>
+          Couldn't confirm your account. Check your connection and try again.
+        </p>
+        <Button onClick={() => void auth.refreshRole()}>Retry</Button>
+      </div>
+    );
+  }
   if (auth.loading || !auth.session || auth.role !== null) {
     return (
       <div className="page" style={{ display: "grid", placeItems: "center" }}>

@@ -34,8 +34,10 @@ export function ScheduleTab({ clientId }: { clientId: string }) {
   const [pets, setPets] = useState<Pets[]>([]);
   const [editing, setEditing] = useState<RecurringSchedules | "new" | null>(null);
 
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   const load = useCallback(async () => {
-    const [{ data: scheds }, sts, props, ps] = await Promise.all([
+    const [{ data: scheds, error: schedErr }, sts, props, ps] = await Promise.all([
       supabase
         .from("recurring_schedules")
         .select("*")
@@ -45,6 +47,7 @@ export function ScheduleTab({ clientId }: { clientId: string }) {
       listProperties(clientId),
       listPets(clientId),
     ]);
+    if (schedErr) throw schedErr; // don't render "no schedule" on a query error
     setSchedules((scheds as RecurringSchedules[]) ?? []);
     setServiceTypes(sts);
     setProperties(props);
@@ -52,9 +55,15 @@ export function ScheduleTab({ clientId }: { clientId: string }) {
   }, [clientId]);
 
   useEffect(() => {
-    void load();
+    setLoadError(null);
+    void load().catch((e) => setLoadError(e instanceof Error ? e.message : "failed to load schedules"));
   }, [load]);
 
+  if (loadError) {
+    return (
+      <Card><EmptyState title="Couldn't load schedules" hint={loadError} /></Card>
+    );
+  }
   if (schedules === null) return <Spinner />;
 
   const serviceName = (id: string) => serviceTypes.find((s) => s.id === id)?.name ?? "";
@@ -208,9 +217,15 @@ function ScheduleSheet({
     if (!schedule) return;
     if (!window.confirm("Deactivate this schedule? Future scheduled walks will be cancelled; past walks are kept.")) return;
     setBusy(true);
+    setError(null);
     try {
       await deactivateSchedule(schedule.id, todayLocal());
       onSaved();
+    } catch (err) {
+      // Surface the failure — deactivateSchedule flips active=false then
+      // cancels future walks in a second statement; if the cancel half fails
+      // the operator must know those walks are still live.
+      setError(err instanceof Error ? err.message : "could not deactivate the schedule");
     } finally {
       setBusy(false);
     }

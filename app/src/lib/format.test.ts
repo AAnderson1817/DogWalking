@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dateLocal, distanceKm, elapsed, money, time12, timeLocal, walkTime } from "./format";
+import { businessWallClockToMs, dateLocal, distanceKm, elapsed, money, time12, timeLocal, walkTime } from "./format";
 
 describe("money", () => {
   it("formats cents as dollars", () => {
@@ -48,6 +48,19 @@ describe("time12", () => {
 describe("walkTime", () => {
   it("labels the slot with US weekday + 12-hour window", () => {
     expect(walkTime("2026-07-06", "12:00:00", "13:00:00")).toBe("Mon, Jul 6, 12:00 PM–1:00 PM");
+  });
+});
+
+describe("businessWallClockToMs", () => {
+  it("interprets the wall clock in Central regardless of device tz", () => {
+    // Summer (CDT, UTC-5): 09:00 Central on 2026-07-06 == 14:00 UTC.
+    expect(businessWallClockToMs("2026-07-06", "09:00:00")).toBe(
+      Date.parse("2026-07-06T14:00:00Z"),
+    );
+    // Winter (CST, UTC-6): 09:00 Central on 2026-01-06 == 15:00 UTC.
+    expect(businessWallClockToMs("2026-01-06", "09:00:00")).toBe(
+      Date.parse("2026-01-06T15:00:00Z"),
+    );
   });
 });
 

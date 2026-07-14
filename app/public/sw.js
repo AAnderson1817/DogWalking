@@ -1,11 +1,15 @@
-// PawTrail service worker (phase 08).
-// Strategy: precache the app shell; stale-while-revalidate for same-origin
-// static assets and GETs to Supabase REST/Storage; network-only for every
-// mutation and auth/realtime/functions traffic. Cache names carry the build
-// version (stamped at build time) so deploys bust cleanly.
+// PawTrail service worker (phase 08; hardened in QC pass).
+// Strategy: precache the app shell; cache-first for immutable static assets
+// and Storage objects (per-request signed URLs, safe to key by URL);
+// NETWORK-ONLY for Supabase REST, auth, realtime, edge functions and every
+// mutation. REST responses are per-user and must never be cached — a shared
+// DATA cache keyed by URL served one signed-in account's rows to the next
+// account on the same device and made writes look like they did not take.
+// Cache names carry the build version (stamped at build time) so deploys
+// bust cleanly.
 const VERSION = "__BUILD_VERSION__";
 const SHELL_CACHE = `pawtrail-shell-${VERSION}`;
-const DATA_CACHE = `pawtrail-data-${VERSION}`;
+const ASSET_CACHE = `pawtrail-asset-${VERSION}`;
 
 const SHELL_URLS = [
   "/",
@@ -42,32 +46,35 @@ function isMutation(request) {
   return request.method !== "GET";
 }
 
-function isAuthOrLive(url) {
+// Supabase REST + auth + realtime + edge functions: always live, never cached.
+function isNeverCache(url) {
   return (
+    url.pathname.startsWith("/rest/") ||
     url.pathname.startsWith("/auth/") ||
     url.pathname.startsWith("/realtime/") ||
     url.pathname.startsWith("/functions/")
   );
 }
 
-function isDataGet(url) {
-  return url.pathname.startsWith("/rest/") || url.pathname.startsWith("/storage/");
+// Storage objects are fetched via short-lived signed URLs (token in the query
+// string), so the full URL is effectively a capability — caching by URL is
+// safe and lets report-card photos render offline.
+function isStorage(url) {
+  return url.pathname.startsWith("/storage/");
 }
 
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   const url = new URL(request.url);
 
-  // Mutations, auth, realtime, edge functions: never cached.
-  if (isMutation(request) || isAuthOrLive(url)) return;
+  if (isMutation(request) || isNeverCache(url)) return; // straight to network
 
-  // Supabase REST/Storage GETs: stale-while-revalidate.
-  if (isDataGet(url)) {
-    event.respondWith(staleWhileRevalidate(request, DATA_CACHE));
+  if (isStorage(url)) {
+    event.respondWith(cacheFirst(request, ASSET_CACHE));
     return;
   }
 
-  // Same-origin navigation + static assets: shell-first.
+  // Same-origin navigation + hashed static assets.
   if (url.origin === self.location.origin) {
     if (request.mode === "navigate") {
       event.respondWith(
@@ -75,11 +82,14 @@ self.addEventListener("fetch", (event) => {
       );
       return;
     }
-    event.respondWith(staleWhileRevalidate(request, SHELL_CACHE));
+    event.respondWith(cacheFirst(request, SHELL_CACHE));
   }
 });
 
-async function staleWhileRevalidate(request, cacheName) {
+// Cache-first with background refresh. For hashed build assets the URL is
+// content-addressed so the cached copy is always correct; the network refresh
+// keeps non-hashed shell files (index.html, manifest) current for next load.
+async function cacheFirst(request, cacheName) {
   const cache = await caches.open(cacheName);
   const cached = await cache.match(request);
   const network = fetch(request)

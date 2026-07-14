@@ -28,6 +28,8 @@ export default function BillingConsole() {
   const [notice, setNotice] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   const load = useCallback(async () => {
     const [cs, ps, pays] = await Promise.all([listClients(), listPlans(), listPayments()]);
     setClients(cs);
@@ -36,9 +38,17 @@ export default function BillingConsole() {
   }, []);
 
   useEffect(() => {
-    void load();
+    setLoadError(null);
+    void load().catch((e) => setLoadError(e instanceof Error ? e.message : "failed to load"));
   }, [load]);
 
+  if (loadError && clients === null) {
+    return (
+      <div className="page">
+        <Card><EmptyState title="Couldn't load the billing console" hint={loadError} /></Card>
+      </div>
+    );
+  }
   if (clients === null) {
     return (
       <div className="page" style={{ display: "grid", placeItems: "center" }}>
