@@ -130,6 +130,30 @@ begin
     raise exception 'MATERIALIZER FAIL: re-run resurrected a cancelled walk';
   end if;
 
+  -- A rescheduled (moved) walk is NOT resurrected on its origin date (0012).
+  declare
+    v_moved uuid;
+    v_before int;
+    v_after int;
+  begin
+    select id into v_moved from walks
+      where schedule_id = '88888888-0000-4000-1000-000000000001'
+        and status = 'scheduled'
+      order by scheduled_date limit 1;
+    -- Move it a year out so it can't collide with any generated date.
+    update walks set scheduled_date = scheduled_date + 365
+      where id = v_moved;
+    select count(*) into v_before from walks
+      where schedule_id = '88888888-0000-4000-1000-000000000001';
+    perform fn_materialize_walks(14);
+    select count(*) into v_after from walks
+      where schedule_id = '88888888-0000-4000-1000-000000000001';
+    if v_after <> v_before then
+      raise exception 'MATERIALIZER FAIL: rescheduled walk was resurrected (% -> %)',
+        v_before, v_after;
+    end if;
+  end;
+
   -- Authenticated callers are rejected (service only).
   begin
     perform set_config('request.jwt.claims',
