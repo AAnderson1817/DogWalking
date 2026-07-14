@@ -33,6 +33,82 @@ jobs:
           echo "::add-mask::$key"
           echo "SERVICE_KEY=$key" >> "$GITHUB_ENV"
 
+  # End-to-end replay of the Onboard flow with a throwaway user: password
+  # sign-in → the exact operators INSERT the app makes → the role-resolution
+  # SELECT → cleanup. Prints real PostgREST statuses/bodies (no tokens, no
+  # emails beyond the fixture address) so auth/RLS/grant regressions on the
+  # hosted project are visible instead of being swallowed by the UI.
+  onboard-repro:
+    name: Replay operator onboard flow
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Fetch API keys (masked)
+        run: |
+          keys=$(curl -sSf \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_ACCESS_TOKEN }}" \
+            "https://api.supabase.com/v1/projects/${{ secrets.SUPABASE_PROJECT_REF }}/api-keys?reveal=true")
+          service=$(echo "$keys" | jq -r '[.[] | select(.name == "service_role")][0].api_key')
+          anon=$(echo "$keys" | jq -r '[.[] | select(.name == "anon")][0].api_key')
+          if [ -z "$service" ] || [ "$service" = "null" ] || [ -z "$anon" ] || [ "$anon" = "null" ]; then
+            echo "FAIL: could not fetch API keys"; exit 1
+          fi
+          echo "::add-mask::$service"
+          echo "::add-mask::$anon"
+          { echo "SERVICE_KEY=$service"; echo "ANON_KEY=$anon"; } >> "$GITHUB_ENV"
+
+      - name: Replay onboard (signup → insert operators → role select)
+        run: |
+          base="https://${{ secrets.SUPABASE_PROJECT_REF }}.supabase.co"
+          email="diag-onboard@pawtrail.dev"; pass="Diag-$(date +%s)-pw"
+          admin() { curl -sS -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY" "$@"; }
+
+          cleanup() {
+            [ -z "$1" ] && return 0
+            admin -X DELETE "$base/rest/v1/service_types?operator_id=eq.$1" >/dev/null || true
+            admin -X DELETE "$base/rest/v1/operators?id=eq.$1" >/dev/null || true
+            admin -X DELETE "$base/auth/v1/admin/users/$1" >/dev/null || true
+          }
+          # remove any leftover fixture from a previous run
+          old=$(admin "$base/auth/v1/admin/users?page=1&per_page=100" \
+            | jq -r --arg e "$email" '.users[]? | select(.email==$e) | .id' | head -1)
+          cleanup "$old"
+
+          uid=$(admin -X POST "$base/auth/v1/admin/users" -H "Content-Type: application/json" \
+            -d "{\"email\":\"$email\",\"password\":\"$pass\",\"email_confirm\":true}" | jq -r '.id')
+          if [ -z "$uid" ] || [ "$uid" = "null" ]; then echo "FAIL: could not create fixture user"; exit 1; fi
+          trap 'cleanup "$uid"' EXIT
+          echo "fixture user: $uid"
+
+          tok=$(curl -sS -X POST "$base/auth/v1/token?grant_type=password" \
+            -H "apikey: $ANON_KEY" -H "Content-Type: application/json" \
+            -d "{\"email\":\"$email\",\"password\":\"$pass\"}" | jq -r '.access_token')
+          if [ -z "$tok" ] || [ "$tok" = "null" ]; then echo "FAIL: password sign-in"; exit 1; fi
+          echo "::add-mask::$tok"
+          echo "sign-in: OK"
+
+          ins=$(mktemp)
+          icode=$(curl -sS -o "$ins" -w '%{http_code}' -X POST "$base/rest/v1/operators" \
+            -H "apikey: $ANON_KEY" -H "Authorization: Bearer $tok" \
+            -H "Content-Type: application/json" -H "Prefer: return=representation" \
+            -d "{\"id\":\"$uid\",\"business_name\":\"Diag Walks\",\"display_name\":\"Diag\",\"email\":\"$email\"}")
+          echo "INSERT operators -> HTTP $icode"; cat "$ins"; echo
+
+          sel=$(mktemp)
+          scode=$(curl -sS -o "$sel" -w '%{http_code}' \
+            "$base/rest/v1/operators?select=id&id=eq.$uid" \
+            -H "apikey: $ANON_KEY" -H "Authorization: Bearer $tok")
+          echo "SELECT operators (role resolution) -> HTTP $scode"; cat "$sel"; echo
+
+          svc=$(mktemp)
+          vcode=$(curl -sS -o "$svc" -w '%{http_code}' \
+            "$base/rest/v1/service_types?select=name&operator_id=eq.$uid" \
+            -H "apikey: $ANON_KEY" -H "Authorization: Bearer $tok")
+          echo "SELECT service_types (seed trigger) -> HTTP $vcode"; cat "$svc"; echo
+
+          [ "$icode" = "201" ] && [ "$scode" = "200" ] && grep -q "$uid" "$sel"
+
       - name: POST materialize-walks
         run: |
           body=$(mktemp)
