@@ -89,7 +89,27 @@ export default function Booking() {
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (!client || !operator || !date || !propertyId || !serviceId) return;
+    if (!client || !operator) return;
+    // Every missing precondition gets a visible message — a silent return
+    // here reads as "the button did nothing".
+    if (!date) {
+      setError("pick a date for the walk");
+      return;
+    }
+    if (!propertyId) {
+      setError("no address on file yet — ask your walker to add your property first");
+      return;
+    }
+    if (!serviceId) {
+      setError("pick a service");
+      return;
+    }
+    if (selectedPets.length === 0) {
+      setError(pets.length === 0
+        ? "no pets on file yet — ask your walker to add your dog first"
+        : "select at least one pet");
+      return;
+    }
     if (needsOverage && !confirmOverage) {
       setError("confirm the overage price to continue");
       return;
@@ -142,6 +162,20 @@ export default function Booking() {
   return (
     <div className="page">
       <h1>Book a walk</h1>
+
+      {(properties.length === 0 || pets.length === 0) && (
+        <Card style={{ background: "var(--pink)", boxShadow: "none", marginTop: "var(--s-4)" }}>
+          <span style={{ fontWeight: 800, color: "var(--pink-ink)" }}>
+            Almost there — your walker still needs to add{" "}
+            {properties.length === 0 && pets.length === 0
+              ? "your address and your dog"
+              : properties.length === 0
+                ? "your address"
+                : "your dog"}{" "}
+            to your account before you can book.
+          </span>
+        </Card>
+      )}
 
       <Card style={{ marginTop: "var(--s-4)" }}>
         <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: "var(--s-3)" }}>
@@ -215,7 +249,11 @@ export default function Booking() {
           )}
 
           {error && <span className="field__error">{error}</span>}
-          <Button type="submit" full disabled={busy || !date || (needsOverage && !confirmOverage)}>
+          <Button
+            type="submit"
+            full
+            disabled={busy || !date || properties.length === 0 || pets.length === 0 || (needsOverage && !confirmOverage)}
+          >
             {busy ? <Spinner /> : "Request walk"}
           </Button>
         </form>
