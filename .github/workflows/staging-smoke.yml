@@ -33,6 +33,17 @@ jobs:
           echo "::add-mask::$key"
           echo "SERVICE_KEY=$key" >> "$GITHUB_ENV"
 
+      - name: POST materialize-walks
+        run: |
+          body=$(mktemp)
+          status=$(curl -sS -o "$body" -w '%{http_code}' -X POST \
+            "https://${{ secrets.SUPABASE_PROJECT_REF }}.supabase.co/functions/v1/materialize-walks" \
+            -H "Authorization: Bearer $SERVICE_KEY" \
+            -H "Content-Type: application/json" -d '{}' --max-time 30)
+          echo "HTTP $status"
+          cat "$body"; echo
+          [ "$status" = "200" ] && grep -q '"ok":true' "$body"
+
   # End-to-end replay of the Onboard flow with a throwaway user: password
   # sign-in → the exact operators INSERT the app makes → the role-resolution
   # SELECT → cleanup. Prints real PostgREST statuses/bodies (no tokens, no
@@ -108,14 +119,3 @@ jobs:
           echo "SELECT service_types (seed trigger) -> HTTP $vcode"; cat "$svc"; echo
 
           [ "$icode" = "201" ] && [ "$scode" = "200" ] && grep -q "$uid" "$sel"
-
-      - name: POST materialize-walks
-        run: |
-          body=$(mktemp)
-          status=$(curl -sS -o "$body" -w '%{http_code}' -X POST \
-            "https://${{ secrets.SUPABASE_PROJECT_REF }}.supabase.co/functions/v1/materialize-walks" \
-            -H "Authorization: Bearer $SERVICE_KEY" \
-            -H "Content-Type: application/json" -d '{}' --max-time 30)
-          echo "HTTP $status"
-          cat "$body"; echo
-          [ "$status" = "200" ] && grep -q '"ok":true' "$body"

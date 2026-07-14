@@ -30,8 +30,10 @@ export interface AuthState {
   loading: boolean;
   /** Password-confirm for vault calls; resolves to the password or null. */
   reauth: () => Promise<string | null>;
-  /** Re-run role resolution (after Onboard creates the operators row, or a claim links a client). */
-  refreshRole: () => Promise<void>;
+  /** Re-run role resolution (after Onboard creates the operators row, or a
+   * claim links a client). Resolves to the freshly resolved role so callers
+   * can branch without waiting for the context re-render. */
+  refreshRole: () => Promise<Role>;
   signOut: () => Promise<void>;
 }
 
@@ -74,12 +76,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const resolvedFor = useRef<string | null>(null);
   const sessionRef = useRef<Session | null>(null);
 
-  const applyRole = useCallback(async (uid: string) => {
+  const applyRole = useCallback(async (uid: string): Promise<Role> => {
     const resolved = await resolveRole(uid, realQueries);
     resolvedFor.current = uid;
     setRole(resolved.role);
     setOperatorId(resolved.operatorId);
     setClientId(resolved.clientId);
+    return resolved.role;
   }, []);
 
   useEffect(() => {
@@ -116,9 +119,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [applyRole]);
 
-  const refreshRole = useCallback(async () => {
+  const refreshRole = useCallback(async (): Promise<Role> => {
     const uid = sessionRef.current?.user?.id;
-    if (uid) await applyRole(uid);
+    return uid ? await applyRole(uid) : null;
   }, [applyRole]);
 
   // ── reauth sheet ─────────────────────────────────────────────────────────

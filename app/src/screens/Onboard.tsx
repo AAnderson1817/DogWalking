@@ -39,15 +39,30 @@ export default function Onboard() {
     setError(null);
     setBusy(true);
     try {
-      await createOperator({
-        id: auth.session!.user.id,
-        business_name: businessName.trim(),
-        display_name: displayName.trim(),
-        email: auth.session!.user.email ?? "",
-        phone: phone.trim() || null,
-      });
-      await auth.refreshRole();
-      navigate("/", { replace: true });
+      try {
+        await createOperator({
+          id: auth.session!.user.id,
+          business_name: businessName.trim(),
+          display_name: displayName.trim(),
+          email: auth.session!.user.email ?? "",
+          phone: phone.trim() || null,
+        });
+      } catch (err) {
+        // Idempotent retry: if a previous submit already created the row
+        // (e.g. the redirect failed afterwards), fall through to the role
+        // refresh instead of dead-ending on the duplicate-key error.
+        const msg = err instanceof Error ? err.message : "";
+        if (!/duplicate key|already exists/i.test(msg)) throw err;
+      }
+      const role = await auth.refreshRole();
+      if (role === "operator") {
+        navigate("/", { replace: true });
+      } else {
+        setError(
+          "Your business was saved, but your role could not be confirmed. " +
+            "Reload the page; if this persists, check the browser console.",
+        );
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "could not create your business");
     } finally {
@@ -84,8 +99,8 @@ export default function Onboard() {
             placeholder="+44 7700 900000"
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
-            error={error ?? undefined}
           />
+          {error && <span className="field__error">{error}</span>}
           <p style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>
             Currency GBP · timezone Europe/London · low-credit alerts at 2 —
             adjustable later.
