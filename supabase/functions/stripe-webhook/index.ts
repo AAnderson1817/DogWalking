@@ -17,11 +17,15 @@ function makeDeps(): WebhookDeps {
       if (error) throw new Error("stripe_events insert failed");
       return (data?.length ?? 0) > 0; // [] ⇒ conflict ⇒ duplicate
     },
+    async unrecordEvent(id) {
+      const { error } = await db.from("stripe_events").delete().eq("id", id);
+      if (error) throw new Error("stripe_events delete failed");
+    },
     async findClientByCustomer(customerId) {
       if (!customerId) return null;
       const { data, error } = await db
         .from("clients")
-        .select("id, operator_id, full_name, plan_id, subscription_status")
+        .select("id, operator_id, full_name, plan_id, subscription_status, stripe_subscription_id")
         .eq("stripe_customer_id", customerId)
         .maybeSingle();
       if (error) throw new Error("client lookup failed");

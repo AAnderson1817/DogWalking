@@ -14,6 +14,7 @@ export interface ClientRow {
   full_name: string;
   plan_id: string | null;
   subscription_status: string;
+  stripe_subscription_id: string | null;
 }
 
 export interface PlanRow {
@@ -23,8 +24,13 @@ export interface PlanRow {
 }
 
 export interface WebhookDeps {
-  /** Insert into stripe_events; false ⇒ duplicate (already processed). */
+  /** Claim the event by inserting into stripe_events; false ⇒ already claimed
+   * (duplicate). The row is the idempotency guard and must only remain if
+   * effects succeed — see unrecordEvent. */
   recordEvent(id: string, type: string, payload: unknown): Promise<boolean>;
+  /** Release the idempotency claim so Stripe's retry re-processes the event
+   * (called when an effect throws after the claim). */
+  unrecordEvent(id: string): Promise<void>;
   findClientByCustomer(customerId: string): Promise<ClientRow | null>;
   getPlan(planId: string): Promise<PlanRow | null>;
   findPlanByPriceId(operatorId: string, priceId: string): Promise<PlanRow | null>;
@@ -46,6 +52,21 @@ export async function handleStripeEvent(
   const fresh = await deps.recordEvent(event.id, event.type, event);
   if (!fresh) return { status: "duplicate" };
 
+  // Effects run AFTER the claim but the claim is only durable if they
+  // succeed: on any failure we release it so Stripe's automatic retry
+  // re-processes instead of the event being lost as a "duplicate".
+  try {
+    return await applyEvent(event, deps);
+  } catch (e) {
+    await deps.unrecordEvent(event.id).catch(() => {});
+    throw e;
+  }
+}
+
+async function applyEvent(
+  event: StripeEventLike,
+  deps: WebhookDeps,
+): Promise<{ status: "processed" | "duplicate" | "ignored" }> {
   const obj = event.data.object;
 
   switch (event.type) {
@@ -67,6 +88,15 @@ export async function handleStripeEvent(
 
     case "invoice.paid": {
       if (!invoiceSubscriptionId(obj)) return { status: "ignored" };
+      // Only a new subscription or a renewal is a credit-cycle boundary.
+      // Proration/manual/threshold invoices must NOT grant a fresh cycle or
+      // trigger rollover (which, on rollover 'none', would wipe the balance
+      // mid-period). A missing billing_reason is treated as a cycle for
+      // backwards-compatibility with older fixtures.
+      const reason = typeof obj.billing_reason === "string" ? obj.billing_reason : "";
+      if (reason && reason !== "subscription_create" && reason !== "subscription_cycle") {
+        return { status: "ignored" };
+      }
       const client = await deps.findClientByCustomer(String(obj.customer ?? ""));
       if (!client) return { status: "ignored" };
 
@@ -144,8 +174,14 @@ export async function handleStripeEvent(
     case "customer.subscription.updated": {
       const client = await deps.findClientByCustomer(String(obj.customer ?? ""));
       if (!client) return { status: "ignored" };
+      const subId = typeof obj.id === "string" ? obj.id : null;
+      // A customer can carry a stale/second subscription; only act on the
+      // one bound to the client so an old sub can't clobber the active one.
+      if (client.stripe_subscription_id && subId && client.stripe_subscription_id !== subId) {
+        return { status: "ignored" };
+      }
       const fields: Record<string, unknown> = {
-        stripe_subscription_id: obj.id ?? null,
+        stripe_subscription_id: subId,
         subscription_status: mapSubscriptionStatus(obj),
       };
       const periodEnd = subscriptionPeriodEnd(obj);
@@ -157,6 +193,13 @@ export async function handleStripeEvent(
     case "customer.subscription.deleted": {
       const client = await deps.findClientByCustomer(String(obj.customer ?? ""));
       if (!client) return { status: "ignored" };
+      const subId = typeof obj.id === "string" ? obj.id : null;
+      // Ignore deletion of a subscription that isn't the client's current one
+      // (e.g. an old cancelled sub) so it can't flip an active account to
+      // cancelled.
+      if (client.stripe_subscription_id && subId && client.stripe_subscription_id !== subId) {
+        return { status: "ignored" };
+      }
       await deps.updateClient(client.id, { subscription_status: "cancelled" });
       return { status: "processed" };
     }

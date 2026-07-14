@@ -17,12 +17,17 @@ export function makeOverageDeps(db: SupabaseClient, stripe: Stripe): OverageDeps
     },
 
     async getSucceededOveragePayment(walkId) {
+      // Short-circuit on a succeeded OR in-flight (pending) charge — never
+      // re-charge for a walk that already has a live payment. Only a 'failed'
+      // row leaves the walk chargeable again.
       const { data, error } = await db
         .from("payments")
         .select("id, walk_id, type, amount_pence, status, stripe_payment_intent_id, receipt_url")
         .eq("walk_id", walkId)
         .eq("type", "overage")
-        .eq("status", "succeeded")
+        .in("status", ["succeeded", "pending"])
+        .order("created_at", { ascending: false })
+        .limit(1)
         .maybeSingle();
       if (error) throw new Error("payment lookup failed");
       return data as OveragePayment | null;
@@ -62,17 +67,23 @@ export function makeOverageDeps(db: SupabaseClient, stripe: Stripe): OverageDeps
       }
       if (!paymentMethod) throw new Error("no payment method on file");
 
-      const pi = await stripe.paymentIntents.create({
-        amount: amountPence,
-        currency: "usd",
-        customer: customerId,
-        payment_method: paymentMethod,
-        off_session: true,
-        confirm: true,
-        description: "PawTrail walk (overage)",
-        metadata: { walk_id: walkId, client_id: clientId },
-        expand: ["latest_charge"],
-      });
+      const pi = await stripe.paymentIntents.create(
+        {
+          amount: amountPence,
+          currency: "usd",
+          customer: customerId,
+          payment_method: paymentMethod,
+          off_session: true,
+          confirm: true,
+          description: "PawTrail walk (overage)",
+          metadata: { walk_id: walkId, client_id: clientId },
+          expand: ["latest_charge"],
+        },
+        // One overage charge per walk, ever: a retry after a crash between
+        // Stripe confirming and our payment row committing returns the SAME
+        // PaymentIntent instead of charging the card twice.
+        { idempotencyKey: `overage_${walkId}` },
+      );
       const charge = pi.latest_charge as Stripe.Charge | null;
       return {
         id: pi.id,

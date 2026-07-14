@@ -1,5 +1,5 @@
 // stripe-webhook dispatch: idempotency guard + core event effects (mocked deps).
-import { assert, assertEquals, assertFalse } from "./asserts.ts";
+import { assert, assertEquals, assertFalse, assertRejects } from "./asserts.ts";
 import {
   handleStripeEvent,
   mapSubscriptionStatus,
@@ -12,7 +12,9 @@ interface Call {
   args: unknown[];
 }
 
-function makeMockDeps(opts: { duplicate?: boolean } = {}): { deps: WebhookDeps; calls: Call[] } {
+function makeMockDeps(
+  opts: { duplicate?: boolean; subId?: string | null; failGrant?: boolean } = {},
+): { deps: WebhookDeps; calls: Call[] } {
   const calls: Call[] = [];
   const client = {
     id: "client-1",
@@ -20,12 +22,17 @@ function makeMockDeps(opts: { duplicate?: boolean } = {}): { deps: WebhookDeps; 
     full_name: "Amelia Hart",
     plan_id: "plan-1",
     subscription_status: "active",
+    stripe_subscription_id: opts.subId === undefined ? "sub_1" : opts.subId,
   };
   const plan = { id: "plan-1", credits_per_cycle: 5, stripe_price_id: "price_1" };
   const deps: WebhookDeps = {
     recordEvent(id, type, payload) {
       calls.push({ fn: "recordEvent", args: [id, type, payload] });
       return Promise.resolve(!opts.duplicate);
+    },
+    unrecordEvent(id) {
+      calls.push({ fn: "unrecordEvent", args: [id] });
+      return Promise.resolve();
     },
     findClientByCustomer(customerId) {
       calls.push({ fn: "findClientByCustomer", args: [customerId] });
@@ -49,6 +56,7 @@ function makeMockDeps(opts: { duplicate?: boolean } = {}): { deps: WebhookDeps; 
     },
     grantCredits(clientId, amount, note) {
       calls.push({ fn: "grantCredits", args: [clientId, amount, note] });
+      if (opts.failGrant) return Promise.reject(new Error("grant failed"));
       return Promise.resolve();
     },
     insertPayment(row) {
@@ -156,6 +164,70 @@ Deno.test("unknown customer is ignored, never throws", async () => {
     deps,
   );
   assertEquals(result.status, "ignored");
+});
+
+Deno.test("failed effect releases the idempotency claim so Stripe can retry", async () => {
+  const { deps, calls } = makeMockDeps({ failGrant: true });
+  await assertRejects(() =>
+    handleStripeEvent(
+      event("invoice.paid", { id: "in_x", customer: "cus_1", subscription: "sub_1", amount_paid: 9000 }),
+      deps,
+    )
+  );
+  assert(calls.some((c) => c.fn === "unrecordEvent"), "must release the claim on failure");
+});
+
+Deno.test("proration invoice.paid does not grant a cycle", async () => {
+  const { deps, calls } = makeMockDeps();
+  const result = await handleStripeEvent(
+    event("invoice.paid", {
+      id: "in_p",
+      customer: "cus_1",
+      subscription: "sub_1",
+      amount_paid: 300,
+      billing_reason: "subscription_update",
+    }),
+    deps,
+  );
+  assertEquals(result.status, "ignored");
+  assertFalse(calls.some((c) => c.fn === "grantCredits"));
+});
+
+Deno.test("renewal invoice.paid (subscription_cycle) grants", async () => {
+  const { deps, calls } = makeMockDeps();
+  const result = await handleStripeEvent(
+    event("invoice.paid", {
+      id: "in_r",
+      customer: "cus_1",
+      subscription: "sub_1",
+      amount_paid: 9000,
+      billing_reason: "subscription_cycle",
+    }),
+    deps,
+  );
+  assertEquals(result.status, "processed");
+  assert(calls.some((c) => c.fn === "grantCredits"));
+});
+
+Deno.test("subscription.deleted for a stale (non-current) sub is ignored", async () => {
+  const { deps, calls } = makeMockDeps({ subId: "sub_current" });
+  const result = await handleStripeEvent(
+    event("customer.subscription.deleted", { id: "sub_old", customer: "cus_1" }),
+    deps,
+  );
+  assertEquals(result.status, "ignored");
+  assertFalse(calls.some((c) => c.fn === "updateClient"));
+});
+
+Deno.test("subscription.updated for the current sub applies", async () => {
+  const { deps, calls } = makeMockDeps({ subId: "sub_1" });
+  const result = await handleStripeEvent(
+    event("customer.subscription.updated", { id: "sub_1", customer: "cus_1", status: "past_due" }),
+    deps,
+  );
+  assertEquals(result.status, "processed");
+  const update = calls.find((c) => c.fn === "updateClient")!;
+  assertEquals((update.args[1] as Record<string, unknown>).subscription_status, "past_due");
 });
 
 Deno.test("subscription status mapping", () => {

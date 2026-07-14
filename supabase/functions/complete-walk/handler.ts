@@ -87,6 +87,25 @@ export async function completeWalk(
     throw new HttpError(409, "invalid_status", `walk is ${walk.status}, not in_progress`);
   }
 
+  // Bill BEFORE marking the walk completed. fn_debit_walk is idempotent
+  // under its per-client lock and the overage charge carries a Stripe
+  // idempotency key, so if either throws the walk stays in_progress and the
+  // client's retry re-runs billing — instead of a completed-but-never-billed
+  // (permanently free) walk that the idempotent-replay branch would then
+  // report as a zero-cost debit forever.
+  const debit = await deps.debitWalk(walk.id);
+  let billing: Billing;
+  if (debit.outcome === "overage") {
+    const { payment } = await deps.chargeOverage(walk.id);
+    billing = {
+      outcome: "overage",
+      charged_pence: payment.amount_pence,
+      payment_status: payment.status,
+    };
+  } else {
+    billing = { outcome: "debited", cost_credits: debit.cost };
+  }
+
   const updated = await deps.updateWalkCompleted(walk.id, {
     status: "completed",
     ended_at: body.ended_at,
@@ -100,19 +119,6 @@ export async function completeWalk(
 
   if (body.photo_paths?.length) {
     await deps.insertPhotos(walk, body.photo_paths);
-  }
-
-  const debit = await deps.debitWalk(walk.id);
-  let billing: Billing;
-  if (debit.outcome === "overage") {
-    const { payment } = await deps.chargeOverage(walk.id);
-    billing = {
-      outcome: "overage",
-      charged_pence: payment.amount_pence,
-      payment_status: payment.status,
-    };
-  } else {
-    billing = { outcome: "debited", cost_credits: debit.cost };
   }
 
   await deps.insertNotification({
