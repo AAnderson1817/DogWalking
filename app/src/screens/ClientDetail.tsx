@@ -102,7 +102,15 @@ export default function ClientDetail() {
 
       <div
         role="tablist"
-        style={{ display: "flex", gap: "var(--s-1)", marginTop: "var(--s-4)", borderBottom: "1.5px solid var(--mist)" }}
+        style={{
+          display: "flex",
+          gap: "var(--s-1)",
+          marginTop: "var(--s-4)",
+          background: "var(--surface)",
+          border: "var(--bw) solid var(--line)",
+          borderRadius: "var(--r-full)",
+          padding: 4,
+        }}
       >
         {TABS.map((t) => (
           <button
@@ -111,14 +119,14 @@ export default function ClientDetail() {
             aria-selected={tab === t.key}
             onClick={() => setTab(t.key)}
             style={{
-              background: "none",
+              flex: 1,
+              background: tab === t.key ? "var(--brand)" : "none",
               border: 0,
-              padding: "var(--s-2) var(--s-3)",
-              fontWeight: 600,
-              fontSize: "var(--fs-14)",
-              color: tab === t.key ? "var(--pine-800)" : "var(--ink-faint)",
-              borderBottom: tab === t.key ? "2.5px solid var(--pine-800)" : "2.5px solid transparent",
-              marginBottom: -1.5,
+              padding: "7px 0",
+              fontWeight: tab === t.key ? 900 : 800,
+              fontSize: "var(--fs-12)",
+              color: tab === t.key ? "var(--cream-page)" : "var(--ink-500)",
+              borderRadius: "var(--r-full)",
               cursor: "pointer",
             }}
           >

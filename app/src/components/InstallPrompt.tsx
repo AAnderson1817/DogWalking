@@ -42,8 +42,8 @@ export function InstallPrompt() {
         display: "flex",
         alignItems: "center",
         gap: "var(--s-3)",
-        background: "var(--pine-900)",
-        color: "#EDF5F1",
+        background: "var(--butter)",
+        color: "var(--ink-900)",
         marginTop: "var(--s-4)",
       }}
     >
@@ -67,7 +67,7 @@ export function InstallPrompt() {
           localStorage.setItem(DISMISSED_KEY, "1");
           setEligible(false);
         }}
-        style={{ background: "none", border: 0, color: "#9DB8AE", cursor: "pointer" }}
+        style={{ background: "none", border: 0, color: "var(--ink-700)", cursor: "pointer" }}
       >
         ✕
       </button>

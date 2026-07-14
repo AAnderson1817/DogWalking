@@ -1,24 +1,53 @@
-/* Trailhead design tokens — verbatim from docs/spec/05-design-system.md. */
+/* PawTrail v2 "Biscuit" tokens — from the Claude Design mock (PawTrail
+   Screens 2a–2d) via docs/spec/05-design-system.md. Neo-brutalist: cream
+   surfaces, brown ink, chunky #3B2A20 borders with hard offset shadows.
+   Legacy Trailhead var names are kept as aliases so existing screens
+   restyle without edits. */
 :root {
   /* palette */
-  --pine-950:#081914; --pine-900:#0E2A23; --pine-800:#14382E;
-  --pine-700:#1C4A3C; --pine-600:#256052; --pine-400:#4E8A78;
-  --teal-live:#2DD4BF; --teal-dim:#14B8A6;
-  --paper:#F6F4EE; --mist:#E7EBE6; --card:#FFFFFF;
-  --ink:#0F1F19; --ink-soft:#46574F; --ink-faint:#8A988F;
-  --amber:#F0A830; --red:#E5484D; --white:#FFFFFF;
+  --cream-page:#FFF6E9; --cream-deep:#FFF1DC; --card:#FFFFFF;
+  --ink-900:#3B2A20; --ink-700:#7A5B41; --ink-500:#A9856A; --ink-mono:#B4855C;
+  --line-soft:#E8C79A; --hairline:#F3E3CB;
+  --orange:#FF6B35; --orange-deep:#B4520A; --orange-tint:#FFD9C4;
+  --butter:#FFE28A; --butter-ink:#7A4E00;
+  --sky:#8FD8FF; --sky-bright:#38BDF8; --sky-ink:#14344A; --sky-mid:#2E6E8F;
+  --mint:#7FE3B4; --mint-ink:#0E5C3F;
+  --lilac:#DCD2FF; --lilac-ink:#5B4A8C;
+  --pink:#FFC7D8; --pink-ink:#8C4A5C; --blush:#FF9BB3;
+  --red:#E5484D; --green:#0E9F6E; --white:#FFFFFF;
+
+  /* legacy Trailhead aliases (screens reference these directly) */
+  --pine-950:var(--ink-900); --pine-900:var(--ink-900); --pine-800:var(--ink-900);
+  --pine-700:var(--ink-700); --pine-600:var(--orange-deep); --pine-400:var(--ink-500);
+  --teal-live:var(--sky-bright); --teal-dim:var(--sky-mid);
+  --paper:var(--cream-page); --mist:var(--hairline);
+  --ink:var(--ink-900); --ink-soft:var(--ink-700); --ink-faint:var(--ink-500);
+  --amber:var(--butter);
+
   /* semantic */
-  --bg:var(--paper); --surface:var(--card); --text:var(--ink);
-  --text-2:var(--ink-soft); --brand:var(--pine-800); --accent:var(--teal-live);
-  --danger:var(--red); --warn:var(--amber);
+  --bg:var(--cream-page); --surface:var(--card); --text:var(--ink-900);
+  --text-2:var(--ink-700); --brand:var(--orange); --accent:var(--sky-bright);
+  --danger:var(--red); --warn:var(--butter);
+
+  /* borders + pop shadows (signature of the v2 look) */
+  --line:var(--ink-900);
+  --bw:2.5px; --bw-sm:2px; --bw-xs:1.5px;
+  --pop:4px 4px 0 var(--ink-900);
+  --pop-sm:3px 3px 0 var(--ink-900);
+  --pop-xs:2px 2px 0 var(--ink-900);
+  --pop-live:4px 4px 0 var(--sky-bright);
+
   /* type */
-  --font-body:'Inter',system-ui,sans-serif;
-  --font-display:'Space Grotesk',var(--font-body); /* headings + all GPS/credit numerals, font-feature-settings:'tnum' */
+  --font-body:'Nunito',system-ui,sans-serif;
+  --font-display:'Baloo 2',var(--font-body); /* headings + all GPS/credit numerals, font-feature-settings:'tnum' */
   --fs-12:.75rem; --fs-14:.875rem; --fs-16:1rem; --fs-20:1.25rem;
   --fs-24:1.5rem; --fs-32:2rem; --fs-44:2.75rem;
   /* space (4pt) */ --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-6:24px; --s-8:32px; --s-12:48px;
-  /* radius */ --r-sm:8px; --r-md:12px; --r-lg:16px; --r-full:999px;
-  /* elevation */ --shadow-1:0 1px 3px rgb(8 25 20/.08); --shadow-2:0 4px 16px rgb(8 25 20/.12);
+  /* radius */ --r-sm:10px; --r-md:14px; --r-lg:18px; --r-full:999px;
+  /* elevation (legacy soft shadows now map to pop shadows) */
+  --shadow-1:var(--pop-sm); --shadow-2:var(--pop);
   /* motion */ --ease:cubic-bezier(.2,.8,.2,1); --t-fast:150ms; --t-med:250ms;
 }
-.walkmode { --bg:var(--pine-950); --surface:var(--pine-900); --text:#EDF5F1; --text-2:#9DB8AE; }
+/* Walk Mode is the light "day" surface in v2 (mock 2b) — same cream page,
+   the mode class is kept for layout hooks. */
+.walkmode { --bg:var(--cream-page); --surface:var(--card); --text:var(--ink-900); --text-2:var(--ink-700); }

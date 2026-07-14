@@ -2,6 +2,7 @@
 // status badge (overage shown in place of completed when flagged).
 import { Badge, type BadgeStatus } from "./Badge";
 import { Card } from "./Card";
+import { PetFace } from "./PetAvatar";
 
 export interface WalkCardData {
   windowStart: string; // "12:00:00"
@@ -34,7 +35,7 @@ export function WalkCard({ walk, onClick }: { walk: WalkCardData; onClick?: () =
         <span className="pet-avatars" aria-label={walk.petNames.join(", ")}>
           {walk.petNames.slice(0, 3).map((name) => (
             <span key={name} className="pet-avatar">
-              {name.charAt(0).toUpperCase()}
+              <PetFace name={name} />
             </span>
           ))}
         </span>

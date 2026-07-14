@@ -8,6 +8,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { InstallPrompt } from "@/components/InstallPrompt";
 import { LiveWalkBanner } from "@/components/LiveWalkBanner";
 import { NotificationBell } from "@/components/NotificationInbox";
+import { PawIcon } from "@/components/PetAvatar";
 import { Spinner } from "@/components/Spinner";
 import { WalkCard } from "@/components/WalkCard";
 import {
@@ -102,9 +103,14 @@ export default function Dashboard() {
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div>
           <span className="section-label">{dateLondon(new Date())}</span>
-          <h1>Today</h1>
+          <h1 style={{ fontSize: "var(--fs-32)" }}>
+            Today <span style={{ color: "var(--brand)" }}>·</span>
+          </h1>
         </div>
-        <NotificationBell persona="operator" />
+        <span style={{ color: "var(--brand)", display: "flex", alignItems: "center", gap: "var(--s-2)" }}>
+          <PawIcon size={40} />
+          <NotificationBell persona="operator" />
+        </span>
       </div>
 
       <InstallPrompt />
@@ -143,7 +149,7 @@ export default function Dashboard() {
                   <span style={{ fontWeight: 600 }}>{c.full_name}</span>
                   <span
                     className="numeral"
-                    style={{ color: "var(--warn)", fontWeight: 700, fontSize: "var(--fs-20)" }}
+                    style={{ color: "var(--orange-deep)", fontWeight: 800, fontSize: "var(--fs-20)" }}
                   >
                     {c.credit_balance}
                   </span>

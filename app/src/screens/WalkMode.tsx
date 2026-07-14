@@ -187,7 +187,7 @@ function WalkModeInner({ walkId }: { walkId: string }) {
   }
   if (!walk) {
     return (
-      <div className="walkmode" style={{ minHeight: "100dvh", display: "grid", placeItems: "center", background: "var(--pine-950)" }}>
+      <div className="walkmode" style={{ minHeight: "100dvh", display: "grid", placeItems: "center", background: "var(--bg)" }}>
         <Spinner />
       </div>
     );
@@ -206,8 +206,8 @@ function WalkModeInner({ walkId }: { walkId: string }) {
         <Card
           style={{
             marginTop: "var(--s-3)",
-            background: billing.outcome === "overage" ? "var(--amber)" : "var(--pine-800)",
-            color: billing.outcome === "overage" ? "var(--pine-950)" : "var(--white)",
+            background: billing.outcome === "overage" ? "var(--butter)" : "var(--mint)",
+            color: billing.outcome === "overage" ? "var(--butter-ink)" : "var(--mint-ink)",
           }}
         >
           <div style={{ fontWeight: 700, fontSize: "var(--fs-20)" }} className="display">
@@ -256,7 +256,7 @@ function WalkModeInner({ walkId }: { walkId: string }) {
             </p>
           </div>
           {reactive.length > 0 && (
-            <Card style={{ background: "var(--pine-900)" }}>
+            <Card style={{ background: "var(--pink)" }}>
               {reactive.map((p) => (
                 <div key={p.id} style={{ display: "flex", gap: "var(--s-2)", alignItems: "center" }}>
                   <Badge status="warn">{p.is_reactive ? "Reactive" : "Escape risk"}</Badge>
@@ -313,14 +313,14 @@ function WalkModeInner({ walkId }: { walkId: string }) {
           <span className="numeral" style={{ fontSize: "var(--fs-44)", fontWeight: 700 }}>
             {walk.started_at ? elapsed(walk.started_at, now) : "00:00"}
           </span>
-          <span className="numeral" style={{ fontSize: "var(--fs-32)", color: "var(--teal-live)" }}>
+          <span className="numeral" style={{ fontSize: "var(--fs-32)", color: "var(--sky-mid)" }}>
             {distanceKm(distance)}
           </span>
         </div>
 
         <MapView points={geo.points} live />
         {geo.error && (
-          <p style={{ color: "var(--warn)", fontSize: "var(--fs-14)" }}>
+          <p style={{ color: "var(--orange-deep)", fontSize: "var(--fs-14)", fontWeight: 800 }}>
             GPS: {geo.error} {geo.permission === "denied" ? "— enable location access to record the route." : ""}
           </p>
         )}

@@ -22,7 +22,7 @@ export function LiveWalkBanner({
     <Link to={`/walks/${walkId}/live`} style={{ textDecoration: "none" }}>
       <div className="live-banner">
         <span className="pulse-live" aria-hidden />
-        <span style={{ fontWeight: 600 }}>{label}</span>
+        <span style={{ fontWeight: 800 }}>{label}</span>
         <span className="live-banner__timer numeral">{elapsed(startedAt, now)}</span>
       </div>
     </Link>

@@ -29,7 +29,7 @@ export function CreditMeter({
         <div className="credit-meter__fill" style={{ width: `${pct}%` }} />
       </div>
       {low && (
-        <span style={{ fontSize: "var(--fs-12)", color: "var(--warn)", fontWeight: 600 }}>
+        <span style={{ fontSize: "var(--fs-12)", color: "var(--orange-deep)", fontWeight: 800 }}>
           Low balance — {balance} left
         </span>
       )}

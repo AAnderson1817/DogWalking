@@ -90,7 +90,7 @@ export function ScheduleTab({ clientId }: { clientId: string }) {
                   {s.window_start.slice(0, 5)}–{s.window_end.slice(0, 5)} · {serviceName(s.service_type_id)} · {propertyLabel(s.property_id)}
                 </div>
                 {s.paused_from && (
-                  <div style={{ fontSize: "var(--fs-12)", color: "var(--warn)", marginTop: "var(--s-1)" }}>
+                  <div style={{ fontSize: "var(--fs-12)", color: "var(--orange-deep)", marginTop: "var(--s-1)", fontWeight: 800 }}>
                     Paused {s.paused_from} → {s.paused_until ?? "indefinitely"}
                   </div>
                 )}

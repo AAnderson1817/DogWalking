@@ -7,6 +7,7 @@ import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
 import { Input, Textarea } from "@/components/fields";
+import { PetFace } from "@/components/PetAvatar";
 import { Sheet } from "@/components/Sheet";
 import { Spinner } from "@/components/Spinner";
 import {
@@ -78,8 +79,8 @@ export default function PetProfiles() {
                   style={{ width: 56, height: 56, borderRadius: "var(--r-full)", objectFit: "cover" }}
                 />
               ) : (
-                <span className="pet-avatar" style={{ width: 56, height: 56, fontSize: "var(--fs-20)" }}>
-                  {pet.name.charAt(0)}
+                <span className="pet-avatar" style={{ width: 56, height: 56 }}>
+                  <PetFace name={pet.name} size={56} />
                 </span>
               )}
               <div>

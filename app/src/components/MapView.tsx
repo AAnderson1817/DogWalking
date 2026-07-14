@@ -39,8 +39,8 @@ export function SvgMap({ points, live }: MapViewProps) {
           <path
             d={toSvgPath(fitted)}
             fill="none"
-            stroke="var(--pine-600)"
-            strokeWidth={3}
+            stroke="var(--sky-bright)"
+            strokeWidth={4}
             strokeLinecap="round"
             strokeLinejoin="round"
           />
@@ -108,7 +108,7 @@ function MapboxMap({ points, live }: MapViewProps) {
           id: "route",
           type: "line",
           source: "route",
-          paint: { "line-color": "#256052", "line-width": 4 },
+          paint: { "line-color": "#38BDF8", "line-width": 4 },
         });
       }
       const last = points[points.length - 1]!;

@@ -13,8 +13,8 @@ const SHELL_URLS = [
   "/manifest.webmanifest",
   "/icons/icon-192.png",
   "/icons/icon-512.png",
-  "/fonts/inter-var.woff2",
-  "/fonts/space-grotesk-var.woff2",
+  "/fonts/nunito-var.woff2",
+  "/fonts/baloo-2-var.woff2",
 ];
 
 self.addEventListener("install", (event) => {

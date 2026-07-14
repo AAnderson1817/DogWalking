@@ -30,7 +30,7 @@ Authoritative specs live in `docs/spec/`. Build plan in `docs/phases/00–08`. S
 ## Conventions
 - TS strict; named exports for lib/components; default export only for route screens.
 - Money = integer pence. Dates stored UTC (`timestamptz`), rendered Europe/London via `lib/format.ts`.
-- Styling: CSS custom properties from `docs/spec/05-design-system.md` (Trailhead theme). No Tailwind.
+- Styling: CSS custom properties from `docs/spec/05-design-system.md` (v2 "Biscuit" theme — cream/orange neo-brutalist, from the Claude Design mock). No Tailwind.
 - Commit format: `phase(NN): summary`.
 
 ## Workflow

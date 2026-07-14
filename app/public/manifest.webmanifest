@@ -4,8 +4,8 @@
   "description": "Dog-walking operations: schedules, live GPS walks, report cards, credits.",
   "start_url": "/",
   "display": "standalone",
-  "theme_color": "#0E2A23",
-  "background_color": "#F6F4EE",
+  "theme_color": "#FFF6E9",
+  "background_color": "#FFF6E9",
   "icons": [
     {
       "src": "/icons/icon-192.png",

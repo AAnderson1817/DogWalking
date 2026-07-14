@@ -5,16 +5,16 @@
 
 /* ── self-hosted fonts ─────────────────────────────────────────────────── */
 @font-face {
-  font-family: "Inter";
-  src: url("/fonts/inter-var.woff2") format("woff2");
-  font-weight: 100 900;
+  font-family: "Nunito";
+  src: url("/fonts/nunito-var.woff2") format("woff2");
+  font-weight: 200 1000;
   font-style: normal;
   font-display: swap;
 }
 @font-face {
-  font-family: "Space Grotesk";
-  src: url("/fonts/space-grotesk-var.woff2") format("woff2");
-  font-weight: 300 700;
+  font-family: "Baloo 2";
+  src: url("/fonts/baloo-2-var.woff2") format("woff2");
+  font-weight: 400 800;
   font-style: normal;
   font-display: swap;
 }
@@ -28,6 +28,7 @@ body {
   color: var(--text);
   font-family: var(--font-body);
   font-size: var(--fs-16);
+  font-weight: 600; /* Nunito reads thin below 600; the v2 mock's body floor */
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   min-height: 100dvh;
@@ -48,18 +49,20 @@ a { color: inherit; }
   flex: 1;
 }
 
-/* ── type rules (spec 05) ──────────────────────────────────────────────── */
+/* ── type rules (spec 05 v2) ───────────────────────────────────────────── */
 h1, h2, h3, .display {
   font-family: var(--font-display);
   font-feature-settings: "tnum";
+  font-weight: 800;
+  line-height: 1.15;
 }
-h1 { font-size: var(--fs-24); font-weight: 600; }
+h1 { font-size: var(--fs-24); }
 .section-label {
   font-size: var(--fs-12);
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--text-2);
-  font-weight: 600;
+  color: var(--ink-500);
+  font-weight: 900;
 }
 .numeral {
   font-family: var(--font-display);
@@ -67,12 +70,12 @@ h1 { font-size: var(--fs-24); font-weight: 600; }
 }
 .walkmode .numeral { font-size: var(--fs-32); }
 
-/* ── signature: pulse-live (spec 05) ───────────────────────────────────── */
-@keyframes pulse-live { 0%{box-shadow:0 0 0 0 rgb(45 212 191/.45)} 70%{box-shadow:0 0 0 12px rgb(45 212 191/0)} 100%{box-shadow:0 0 0 0 rgb(45 212 191/0)} }
-.pulse-live { width:10px;height:10px;border-radius:var(--r-full);background:var(--teal-live);animation:pulse-live 2s infinite; }
+/* ── signature: pulse-live (spec 05 v2, sky) ───────────────────────────── */
+@keyframes pulse-live { 0%{box-shadow:0 0 0 0 rgb(56 189 248/.55)} 70%{box-shadow:0 0 0 12px rgb(56 189 248/0)} 100%{box-shadow:0 0 0 0 rgb(56 189 248/0)} }
+.pulse-live { width:10px;height:10px;border-radius:var(--r-full);background:var(--sky-bright);border:2px solid var(--line);animation:pulse-live 2s infinite; }
 
 @media (prefers-reduced-motion: reduce) {
-  .pulse-live { animation: none; box-shadow: 0 0 0 3px rgb(45 212 191 / 0.25); }
+  .pulse-live { animation: none; box-shadow: 0 0 0 3px rgb(56 189 248 / 0.3); }
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
@@ -80,5 +83,5 @@ h1 { font-size: var(--fs-24); font-weight: 600; }
   }
 }
 
-/* ── walk mode: night-walk surface ─────────────────────────────────────── */
+/* ── walk mode: v2 day surface (mock 2b) ───────────────────────────────── */
 .walkmode { background: var(--bg); color: var(--text); }
