@@ -89,8 +89,18 @@ export default function ClaimInvite() {
     setError(null);
     try {
       await claimInvite(token);
-      await auth.refreshRole();
-      navigate("/portal", { replace: true });
+      // Branch on the freshly resolved role instead of navigating blindly:
+      // a silent bounce off /portal would land the client on the operator
+      // onboarding form (same failure family as the Onboard fix).
+      const role = await auth.refreshRole();
+      if (role === "client") {
+        navigate("/portal", { replace: true });
+      } else {
+        setError(
+          "Invite accepted, but your portal access could not be confirmed. " +
+            "Reload this page to continue.",
+        );
+      }
     } catch (err) {
       setDeadEndReason(
         err instanceof Error && err.message.includes("claim")
@@ -163,6 +173,11 @@ export default function ClaimInvite() {
                   {busy ? <Spinner /> : "Accept invite"}
                 </Button>
               </div>
+              {error && (
+                <span className="field__error" style={{ display: "block", marginTop: "var(--s-2)" }}>
+                  {error}
+                </span>
+              )}
             </div>
           </Card>
         )}

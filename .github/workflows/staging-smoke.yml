@@ -119,3 +119,70 @@ jobs:
           echo "SELECT service_types (seed trigger) -> HTTP $vcode"; cat "$svc"; echo
 
           [ "$icode" = "201" ] && [ "$scode" = "200" ] && grep -q "$uid" "$sel"
+
+      - name: Replay invite-claim flow (fixture operator + client)
+        run: |
+          base="https://${{ secrets.SUPABASE_PROJECT_REF }}.supabase.co"
+          op_email="diag-claim-op@pawtrail.dev"; cl_email="diag-claim-client@pawtrail.dev"
+          pass="Diag-$(date +%s)-pw"
+          admin() { curl -sS -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY" "$@"; }
+
+          user_id_for() {
+            admin "$base/auth/v1/admin/users?page=1&per_page=100" \
+              | jq -r --arg e "$1" '.users[]? | select(.email==$e) | .id' | head -1
+          }
+          cleanup() {
+            [ -n "$2" ] && admin -X DELETE "$base/rest/v1/clients?id=eq.$2" >/dev/null || true
+            if [ -n "$1" ]; then
+              admin -X DELETE "$base/rest/v1/service_types?operator_id=eq.$1" >/dev/null || true
+              admin -X DELETE "$base/rest/v1/operators?id=eq.$1" >/dev/null || true
+              admin -X DELETE "$base/auth/v1/admin/users/$1" >/dev/null || true
+            fi
+            [ -n "$3" ] && admin -X DELETE "$base/auth/v1/admin/users/$3" >/dev/null || true
+            return 0
+          }
+          # leftovers from a previous run
+          old_op=$(user_id_for "$op_email"); old_cl=$(user_id_for "$cl_email")
+          old_client_row=$(admin "$base/rest/v1/clients?select=id&operator_id=eq.${old_op:-00000000-0000-4000-8000-000000000000}" | jq -r '.[0].id // empty')
+          cleanup "$old_op" "$old_client_row" "$old_cl"
+
+          op_uid=$(admin -X POST "$base/auth/v1/admin/users" -H "Content-Type: application/json" \
+            -d "{\"email\":\"$op_email\",\"password\":\"$pass\",\"email_confirm\":true}" | jq -r '.id')
+          [ -n "$op_uid" ] && [ "$op_uid" != "null" ] || { echo "FAIL: fixture operator user"; exit 1; }
+          client_row=""; cl_uid=""
+          trap 'cleanup "$op_uid" "$client_row" "$cl_uid"' EXIT
+
+          admin -X POST "$base/rest/v1/operators" -H "Content-Type: application/json" \
+            -d "{\"id\":\"$op_uid\",\"business_name\":\"Diag Claim Walks\",\"display_name\":\"Diag\",\"email\":\"$op_email\"}" >/dev/null
+
+          created=$(admin -X POST "$base/rest/v1/clients" -H "Content-Type: application/json" \
+            -H "Prefer: return=representation" \
+            -d "{\"operator_id\":\"$op_uid\",\"full_name\":\"Diag Client\",\"email\":\"$cl_email\"}")
+          client_row=$(echo "$created" | jq -r '.[0].id // empty')
+          invite=$(echo "$created" | jq -r '.[0].invite_token // empty')
+          [ -n "$invite" ] || { echo "FAIL: no invite token: $created"; exit 1; }
+
+          cl_uid=$(admin -X POST "$base/auth/v1/admin/users" -H "Content-Type: application/json" \
+            -d "{\"email\":\"$cl_email\",\"password\":\"$pass\",\"email_confirm\":true}" | jq -r '.id')
+          tok=$(curl -sS -X POST "$base/auth/v1/token?grant_type=password" \
+            -H "apikey: $ANON_KEY" -H "Content-Type: application/json" \
+            -d "{\"email\":\"$cl_email\",\"password\":\"$pass\"}" | jq -r '.access_token')
+          [ -n "$tok" ] && [ "$tok" != "null" ] || { echo "FAIL: client sign-in"; exit 1; }
+          echo "::add-mask::$tok"
+          as_client() { curl -sS -H "apikey: $ANON_KEY" -H "Authorization: Bearer $tok" "$@"; }
+
+          prev=$(mktemp); pcode=$(as_client -o "$prev" -w '%{http_code}' -X POST \
+            "$base/rest/v1/rpc/fn_preview_invite" -H "Content-Type: application/json" \
+            -d "{\"p_token\":\"$invite\"}")
+          echo "fn_preview_invite -> HTTP $pcode"; cat "$prev"; echo
+
+          clm=$(mktemp); ccode=$(as_client -o "$clm" -w '%{http_code}' -X POST \
+            "$base/rest/v1/rpc/fn_claim_invite" -H "Content-Type: application/json" \
+            -d "{\"p_token\":\"$invite\"}")
+          echo "fn_claim_invite -> HTTP $ccode"; cat "$clm"; echo
+
+          sel=$(mktemp); scode=$(as_client -o "$sel" -w '%{http_code}' \
+            "$base/rest/v1/clients?select=id,status&auth_user_id=eq.$cl_uid")
+          echo "SELECT clients (role resolution) -> HTTP $scode"; cat "$sel"; echo
+
+          [ "$pcode" = "200" ] && [ "$ccode" -lt 300 ] && [ "$scode" = "200" ] && grep -q "$client_row" "$sel"
