@@ -72,7 +72,13 @@ anywhere else; rotating it later makes existing vault blobs unreadable
 2. Post-deploy dashboard wiring (one-time):
    - **Cron**: Integrations → Cron → New job → schedule `0 3 * * *` →
      type "Supabase Edge Function" → `materialize-walks` (this also runs
-     the daily credit-expiry sweep).
+     the daily credit-expiry sweep). Method POST, timeout `8000` ms (cold
+     starts exceed the 1000 default), one HTTP header:
+     `Authorization` = `Bearer <service_role key>` (Settings → API).
+     Cron marks a run "successful" once the HTTP call is *dispatched* —
+     verify the actual response in SQL Editor:
+     `select status_code, content::text from net._http_response order by id desc limit 3;`
+     — expect `200` and `{"ok":true,...}`.
    - **Email webhook** (only when Resend is configured): Database →
      Webhooks → new webhook on `notifications` INSERT → Edge Function
      `send-notification`, auth header with the service role key.

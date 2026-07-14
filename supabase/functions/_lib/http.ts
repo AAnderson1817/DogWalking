@@ -40,6 +40,43 @@ export async function readJson<T>(req: Request): Promise<T> {
   }
 }
 
+/**
+ * True when the Authorization header carries the service-role key (cron
+ * jobs, DB webhooks). Two accepted shapes:
+ *   1. exact match against the platform-injected key (covers the new
+ *      `sb_secret_…` API keys, which are not JWTs), or
+ *   2. a bearer JWT whose `role` claim is `service_role`.
+ * Shape 2 does NOT verify the signature itself — that is safe only because
+ * every function using this helper deploys with verify_jwt enabled, so the
+ * platform gateway rejects forged tokens before they reach us. Never pair
+ * this helper with verify_jwt=false. The claim fallback exists because the
+ * dashboard-displayed key and the injected env can legitimately differ
+ * (API-key migration, JWT secret rotation), which made exact-match-only
+ * auth return spurious 401s to scheduled invocations.
+ */
+export function isServiceAuth(authHeader: string | null, injectedKey: string): boolean {
+  const header = authHeader ?? "";
+  if (!header.startsWith("Bearer ")) return false;
+  const token = header.slice(7).trim();
+  if (token.length === 0) return false;
+  if (injectedKey.length > 0 && token === injectedKey) return true;
+  return jwtClaimRole(token) === "service_role";
+}
+
+/** Unverified read of a JWT payload's `role` claim; null on any malformation. */
+function jwtClaimRole(token: string): string | null {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const b64 = parts[1].replaceAll("-", "+").replaceAll("_", "/");
+    const padded = b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), "=");
+    const claims = JSON.parse(atob(padded)) as { role?: unknown };
+    return typeof claims.role === "string" ? claims.role : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Verified JWT user from the Authorization header. */
 export async function requireUser(req: Request): Promise<{ id: string; email?: string }> {
   const auth = req.headers.get("Authorization") ?? "";

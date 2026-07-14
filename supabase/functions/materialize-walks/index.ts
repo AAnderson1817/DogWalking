@@ -2,15 +2,17 @@
 // POST with an operator JWT for a manual run (spec 04). The generation
 // itself is fn_materialize_walks (0007): set-based, idempotent via the
 // (schedule_id, scheduled_date) unique index.
-import { jsonOk, requireOperator, serveFunction, HttpError } from "../_lib/http.ts";
+import { isServiceAuth, jsonOk, requireOperator, serveFunction, HttpError } from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
 
 serveFunction(async (req) => {
-  // Cron/scheduled invocations authenticate with the service-role key;
-  // interactive runs must be an operator.
-  const auth = req.headers.get("Authorization") ?? "";
-  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
-  const isService = serviceKey.length > 0 && auth === `Bearer ${serviceKey}`;
+  // Cron/scheduled invocations authenticate with the service-role key
+  // (gateway-verified — verify_jwt stays on in config.toml); interactive
+  // runs must be an operator.
+  const isService = isServiceAuth(
+    req.headers.get("Authorization"),
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
+  );
   if (!isService) {
     await requireOperator(req);
   }

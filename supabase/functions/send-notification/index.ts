@@ -1,7 +1,7 @@
 // send-notification — POST (service key via DB webhook, or operator JWT).
 // Emails client-facing notifications through Resend; env-gated on
 // RESEND_API_KEY and silently skipped when absent (phase 08).
-import { jsonOk, readJson, requireOperator, serveFunction, HttpError } from "../_lib/http.ts";
+import { isServiceAuth, jsonOk, readJson, requireOperator, serveFunction, HttpError } from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
 
 const CLIENT_FACING = new Set([
@@ -20,9 +20,10 @@ interface Body {
 }
 
 serveFunction(async (req) => {
-  const auth = req.headers.get("Authorization") ?? "";
-  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
-  const isService = serviceKey.length > 0 && auth === `Bearer ${serviceKey}`;
+  const isService = isServiceAuth(
+    req.headers.get("Authorization"),
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
+  );
   if (!isService) await requireOperator(req);
 
   const body = await readJson<Body>(req);
