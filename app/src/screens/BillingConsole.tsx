@@ -17,7 +17,7 @@ import {
   listPayments,
   listPlans,
 } from "@/lib/api";
-import { dateLondon, gbp } from "@/lib/format";
+import { dateLondon, money } from "@/lib/format";
 import type { Clients, Payments, Plans } from "@/lib/types";
 
 export default function BillingConsole() {
@@ -64,7 +64,7 @@ export default function BillingConsole() {
       const { payment: result } = await chargeOverage(payment.walk_id);
       setNotice(
         result.status === "succeeded"
-          ? `Recovered ${gbp(result.amount_pence)} from ${clientName(payment.client_id)}.`
+          ? `Recovered ${money(result.amount_pence)} from ${clientName(payment.client_id)}.`
           : `Charge attempt is ${result.status}.`,
       );
       await load();
@@ -147,7 +147,7 @@ export default function BillingConsole() {
                   </div>
                 </div>
                 <div style={{ display: "flex", gap: "var(--s-2)", alignItems: "center" }}>
-                  <span className="numeral" style={{ fontWeight: 600 }}>{gbp(p.amount_pence)}</span>
+                  <span className="numeral" style={{ fontWeight: 600 }}>{money(p.amount_pence)}</span>
                   <Button
                     variant="accent"
                     onClick={() => void recharge(p)}
@@ -214,7 +214,7 @@ function PlanChangeSheet({
         <Select label="New plan" value={planId} onChange={(e) => setPlanId(e.target.value)}>
           {options.map((p) => (
             <option key={p.id} value={p.id}>
-              {p.name} — {gbp(p.price_pence)}/{p.cycle}, {p.credits_per_cycle} credits
+              {p.name} — {money(p.price_pence)}/{p.cycle}, {p.credits_per_cycle} credits
             </option>
           ))}
         </Select>

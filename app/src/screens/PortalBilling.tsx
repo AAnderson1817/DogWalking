@@ -14,7 +14,7 @@ import {
   listPayments,
 } from "@/lib/api";
 import { formatLedgerEntry } from "@/lib/credits";
-import { dateLondon, gbp } from "@/lib/format";
+import { dateLondon, money } from "@/lib/format";
 import type { Clients, CreditLedger, Payments, Plans } from "@/lib/types";
 
 export default function PortalBilling() {
@@ -74,10 +74,10 @@ export default function PortalBilling() {
           <div style={{ marginTop: "var(--s-2)" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
               <span style={{ fontWeight: 600 }}>{plan.name}</span>
-              <span className="numeral" style={{ fontWeight: 600 }}>{gbp(plan.price_pence)}/{plan.cycle}</span>
+              <span className="numeral" style={{ fontWeight: 600 }}>{money(plan.price_pence)}/{plan.cycle}</span>
             </div>
             <div style={{ color: "var(--text-2)", fontSize: "var(--fs-14)", marginTop: "var(--s-1)" }}>
-              {plan.credits_per_cycle} credits per cycle · extra walks {gbp(plan.overage_rate_pence)}
+              {plan.credits_per_cycle} credits per cycle · extra walks {money(plan.overage_rate_pence)}
             </div>
             <div style={{ marginTop: "var(--s-2)", display: "flex", gap: "var(--s-2)", alignItems: "center" }}>
               <Badge status={client.subscription_status === "active" ? "completed" : "warn"}>
@@ -155,7 +155,7 @@ export default function PortalBilling() {
                   <div style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>{dateLondon(p.created_at)}</div>
                 </div>
                 <div style={{ display: "flex", gap: "var(--s-2)", alignItems: "center" }}>
-                  <span className="numeral" style={{ fontWeight: 600 }}>{gbp(p.amount_pence)}</span>
+                  <span className="numeral" style={{ fontWeight: 600 }}>{money(p.amount_pence)}</span>
                   <Badge status={p.status === "succeeded" ? "completed" : p.status === "failed" ? "warn" : "neutral"}>
                     {p.status}
                   </Badge>

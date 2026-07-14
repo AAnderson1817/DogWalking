@@ -50,7 +50,7 @@ anywhere else; rotating it later makes existing vault blobs unreadable
 
 1. Stripe dashboard, toggle **Test mode**.
 2. Product catalogue → create one Product per plan with a recurring Price
-   (GBP, weekly/monthly to match). Note each `price_…` id.
+   (USD, weekly/monthly to match). Note each `price_…` id.
 3. Developers → Webhooks → Add endpoint:
    `https://<PROJECT_REF>.supabase.co/functions/v1/stripe-webhook`
    with events: `checkout.session.completed`, `invoice.paid`,

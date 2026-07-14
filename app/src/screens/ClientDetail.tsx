@@ -34,7 +34,7 @@ import {
 import { useAuth } from "@/lib/auth-context";
 import { compressImage } from "@/lib/image";
 import { formatLedgerEntry } from "@/lib/credits";
-import { dateLondon, gbp } from "@/lib/format";
+import { dateLondon, money } from "@/lib/format";
 import type { Clients, CreditLedger, Operators, Pets, Plans, Properties } from "@/lib/types";
 
 type Tab = "pets" | "plan" | "walks" | "schedule" | "access";
@@ -403,10 +403,10 @@ function PlanTab({
           <div style={{ marginTop: "var(--s-2)" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
               <span style={{ fontWeight: 600 }}>{plan.name}</span>
-              <span className="numeral" style={{ fontWeight: 600 }}>{gbp(plan.price_pence)}/{plan.cycle}</span>
+              <span className="numeral" style={{ fontWeight: 600 }}>{money(plan.price_pence)}/{plan.cycle}</span>
             </div>
             <div style={{ color: "var(--text-2)", fontSize: "var(--fs-14)", marginTop: "var(--s-1)" }}>
-              {plan.credits_per_cycle} credits per cycle · overage {gbp(plan.overage_rate_pence)} ·{" "}
+              {plan.credits_per_cycle} credits per cycle · overage {money(plan.overage_rate_pence)} ·{" "}
               rollover {plan.rollover_policy}
               {plan.rollover_policy === "capped" ? ` (cap ${plan.rollover_cap})` : ""}
             </div>
@@ -425,7 +425,7 @@ function PlanTab({
             <Select label="Subscribe to" value={checkoutPlan} onChange={(e) => setCheckoutPlan(e.target.value)}>
               {plans.filter((p) => p.active).map((p) => (
                 <option key={p.id} value={p.id}>
-                  {p.name} — {gbp(p.price_pence)}/{p.cycle}
+                  {p.name} — {money(p.price_pence)}/{p.cycle}
                 </option>
               ))}
             </Select>

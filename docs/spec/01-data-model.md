@@ -17,7 +17,7 @@ All `id` columns `uuid default gen_random_uuid() primary key` unless noted. All 
 
 ## Tables (migration 0002)
 
-**operators** — `id` = `auth.users.id` (no default). `business_name`, `display_name`, `email`, `phone`, `timezone text default 'Europe/London'`, `currency char(3) default 'GBP'`, `low_credit_threshold int default 2`.
+**operators** — `id` = `auth.users.id` (no default). `business_name`, `display_name`, `email`, `phone`, `timezone text default 'Europe/London'`, `currency char(3) default 'USD (integer cents; *_pence column names are historical)'`, `low_credit_threshold int default 2`.
 Insert trigger seeds default service types (below).
 
 **clients** — `operator_id`, `auth_user_id uuid null unique` (linked on invite claim), `full_name`, `email`, `phone`, `status client_status default 'invited'`, `notes text`, `invite_token uuid default gen_random_uuid() unique`, `stripe_customer_id text`, `plan_id uuid null references plans`, `subscription_status subscription_status default 'none'`, `stripe_subscription_id text`, `credit_balance int not null default 0 check (credit_balance >= 0)` ← denormalized, definer-only write (spec 03).
@@ -46,7 +46,7 @@ Insert trigger seeds default service types (below).
 
 **credit_ledger** — `operator_id`, `client_id`, `entry_type ledger_entry_type`, `amount int not null check (amount <> 0)` (signed: grants/rollover +, debit/expiry −, adjust ±), `balance_after int not null`, `walk_id uuid null`, `expires_at timestamptz null` (rollover lots), `note text`. Append-only; insert path is definer-only (spec 02/03). Index `(client_id, created_at desc)`.
 
-**payments** — `operator_id`, `client_id`, `walk_id uuid null`, `type payment_type`, `amount_pence int`, `currency char(3) default 'GBP'`, `stripe_payment_intent_id text`, `stripe_invoice_id text`, `status payment_status`, `receipt_url text`.
+**payments** — `operator_id`, `client_id`, `walk_id uuid null`, `type payment_type`, `amount_pence int`, `currency char(3) default 'USD (integer cents; *_pence column names are historical)'`, `stripe_payment_intent_id text`, `stripe_invoice_id text`, `status payment_status`, `receipt_url text`.
 
 **notifications** — `operator_id`, `client_id uuid null` (null ⇒ operator-facing), `type notification_type`, `title text`, `body text`, `walk_id uuid null`, `read_at timestamptz null`.
 

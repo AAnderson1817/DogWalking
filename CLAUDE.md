@@ -1,6 +1,6 @@
 # PawTrail — solo-first dog-walking operations SaaS
 
-React PWA (Vite 5, React 18, TS strict, react-router-dom 6) + Supabase (Postgres 16, Auth, RLS, Realtime, Storage) + Deno edge functions + Stripe Billing + Mapbox (SVG fallback). Currency GBP (pence integers). Timezone Europe/London (UTC in DB).
+React PWA (Vite 5, React 18, TS strict, react-router-dom 6) + Supabase (Postgres 16, Auth, RLS, Realtime, Storage) + Deno edge functions + Stripe Billing + Mapbox (SVG fallback). Currency USD (integer cents — the *_pence column names are historical and hold cents). Timezone Europe/London (UTC in DB).
 
 Authoritative specs live in `docs/spec/`. Build plan in `docs/phases/00–08`. Specs win over improvisation; if a spec is ambiguous, ask before deviating.
 
@@ -29,7 +29,7 @@ Authoritative specs live in `docs/spec/`. Build plan in `docs/phases/00–08`. S
 
 ## Conventions
 - TS strict; named exports for lib/components; default export only for route screens.
-- Money = integer pence. Dates stored UTC (`timestamptz`), rendered Europe/London via `lib/format.ts`.
+- Money = integer minor units (cents; *_pence columns kept their names). Dates stored UTC (`timestamptz`), rendered Europe/London via `lib/format.ts`.
 - Styling: CSS custom properties from `docs/spec/05-design-system.md` (v2 "Biscuit" theme — cream/orange neo-brutalist, from the Claude Design mock). No Tailwind.
 - Commit format: `phase(NN): summary`.
 

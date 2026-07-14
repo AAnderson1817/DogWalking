@@ -28,7 +28,7 @@ import { useGeolocation } from "@/hooks/useGeolocation";
 import { useOnline } from "@/hooks/useOnline";
 import { useWalkChannel } from "@/hooks/useWalkChannel";
 import { pathDistanceM } from "@/lib/geo";
-import { distanceKm, elapsed, gbp } from "@/lib/format";
+import { distanceKm, elapsed, money } from "@/lib/format";
 import { compressImage } from "@/lib/image";
 import type { Pets, Walks } from "@/lib/types";
 
@@ -213,7 +213,7 @@ function WalkModeInner({ walkId }: { walkId: string }) {
           <div style={{ fontWeight: 700, fontSize: "var(--fs-20)" }} className="display">
             {billing.outcome === "debited"
               ? `Debited ${billing.cost_credits} credit${billing.cost_credits === 1 ? "" : "s"}`
-              : `Overage — ${billing.charged_pence != null ? gbp(billing.charged_pence) : "charge pending"}`}
+              : `Overage — ${billing.charged_pence != null ? money(billing.charged_pence) : "charge pending"}`}
           </div>
           <div style={{ fontSize: "var(--fs-14)", marginTop: "var(--s-1)", opacity: 0.85 }}>
             {billing.outcome === "debited"

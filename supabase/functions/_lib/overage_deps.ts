@@ -64,7 +64,7 @@ export function makeOverageDeps(db: SupabaseClient, stripe: Stripe): OverageDeps
 
       const pi = await stripe.paymentIntents.create({
         amount: amountPence,
-        currency: "gbp",
+        currency: "usd",
         customer: customerId,
         payment_method: paymentMethod,
         off_session: true,

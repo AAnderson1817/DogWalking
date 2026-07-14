@@ -1,15 +1,15 @@
-// Display formatting (spec 06). Money is integer pence; all display times
+// Display formatting (spec 06). Money is integer cents (USD); all display times
 // are Europe/London regardless of the device timezone (UTC in the DB).
 
 const LONDON = "Europe/London";
 
-/** 12345 → "£123.45" */
-export function gbp(pence: number): string {
-  const sign = pence < 0 ? "-" : "";
-  const abs = Math.abs(pence);
-  const pounds = Math.floor(abs / 100);
+/** 12345 → "$123.45" (integer cents; *_pence columns hold cents since the USD switch) */
+export function money(cents: number): string {
+  const sign = cents < 0 ? "-" : "";
+  const abs = Math.abs(cents);
+  const dollars = Math.floor(abs / 100);
   const rem = String(abs % 100).padStart(2, "0");
-  return `${sign}£${pounds.toLocaleString("en-GB")}.${rem}`;
+  return `${sign}$${dollars.toLocaleString("en-US")}.${rem}`;
 }
 
 /** "2026-07-05T11:30:00Z" → "5 Jul 2026" (London calendar date). */

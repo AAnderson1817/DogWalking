@@ -20,7 +20,7 @@ import {
   type WalkDetailed,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { dateLondon, gbp } from "@/lib/format";
+import { dateLondon, money } from "@/lib/format";
 import {
   failedPayments,
   liveWalk,
@@ -176,7 +176,7 @@ export default function Dashboard() {
                   </span>
                 </div>
                 <div style={{ display: "flex", gap: "var(--s-2)", alignItems: "center" }}>
-                  <span className="numeral" style={{ fontWeight: 600 }}>{gbp(p.amount_pence)}</span>
+                  <span className="numeral" style={{ fontWeight: 600 }}>{money(p.amount_pence)}</span>
                   <Badge status="warn">failed</Badge>
                 </div>
               </Card>

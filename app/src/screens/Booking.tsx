@@ -27,7 +27,7 @@ import {
   type WalkDetailed,
 } from "@/lib/api";
 import { effectiveWalkCost } from "@/lib/credits";
-import { gbp, walkTime } from "@/lib/format";
+import { money, walkTime } from "@/lib/format";
 import { todayLondon } from "@/lib/selectors";
 import type { Clients, Pets, Plans, Properties, ServiceTypes } from "@/lib/types";
 
@@ -198,7 +198,7 @@ export default function Booking() {
                 <div style={{ marginTop: "var(--s-2)" }}>
                   <p style={{ fontSize: "var(--fs-14)", fontWeight: 600 }}>
                     Not enough credits — this walk will be charged in full
-                    {overagePence != null ? ` at ${gbp(overagePence)}` : " at your plan's overage rate"}
+                    {overagePence != null ? ` at ${money(overagePence)}` : " at your plan's overage rate"}
                     to your card after completion.
                   </p>
                   <label style={{ display: "flex", gap: "var(--s-2)", alignItems: "center", marginTop: "var(--s-2)" }}>
@@ -207,7 +207,7 @@ export default function Booking() {
                       checked={confirmOverage}
                       onChange={(e) => setConfirmOverage(e.target.checked)}
                     />
-                    I understand{overagePence != null ? ` — charge ${gbp(overagePence)}` : ""}
+                    I understand{overagePence != null ? ` — charge ${money(overagePence)}` : ""}
                   </label>
                 </div>
               )}

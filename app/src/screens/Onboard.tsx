@@ -1,5 +1,5 @@
 // Onboard (phase 04): first-run operator setup. Creates the operators row
-// (defaults GBP / Europe/London / threshold 2 come from the schema) and
+// (defaults USD / Europe/London / threshold 2 come from the schema) and
 // lands on the Dashboard. Skips straight through if a persona exists.
 import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
@@ -96,13 +96,13 @@ export default function Onboard() {
           <Input
             label="Phone (optional)"
             type="tel"
-            placeholder="+44 7700 900000"
+            placeholder="+1 (555) 019-2830"
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
           />
           {error && <span className="field__error">{error}</span>}
           <p style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>
-            Currency GBP · timezone Europe/London · low-credit alerts at 2 —
+            Currency USD · timezone Europe/London · low-credit alerts at 2 —
             adjustable later.
           </p>
           <Button type="submit" full disabled={busy || !businessName.trim() || !displayName.trim()}>

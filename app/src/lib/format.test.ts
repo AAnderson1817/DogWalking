@@ -1,20 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { dateLondon, distanceKm, elapsed, gbp, timeLondon, walkTime } from "./format";
+import { dateLondon, distanceKm, elapsed, money, timeLondon, walkTime } from "./format";
 
-describe("gbp", () => {
+describe("money", () => {
   it("formats pence as pounds", () => {
-    expect(gbp(12345)).toBe("£123.45");
+    expect(money(12345)).toBe("$123.45");
   });
   it("pads sub-pound amounts", () => {
-    expect(gbp(5)).toBe("£0.05");
-    expect(gbp(100)).toBe("£1.00");
+    expect(money(5)).toBe("$0.05");
+    expect(money(100)).toBe("$1.00");
   });
   it("handles zero and negatives", () => {
-    expect(gbp(0)).toBe("£0.00");
-    expect(gbp(-2200)).toBe("-£22.00");
+    expect(money(0)).toBe("$0.00");
+    expect(money(-2200)).toBe("-$22.00");
   });
   it("groups thousands", () => {
-    expect(gbp(123456789)).toBe("£1,234,567.89");
+    expect(money(123456789)).toBe("$1,234,567.89");
   });
 });
 
