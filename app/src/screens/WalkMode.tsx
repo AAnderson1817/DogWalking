@@ -67,6 +67,13 @@ function WalkModeInner({ walkId }: { walkId: string }) {
         setWalk(w);
         setPets(await listWalkPets(walkId));
         setNotes(w.notes ?? "");
+        // Resuming an in-progress walk after a reload: seed the route and
+        // distance baseline from points already saved, so the report doesn't
+        // silently lose everything walked before the reload.
+        if (w.status === "in_progress") {
+          const points = await listWalkGpsPoints(walkId);
+          setResumedPoints(points.map((p) => ({ lat: p.lat, lng: p.lng })));
+        }
         // Re-entering a completed walk: show its report.
         if (w.status === "completed") {
           const [photos, points] = await Promise.all([
@@ -89,6 +96,9 @@ function WalkModeInner({ walkId }: { walkId: string }) {
   }, [walkId]);
 
   const [staticPoints, setStaticPoints] = useState<Array<{ lat: number; lng: number }>>([]);
+  // Points saved before a mid-walk reload; prepended to live points for the
+  // distance total and the route map.
+  const [resumedPoints, setResumedPoints] = useState<Array<{ lat: number; lng: number }>>([]);
 
   // Broadcast every newly emitted point.
   useEffect(() => {
@@ -117,7 +127,11 @@ function WalkModeInner({ walkId }: { walkId: string }) {
     return () => window.removeEventListener("beforeunload", guard);
   }, [active]);
 
-  const distance = useMemo(() => pathDistanceM(geo.points), [geo.points]);
+  const routePoints = useMemo(
+    () => [...resumedPoints, ...geo.points],
+    [resumedPoints, geo.points],
+  );
+  const distance = useMemo(() => pathDistanceM(routePoints), [routePoints]);
 
   async function start() {
     setBusy(true);
@@ -318,7 +332,7 @@ function WalkModeInner({ walkId }: { walkId: string }) {
           </span>
         </div>
 
-        <MapView points={geo.points} live />
+        <MapView points={routePoints} live />
         {geo.error && (
           <p style={{ color: "var(--orange-deep)", fontSize: "var(--fs-14)", fontWeight: 800 }}>
             GPS: {geo.error} {geo.permission === "denied" ? "— enable location access to record the route." : ""}

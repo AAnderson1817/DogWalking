@@ -23,7 +23,9 @@ function makeStore(): OutboxStore & { rows: Map<string, OutboxBatch> } {
   };
 }
 
-function makeHarness(opts: { failTimes?: number; online?: () => boolean } = {}) {
+function makeHarness(
+  opts: { failTimes?: number; online?: () => boolean; maxAttempts?: number; poisonFirst?: boolean } = {},
+) {
   const store = makeStore();
   const sent: OutboxBatch[] = [];
   let failures = opts.failTimes ?? 0;
@@ -31,6 +33,12 @@ function makeHarness(opts: { failTimes?: number; online?: () => boolean } = {}) 
   const outbox = new GpsOutbox(
     store,
     (batch) => {
+      // Poison mode: the first-enqueued batch always fails; others succeed.
+      if (opts.poisonFirst) {
+        if (batch.walkId === "poison") return Promise.reject(new Error("permanent"));
+        sent.push(batch);
+        return Promise.resolve();
+      }
       if (failures > 0) {
         failures--;
         return Promise.reject(new Error("network down"));
@@ -41,6 +49,7 @@ function makeHarness(opts: { failTimes?: number; online?: () => boolean } = {}) 
     {
       baseDelayMs: 1000,
       maxDelayMs: 30_000,
+      maxAttempts: opts.maxAttempts,
       setTimer: (fn, ms) => {
         timers.push({ fn, ms });
         return timers.length - 1;
@@ -111,5 +120,19 @@ describe("GpsOutbox", () => {
     await outbox.enqueue("walk-1", "op-1", pts(3));
     await outbox.drain();
     expect(sent.map((b) => b.points.length)).toEqual([1, 2, 3]);
+  });
+
+  it("drops a poison batch after maxAttempts so it can't block the queue", async () => {
+    const { outbox, store, sent, timers } = makeHarness({ poisonFirst: true, maxAttempts: 3 });
+    await outbox.enqueue("poison", "op-1", pts(1)); // will always fail
+    await outbox.enqueue("walk-2", "op-1", pts(2)); // stuck behind it
+    // Retry until the poison batch is dropped (attempts reach maxAttempts).
+    for (let i = 0; i < 5 && store.rows.size > 0; i++) {
+      const t = timers.splice(0);
+      for (const timer of t) timer.fn();
+      await outbox.drain();
+    }
+    expect(store.rows.size).toBe(0); // poison dropped, good batch sent
+    expect(sent.some((b) => b.walkId === "walk-2")).toBe(true);
   });
 });

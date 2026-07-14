@@ -126,13 +126,17 @@ export default function PetProfiles() {
 function PropertyNotesCard({ property, onSaved }: { property: Properties; onSaved: () => void }) {
   const [notes, setNotes] = useState(property.access_notes_public ?? "");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const dirty = notes !== (property.access_notes_public ?? "");
 
   async function save() {
     setBusy(true);
+    setError(null);
     try {
       await updateProperty(property.id, { access_notes_public: notes.trim() || null });
       onSaved();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "could not save notes");
     } finally {
       setBusy(false);
     }
@@ -144,6 +148,7 @@ function PropertyNotesCard({ property, onSaved }: { property: Properties; onSave
       <div style={{ marginTop: "var(--s-2)" }}>
         <Textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Gate sticks — lift while pushing." />
       </div>
+      {error && <span className="field__error">{error}</span>}
       {dirty && (
         <div style={{ marginTop: "var(--s-2)" }}>
           <Button variant="ghost" onClick={() => void save()} disabled={busy}>

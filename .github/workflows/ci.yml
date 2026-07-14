@@ -73,6 +73,10 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
+        # NOTE: remote is Postgres 17 (supabase/config.toml major_version);
+        # CI runs 16. Bumping to 17 needs a shim/smoke re-verification first
+        # (tracked follow-up) — kept at 16 so a version-drift surprise can't
+        # block the CI-gated deploy.
         image: postgres:16
         env:
           POSTGRES_PASSWORD: postgres

@@ -22,6 +22,9 @@ export interface OutboxStore {
 export interface OutboxOptions {
   baseDelayMs?: number;
   maxDelayMs?: number;
+  /** Drop a batch after this many failed sends so one poison batch can't
+   * head-of-line-block all GPS sync forever (points are best-effort). */
+  maxAttempts?: number;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
@@ -35,6 +38,7 @@ export class GpsOutbox {
   private readonly send: (batch: OutboxBatch) => Promise<void>;
   private readonly baseDelayMs: number;
   private readonly maxDelayMs: number;
+  private readonly maxAttempts: number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (handle: unknown) => void;
   private readonly online: () => boolean;
@@ -48,6 +52,7 @@ export class GpsOutbox {
     this.send = send;
     this.baseDelayMs = options.baseDelayMs ?? 2000;
     this.maxDelayMs = options.maxDelayMs ?? 60_000;
+    this.maxAttempts = options.maxAttempts ?? 12;
     this.setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimer = options.clearTimer ?? ((h) => clearTimeout(h as number));
     this.online = options.online ?? (() => (typeof navigator === "undefined" ? true : navigator.onLine));
@@ -86,6 +91,12 @@ export class GpsOutbox {
           await this.store.delete(batch.id);
         } catch {
           const attempts = batch.attempts + 1;
+          if (attempts >= this.maxAttempts) {
+            // Poison batch: drop it and keep draining so it can't block the
+            // rest of the queue (and this walk's later points) forever.
+            await this.store.delete(batch.id);
+            continue;
+          }
           await this.store.put({ ...batch, attempts });
           this.schedule(Math.min(this.baseDelayMs * 2 ** attempts, this.maxDelayMs));
           return; // stop the pass; retry later in order

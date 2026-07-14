@@ -12,8 +12,13 @@ name: Deploy staging (Supabase)
 #   STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, VAULT_MASTER_KEY, APP_BASE_URL
 #   and optionally RESEND_API_KEY, NOTIFY_FROM_EMAIL
 
+# Deploy only after CI passes on main (workflow_run gate) — a red commit
+# must never migrate the live database. Manual runs (workflow_dispatch) are
+# still allowed for secret syncs / re-deploys.
 on:
-  push:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
     inputs:
@@ -30,6 +35,8 @@ jobs:
   migrate:
     name: Apply migrations
     runs-on: ubuntu-latest
+    # Skip if CI failed; dispatch runs have no triggering workflow to check.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     environment: staging
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}

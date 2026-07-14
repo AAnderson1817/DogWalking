@@ -13,6 +13,12 @@ on:
     workflows: ["Deploy staging (Supabase)"]
     types: [completed]
 
+# Serialize runs: they share fixed fixture emails, so concurrent runs would
+# fight over the same throwaway users.
+concurrency:
+  group: staging-smoke
+  cancel-in-progress: false
+
 jobs:
   smoke:
     name: Invoke materialize-walks as the cron would
@@ -118,7 +124,11 @@ jobs:
             -H "apikey: $ANON_KEY" -H "Authorization: Bearer $tok")
           echo "SELECT service_types (seed trigger) -> HTTP $vcode"; cat "$svc"; echo
 
-          [ "$icode" = "201" ] && [ "$scode" = "200" ] && grep -q "$uid" "$sel"
+          # Assert the seed trigger created BOTH default service types, not
+          # just that the query returned 200.
+          seeded=$(jq 'length' "$svc")
+          [ "$icode" = "201" ] && [ "$scode" = "200" ] && grep -q "$uid" "$sel" \
+            && [ "$vcode" = "200" ] && [ "$seeded" -eq 2 ]
 
       - name: Replay invite-claim flow (fixture operator + client)
         run: |

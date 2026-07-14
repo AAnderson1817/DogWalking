@@ -64,8 +64,8 @@ anywhere else; rotating it later makes existing vault blobs unreadable
 ## 5. Deploy
 
 1. GitHub → Actions → "Deploy staging (Supabase)" → Run workflow →
-   tick **sync secrets** → run. This pushes migrations 0001–0009, deploys
-   all eight edge functions, and sets the edge secrets.
+   tick **sync secrets** → run. This pushes all migrations (0001–0012),
+   deploys all nine edge functions, and sets the edge secrets.
    - If `db push` fails on the storage policies ("must be owner of table
      objects"), create just those policies via the SQL Editor (copy them
      from `0004_security.sql` / `0008_portal.sql`) and re-run.
