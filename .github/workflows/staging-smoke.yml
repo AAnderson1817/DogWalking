@@ -1,0 +1,40 @@
+name: Staging smoke test
+
+# On-demand check that the deployed edge functions accept scheduled
+# (service-role) invocations — calls materialize-walks exactly the way the
+# dashboard cron job does. The service key is fetched at runtime via the
+# management API (existing SUPABASE_ACCESS_TOKEN secret), masked, and never
+# printed to the log.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: Invoke materialize-walks as the cron would
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Fetch service key (masked)
+        run: |
+          key=$(curl -sSf \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_ACCESS_TOKEN }}" \
+            "https://api.supabase.com/v1/projects/${{ secrets.SUPABASE_PROJECT_REF }}/api-keys?reveal=true" \
+            | jq -r '[.[] | select(.name == "service_role")][0].api_key')
+          if [ -z "$key" ] || [ "$key" = "null" ]; then
+            echo "FAIL: could not fetch the service_role key from the management API"
+            exit 1
+          fi
+          echo "::add-mask::$key"
+          echo "SERVICE_KEY=$key" >> "$GITHUB_ENV"
+
+      - name: POST materialize-walks
+        run: |
+          body=$(mktemp)
+          status=$(curl -sS -o "$body" -w '%{http_code}' -X POST \
+            "https://${{ secrets.SUPABASE_PROJECT_REF }}.supabase.co/functions/v1/materialize-walks" \
+            -H "Authorization: Bearer $SERVICE_KEY" \
+            -H "Content-Type: application/json" -d '{}' --max-time 30)
+          echo "HTTP $status"
+          cat "$body"; echo
+          [ "$status" = "200" ] && grep -q '"ok":true' "$body"
