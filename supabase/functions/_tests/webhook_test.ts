@@ -60,6 +60,15 @@ function makeMockDeps(
       calls.push({ fn: "updateClient", args: [id, fields] });
       return Promise.resolve();
     },
+    findPendingPlanChangeIntent(args) {
+      calls.push({ fn: "findPendingPlanChangeIntent", args: [args] });
+      const metadataIntentId = args.metadataIntentId;
+      return Promise.resolve(metadataIntentId ? { id: metadataIntentId, new_plan_id: "plan-1" } : null);
+    },
+    applyPlanChangeIntent(intentId, eventId) {
+      calls.push({ fn: "applyPlanChangeIntent", args: [intentId, eventId] });
+      return Promise.resolve(7);
+    },
     applyInvoicePaid(args) {
       calls.push({ fn: "applyInvoicePaid", args: [args] });
       if (opts.failApply) return Promise.reject(new Error("apply failed"));
@@ -255,6 +264,24 @@ Deno.test("subscription.updated for the current sub applies", async () => {
   assertEquals(result.status, "processed");
   const update = calls.find((c) => c.fn === "updateClient")!;
   assertEquals((update.args[1] as Record<string, unknown>).subscription_status, "past_due");
+});
+
+Deno.test("subscription.updated applies a pending plan-change intent before updating client plan", async () => {
+  const { deps, calls } = makeMockDeps({ subId: "sub_1" });
+  const result = await handleStripeEvent(
+    event("customer.subscription.updated", {
+      id: "sub_1",
+      customer: "cus_1",
+      status: "active",
+      metadata: { pawtrail_plan_change_intent_id: "intent-1" },
+      items: { data: [{ price: { id: "price_1" } }] },
+    }),
+    deps,
+  );
+  assertEquals(result.status, "processed");
+  assert(calls.some((c) => c.fn === "applyPlanChangeIntent"));
+  const update = calls.find((c) => c.fn === "updateClient")!;
+  assertEquals((update.args[1] as Record<string, unknown>).plan_id, "plan-1");
 });
 
 Deno.test("unbound client: a LIVE subscription.updated binds, a dead one is ignored", async () => {

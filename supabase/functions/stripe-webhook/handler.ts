@@ -44,6 +44,13 @@ export interface WebhookDeps {
   getPlan(planId: string): Promise<PlanRow | null>;
   findPlanByPriceId(operatorId: string, priceId: string): Promise<PlanRow | null>;
   updateClient(id: string, fields: Record<string, unknown>): Promise<void>;
+  findPendingPlanChangeIntent(args: {
+    clientId: string;
+    subscriptionId: string | null;
+    planId: string | null;
+    metadataIntentId: string | null;
+  }): Promise<{ id: string; new_plan_id: string } | null>;
+  applyPlanChangeIntent(intentId: string, eventId: string): Promise<number>;
   /** Atomic + idempotent invoice effects (fn_apply_invoice_paid RPC):
    * payment row + rollover + cycle grant in one transaction keyed on the
    * invoice id. Returns false when the invoice was already applied. */
@@ -225,6 +232,24 @@ async function applyEvent(
       };
       const periodEnd = subscriptionPeriodEnd(obj);
       if (periodEnd) fields.current_period_end = periodEnd;
+
+      const priceId = subscriptionPriceId(obj);
+      const plan = priceId ? await deps.findPlanByPriceId(client.operator_id, priceId) : null;
+      const meta = (obj.metadata ?? {}) as Record<string, unknown>;
+      const metadataIntentId = typeof meta.pawtrail_plan_change_intent_id === "string"
+        ? meta.pawtrail_plan_change_intent_id
+        : null;
+      const intent = await deps.findPendingPlanChangeIntent({
+        clientId: client.id,
+        subscriptionId: subId,
+        planId: plan?.id ?? null,
+        metadataIntentId,
+      });
+      if (intent) {
+        await deps.applyPlanChangeIntent(intent.id, event.id);
+        fields.plan_id = intent.new_plan_id;
+      }
+
       await deps.updateClient(client.id, fields);
       return { status: "processed" };
     }
@@ -252,6 +277,13 @@ function invoiceSubscriptionId(obj: Record<string, unknown>): string | null {
   if (typeof obj.subscription === "string" && obj.subscription) return obj.subscription;
   const parent = obj.parent as { subscription_details?: { subscription?: string } } | undefined;
   return parent?.subscription_details?.subscription ?? null;
+}
+
+function subscriptionPriceId(obj: Record<string, unknown>): string | null {
+  const items = (obj.items as { data?: Array<Record<string, unknown>> })?.data ?? [];
+  const first = items[0];
+  const price = first?.price as { id?: string } | undefined;
+  return price?.id ?? null;
 }
 
 async function resolvePlan(

@@ -1,8 +1,9 @@
 // change-plan — POST, operator JWT (spec 04, built in phase 07).
-// Stripe prorates the money (proration_behavior=create_prorations); the
-// credit side is fn_change_plan with the remaining fraction of the current
-// period. For clients without a live Stripe subscription (manual/local
-// billing), an explicit body.fraction drives the credit proration alone.
+// Stripe prorates the money (proration_behavior=create_prorations). For live
+// Stripe subscriptions, this function saves a plan-change intent first and the
+// customer.subscription.updated webhook finalizes the local plan/credit effect.
+// For clients without a live Stripe subscription (manual/local billing), an
+// explicit body.fraction drives the credit proration directly.
 import { jsonOk, readJson, requireOperator, serveFunction, HttpError } from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
 import { stripeClient } from "../_lib/stripe.ts";
@@ -25,7 +26,7 @@ serveFunction(async (req) => {
 
   const { data: client, error: cErr } = await db
     .from("clients")
-    .select("id, operator_id, stripe_subscription_id")
+    .select("id, operator_id, plan_id, stripe_subscription_id, credit_balance")
     .eq("id", body.client_id)
     .maybeSingle();
   if (cErr) throw new HttpError(500, "db_error", "client lookup failed");
@@ -54,14 +55,10 @@ serveFunction(async (req) => {
     const item = sub.items.data[0];
     if (!item) throw new HttpError(409, "no_subscription_item", "subscription has no items");
 
-    await stripe.subscriptions.update(sub.id, {
-      items: [{ id: item.id, price: plan.stripe_price_id }],
-      proration_behavior: "create_prorations",
-    });
-
     // Remaining fraction of the current period drives the credit proration.
     // Newer Stripe API versions carry the period on the item; older on the
-    // subscription — read both shapes defensively.
+    // subscription — read both shapes defensively. Persist it with the intent
+    // so the webhook applies the same credit effect the operator requested.
     const itemAny = item as unknown as { current_period_start?: number; current_period_end?: number };
     const subAny = sub as unknown as { current_period_start?: number; current_period_end?: number };
     const start = itemAny.current_period_start ?? subAny.current_period_start ?? 0;
@@ -69,9 +66,62 @@ serveFunction(async (req) => {
     const now = Math.floor(Date.now() / 1000);
     fraction = end > start ? Math.min(1, Math.max(0, (end - now) / (end - start))) : 0;
 
+    const { data: existingIntent, error: existingErr } = await db
+      .from("plan_change_intents")
+      .select("id, stripe_update_idempotency_key")
+      .eq("client_id", client.id)
+      .eq("stripe_subscription_id", sub.id)
+      .eq("new_plan_id", plan.id)
+      .eq("status", "pending")
+      .order("requested_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (existingErr) throw new HttpError(500, "intent_lookup_failed", "plan change intent lookup failed");
+
+    const { data: createdIntent, error: iErr } = existingIntent
+      ? { data: null, error: null }
+      : await db
+        .from("plan_change_intents")
+        .insert({
+          operator_id: operator.id,
+          client_id: client.id,
+          requested_by: operator.id,
+          old_plan_id: client.plan_id,
+          new_plan_id: plan.id,
+          stripe_subscription_id: sub.id,
+          stripe_update_idempotency_key: crypto.randomUUID(),
+          remaining_fraction: fraction,
+        })
+        .select("id, stripe_update_idempotency_key")
+        .single();
+    const intent = existingIntent ?? createdIntent;
+    if (iErr || !intent) throw new HttpError(500, "intent_failed", "plan change intent could not be saved");
+
+    const idempotencyKey = `change_plan_${intent.stripe_update_idempotency_key}`;
+    await stripe.subscriptions.update(
+      sub.id,
+      {
+        items: [{ id: item.id, price: plan.stripe_price_id }],
+        proration_behavior: "create_prorations",
+        metadata: {
+          ...sub.metadata,
+          pawtrail_plan_change_intent_id: intent.id,
+          pawtrail_plan_id: plan.id,
+        },
+      },
+      { idempotencyKey },
+    );
+
     await db.from("clients")
       .update({ current_period_end: end ? new Date(end * 1000).toISOString() : null })
       .eq("id", client.id);
+
+    return jsonOk({
+      pending: true,
+      new_balance: client.credit_balance as number,
+      plan,
+      intent_id: intent.id,
+    });
   } else {
     if (typeof body.fraction !== "number" || body.fraction < 0 || body.fraction > 1) {
       throw new HttpError(

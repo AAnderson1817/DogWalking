@@ -4,14 +4,17 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   frontend:
     name: Frontend — tsc, vitest, build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -25,6 +28,10 @@ jobs:
       - name: Typecheck
         working-directory: app
         run: npx tsc --noEmit -p .
+
+      - name: Lint (warnings fail)
+        working-directory: app
+        run: npm run lint
 
       - name: Unit tests
         working-directory: app
@@ -47,11 +54,11 @@ jobs:
     name: Edge functions — deno check + test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: denoland/setup-deno@v2
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
-          deno-version: v2.x
+          deno-version: v2.9.2
 
       - name: Typecheck entrypoints
         run: deno check supabase/functions/*/index.ts
@@ -73,11 +80,8 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        # NOTE: remote is Postgres 17 (supabase/config.toml major_version);
-        # CI runs 16. Bumping to 17 needs a shim/smoke re-verification first
-        # (tracked follow-up) — kept at 16 so a version-drift surprise can't
-        # block the CI-gated deploy.
-        image: postgres:16
+        # Match supabase/config.toml [db].major_version and production.
+        image: postgres:17
         env:
           POSTGRES_PASSWORD: postgres
         ports:
@@ -90,7 +94,7 @@ jobs:
     env:
       LOCAL_DB_URL: postgresql://postgres:postgres@localhost:54322/postgres
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Reset — shim + migrations 0001..NNNN + seed
         run: ./scripts/db-reset.sh

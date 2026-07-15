@@ -44,6 +44,7 @@ export interface AuthState {
 const AuthContext = createContext<AuthState | null>(null);
 
 /** Pure role resolution — unit-tested with mocked queries (phase 04). */
+// oxlint-disable-next-line react/only-export-components
 export async function resolveRole(
   userId: string,
   queries: {
@@ -235,6 +236,7 @@ function ReauthSheet({
   );
 }
 
+// oxlint-disable-next-line react/only-export-components
 export function useAuth(): AuthState {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error("useAuth must be used inside <AuthProvider>");

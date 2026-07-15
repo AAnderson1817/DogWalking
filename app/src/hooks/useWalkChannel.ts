@@ -92,7 +92,7 @@ export function useWalkChannel(
     channel.subscribe();
     channelRef.current = channel;
     return () => {
-      if (mode === "broadcast") batcher.end();
+      if (mode === "broadcast") void batcher.end();
       void supabase.removeChannel(channel);
       channelRef.current = null;
     };
@@ -107,9 +107,10 @@ export function useWalkChannel(
   );
 
   const end = useCallback(async () => {
-    batcher.end(); // flush the in-memory batch into the durable outbox
-    // Await a drain so the final batch is persisted to the DB before the
-    // walk completes (it was fire-and-forget, which could strand it).
+    // Flush the in-memory batch into the durable outbox first; flush() awaits
+    // the outbox enqueue so the immediate drain cannot race ahead of
+    // IndexedDB persistence.
+    await batcher.end();
     await outbox?.drain();
     await channelRef.current?.send({ type: "broadcast", event: "ended", payload: { walkId } });
   }, [batcher, outbox, walkId]);

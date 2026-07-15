@@ -3,7 +3,7 @@
 # Recreates the pawtrail database on the local cluster, applies the
 # Supabase-compatibility shim, then all migrations in order, then seed.sql.
 #
-# Requires: a Postgres 16 server on 127.0.0.1:54322 (scripts/db-start.sh)
+# Requires: a Postgres 17 server on 127.0.0.1:54322 (scripts/db-start.sh)
 # and LOCAL_DB_URL exported, e.g.
 #   export LOCAL_DB_URL="postgresql://postgres@127.0.0.1:54322/postgres"
 set -euo pipefail

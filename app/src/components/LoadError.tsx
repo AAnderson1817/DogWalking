@@ -7,6 +7,7 @@ import { EmptyState } from "./EmptyState";
 import { Spinner } from "./Spinner";
 
 /** Friendlier copy for the common offline/network case. */
+// oxlint-disable-next-line react/only-export-components
 export function loadErrorMessage(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err ?? "");
   if (/failed to fetch|networkerror|load failed/i.test(msg)) {

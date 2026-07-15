@@ -35,6 +35,7 @@ const METHOD_LABELS: Record<string, string> = {
   buzzer_fob: "Buzzer / fob",
 };
 
+// oxlint-disable-next-line react/only-export-components
 export function entryMethodLabel(method: string): string {
   return METHOD_LABELS[method] ?? method;
 }

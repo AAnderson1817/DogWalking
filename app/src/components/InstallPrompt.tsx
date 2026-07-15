@@ -12,6 +12,7 @@ interface BeforeInstallPromptEvent extends Event {
 const VISITS_KEY = "pawtrail-visits";
 const DISMISSED_KEY = "pawtrail-install-dismissed";
 
+// oxlint-disable-next-line react/only-export-components
 export function countVisit(): number {
   const n = Number(localStorage.getItem(VISITS_KEY) ?? "0") + 1;
   localStorage.setItem(VISITS_KEY, String(n));

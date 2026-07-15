@@ -65,6 +65,7 @@ function WalkModeInner({ walkId }: { walkId: string }) {
   const active = walk?.status === "in_progress" && !result;
   const geo = useGeolocation(active ?? false);
   const channel = useWalkChannel(walkId, "broadcast", auth.operatorId ?? "");
+  const pendingPoints = channel.pendingPoints;
   const online = useOnline();
   const sentCount = useRef(0);
 
@@ -82,7 +83,7 @@ function WalkModeInner({ walkId }: { walkId: string }) {
         if (w.status === "in_progress") {
           const [saved, queued] = await Promise.all([
             listWalkGpsPoints(walkId),
-            channel.pendingPoints(),
+            pendingPoints(),
           ]);
           const seen = new Set<string>();
           const merged: Array<{ lat: number; lng: number }> = [];
@@ -121,14 +122,14 @@ function WalkModeInner({ walkId }: { walkId: string }) {
         if (snap && isNetworkError(e)) {
           setWalk(snap as unknown as Walks);
           setOfflineResumed(true);
-          void channel.pendingPoints().then((queued) =>
+          void pendingPoints().then((queued) =>
             setResumedPoints(queued.map((p) => ({ lat: p.lat, lng: p.lng }))),
           );
           return;
         }
         setError(e instanceof Error ? e.message : "walk not found");
       });
-  }, [walkId]);
+  }, [walkId, pendingPoints]);
 
   const [staticPoints, setStaticPoints] = useState<Array<{ lat: number; lng: number }>>([]);
   // Points saved before a mid-walk reload; prepended to live points for the

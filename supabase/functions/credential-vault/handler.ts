@@ -1,5 +1,5 @@
 // credential-vault core logic (spec 03/04), dependency-injected for tests.
-// Every action re-verifies the caller's password; 5/min/user rate limit;
+// Every action re-verifies the caller's password; 5/min/user shared rate limit;
 // get writes exactly one audit row (via fn_read_credential); delete is a
 // soft revoke (revoked_at — audit log immortal). Plaintext secrets never
 // appear in logs or errors; the only place a secret leaves this function is
@@ -31,8 +31,8 @@ export interface CredentialMeta {
 }
 
 export interface VaultDeps {
-  /** Sliding-window limiter; false ⇒ over 5/min for this user. */
-  allowAttempt(userId: string): boolean;
+  /** Shared sliding-window limiter; false ⇒ over 5/min for this user. */
+  allowAttempt(userId: string): boolean | Promise<boolean>;
   verifyPassword(email: string, password: string): Promise<boolean>;
   encrypt(plaintext: string): Promise<Uint8Array>;
   decrypt(blob: Uint8Array): Promise<string>;
@@ -69,7 +69,7 @@ export async function handleVault(
   body: VaultBody,
   deps: VaultDeps,
 ): Promise<Record<string, unknown>> {
-  if (!deps.allowAttempt(operator.id)) {
+  if (!(await deps.allowAttempt(operator.id))) {
     throw new HttpError(429, "rate_limited", "too many vault attempts; wait a minute");
   }
   if (!body?.password) {
@@ -170,7 +170,7 @@ function publicMeta(c: CredentialMeta): Omit<CredentialMeta, "operator_id"> {
   };
 }
 
-/** In-memory sliding-window limiter (per isolate), 5 attempts / 60 s. */
+/** In-memory sliding-window limiter used only by unit tests. */
 export function makeRateLimiter(
   limit = 5,
   windowMs = 60_000,

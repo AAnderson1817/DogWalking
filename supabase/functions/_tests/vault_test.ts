@@ -254,12 +254,16 @@ Deno.test("fresh pending claim (no PI yet) blocks a concurrent re-charge", async
   assert(!calls.includes("createPI"), "must not double-charge while an attempt is live");
 });
 
-Deno.test("stale id-less pending claim is released and re-attempted", async () => {
-  const { deps, calls } = makeODeps({ live: { status: "pending", createdMsAgo: 20 * 60_000 } });
+Deno.test("stale id-less pending claim reuses the original claim idempotency key", async () => {
+  const { deps, calls, attemptKey } = makeODeps({
+    live: { status: "pending", createdMsAgo: 20 * 60_000 },
+  });
   const result = await chargeOverageForWalk("walk-1", deps);
   assertEquals(result.already_charged, false);
-  assert(calls.includes("updatePayment:failed"), "stale claim must be released");
+  assert(!calls.includes("insertPayment:pending"), "must not create a replacement claim");
+  assert(!calls.includes("updatePayment:failed"), "must not release ambiguous claims as failed");
   assert(calls.includes("createPI"));
+  assertEquals(attemptKey(), "overage_walk-1_pay-live");
 });
 
 Deno.test("pending claim with a PI reconciles: Stripe says succeeded → settle, no re-charge", async () => {

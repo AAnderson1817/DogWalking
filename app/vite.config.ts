@@ -3,10 +3,38 @@ import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
-// Stamp the service worker with a per-build version AND the build's hashed
-// asset list so the shell precache is complete (phase 08; re-review fix —
-// without the chunks, activate's cache wipe broke offline reload after
-// every deploy: the new index.html referenced chunks no cache held).
+interface ViteManifestEntry {
+  file?: string;
+  css?: string[];
+  imports?: string[];
+  isEntry?: boolean;
+}
+
+type ViteManifest = Record<string, ViteManifestEntry>;
+
+function assetUrl(file: string): string {
+  return file.startsWith("/") ? file : `/${file}`;
+}
+
+function collectInitialAssets(manifest: ViteManifest): string[] {
+  const out = new Set<string>();
+  const visit = (key: string) => {
+    const entry = manifest[key];
+    if (!entry) return;
+    if (entry.file) out.add(assetUrl(entry.file));
+    for (const css of entry.css ?? []) out.add(assetUrl(css));
+    for (const imported of entry.imports ?? []) visit(imported);
+  };
+  for (const [key, entry] of Object.entries(manifest)) {
+    if (entry.isEntry) visit(key);
+  }
+  return [...out];
+}
+
+// Stamp the service worker with a per-build version and the hashed assets
+// needed by the initial app shell. Lazy feature chunks (notably Mapbox) are
+// intentionally excluded so installing/updating the PWA does not download
+// large code that may never be used.
 function stampServiceWorker(): Plugin {
   return {
     name: "pawtrail-sw-version",
@@ -17,11 +45,18 @@ function stampServiceWorker(): Plugin {
       try {
         let assets: string[] = [];
         try {
-          assets = readdirSync(assetsDir)
-            .filter((f) => f.endsWith(".js") || f.endsWith(".css") || f.endsWith(".woff2"))
-            .map((f) => `/assets/${f}`);
+          const manifest = JSON.parse(
+            readFileSync(fileURLToPath(new URL("./dist/.vite/manifest.json", import.meta.url)), "utf8"),
+          ) as ViteManifest;
+          assets = collectInitialAssets(manifest);
         } catch {
-          // no assets dir — precache the bare shell only
+          try {
+            assets = readdirSync(assetsDir)
+              .filter((f) => f.endsWith(".css") || (f.endsWith(".js") && f.startsWith("index-")))
+              .map((f) => `/assets/${f}`);
+          } catch {
+            // no assets dir — precache the bare shell only
+          }
         }
         const src = readFileSync(out, "utf8");
         writeFileSync(
@@ -44,6 +79,9 @@ export default defineConfig({
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
+  },
+  build: {
+    manifest: true,
   },
   test: {
     environment: "node",

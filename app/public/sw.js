@@ -1,8 +1,7 @@
 // PawTrail service worker (phase 08; hardened in the QC + re-review passes).
-// Strategy: precache the complete app shell INCLUDING the build's hashed
-// chunks (stamped in at build time — without them, the activate-time cache
-// wipe broke offline reload after every deploy); cache-first for same-origin
-// static assets; NETWORK-ONLY for Supabase REST/Storage, auth, realtime,
+// Strategy: precache the app shell and initial hashed assets (stamped in at
+// build time) while excluding lazy feature chunks such as Mapbox; cache-first
+// for same-origin static assets; NETWORK-ONLY for Supabase REST/Storage, auth, realtime,
 // edge functions and every mutation. Per-user API data is never cached — a
 // shared cache keyed by URL served one account's rows to the next account
 // on the same device. Storage photo caching was removed too: signed URLs

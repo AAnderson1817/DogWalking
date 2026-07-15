@@ -845,6 +845,13 @@ export type Database = {
         };
         Returns: string;
       };
+      fn_deactivate_schedule: {
+        Args: {
+          p_schedule: string;
+          p_today: string;
+        };
+        Returns: void;
+      };
       fn_debit_walk: {
         Args: {
           p_walk: string;
@@ -928,6 +935,13 @@ export type Database = {
       fn_refund_cancelled_debit: {
         Args: Record<string, never>;
         Returns: unknown;
+      };
+      fn_set_schedule_pets: {
+        Args: {
+          p_schedule: string;
+          p_pet_ids: string[];
+        };
+        Returns: void;
       };
       fn_seed_operator_defaults: {
         Args: Record<string, never>;
