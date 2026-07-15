@@ -43,18 +43,47 @@ describe("useWalkChannel batching (10 points / 60 s / end)", () => {
     expect(flushes[0]).toHaveLength(2);
   });
 
-  it("end() flushes the remainder", () => {
+  it("end() flushes the remainder", async () => {
     const { batcher, flushes } = makeBatcher();
     for (let i = 0; i < 13; i++) batcher.add(p(i));
     expect(flushes.length).toBe(1); // the full ten
-    batcher.end();
+    await batcher.end();
     expect(flushes.length).toBe(2);
     expect(flushes[1]).toHaveLength(3);
   });
 
-  it("end() with an empty buffer is a no-op", () => {
+  it("end() awaits asynchronous flush work", async () => {
+    const flushed: GeoPoint[][] = [];
+    let resolveFlush!: () => void;
+    const batcher = new GpsBatcher(
+      (points) =>
+        new Promise<void>((resolve) => {
+          resolveFlush = () => {
+            flushed.push(points);
+            resolve();
+          };
+        }),
+    );
+
+    batcher.add(p(0));
+    const ended = batcher.end();
+    let settled = false;
+    void ended.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+
+    expect(settled).toBe(false);
+    expect(flushed).toHaveLength(0);
+    resolveFlush();
+    await ended;
+    expect(settled).toBe(true);
+    expect(flushed[0]).toHaveLength(1);
+  });
+
+  it("end() with an empty buffer is a no-op", async () => {
     const { batcher, flushes } = makeBatcher();
-    batcher.end();
+    await batcher.end();
     expect(flushes.length).toBe(0);
   });
 

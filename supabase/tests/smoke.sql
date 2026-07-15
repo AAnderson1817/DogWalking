@@ -47,7 +47,9 @@ begin
     ('99999999-0000-4000-c000-00000000000d', '99999999-0000-4000-a000-000000000001',
      null, 'Smoke Client D', 'active', '99999999-0000-4000-b000-000000000003'),
     ('99999999-0000-4000-c000-00000000000e', '99999999-0000-4000-a000-000000000001',
-     null, 'Smoke Client E', 'active', '99999999-0000-4000-b000-000000000002');
+     null, 'Smoke Client E', 'active', '99999999-0000-4000-b000-000000000002'),
+    ('99999999-0000-4000-c000-0000000000f2', '99999999-0000-4000-a000-000000000002',
+     null, 'Smoke Client F2', 'active', null);
 
   insert into properties (id, operator_id, client_id, label) values
     ('99999999-0000-4000-d000-00000000000a', '99999999-0000-4000-a000-000000000001',
@@ -55,13 +57,17 @@ begin
     ('99999999-0000-4000-d000-0000000000a2', '99999999-0000-4000-a000-000000000001',
      '99999999-0000-4000-c000-0000000000a2', 'A2 home'),
     ('99999999-0000-4000-d000-00000000000e', '99999999-0000-4000-a000-000000000001',
-     '99999999-0000-4000-c000-00000000000e', 'E home');
+     '99999999-0000-4000-c000-00000000000e', 'E home'),
+    ('99999999-0000-4000-d000-0000000000f2', '99999999-0000-4000-a000-000000000002',
+     '99999999-0000-4000-c000-0000000000f2', 'F2 home');
 
   insert into pets (id, operator_id, client_id, name) values
     ('99999999-0000-4000-e000-00000000000a', '99999999-0000-4000-a000-000000000001',
      '99999999-0000-4000-c000-00000000000a', 'Smoke Pet A'),
     ('99999999-0000-4000-e000-0000000000a2', '99999999-0000-4000-a000-000000000001',
-     '99999999-0000-4000-c000-0000000000a2', 'Smoke Pet A2');
+     '99999999-0000-4000-c000-0000000000a2', 'Smoke Pet A2'),
+    ('99999999-0000-4000-e000-0000000000f2', '99999999-0000-4000-a000-000000000002',
+     '99999999-0000-4000-c000-0000000000f2', 'Smoke Pet F2');
 
   insert into access_credentials (id, operator_id, property_id, entry_method, ciphertext, label)
   values ('99999999-0000-4000-f000-000000000001', '99999999-0000-4000-a000-000000000001',
@@ -458,6 +464,79 @@ begin
           '99999999-0000-4000-c000-00000000000a',
           '99999999-0000-4000-2000-000000000001', 'overage', 2500, 'USD', 'failed');
   raise notice 'security 3b (overage payment uniqueness): OK';
+end $$;
+
+-- ═══ Security assertion 3c: tenant consistency on known UUIDs (0014) ═════
+do $$
+declare
+  v_service_op1 uuid;
+  v_service_op2 uuid;
+  v_walk uuid;
+begin
+  select id into v_service_op1 from service_types
+   where operator_id = '99999999-0000-4000-a000-000000000001' and is_default;
+  select id into v_service_op2 from service_types
+   where operator_id = '99999999-0000-4000-a000-000000000002' and is_default;
+
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000000001","role":"authenticated"}', true);
+  set local session authorization authenticated;
+
+  begin
+    insert into walks (operator_id, client_id, property_id, service_type_id,
+                       scheduled_date, window_start, window_end, status)
+    values ('99999999-0000-4000-a000-000000000001',
+            '99999999-0000-4000-c000-0000000000f2',
+            '99999999-0000-4000-d000-00000000000a',
+            v_service_op1, date '2026-07-08', '10:00', '11:00', 'scheduled');
+    raise exception 'FAIL: cross-tenant client UUID accepted on walk';
+  exception when raise_exception then
+    if sqlerrm not like 'tenant consistency:%' then raise; end if;
+  end;
+
+  begin
+    insert into walks (operator_id, client_id, property_id, service_type_id,
+                       scheduled_date, window_start, window_end, status)
+    values ('99999999-0000-4000-a000-000000000001',
+            '99999999-0000-4000-c000-00000000000a',
+            '99999999-0000-4000-d000-0000000000a2',
+            v_service_op1, date '2026-07-08', '10:00', '11:00', 'scheduled');
+    raise exception 'FAIL: wrong-client property UUID accepted on walk';
+  exception when raise_exception then
+    if sqlerrm not like 'tenant consistency:%' then raise; end if;
+  end;
+
+  begin
+    insert into walks (operator_id, client_id, property_id, service_type_id,
+                       scheduled_date, window_start, window_end, status)
+    values ('99999999-0000-4000-a000-000000000001',
+            '99999999-0000-4000-c000-00000000000a',
+            '99999999-0000-4000-d000-00000000000a',
+            v_service_op2, date '2026-07-08', '10:00', '11:00', 'scheduled');
+    raise exception 'FAIL: cross-tenant service UUID accepted on walk';
+  exception when raise_exception then
+    if sqlerrm not like 'tenant consistency:%' then raise; end if;
+  end;
+
+  insert into walks (operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status)
+  values ('99999999-0000-4000-a000-000000000001',
+          '99999999-0000-4000-c000-00000000000a',
+          '99999999-0000-4000-d000-00000000000a',
+          v_service_op1, date '2026-07-08', '10:00', '11:00', 'scheduled')
+  returning id into v_walk;
+
+  begin
+    insert into walk_pets (walk_id, pet_id, operator_id)
+    values (v_walk, '99999999-0000-4000-e000-0000000000f2',
+            '99999999-0000-4000-a000-000000000001');
+    raise exception 'FAIL: cross-tenant pet UUID accepted on walk_pet';
+  exception when raise_exception then
+    if sqlerrm not like 'tenant consistency:%' then raise; end if;
+  end;
+
+  reset session authorization;
+  raise notice 'security 3c (tenant consistency known UUIDs): OK';
 end $$;
 
 -- ═══ Security assertion 4: direct ledger insert denied ════════════════════

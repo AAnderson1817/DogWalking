@@ -101,6 +101,34 @@ function makeDeps(): WebhookDeps {
       if (error) throw new Error("client update failed");
     },
 
+    async findPendingPlanChangeIntent({ clientId, subscriptionId, planId, metadataIntentId }) {
+      let query = db
+        .from("plan_change_intents")
+        .select("id, new_plan_id")
+        .eq("client_id", clientId)
+        .eq("status", "pending")
+        .order("requested_at", { ascending: false })
+        .limit(1);
+      if (metadataIntentId) {
+        query = query.eq("id", metadataIntentId);
+      } else {
+        if (subscriptionId) query = query.eq("stripe_subscription_id", subscriptionId);
+        if (planId) query = query.eq("new_plan_id", planId);
+      }
+      const { data, error } = await query.maybeSingle();
+      if (error) throw new Error("plan-change intent lookup failed");
+      return data;
+    },
+
+    async applyPlanChangeIntent(intentId, eventId) {
+      const { data, error } = await db.rpc("fn_apply_plan_change_intent", {
+        p_intent: intentId,
+        p_event_id: eventId,
+      });
+      if (error) throw new Error("plan-change intent apply failed");
+      return Number(data);
+    },
+
     async applyInvoicePaid({ clientId, credits, invoiceId, amountPence, currency, receiptUrl }) {
       const { data, error } = await db.rpc("fn_apply_invoice_paid", {
         p_client: clientId,

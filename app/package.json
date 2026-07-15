@@ -6,9 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "lint": "oxlint",
+    "lint": "oxlint --deny-warnings",
     "preview": "vite preview",
-    "test": "vitest"
+    "test": "vitest",
+    "test:e2e": "npx --yes @playwright/test@1.55.0 test --config playwright.config.mjs",
+    "test:e2e:install": "npx --yes @playwright/test@1.55.0 install --with-deps chromium"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.0",

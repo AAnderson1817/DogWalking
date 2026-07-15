@@ -1,12 +1,16 @@
 // Notification bell + inbox sheet (phase 08): unread count, mark-read,
 // deep links to the walk or billing surface for either persona.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type KeyboardEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { Sheet } from "./Sheet";
 import { Spinner } from "./Spinner";
 import { listNotifications, markNotificationRead } from "@/lib/api";
 import { dateLocal, timeLocal } from "@/lib/format";
 import type { Notifications } from "@/lib/types";
+
+function isActivationKey(e: KeyboardEvent): boolean {
+  return e.key === "Enter" || e.key === " ";
+}
 
 function deepLink(n: Notifications, persona: "operator" | "client"): string | null {
   if (n.walk_id) {
@@ -99,7 +103,18 @@ export function NotificationBell({ persona }: { persona: "operator" | "client" }
               return (
                 <div
                   key={n.id}
+                  role="button"
+                  tabIndex={0}
                   onClick={() => {
+                    void markRead(n);
+                    if (link) {
+                      setOpen(false);
+                      navigate(link);
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (!isActivationKey(e)) return;
+                    e.preventDefault();
                     void markRead(n);
                     if (link) {
                       setOpen(false);
@@ -111,7 +126,7 @@ export function NotificationBell({ persona }: { persona: "operator" | "client" }
                     gap: "var(--s-2)",
                     padding: "var(--s-3) 0",
                     borderBottom: "1px solid var(--mist)",
-                    cursor: link ? "pointer" : "default",
+                    cursor: "pointer",
                     opacity: n.read_at ? 0.55 : 1,
                   }}
                 >

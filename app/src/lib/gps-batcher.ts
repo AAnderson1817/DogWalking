@@ -14,6 +14,7 @@ export interface GpsBatcherOptions {
 export class GpsBatcher {
   private buffer: GeoPoint[] = [];
   private timer: unknown = null;
+  private inFlightFlushes: Promise<void>[] = [];
   private readonly flushFn: (points: GeoPoint[]) => void | Promise<void>;
   private readonly maxPoints: number;
   private readonly maxIntervalMs: number;
@@ -38,31 +39,49 @@ export class GpsBatcher {
   add(point: GeoPoint): void {
     this.buffer.push(point);
     if (this.buffer.length >= this.maxPoints) {
-      this.flush();
+      void this.flush();
       return;
     }
     if (this.timer === null) {
       this.timer = this.setTimer(() => {
         this.timer = null;
-        this.flush();
+        void this.flush();
       }, this.maxIntervalMs);
     }
   }
 
-  /** Flush whatever is buffered (no-op when empty). */
-  flush(): void {
+  /** Flush whatever is buffered and await all outstanding flush work. */
+  async flush(): Promise<void> {
     if (this.timer !== null) {
       this.clearTimer(this.timer);
       this.timer = null;
     }
-    if (this.buffer.length === 0) return;
-    const batch = this.buffer;
-    this.buffer = [];
-    void this.flushFn(batch);
+    if (this.buffer.length > 0) {
+      const batch = this.buffer;
+      this.buffer = [];
+      let pending: Promise<void>;
+      try {
+        pending = Promise.resolve(this.flushFn(batch));
+      } catch (err) {
+        pending = Promise.reject(err);
+      }
+      this.inFlightFlushes.push(pending);
+      pending.then(
+        () => {
+          this.inFlightFlushes = this.inFlightFlushes.filter((p) => p !== pending);
+        },
+        () => {
+          this.inFlightFlushes = this.inFlightFlushes.filter((p) => p !== pending);
+        },
+      );
+    }
+    if (this.inFlightFlushes.length > 0) {
+      await Promise.all(this.inFlightFlushes);
+    }
   }
 
   /** End of walk: flush the remainder and stop the interval timer. */
-  end(): void {
-    this.flush();
+  async end(): Promise<void> {
+    await this.flush();
   }
 }

@@ -11,7 +11,6 @@ import {
 } from "../_lib/crypto.ts";
 import {
   handleVault,
-  makeRateLimiter,
   type CredentialMeta,
   type VaultBody,
   type VaultDeps,
@@ -19,9 +18,6 @@ import {
 
 const CRED_META_COLUMNS =
   "id, operator_id, property_id, entry_method, label, key_location_hint, rotated_at, revoked_at";
-
-// Per-isolate limiter: counts every attempt, success or failure.
-const allowAttempt = makeRateLimiter(5, 60_000);
 
 let vaultKey: CryptoKey | null = null;
 async function getVaultKey(): Promise<CryptoKey> {
@@ -36,7 +32,16 @@ async function getVaultKey(): Promise<CryptoKey> {
 function makeDeps(): VaultDeps {
   const db = adminClient();
   return {
-    allowAttempt,
+    async allowAttempt(userId) {
+      const { data, error } = await db.rpc("fn_vault_allow_attempt", {
+        p_user: userId,
+        p_ip: null,
+        p_limit: 5,
+        p_window_seconds: 60,
+      });
+      if (error) throw new HttpError(500, "rate_limit_failed", "vault rate limit check failed");
+      return Boolean(data);
+    },
 
     async verifyPassword(email, password) {
       // Fresh re-auth check against GoTrue with the anon key; the session is

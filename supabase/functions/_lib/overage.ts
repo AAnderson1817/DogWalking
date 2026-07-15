@@ -6,10 +6,11 @@
 //   1. A 'pending' payments row is inserted BEFORE the Stripe confirm — it
 //      claims the walk under uq_overage_payment_per_walk, so concurrent or
 //      crashed attempts can never charge twice.
-//   2. The Stripe idempotency key is per-ATTEMPT (walkId + claim row id):
-//      a crash-retry of the same attempt replays, while a genuinely new
-//      attempt after a decline gets a fresh key (a fixed per-walk key would
-//      replay the stored decline for ~24h and brick the console re-charge).
+//   2. The Stripe idempotency key is per-CLAIM (walkId + claim row id):
+//      a crash-retry of the same claim replays the same Stripe attempt, while
+//      a genuinely new claim after a definitive decline/cancel gets a fresh
+//      key (a fixed per-walk key would replay the stored decline for ~24h and
+//      brick the console re-charge).
 //   3. A found 'pending' claim is reconciled against Stripe live before we
 //      decide anything, so async PI settlement can't deadlock collection.
 //   4. Card errors mark the claim failed (re-chargeable); infra errors leave
@@ -54,7 +55,7 @@ export interface OverageDeps {
     amountPence: number;
     walkId: string;
     clientId: string;
-    /** Stripe idempotency key for THIS attempt. */
+    /** Stripe idempotency key for THIS payment claim. */
     attemptKey: string;
   }): Promise<{ id: string; status: string; receipt_url: string | null }>;
   insertPayment(
@@ -86,7 +87,7 @@ export class OverageError extends Error {
 
 /** Stripe PI states that mean the attempt is dead and re-chargeable. */
 const PI_DEAD = new Set(["canceled", "requires_payment_method"]);
-/** How long an id-less pending claim blocks before it's considered crashed. */
+/** How long an id-less pending claim blocks before retrying the same claim. */
 const CLAIM_LEASE_MS = 10 * 60_000;
 
 export async function chargeOverageForWalk(
@@ -101,29 +102,22 @@ export async function chargeOverageForWalk(
 
   const live = await deps.getLiveOveragePayment(walkId);
   if (live?.status === "succeeded") return { payment: live, already_charged: true };
-  if (live && live.status === "pending") {
-    if (live.stripe_payment_intent_id) {
-      // Reconcile against Stripe before deciding.
-      const pi = await deps.retrievePaymentIntent(live.stripe_payment_intent_id);
-      if (pi.status === "succeeded") {
-        const settled = await deps.updatePayment(live.id!, {
-          status: "succeeded",
-          receipt_url: pi.receipt_url,
-        });
-        return { payment: settled, already_charged: true };
-      }
-      if (!PI_DEAD.has(pi.status)) {
-        // processing / requires_action: genuinely in flight — do not re-charge.
-        return { payment: live, already_charged: true };
-      }
-      await deps.updatePayment(live.id!, { status: "failed" });
-    } else {
-      // Claimed but no PI recorded: an attempt in progress or a crash.
-      const now = deps.now?.() ?? Date.now();
-      const age = live.created_at ? now - Date.parse(live.created_at) : Infinity;
-      if (age < CLAIM_LEASE_MS) return { payment: live, already_charged: true };
-      await deps.updatePayment(live.id!, { status: "failed" });
+  if (live?.status === "pending" && live.stripe_payment_intent_id) {
+    // Reconcile an identified PaymentIntent before loading billing details:
+    // this may be a completed charge even if the client was later archived.
+    const pi = await deps.retrievePaymentIntent(live.stripe_payment_intent_id);
+    if (pi.status === "succeeded") {
+      const settled = await deps.updatePayment(live.id!, {
+        status: "succeeded",
+        receipt_url: pi.receipt_url,
+      });
+      return { payment: settled, already_charged: true };
     }
+    if (!PI_DEAD.has(pi.status)) {
+      // processing / requires_action: genuinely in flight — do not re-charge.
+      return { payment: live, already_charged: true };
+    }
+    await deps.updatePayment(live.id!, { status: "failed" });
   }
 
   const billing = await deps.getClientBilling(walk.client_id);
@@ -169,6 +163,51 @@ export async function chargeOverageForWalk(
   if (amount == null) return failWithoutAttempt("no plan on file");
   if (!billing.stripe_customer_id) return failWithoutAttempt("no payment method on file");
 
+  const chargeClaim = async (
+    claim: OveragePayment,
+  ): Promise<{ payment: OveragePayment; already_charged: false }> => {
+    try {
+      const pi = await deps.createOffSessionPaymentIntent({
+        customerId: billing.stripe_customer_id,
+        amountPence: amount,
+        walkId,
+        clientId: walk.client_id,
+        attemptKey: `overage_${walkId}_${claim.id ?? "claim"}`,
+      });
+      const status = pi.status === "succeeded" ? "succeeded" : "pending";
+      const payment = await deps.updatePayment(claim.id!, {
+        status,
+        stripe_payment_intent_id: pi.id,
+        receipt_url: pi.receipt_url,
+      });
+      return { payment, already_charged: false };
+    } catch (err) {
+      if (deps.isCardError(err)) {
+        // Card declined: the attempt is dead, the walk stays completed, the
+        // debt shows in the billing console for a fresh re-charge attempt.
+        const payment = await deps.updatePayment(claim.id!, { status: "failed" });
+        await notifyFailure("card declined");
+        return { payment, already_charged: false };
+      }
+      // Infra error (Stripe unreachable, DB write failed): keep the pending
+      // claim (it blocks double-charging) and rethrow — the caller 500s and a
+      // retry reuses this claim's idempotency key instead of creating a new
+      // Stripe attempt.
+      throw err;
+    }
+  };
+
+  if (live?.status === "pending" && !live.stripe_payment_intent_id) {
+    // Claimed but no PI recorded: an attempt may still be in progress. Once
+    // the lease expires, retry THE SAME claim with THE SAME idempotency key.
+    // If Stripe succeeded before the previous crash, this replays that PI
+    // instead of creating a second charge.
+    const now = deps.now?.() ?? Date.now();
+    const age = live.created_at ? now - Date.parse(live.created_at) : Infinity;
+    if (age < CLAIM_LEASE_MS) return { payment: live, already_charged: true };
+    return chargeClaim(live);
+  }
+
   // Claim the walk (uq_overage_payment_per_walk serializes concurrent
   // attempts: the loser's insert throws and its caller retries into the
   // reconcile path above).
@@ -183,32 +222,5 @@ export async function chargeOverageForWalk(
     receipt_url: null,
   });
 
-  try {
-    const pi = await deps.createOffSessionPaymentIntent({
-      customerId: billing.stripe_customer_id,
-      amountPence: amount,
-      walkId,
-      clientId: walk.client_id,
-      attemptKey: `overage_${walkId}_${claim.id ?? "claim"}`,
-    });
-    const status = pi.status === "succeeded" ? "succeeded" : "pending";
-    const payment = await deps.updatePayment(claim.id!, {
-      status,
-      stripe_payment_intent_id: pi.id,
-      receipt_url: pi.receipt_url,
-    });
-    return { payment, already_charged: false };
-  } catch (err) {
-    if (deps.isCardError(err)) {
-      // Card declined: the attempt is dead, the walk stays completed, the
-      // debt shows in the billing console for a fresh re-charge attempt.
-      const payment = await deps.updatePayment(claim.id!, { status: "failed" });
-      await notifyFailure("card declined");
-      return { payment, already_charged: false };
-    }
-    // Infra error (Stripe unreachable, DB write failed): keep the pending
-    // claim (it blocks double-charging) and rethrow — the caller 500s and a
-    // retry reconciles via the claim-lease path.
-    throw err;
-  }
+  return chargeClaim(claim);
 }

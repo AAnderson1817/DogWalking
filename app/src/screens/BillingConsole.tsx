@@ -211,8 +211,12 @@ function PlanChangeSheet({
     setBusy(true);
     setError(null);
     try {
-      const { new_balance } = await changePlan(client.id, planId);
-      onChanged(`Plan changed — ${client.full_name} now holds ${new_balance} credits (upgrades prorate, downgrades never claw back).`);
+      const result = await changePlan(client.id, planId);
+      onChanged(
+        result.pending
+          ? `Plan change queued for ${client.full_name}; Stripe will confirm it shortly and credits will update from the webhook.`
+          : `Plan changed — ${client.full_name} now holds ${result.new_balance} credits (upgrades prorate, downgrades never claw back).`,
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : "plan change failed");
     } finally {

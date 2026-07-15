@@ -91,6 +91,48 @@ describe("GpsOutbox", () => {
     expect([...store.rows.values()][0]!.attempts).toBeGreaterThanOrEqual(5);
   });
 
+  it("concurrent drain callers await the active drain pass", async () => {
+    let releaseAll: ((rows: OutboxBatch[]) => void) | null = null;
+    const store: OutboxStore & { deleted: string[] } = {
+      deleted: [],
+      put: () => Promise.resolve(),
+      all: () =>
+        new Promise<OutboxBatch[]>((resolve) => {
+          releaseAll = resolve;
+        }),
+      delete(id) {
+        this.deleted.push(id);
+        return Promise.resolve();
+      },
+    };
+    const sent: OutboxBatch[] = [];
+    const outbox = new GpsOutbox(
+      store,
+      (batch) => {
+        sent.push(batch);
+        return Promise.resolve();
+      },
+      { online: () => true },
+    );
+
+    const first = outbox.drain();
+    const second = outbox.drain();
+    let secondSettled = false;
+    void second.then(() => {
+      secondSettled = true;
+    });
+    await Promise.resolve();
+
+    expect(secondSettled).toBe(false);
+    expect(releaseAll).toBeTypeOf("function");
+    releaseAll!([{ id: "b1", walkId: "walk-1", operatorId: "op-1", points: pts(1), attempts: 0 }]);
+    await first;
+    await second;
+    expect(secondSettled).toBe(true);
+    expect(sent).toHaveLength(1);
+    expect(store.deleted).toEqual(["b1"]);
+  });
+
   it("drains the survivors after 'reconnect' (retry succeeds)", async () => {
     const { outbox, sent, store } = makeHarness({ failTimes: 1 });
     await outbox.enqueue("walk-1", "op-1", pts(20)); // first drain fails

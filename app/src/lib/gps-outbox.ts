@@ -32,7 +32,7 @@ export interface OutboxOptions {
 }
 
 export class GpsOutbox {
-  private draining = false;
+  private drainPromise: Promise<void> | null = null;
   private timer: unknown = null;
   private readonly store: OutboxStore;
   private readonly send: (batch: OutboxBatch) => Promise<void>;
@@ -85,33 +85,35 @@ export class GpsOutbox {
 
   /** Push everything queued; on failure reschedule with backoff. */
   async drain(): Promise<void> {
-    if (this.draining) return;
+    if (this.drainPromise) return this.drainPromise;
+    this.drainPromise = this.drainOnce().finally(() => {
+      this.drainPromise = null;
+    });
+    return this.drainPromise;
+  }
+
+  private async drainOnce(): Promise<void> {
     if (!this.online()) {
       this.schedule(this.baseDelayMs);
       return;
     }
-    this.draining = true;
-    try {
-      const batches = await this.store.all();
-      for (const batch of batches) {
-        try {
-          await this.send(batch);
+    const batches = await this.store.all();
+    for (const batch of batches) {
+      try {
+        await this.send(batch);
+        await this.store.delete(batch.id);
+      } catch {
+        const attempts = batch.attempts + 1;
+        if (attempts >= this.maxAttempts) {
+          // Poison batch: drop it and keep draining so it can't block the
+          // rest of the queue (and this walk's later points) forever.
           await this.store.delete(batch.id);
-        } catch {
-          const attempts = batch.attempts + 1;
-          if (attempts >= this.maxAttempts) {
-            // Poison batch: drop it and keep draining so it can't block the
-            // rest of the queue (and this walk's later points) forever.
-            await this.store.delete(batch.id);
-            continue;
-          }
-          await this.store.put({ ...batch, attempts });
-          this.schedule(Math.min(this.baseDelayMs * 2 ** attempts, this.maxDelayMs));
-          return; // stop the pass; retry later in order
+          continue;
         }
+        await this.store.put({ ...batch, attempts });
+        this.schedule(Math.min(this.baseDelayMs * 2 ** attempts, this.maxDelayMs));
+        return; // stop the pass; retry later in order
       }
-    } finally {
-      this.draining = false;
     }
   }
 

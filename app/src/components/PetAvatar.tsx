@@ -21,6 +21,7 @@ function hashName(name: string): number {
   return Math.abs(h);
 }
 
+// oxlint-disable-next-line react/only-export-components
 export function petColorway(name: string): { face: string; ears: string } {
   return COLORWAYS[hashName(name) % COLORWAYS.length] ?? { face: "#F7B733", ears: "#E08E1B" };
 }

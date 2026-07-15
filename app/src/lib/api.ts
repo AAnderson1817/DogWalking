@@ -376,7 +376,10 @@ export function vaultDelete(body: {
 }
 
 // Built in later phases (07/06); typed now so screens can bind early.
-export function changePlan(clientId: string, newPlanId: string): Promise<{ new_balance: number }> {
+export function changePlan(
+  clientId: string,
+  newPlanId: string,
+): Promise<{ new_balance: number; pending?: boolean; intent_id?: string }> {
   return invokeEdge("change-plan", { client_id: clientId, new_plan_id: newPlanId });
 }
 
@@ -567,16 +570,13 @@ export async function listSchedulePets(scheduleId: string): Promise<string[]> {
 
 export async function setSchedulePets(
   scheduleId: string,
-  operatorId: string,
+  _operatorId: string,
   petIds: string[],
 ): Promise<void> {
-  const { error: delErr } = await supabase
-    .from("schedule_pets").delete().eq("schedule_id", scheduleId);
-  if (delErr) throw new Error(delErr.message);
-  if (petIds.length === 0) return;
-  const { error } = await supabase.from("schedule_pets").insert(
-    petIds.map((petId) => ({ schedule_id: scheduleId, pet_id: petId, operator_id: operatorId })),
-  );
+  const { error } = await supabase.rpc("fn_set_schedule_pets", {
+    p_schedule: scheduleId,
+    p_pet_ids: petIds,
+  });
   if (error) throw new Error(error.message);
 }
 
@@ -585,16 +585,11 @@ export async function setSchedulePets(
  * (phase 06 deletion semantics — past walks are kept).
  */
 export async function deactivateSchedule(scheduleId: string, today: string): Promise<void> {
-  const { error } = await supabase
-    .from("recurring_schedules").update({ active: false }).eq("id", scheduleId);
+  const { error } = await supabase.rpc("fn_deactivate_schedule", {
+    p_schedule: scheduleId,
+    p_today: today,
+  });
   if (error) throw new Error(error.message);
-  const { error: wErr } = await supabase
-    .from("walks")
-    .update({ status: "cancelled" })
-    .eq("schedule_id", scheduleId)
-    .eq("status", "scheduled")
-    .gte("scheduled_date", today);
-  if (wErr) throw new Error(wErr.message);
 }
 
 // ── portal (phase 07) ──────────────────────────────────────────────────────

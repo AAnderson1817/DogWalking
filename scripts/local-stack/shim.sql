@@ -1,4 +1,4 @@
--- Supabase-compatibility shim for a bare Postgres 16 cluster.
+-- Supabase-compatibility shim for a bare Postgres 17 cluster.
 -- Replicates the parts of the Supabase local stack (roles, auth schema,
 -- storage schema, default privileges) that PawTrail's migrations, RLS
 -- policies, and smoke tests depend on. Applied by scripts/db-reset.sh
