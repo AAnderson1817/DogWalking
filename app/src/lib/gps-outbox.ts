@@ -33,6 +33,7 @@ export interface OutboxOptions {
 
 export class GpsOutbox {
   private drainPromise: Promise<void> | null = null;
+  private queuedDrain: Promise<void> | null = null;
   private timer: unknown = null;
   private readonly store: OutboxStore;
   private readonly send: (batch: OutboxBatch) => Promise<void>;
@@ -83,9 +84,21 @@ export class GpsOutbox {
     return all.filter((b) => b.walkId === walkId).flatMap((b) => b.points);
   }
 
-  /** Push everything queued; on failure reschedule with backoff. */
+  /** Push everything queued; on failure reschedule with backoff.
+   * A call that lands while a pass is already in flight queues exactly one
+   * follow-up pass: the in-flight pass snapshotted the store before this
+   * caller's batch may have been written, so returning the stale promise
+   * alone would let end() resolve with the final batch still queued. */
   async drain(): Promise<void> {
-    if (this.drainPromise) return this.drainPromise;
+    if (this.drainPromise) {
+      this.queuedDrain ??= this.drainPromise
+        .catch(() => {})
+        .then(() => {
+          this.queuedDrain = null;
+          return this.drain();
+        });
+      return this.queuedDrain;
+    }
     this.drainPromise = this.drainOnce().finally(() => {
       this.drainPromise = null;
     });

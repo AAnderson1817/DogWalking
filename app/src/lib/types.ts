@@ -370,6 +370,57 @@ export type Database = {
         };
         Relationships: [];
       };
+      plan_change_intents: {
+        Row: {
+          id: string;
+          operator_id: string;
+          client_id: string;
+          requested_by: string;
+          old_plan_id: string | null;
+          new_plan_id: string;
+          stripe_subscription_id: string | null;
+          stripe_update_idempotency_key: string;
+          remaining_fraction: number;
+          status: string;
+          stripe_event_id: string | null;
+          requested_at: string;
+          applied_at: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          operator_id: string;
+          client_id: string;
+          requested_by: string;
+          old_plan_id?: string | null;
+          new_plan_id: string;
+          stripe_subscription_id?: string | null;
+          stripe_update_idempotency_key: string;
+          remaining_fraction: number;
+          status?: string;
+          stripe_event_id?: string | null;
+          requested_at?: string;
+          applied_at?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          operator_id?: string;
+          client_id?: string;
+          requested_by?: string;
+          old_plan_id?: string | null;
+          new_plan_id?: string;
+          stripe_subscription_id?: string | null;
+          stripe_update_idempotency_key?: string;
+          remaining_fraction?: number;
+          status?: string;
+          stripe_event_id?: string | null;
+          requested_at?: string;
+          applied_at?: string | null;
+          created_at?: string;
+        };
+        Relationships: [];
+      };
       plans: {
         Row: {
           id: string;
@@ -610,6 +661,27 @@ export type Database = {
         };
         Relationships: [];
       };
+      vault_rate_limit_attempts: {
+        Row: {
+          id: string;
+          user_id: string;
+          ip: unknown | null;
+          attempted_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          ip?: unknown | null;
+          attempted_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          ip?: unknown | null;
+          attempted_at?: string;
+        };
+        Relationships: [];
+      };
       walk_gps_points: {
         Row: {
           id: string;
@@ -810,11 +882,26 @@ export type Database = {
         };
         Returns: boolean;
       };
+      fn_apply_plan_change_intent: {
+        Args: {
+          p_intent: string;
+          p_event_id: string;
+        };
+        Returns: number;
+      };
       fn_apply_rollover: {
         Args: {
           p_client: string;
         };
         Returns: number;
+      };
+      fn_assert_plan_change_intent_tenant: {
+        Args: Record<string, never>;
+        Returns: unknown;
+      };
+      fn_assert_tenant_consistency: {
+        Args: Record<string, never>;
+        Returns: unknown;
       };
       fn_book_walk: {
         Args: {
@@ -850,7 +937,7 @@ export type Database = {
           p_schedule: string;
           p_today: string;
         };
-        Returns: void;
+        Returns: unknown;
       };
       fn_debit_walk: {
         Args: {
@@ -932,7 +1019,23 @@ export type Database = {
         };
         Returns: Array<{ ciphertext: string; label: string; entry_method: Database["public"]["Enums"]["entry_method"] }>;
       };
+      fn_record_plan_change_intent: {
+        Args: {
+          p_operator: string;
+          p_client: string;
+          p_requested_by: string;
+          p_old_plan: string;
+          p_new_plan: string;
+          p_subscription: string;
+          p_fraction: number;
+        };
+        Returns: Array<{ o_intent_id: string; o_idempotency_key: string }>;
+      };
       fn_refund_cancelled_debit: {
+        Args: Record<string, never>;
+        Returns: unknown;
+      };
+      fn_seed_operator_defaults: {
         Args: Record<string, never>;
         Returns: unknown;
       };
@@ -941,15 +1044,20 @@ export type Database = {
           p_schedule: string;
           p_pet_ids: string[];
         };
-        Returns: void;
-      };
-      fn_seed_operator_defaults: {
-        Args: Record<string, never>;
         Returns: unknown;
       };
       fn_touch_updated_at: {
         Args: Record<string, never>;
         Returns: unknown;
+      };
+      fn_vault_allow_attempt: {
+        Args: {
+          p_user: string;
+          p_ip: unknown;
+          p_limit: number;
+          p_window_seconds: number;
+        };
+        Returns: boolean;
       };
       fn_walk_cost: {
         Args: {
@@ -992,12 +1100,14 @@ export type Notifications = Database["public"]["Tables"]["notifications"]["Row"]
 export type Operators = Database["public"]["Tables"]["operators"]["Row"];
 export type Payments = Database["public"]["Tables"]["payments"]["Row"];
 export type Pets = Database["public"]["Tables"]["pets"]["Row"];
+export type PlanChangeIntents = Database["public"]["Tables"]["plan_change_intents"]["Row"];
 export type Plans = Database["public"]["Tables"]["plans"]["Row"];
 export type Properties = Database["public"]["Tables"]["properties"]["Row"];
 export type RecurringSchedules = Database["public"]["Tables"]["recurring_schedules"]["Row"];
 export type SchedulePets = Database["public"]["Tables"]["schedule_pets"]["Row"];
 export type ServiceTypes = Database["public"]["Tables"]["service_types"]["Row"];
 export type StripeEvents = Database["public"]["Tables"]["stripe_events"]["Row"];
+export type VaultRateLimitAttempts = Database["public"]["Tables"]["vault_rate_limit_attempts"]["Row"];
 export type WalkGpsPoints = Database["public"]["Tables"]["walk_gps_points"]["Row"];
 export type WalkPets = Database["public"]["Tables"]["walk_pets"]["Row"];
 export type WalkPhotos = Database["public"]["Tables"]["walk_photos"]["Row"];

@@ -13,10 +13,10 @@ on:
     workflows: ["Deploy staging (Supabase)"]
     types: [completed]
 
-# Serialize runs: they share fixed fixture emails, so concurrent runs would
-# fight over the same throwaway users.
 permissions: {}
 
+# Serialize runs: they share fixed fixture emails, so concurrent runs would
+# fight over the same throwaway users.
 concurrency:
   group: staging-smoke
   cancel-in-progress: false

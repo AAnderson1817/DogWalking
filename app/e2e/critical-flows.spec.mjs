@@ -68,7 +68,17 @@ test.describe("critical PawTrail journeys", () => {
     const endB = pageB.getByRole("button", { name: /end|complete|finish/i });
     await Promise.allSettled([endA.click(), endB.click()]);
 
-    await expect(pageA.getByText(/ended|complete|finished|already/i).or(pageB.getByText(/ended|complete|finished|already/i))).toBeVisible();
+    // Locator.or() must not cross pages — poll each page separately and
+    // require at least one to reach a resolved end state.
+    await expect
+      .poll(async () => {
+        const [a, b] = await Promise.all([
+          pageA.getByText(/ended|complete|finished|already/i).first().isVisible().catch(() => false),
+          pageB.getByText(/ended|complete|finished|already/i).first().isVisible().catch(() => false),
+        ]);
+        return a || b;
+      })
+      .toBe(true);
     await first.close();
     await second.close();
   });

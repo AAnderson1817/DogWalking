@@ -162,13 +162,15 @@ export async function chargeOverageForWalk(
 
   if (amount == null) return failWithoutAttempt("no plan on file");
   if (!billing.stripe_customer_id) return failWithoutAttempt("no payment method on file");
+  // Narrowing doesn't survive into the closure below — capture it.
+  const customerId = billing.stripe_customer_id;
 
   const chargeClaim = async (
     claim: OveragePayment,
   ): Promise<{ payment: OveragePayment; already_charged: false }> => {
     try {
       const pi = await deps.createOffSessionPaymentIntent({
-        customerId: billing.stripe_customer_id,
+        customerId,
         amountPence: amount,
         walkId,
         clientId: walk.client_id,

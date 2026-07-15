@@ -723,6 +723,71 @@ begin
   raise notice 'portal booking & cutoff guards: OK';
 end $$;
 
+-- ═══ Plan-change intents: supersede, one-pending, idempotent apply (0018) ══
+do $$
+declare
+  v_client uuid := '99999999-0000-4000-c000-00000000000a';
+  v_op uuid := '99999999-0000-4000-a000-000000000001';
+  v_plan_b uuid := '99999999-0000-4000-b000-000000000002';
+  v_plan_c uuid := '99999999-0000-4000-b000-000000000003';
+  v_intent1 uuid;
+  v_key1 text;
+  v_intent1_replay uuid;
+  v_key1_replay text;
+  v_intent2 uuid;
+  v_balance1 int;
+  v_balance2 int;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  set local session authorization service_role;
+
+  -- Record an intent, then replay the identical request: same intent AND the
+  -- same Stripe idempotency key must come back (retry replays, not re-issues).
+  select o_intent_id, o_idempotency_key into v_intent1, v_key1
+    from fn_record_plan_change_intent(v_op, v_client, v_op, null, v_plan_b, 'sub_smoke', 0.5);
+  select o_intent_id, o_idempotency_key into v_intent1_replay, v_key1_replay
+    from fn_record_plan_change_intent(v_op, v_client, v_op, null, v_plan_b, 'sub_smoke', 0.5);
+  if v_intent1 <> v_intent1_replay or v_key1 <> v_key1_replay then
+    raise exception 'FAIL: identical plan-change request did not reuse the pending intent';
+  end if;
+
+  -- A different target supersedes: old pending intent gone, exactly one left.
+  select o_intent_id into v_intent2
+    from fn_record_plan_change_intent(v_op, v_client, v_op, null, v_plan_c, 'sub_smoke', 0.5);
+  if exists (select 1 from plan_change_intents where id = v_intent1) then
+    raise exception 'FAIL: superseded intent still present';
+  end if;
+  if (select count(*) from plan_change_intents where client_id = v_client and status = 'pending') <> 1 then
+    raise exception 'FAIL: expected exactly one pending intent per client';
+  end if;
+
+  -- The partial unique index blocks a second pending intent outright.
+  begin
+    insert into plan_change_intents (operator_id, client_id, requested_by, new_plan_id,
+                                     stripe_update_idempotency_key, remaining_fraction)
+    values (v_op, v_client, v_op, v_plan_b, 'smoke-dup-key', 0.5);
+    raise exception 'FAIL: second pending intent accepted despite unique index';
+  exception when unique_violation then
+    null;
+  end;
+
+  -- Apply is idempotent on replay: same event, same intent → one plan change.
+  select fn_apply_plan_change_intent(v_intent2, 'evt_smoke_intent') into v_balance1;
+  select fn_apply_plan_change_intent(v_intent2, 'evt_smoke_intent_retry') into v_balance2;
+  if v_balance1 <> v_balance2 then
+    raise exception 'FAIL: replayed intent apply changed the balance (% -> %)', v_balance1, v_balance2;
+  end if;
+  if (select plan_id from clients where id = v_client) <> v_plan_c then
+    raise exception 'FAIL: applied intent did not move the client to the target plan';
+  end if;
+  if (select status from plan_change_intents where id = v_intent2) <> 'applied' then
+    raise exception 'FAIL: applied intent not marked applied';
+  end if;
+
+  reset session authorization;
+  raise notice 'plan-change intents (0018): OK';
+end $$;
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;

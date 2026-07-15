@@ -2,7 +2,13 @@
 
 The HANDOFF assumes `supabase start` (Docker). This repo also supports a
 bare-metal fallback for environments where the Docker daemon is unavailable,
-using the system PostgreSQL 16 server plus a compatibility shim.
+using a system PostgreSQL server plus a compatibility shim.
+
+`scripts/db-start.sh` targets the major version in `supabase/config.toml`
+(currently 17, matching hosted Supabase and CI). If those binaries aren't
+installed it falls back to the newest `/usr/lib/postgresql/*` with a warning,
+and if something is already serving 127.0.0.1:54322 it reuses it. Override
+with `PG_MAJOR=16` (or `PGBIN=/path/to/bin`) when you need a specific major.
 
 ## One-time setup
 ```sh

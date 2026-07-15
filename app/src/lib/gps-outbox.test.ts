@@ -91,17 +91,31 @@ describe("GpsOutbox", () => {
     expect([...store.rows.values()][0]!.attempts).toBeGreaterThanOrEqual(5);
   });
 
-  it("concurrent drain callers await the active drain pass", async () => {
-    let releaseAll: ((rows: OutboxBatch[]) => void) | null = null;
+  it("a drain during an in-flight pass runs exactly one follow-up pass that sees late batches", async () => {
+    // Pass 1 snapshots the store BEFORE the late batch is written. If drain()
+    // merely returned the in-flight promise, end() could resolve with the
+    // final batch still queued — the follow-up pass is the guarantee.
+    let releaseFirstAll: ((rows: OutboxBatch[]) => void) | null = null;
+    const rows = new Map<string, OutboxBatch>();
+    let allCalls = 0;
     const store: OutboxStore & { deleted: string[] } = {
       deleted: [],
-      put: () => Promise.resolve(),
-      all: () =>
-        new Promise<OutboxBatch[]>((resolve) => {
-          releaseAll = resolve;
-        }),
+      put: (b) => {
+        rows.set(b.id, b);
+        return Promise.resolve();
+      },
+      all: () => {
+        allCalls++;
+        if (allCalls === 1) {
+          return new Promise<OutboxBatch[]>((resolve) => {
+            releaseFirstAll = resolve;
+          });
+        }
+        return Promise.resolve([...rows.values()]);
+      },
       delete(id) {
         this.deleted.push(id);
+        rows.delete(id);
         return Promise.resolve();
       },
     };
@@ -115,8 +129,10 @@ describe("GpsOutbox", () => {
       { online: () => true },
     );
 
-    const first = outbox.drain();
-    const second = outbox.drain();
+    const first = outbox.drain(); // pass 1 blocked inside store.all()
+    await store.put({ id: "late", walkId: "walk-1", operatorId: "op-1", points: pts(1), attempts: 0 });
+    const second = outbox.drain(); // must not resolve off pass 1's stale snapshot
+    const third = outbox.drain(); // shares the single queued follow-up
     let secondSettled = false;
     void second.then(() => {
       secondSettled = true;
@@ -124,13 +140,14 @@ describe("GpsOutbox", () => {
     await Promise.resolve();
 
     expect(secondSettled).toBe(false);
-    expect(releaseAll).toBeTypeOf("function");
-    releaseAll!([{ id: "b1", walkId: "walk-1", operatorId: "op-1", points: pts(1), attempts: 0 }]);
+    expect(releaseFirstAll).toBeTypeOf("function");
+    releaseFirstAll!([]); // pass 1 saw nothing — "late" arrived after its snapshot
     await first;
     await second;
-    expect(secondSettled).toBe(true);
-    expect(sent).toHaveLength(1);
-    expect(store.deleted).toEqual(["b1"]);
+    await third;
+    expect(sent.map((b) => b.id)).toEqual(["late"]); // follow-up delivered it
+    expect(store.deleted).toEqual(["late"]);
+    expect(allCalls).toBe(2); // exactly one follow-up pass, shared by callers 2+3
   });
 
   it("drains the survivors after 'reconnect' (retry succeeds)", async () => {

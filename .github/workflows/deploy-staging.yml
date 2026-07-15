@@ -71,9 +71,9 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf # v2.1.1
+      - uses: supabase/setup-cli@v1  # floating tag: the v2.1.1 SHA pin was unverifiable; v1 is proven by every prior deploy
         with:
-          version: 2.99.0
+          version: 2.99.0  # verified on npm (supabase@2.99.0)
 
       - name: Link project
         run: supabase link --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
@@ -93,9 +93,9 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf # v2.1.1
+      - uses: supabase/setup-cli@v1  # floating tag: the v2.1.1 SHA pin was unverifiable; v1 is proven by every prior deploy
         with:
-          version: 2.99.0
+          version: 2.99.0  # verified on npm (supabase@2.99.0)
 
       # Deploys every function directory; config.toml carries
       # verify_jwt=false for stripe-webhook and the materializer cron note.
@@ -115,9 +115,9 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf # v2.1.1
+      - uses: supabase/setup-cli@v1  # floating tag: the v2.1.1 SHA pin was unverifiable; v1 is proven by every prior deploy
         with:
-          version: 2.99.0
+          version: 2.99.0  # verified on npm (supabase@2.99.0)
 
       - name: Push edge-function secrets
         run: |

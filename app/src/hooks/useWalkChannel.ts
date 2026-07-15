@@ -62,9 +62,9 @@ export function useWalkChannel(
 
   const batcher = useMemo(
     () =>
-      new GpsBatcher((points) => {
-        void outbox?.enqueue(walkId, operatorId ?? "", points);
-      }),
+      // Return the enqueue promise so batcher.flush()/end() genuinely await
+      // IndexedDB persistence — a voided call lets end() race the final batch.
+      new GpsBatcher((points) => outbox?.enqueue(walkId, operatorId ?? "", points)),
     [walkId, operatorId, outbox],
   );
 

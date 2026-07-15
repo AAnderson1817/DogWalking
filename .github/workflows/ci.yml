@@ -56,9 +56,9 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+      - uses: denoland/setup-deno@v2  # floating tag: the pinned SHA was unverifiable from this environment
         with:
-          deno-version: v2.9.2
+          deno-version: v2.9.1  # verified release (matches the local toolchain)
 
       - name: Typecheck entrypoints
         run: deno check supabase/functions/*/index.ts

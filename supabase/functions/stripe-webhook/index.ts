@@ -111,9 +111,12 @@ function makeDeps(): WebhookDeps {
         .limit(1);
       if (metadataIntentId) {
         query = query.eq("id", metadataIntentId);
+      } else if (subscriptionId && planId) {
+        query = query.eq("stripe_subscription_id", subscriptionId).eq("new_plan_id", planId);
       } else {
-        if (subscriptionId) query = query.eq("stripe_subscription_id", subscriptionId);
-        if (planId) query = query.eq("new_plan_id", planId);
+        // Without an exact metadata id or a sub+plan proof, never guess —
+        // the handler pre-filters this, but keep the query fail-safe too.
+        return null;
       }
       const { data, error } = await query.maybeSingle();
       if (error) throw new Error("plan-change intent lookup failed");

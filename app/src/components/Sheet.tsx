@@ -24,6 +24,12 @@ export function Sheet({
 }) {
   const sheetRef = useRef<HTMLDivElement | null>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
+  // The trap must only set up / tear down on open/close. Consumers pass
+  // inline onClose handlers, so keying the effect on onClose would re-run it
+  // (and yank focus) on every parent re-render — e.g. each password keystroke
+  // in the vault re-auth sheet. Read the latest handler through a ref instead.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     if (!open) return;
@@ -39,7 +45,7 @@ export function Sheet({
 
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        onClose();
+        onCloseRef.current();
         return;
       }
       if (e.key !== "Tab") return;
@@ -69,7 +75,7 @@ export function Sheet({
       restoreFocusRef.current?.focus();
       restoreFocusRef.current = null;
     };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
   return (

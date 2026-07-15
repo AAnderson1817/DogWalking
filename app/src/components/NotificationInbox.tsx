@@ -113,6 +113,10 @@ export function NotificationBell({ persona }: { persona: "operator" | "client" }
                     }
                   }}
                   onKeyDown={(e) => {
+                    // Only activate for keys on the row itself — Enter/Space
+                    // on the nested "Mark read" button must stay a mark-read,
+                    // not bubble up into a navigation.
+                    if (e.target !== e.currentTarget) return;
                     if (!isActivationKey(e)) return;
                     e.preventDefault();
                     void markRead(n);

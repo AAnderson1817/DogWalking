@@ -85,6 +85,11 @@ export LOCAL_DB_URL="postgresql://postgres@127.0.0.1:54322/postgres"
 ./scripts/db-reset.sh
 ```
 
+The helper targets the Postgres major from `supabase/config.toml` (17); on a
+machine with only an older major installed it falls back with a warning, or
+force one with `PG_MAJOR=16 ./scripts/db-start.sh`. See
+`docs/dev/local-stack.md`.
+
 Then start the Vite dev server:
 
 ```bash

@@ -6,21 +6,41 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Idempotent across script versions: if a cluster (any major, any data dir)
+# is already serving 54322, use it rather than fighting over the port.
+if command -v pg_isready >/dev/null 2>&1 && pg_isready -h 127.0.0.1 -p 54322 -q; then
+  echo "postgres already serving 127.0.0.1:54322 — reusing it"
+  echo 'export LOCAL_DB_URL="postgresql://postgres@127.0.0.1:54322/postgres"'
+  exit 0
+fi
+
 CONFIG_MAJOR="$(awk -F= '/^[[:space:]]*major_version[[:space:]]*=/{ gsub(/[[:space:]]/, "", $2); print $2; exit }' "$ROOT/supabase/config.toml")"
 PG_MAJOR="${PG_MAJOR:-${CONFIG_MAJOR:-17}}"
 PG_MAJOR="${PG_MAJOR//[[:space:]]/}"
 PGBIN="${PGBIN:-/usr/lib/postgresql/${PG_MAJOR}/bin}"
+
+# Prefer the configured major, but fall back to the newest installed one so
+# a PG16-only machine can still run the suite (the drift is called out).
+if [[ ! -x "$PGBIN/initdb" || ! -x "$PGBIN/pg_ctl" ]]; then
+  FALLBACK="$(ls -1d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -1 || true)"
+  if [[ -n "$FALLBACK" && -x "$FALLBACK/initdb" ]]; then
+    echo "warning: Postgres ${PG_MAJOR} not installed; falling back to ${FALLBACK}" >&2
+    echo "warning: production/CI run Postgres ${PG_MAJOR} — install it to match" >&2
+    PGBIN="$FALLBACK"
+    PG_MAJOR="$(basename "$(dirname "$FALLBACK")")"
+  else
+    cat >&2 <<MSG
+Postgres ${PG_MAJOR} binaries were not found at ${PGBIN} and no other
+/usr/lib/postgresql/*/bin exists. Install Postgres ${PG_MAJOR}, set PG_MAJOR to
+an installed major version, or set PGBIN to a directory with initdb/pg_ctl.
+MSG
+    exit 1
+  fi
+fi
+
 PGDATA="${PGDATA:-/home/pguser/pgdata-${PG_MAJOR}}"
 PGRUN="${PGRUN:-/home/pguser/pgrun}"
-
-if [[ ! -x "$PGBIN/initdb" || ! -x "$PGBIN/pg_ctl" ]]; then
-  cat >&2 <<MSG
-Postgres ${PG_MAJOR} binaries were not found at ${PGBIN}.
-Install Postgres ${PG_MAJOR}, set PG_MAJOR to an installed major version, or set
-PGBIN to a directory containing initdb and pg_ctl.
-MSG
-  exit 1
-fi
 
 if ! id pguser >/dev/null 2>&1; then
   useradd -m -s /bin/bash pguser

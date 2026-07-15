@@ -29,13 +29,13 @@ async function getVaultKey(): Promise<CryptoKey> {
   return vaultKey;
 }
 
-function makeDeps(): VaultDeps {
+function makeDeps(clientIp: string | null): VaultDeps {
   const db = adminClient();
   return {
     async allowAttempt(userId) {
       const { data, error } = await db.rpc("fn_vault_allow_attempt", {
         p_user: userId,
-        p_ip: null,
+        p_ip: clientIp,
         p_limit: 5,
         p_window_seconds: 60,
       });
@@ -152,6 +152,8 @@ function makeDeps(): VaultDeps {
 serveFunction(async (req) => {
   const operator = await requireOperator(req);
   const body = await readJson<VaultBody>(req);
-  const result = await handleVault(operator, body, makeDeps());
+  // First hop of x-forwarded-for = the caller as seen by the edge gateway.
+  const clientIp = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null;
+  const result = await handleVault(operator, body, makeDeps(clientIp));
   return jsonOk(result);
 });

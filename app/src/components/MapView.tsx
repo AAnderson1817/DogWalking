@@ -1,7 +1,7 @@
 // Route map (spec 05): Mapbox GL when VITE_MAPBOX_TOKEN is set, otherwise
 // an auto-fit SVG polyline — identical props either way: { points, live? }.
 // mapbox-gl loads lazily so the fallback build never pays for it.
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { env } from "@/lib/env";
 import { fitPointsToViewBox, toSvgPath } from "@/lib/map-fit";
 
@@ -64,12 +64,21 @@ function MapboxMap({ points, live }: MapViewProps) {
   const container = useRef<HTMLDivElement>(null);
   // deno-lint-ignore no-explicit-any
   const mapRef = useRef<any>(null);
+  // If the lazy chunk can't load (offline cold-start after a deploy, CDN
+  // hiccup), fall back to the bundled SVG map instead of a blank pane.
+  const [loadFailed, setLoadFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     async function boot() {
       if (!container.current || mapRef.current) return;
-      const mapboxgl = (await import("mapbox-gl")).default;
+      let mapboxgl: typeof import("mapbox-gl").default;
+      try {
+        mapboxgl = (await import("mapbox-gl")).default;
+      } catch {
+        if (!cancelled) setLoadFailed(true);
+        return;
+      }
       if (cancelled || !container.current) return;
       mapboxgl.accessToken = env.mapboxToken ?? "";
       const first = points[points.length - 1] ?? { lat: 51.5074, lng: -0.1278 };
@@ -118,5 +127,6 @@ function MapboxMap({ points, live }: MapViewProps) {
     else map.once("load", draw);
   }, [points, live]);
 
+  if (loadFailed) return <SvgMap points={points} live={live} />;
   return <div className="map-view" data-renderer="mapbox" ref={container} />;
 }

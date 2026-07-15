@@ -239,12 +239,21 @@ async function applyEvent(
       const metadataIntentId = typeof meta.pawtrail_plan_change_intent_id === "string"
         ? meta.pawtrail_plan_change_intent_id
         : null;
-      const intent = await deps.findPendingPlanChangeIntent({
-        clientId: client.id,
-        subscriptionId: subId,
-        planId: plan?.id ?? null,
-        metadataIntentId,
-      });
+      // Only two matches are safe: the exact intent id stamped into the
+      // subscription's metadata by change-plan, or (for pre-intent subs with
+      // no metadata) sub + resolved plan — proof the price really moved to
+      // the intent's target. Anything looser can apply an orphaned intent on
+      // an unrelated subscription event and diverge local plan/credits from
+      // what Stripe is actually billing.
+      const canMatchIntent = metadataIntentId !== null || (subId !== null && plan !== null);
+      const intent = canMatchIntent
+        ? await deps.findPendingPlanChangeIntent({
+          clientId: client.id,
+          subscriptionId: subId,
+          planId: plan?.id ?? null,
+          metadataIntentId,
+        })
+        : null;
       if (intent) {
         await deps.applyPlanChangeIntent(intent.id, event.id);
         fields.plan_id = intent.new_plan_id;

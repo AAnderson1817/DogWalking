@@ -284,6 +284,45 @@ Deno.test("subscription.updated applies a pending plan-change intent before upda
   assertEquals((update.args[1] as Record<string, unknown>).plan_id, "plan-1");
 });
 
+Deno.test("subscription.updated with no metadata and no resolvable plan never looks up an intent", async () => {
+  // An orphaned pending intent must not be applied off an unrelated
+  // subscription event: without the exact metadata id or a sub+plan proof,
+  // the handler skips intent matching entirely.
+  const { deps, calls } = makeMockDeps({ subId: "sub_1" });
+  const result = await handleStripeEvent(
+    event("customer.subscription.updated", {
+      id: "sub_1",
+      customer: "cus_1",
+      status: "active",
+      items: { data: [{ price: { id: "price_unknown" } }] },
+    }),
+    deps,
+  );
+  assertEquals(result.status, "processed");
+  assertFalse(calls.some((c) => c.fn === "findPendingPlanChangeIntent"));
+  assertFalse(calls.some((c) => c.fn === "applyPlanChangeIntent"));
+});
+
+Deno.test("subscription.updated without metadata falls back to an exact sub+plan intent match", async () => {
+  const { deps, calls } = makeMockDeps({ subId: "sub_1" });
+  const result = await handleStripeEvent(
+    event("customer.subscription.updated", {
+      id: "sub_1",
+      customer: "cus_1",
+      status: "active",
+      items: { data: [{ price: { id: "price_1" } }] },
+    }),
+    deps,
+  );
+  assertEquals(result.status, "processed");
+  const lookup = calls.find((c) => c.fn === "findPendingPlanChangeIntent");
+  assert(lookup, "fallback lookup must run when sub and plan both resolve");
+  const args = lookup!.args[0] as Record<string, unknown>;
+  assertEquals(args.metadataIntentId, null);
+  assertEquals(args.subscriptionId, "sub_1");
+  assertEquals(args.planId, "plan-1");
+});
+
 Deno.test("unbound client: a LIVE subscription.updated binds, a dead one is ignored", async () => {
   const live = makeMockDeps({ subId: null });
   const r1 = await handleStripeEvent(

@@ -43,6 +43,12 @@ serveFunction(async (req) => {
   if (!plan || plan.operator_id !== operator.id) {
     throw new HttpError(404, "plan_not_found", "plan not found");
   }
+  if (plan.id === client.plan_id) {
+    // A no-op "change" must not create an intent: a stale same-plan intent
+    // could later be matched by a routine renewal event (sub + plan match)
+    // and spuriously re-prorate credits.
+    throw new HttpError(409, "already_on_plan", "client is already on this plan");
+  }
 
   let fraction: number;
 
@@ -66,36 +72,25 @@ serveFunction(async (req) => {
     const now = Math.floor(Date.now() / 1000);
     fraction = end > start ? Math.min(1, Math.max(0, (end - now) / (end - start))) : 0;
 
-    const { data: existingIntent, error: existingErr } = await db
-      .from("plan_change_intents")
-      .select("id, stripe_update_idempotency_key")
-      .eq("client_id", client.id)
-      .eq("stripe_subscription_id", sub.id)
-      .eq("new_plan_id", plan.id)
-      .eq("status", "pending")
-      .order("requested_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (existingErr) throw new HttpError(500, "intent_lookup_failed", "plan change intent lookup failed");
-
-    const { data: createdIntent, error: iErr } = existingIntent
-      ? { data: null, error: null }
-      : await db
-        .from("plan_change_intents")
-        .insert({
-          operator_id: operator.id,
-          client_id: client.id,
-          requested_by: operator.id,
-          old_plan_id: client.plan_id,
-          new_plan_id: plan.id,
-          stripe_subscription_id: sub.id,
-          stripe_update_idempotency_key: crypto.randomUUID(),
-          remaining_fraction: fraction,
-        })
-        .select("id, stripe_update_idempotency_key")
-        .single();
-    const intent = existingIntent ?? createdIntent;
-    if (iErr || !intent) throw new HttpError(500, "intent_failed", "plan change intent could not be saved");
+    // Atomic reuse-or-supersede-or-insert under a per-client lock (0018):
+    // a repeat of the same request replays the same Stripe idempotency key;
+    // a different target supersedes the old pending intent so at most one
+    // pending intent per client can ever be webhook-matched.
+    const { data: intentRow, error: iErr } = await db.rpc("fn_record_plan_change_intent", {
+      p_operator: operator.id,
+      p_client: client.id,
+      p_requested_by: operator.id,
+      p_old_plan: client.plan_id,
+      p_new_plan: plan.id,
+      p_subscription: sub.id,
+      p_fraction: fraction,
+    });
+    const intentData = Array.isArray(intentRow) ? intentRow[0] : intentRow;
+    if (iErr || !intentData) throw new HttpError(500, "intent_failed", "plan change intent could not be saved");
+    const intent = {
+      id: (intentData as { o_intent_id: string }).o_intent_id,
+      stripe_update_idempotency_key: (intentData as { o_idempotency_key: string }).o_idempotency_key,
+    };
 
     const idempotencyKey = `change_plan_${intent.stripe_update_idempotency_key}`;
     await stripe.subscriptions.update(
