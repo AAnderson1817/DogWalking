@@ -1,0 +1,126 @@
+name: Deploy production (Supabase)
+
+# Applies migrations and deploys all edge functions to the PRODUCTION
+# Supabase project. Production deploys are always deliberate:
+#   - manual trigger only (workflow_dispatch) — never on push
+#   - a typed confirmation phrase
+#   - CI must already be green on the exact commit being deployed
+#   - the `production` GitHub environment can additionally require a
+#     human approval (Settings → Environments → production → reviewers)
+#
+# Secrets are ENVIRONMENT-SCOPED: create the same names used by staging
+# (SUPABASE_ACCESS_TOKEN, SUPABASE_PROJECT_REF, SUPABASE_DB_PASSWORD,
+# STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, VAULT_MASTER_KEY, APP_BASE_URL,
+# RESEND_API_KEY, NOTIFY_FROM_EMAIL) inside the `production` environment,
+# holding the PRODUCTION project's values. One-time setup lives in
+# docs/dev/production-cutover.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy-production" to confirm'
+        required: true
+        type: string
+      sync_secrets:
+        description: "Also push edge-function secrets from GitHub secrets"
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  gate:
+    name: Production gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the confirmation phrase
+        run: |
+          if [ "${{ inputs.confirm }}" != "deploy-production" ]; then
+            echo 'Refusing: type "deploy-production" in the confirm box to deploy.'
+            exit 1
+          fi
+
+      - name: Require green CI on this exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          conclusion=$(gh api \
+            "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=${{ github.sha }}&per_page=1" \
+            --jq '.workflow_runs[0].conclusion // "none"')
+          if [ "$conclusion" != "success" ]; then
+            echo "Refusing to deploy: CI for ${{ github.sha }} is '$conclusion' (need success)."
+            echo "Push the commit, let CI finish green, then re-run this workflow."
+            exit 1
+          fi
+          echo "CI green on ${{ github.sha }} — deploying to production."
+
+  migrate:
+    name: Apply migrations
+    needs: gate
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.109.1  # keep in lockstep with deploy-staging.yml
+
+      - name: Link project
+        run: supabase link --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
+
+      - name: Push migrations
+        run: supabase db push
+
+  deploy-functions:
+    name: Deploy edge functions
+    needs: migrate
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.109.1
+
+      - name: Deploy all functions
+        run: supabase functions deploy --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
+
+  sync-secrets:
+    name: Sync edge secrets (opt-in)
+    if: ${{ inputs.sync_secrets }}
+    needs: migrate
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+    steps:
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.109.1
+
+      - name: Push edge-function secrets
+        run: |
+          args=()
+          add() { if [ -n "$2" ]; then args+=("$1=$2"); else echo "skip: $1 not set"; fi; }
+          add STRIPE_SECRET_KEY     "${{ secrets.STRIPE_SECRET_KEY }}"
+          add STRIPE_WEBHOOK_SECRET "${{ secrets.STRIPE_WEBHOOK_SECRET }}"
+          add VAULT_MASTER_KEY      "${{ secrets.VAULT_MASTER_KEY }}"
+          add APP_BASE_URL          "${{ secrets.APP_BASE_URL }}"
+          add RESEND_API_KEY        "${{ secrets.RESEND_API_KEY }}"
+          add NOTIFY_FROM_EMAIL     "${{ secrets.NOTIFY_FROM_EMAIL }}"
+          if [ ${#args[@]} -eq 0 ]; then echo "nothing to sync"; exit 0; fi
+          supabase secrets set "${args[@]}" --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
