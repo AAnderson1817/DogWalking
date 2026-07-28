@@ -89,7 +89,7 @@ export default function BillingConsole() {
 
   return (
     <div className="page">
-      <h1>Billing</h1>
+      <h1>Money</h1>
       {notice && (
         <p style={{ marginTop: "var(--s-2)", color: "var(--text-2)", fontSize: "var(--fs-14)" }}>{notice}</p>
       )}

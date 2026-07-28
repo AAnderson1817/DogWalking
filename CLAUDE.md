@@ -1,4 +1,8 @@
-# PawTrail — solo-first dog-walking operations SaaS
+# Sanpo — solo-first pet-care operations SaaS
+
+The repository and some legacy implementation comments still use the working
+name PawTrail. Sanpo is the production brand and a vertical SaaS platform for
+independent pet-care professionals, not a centralized dog-walking agency.
 
 React PWA (Vite 8, React 19, TS strict, react-router-dom 6) + Supabase (Postgres 17, Auth, RLS, Realtime, Storage) + Deno edge functions + Stripe Billing + Mapbox (SVG fallback). Currency USD (integer cents — the *_pence column names are historical and hold cents). Timezone US Central — America/Chicago (UTC in DB).
 

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="24" height="24" viewBox="0 0 24 24"
+     role="img" aria-labelledby="sanpo-inbox-title sanpo-inbox-desc"
+     style="color:#0C4774">
+  <title id="sanpo-inbox-title">Inbox</title>
+  <desc id="sanpo-inbox-desc">A message bubble containing two lines of conversation.</desc>
+  <path d="M5.75 4.25
+           H18.25
+           C19.63 4.25 20.75 5.37 20.75 6.75
+           V14.25
+           C20.75 15.63 19.63 16.75 18.25 16.75
+           H9
+           L5.35 19.4
+           L6.25 16.75
+           H5.75
+           C4.37 16.75 3.25 15.63 3.25 14.25
+           V6.75
+           C3.25 5.37 4.37 4.25 5.75 4.25
+           Z"
+        fill="none" stroke="currentColor" stroke-width="1.75"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M7.25 8.5 H16.75
+           M7.25 12.5 H14.25"
+        fill="none" stroke="currentColor" stroke-width="1.75"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

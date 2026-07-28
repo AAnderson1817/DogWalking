@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="24" height="24" viewBox="0 0 24 24"
+     role="img" aria-labelledby="sanpo-payments-title sanpo-payments-desc"
+     style="color:#0C4774">
+  <title id="sanpo-payments-title">Payments</title>
+  <desc id="sanpo-payments-desc">A payment card with a band, chip, and account line.</desc>
+  <rect x="3.25" y="5.25" width="17.5" height="13.5" rx="2.25"
+        fill="none" stroke="currentColor" stroke-width="1.75"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M6.5 9.25 H17.5"
+        fill="none" stroke="currentColor" stroke-width="1.75"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="6" y="12.25" width="3.75" height="2.75" rx="0.6"
+        fill="currentColor"/>
+  <path d="M12.5 13.625 H16.75"
+        fill="none" stroke="currentColor" stroke-width="1.75"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

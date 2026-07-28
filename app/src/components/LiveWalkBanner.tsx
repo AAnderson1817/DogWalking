@@ -1,6 +1,7 @@
 // Fixed-top live walk banner (spec 05): pulse-live dot + elapsed timer.
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { ApprovedIcon } from "./ApprovedIcon";
 import { elapsed } from "@/lib/format";
 
 export function LiveWalkBanner({
@@ -21,6 +22,7 @@ export function LiveWalkBanner({
   return (
     <Link to={`/walks/${walkId}/live`} style={{ textDecoration: "none" }}>
       <div className="live-banner">
+        <ApprovedIcon name="route" className="live-banner__route-icon" />
         <span className="pulse-live" aria-hidden />
         <span style={{ fontWeight: 800 }}>{label}</span>
         <span className="live-banner__timer numeral">{elapsed(startedAt, now)}</span>

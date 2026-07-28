@@ -179,6 +179,20 @@
   box-shadow: var(--pop);
 }
 .live-banner__timer { font-family: var(--font-display); font-feature-settings: "tnum"; font-weight: 700; font-size: var(--fs-20); color: var(--butter); margin-left: auto; }
+.live-banner__route-icon { color: currentColor; }
+
+/* ── Secondary utility links ───────────────────────────────────────────── */
+.secondary-link {
+  color: var(--sanpo-color-text-link);
+  font-size: var(--fs-14);
+  font-weight: 800;
+  text-underline-offset: 3px;
+}
+.secondary-link:focus-visible {
+  outline: 3px solid var(--sanpo-color-border-focus);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
 
 /* ── MapView ───────────────────────────────────────────────────────────── */
 .map-view {
@@ -267,6 +281,79 @@
   color: var(--white);
 }
 
+/* Approved Sanpo operator treatment (CT-1 + IP-2). The Kaki bar is a
+   separate state marker; approved SVG geometry remains unchanged. */
+.bottom-nav[data-navigation-persona="operator"] {
+  background: var(--sanpo-color-surface-canvas);
+  border-color: var(--sanpo-color-border-subtle);
+}
+.bottom-nav[data-navigation-persona="operator"] .bottom-nav__item {
+  position: relative;
+  color: var(--sanpo-color-navigation-inactive);
+}
+.bottom-nav[data-navigation-persona="operator"] .bottom-nav__icon {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+}
+.bottom-nav[data-navigation-persona="operator"] .bottom-nav__item--active {
+  color: var(--sanpo-color-navigation-active);
+}
+.bottom-nav[data-navigation-persona="operator"] .bottom-nav__item--active .bottom-nav__icon {
+  background: transparent;
+  border: 0;
+  color: currentColor;
+}
+.bottom-nav[data-navigation-persona="operator"] .bottom-nav__item--active::after {
+  content: "";
+  position: absolute;
+  bottom: 4px;
+  width: 18px;
+  height: 3px;
+  border-radius: var(--r-full);
+  background: var(--sanpo-color-navigation-active-marker);
+}
+.bottom-nav[data-navigation-persona="operator"] .bottom-nav__item:focus-visible {
+  outline: 3px solid var(--sanpo-color-border-focus);
+  outline-offset: -3px;
+}
+
+/* ── Inbox utility ─────────────────────────────────────────────────────── */
+.notification-bell {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: var(--bw-xs) solid var(--sanpo-color-border-subtle);
+  border-radius: var(--r-full);
+  background: var(--sanpo-color-surface-raised);
+  color: var(--sanpo-color-navigation-active);
+  box-shadow: none;
+}
+.notification-bell:focus-visible {
+  outline: 3px solid var(--sanpo-color-border-focus);
+  outline-offset: 2px;
+}
+.notification-bell__count {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  display: grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 4px;
+  border-radius: var(--r-full);
+  background: var(--sanpo-color-message-unread-accent);
+  color: var(--sanpo-color-text-inverse);
+  font-size: var(--fs-12);
+  font-weight: 800;
+}
+
 /* Desktop ≥1024px: left rail (operator only, spec 05). */
 @media (min-width: 1024px) {
   .bottom-nav--rail {
@@ -285,5 +372,13 @@
     margin: 0;
   }
   .bottom-nav--rail .bottom-nav__item { flex: 0 0 auto; }
+  .bottom-nav[data-navigation-persona="operator"] .bottom-nav__item--active::after {
+    top: 50%;
+    right: 0;
+    bottom: auto;
+    width: 3px;
+    height: 24px;
+    transform: translateY(-50%);
+  }
   body:has(.bottom-nav--rail) .page { margin-left: calc(88px + (100% - 88px - 640px) / 2); }
 }

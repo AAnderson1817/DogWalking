@@ -1,5 +1,6 @@
 /* Trailhead base styles (spec 05): reset, fonts, type rules, signature
    pulse-live, walk-mode inversion, reduced-motion guard. */
+@import "./vendor/sanpo-product-color-tokens-r1.css";
 @import "./tokens.css";
 @import "./components.css";
 
@@ -37,6 +38,20 @@ img, picture, video, canvas, svg { display: block; max-width: 100%; }
 input, button, textarea, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
 a { color: inherit; }
+
+/* Approved Sanpo utility SVGs are loaded unchanged and used as alpha masks.
+   The element supplies currentColor; product state never rewrites geometry. */
+.approved-icon {
+  display: inline-block;
+  flex: 0 0 auto;
+  background-color: currentColor;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+}
 
 /* ── layout (spec 05): mobile-first, 640px centered ────────────────────── */
 #root { min-height: 100dvh; display: flex; flex-direction: column; }

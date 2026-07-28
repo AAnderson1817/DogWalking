@@ -5,12 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "npm run verify:brand-assets",
     "build": "tsc -b && vite build",
     "lint": "oxlint --deny-warnings",
     "preview": "vite preview",
     "test": "vitest",
     "test:e2e": "playwright test --config playwright.config.mjs",
-    "test:e2e:install": "playwright install --with-deps chromium"
+    "test:e2e:install": "playwright install --with-deps chromium",
+    "verify:brand-assets": "node scripts/verify-sanpo-assets.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.0",

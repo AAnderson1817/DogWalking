@@ -24,6 +24,20 @@ Single Vite React-TS PWA in `app/`, serving both personas behind role-gated rout
 ```
 `RequireRole` wrapper redirects to `/signin`, then to the persona home.
 
+### Operator navigation
+
+The authoritative primary navigation is:
+
+1. Today → `/`
+2. Calendar → `/calendar`
+3. Clients → `/roster`
+4. Money → `/billing`
+
+Inbox is a secondary utility surfaced through `NotificationBell`; it is not a
+fifth bottom-navigation destination. Access Vault remains available at
+`/vault` through the Clients surface. Route paths remain stable while the
+visible product labels use the approved Sanpo language.
+
 ## lib/
 - `supabase.ts` — browser client (anon key, `persistSession`).
 - `types.ts` — `supabase gen types typescript --local > app/src/lib/types.ts` after every migration phase; domain aliases exported.
