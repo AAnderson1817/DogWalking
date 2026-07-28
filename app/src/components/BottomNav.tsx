@@ -1,19 +1,12 @@
-// Persona-aware bottom navigation (spec 05 v2). Operator: Today · Calendar ·
-// Roster · Vault; portal: Home · Book · Walks · Billing. Collapses to a
-// left rail on desktop for the operator (components.css). Icons are the
-// mock's geometric set (paw / square / circles / diamond), currentColor so
-// the active orange pill renders them white.
+// Persona-aware bottom navigation. The operator destinations and icon
+// assignments are governed by Sanpo IP-2 / Utility Icons v1.1:
+// Today · Calendar · Clients · Money. Inbox and Access Vault remain
+// secondary utilities. The operator navigation becomes a rail on desktop.
 import type { ReactNode } from "react";
 import { NavLink } from "react-router-dom";
+import { ApprovedIcon } from "./ApprovedIcon";
+import { OPERATOR_NAV_ITEMS } from "./operator-navigation";
 import { PawIcon } from "./PetAvatar";
-
-function SquareIcon() {
-  return (
-    <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden>
-      <rect x="2.5" y="2.5" width="15" height="15" rx="4" fill="none" stroke="currentColor" strokeWidth="2.5" />
-    </svg>
-  );
-}
 
 function CirclesIcon() {
   return (
@@ -47,13 +40,6 @@ interface NavItem {
   end?: boolean;
 }
 
-const OPERATOR_ITEMS: NavItem[] = [
-  { to: "/", label: "Today", icon: <PawIcon />, end: true },
-  { to: "/calendar", label: "Calendar", icon: <SquareIcon /> },
-  { to: "/roster", label: "Roster", icon: <CirclesIcon /> },
-  { to: "/vault", label: "Vault", icon: <DiamondIcon /> },
-];
-
 const PORTAL_ITEMS: NavItem[] = [
   { to: "/portal", label: "Home", icon: <PawIcon />, end: true },
   { to: "/portal/book", label: "Book", icon: <PlusIcon /> },
@@ -62,11 +48,19 @@ const PORTAL_ITEMS: NavItem[] = [
 ];
 
 export function BottomNav({ persona }: { persona: "operator" | "client" }) {
-  const items = persona === "operator" ? OPERATOR_ITEMS : PORTAL_ITEMS;
+  const items: NavItem[] =
+    persona === "operator"
+      ? OPERATOR_NAV_ITEMS.map((item) => ({
+          ...item,
+          icon: <ApprovedIcon name={item.icon} />,
+        }))
+      : PORTAL_ITEMS;
+
   return (
     <nav
       className={`bottom-nav${persona === "operator" ? " bottom-nav--rail" : ""}`}
       aria-label="Primary"
+      data-navigation-persona={persona}
     >
       {items.map((item) => (
         <NavLink

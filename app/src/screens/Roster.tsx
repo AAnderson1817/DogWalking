@@ -2,7 +2,7 @@
 // badges, balance chips → ClientDetail. Includes add-client with invite
 // link handoff.
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Badge, type BadgeStatus } from "@/components/Badge";
 import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
@@ -97,10 +97,15 @@ export default function Roster() {
   return (
     <div className="page">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h1>Roster</h1>
-        <Button variant="accent" onClick={() => setAddOpen(true)}>
-          Add client
-        </Button>
+        <h1>Clients</h1>
+        <div style={{ display: "flex", alignItems: "center", gap: "var(--s-3)" }}>
+          <Link className="secondary-link" to="/vault">
+            Access vault
+          </Link>
+          <Button variant="accent" onClick={() => setAddOpen(true)}>
+            Add client
+          </Button>
+        </div>
       </div>
 
       <div style={{ marginTop: "var(--s-3)" }}>

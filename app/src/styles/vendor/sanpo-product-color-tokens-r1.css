@@ -1,0 +1,88 @@
+/* Sanpo CT-1 R1 candidate - product color tokens */
+/* Canonical brand values remain governed by approved PR-4A R1. */
+:root {
+  --sanpo-color-brand-indigo: #0C4774;
+  --sanpo-color-brand-cream: #FEF6EA;
+  --sanpo-color-production-black: #000000;
+  --sanpo-color-production-white: #FFFFFF;
+  --sanpo-color-supporting-kaki: #B84828;
+  --sanpo-color-supporting-kaki-strong: #96391F;
+  --sanpo-color-supporting-kaki-tint: #F2D7CC;
+  --sanpo-color-supporting-asagi: #236F86;
+  --sanpo-color-supporting-asagi-tint: #D8EAF0;
+  --sanpo-color-supporting-matcha: #55724B;
+  --sanpo-color-supporting-matcha-tint: #DEE8D8;
+  --sanpo-color-supporting-fuji: #796397;
+  --sanpo-color-supporting-fuji-tint: #E7E0EF;
+  --sanpo-color-supporting-yamabuki: #E5AB35;
+  --sanpo-color-supporting-yamabuki-tint: #F4E4B8;
+  --sanpo-color-neutral-muted: #5D7180;
+  --sanpo-color-neutral-rule: #CAD7DC;
+  --sanpo-color-interaction-indigo-pressed: #08395E;
+
+  --sanpo-color-surface-canvas: var(--sanpo-color-brand-cream);
+  --sanpo-color-surface-raised: var(--sanpo-color-production-white);
+  --sanpo-color-surface-inverse: var(--sanpo-color-brand-indigo);
+  --sanpo-color-surface-attention: var(--sanpo-color-supporting-kaki-tint);
+  --sanpo-color-surface-information: var(--sanpo-color-supporting-asagi-tint);
+  --sanpo-color-surface-success: var(--sanpo-color-supporting-matcha-tint);
+  --sanpo-color-surface-relationship: var(--sanpo-color-supporting-fuji-tint);
+  --sanpo-color-surface-milestone: var(--sanpo-color-supporting-yamabuki-tint);
+  --sanpo-color-text-primary: var(--sanpo-color-brand-indigo);
+  --sanpo-color-text-secondary: var(--sanpo-color-neutral-muted);
+  --sanpo-color-text-inverse: var(--sanpo-color-brand-cream);
+  --sanpo-color-text-link: var(--sanpo-color-supporting-asagi);
+  --sanpo-color-text-success: var(--sanpo-color-supporting-matcha);
+  --sanpo-color-text-attention: var(--sanpo-color-supporting-kaki);
+  --sanpo-color-text-relationship: var(--sanpo-color-supporting-fuji);
+  --sanpo-color-border-subtle: var(--sanpo-color-neutral-rule);
+  --sanpo-color-border-strong: var(--sanpo-color-neutral-muted);
+  --sanpo-color-border-focus: var(--sanpo-color-supporting-asagi);
+  --sanpo-color-border-attention: var(--sanpo-color-supporting-kaki);
+  --sanpo-color-status-current: var(--sanpo-color-supporting-kaki);
+  --sanpo-color-status-complete: var(--sanpo-color-supporting-matcha);
+  --sanpo-color-status-upcoming: var(--sanpo-color-supporting-asagi);
+  --sanpo-color-status-relationship: var(--sanpo-color-supporting-fuji);
+  --sanpo-color-status-milestone: var(--sanpo-color-supporting-yamabuki);
+  --sanpo-color-status-cancelled: var(--sanpo-color-neutral-muted);
+  --sanpo-color-status-critical: var(--sanpo-color-supporting-kaki-strong);
+
+  --sanpo-color-button-primary-background: var(--sanpo-color-surface-inverse);
+  --sanpo-color-button-primary-text: var(--sanpo-color-text-inverse);
+  --sanpo-color-button-primary-hover-background: var(--sanpo-color-interaction-indigo-pressed);
+  --sanpo-color-button-primary-pressed-background: var(--sanpo-color-interaction-indigo-pressed);
+  --sanpo-color-button-primary-focus-ring: var(--sanpo-color-border-focus);
+  --sanpo-color-button-primary-disabled-background: var(--sanpo-color-border-subtle);
+  --sanpo-color-button-primary-disabled-text: var(--sanpo-color-text-secondary);
+  --sanpo-color-button-secondary-background: var(--sanpo-color-surface-canvas);
+  --sanpo-color-button-secondary-text: var(--sanpo-color-text-primary);
+  --sanpo-color-button-secondary-border: var(--sanpo-color-brand-indigo);
+  --sanpo-color-button-destructive-background: var(--sanpo-color-status-critical);
+  --sanpo-color-button-destructive-text: var(--sanpo-color-brand-cream);
+  --sanpo-color-input-background: var(--sanpo-color-surface-raised);
+  --sanpo-color-input-text: var(--sanpo-color-text-primary);
+  --sanpo-color-input-placeholder: var(--sanpo-color-text-secondary);
+  --sanpo-color-input-border: var(--sanpo-color-border-subtle);
+  --sanpo-color-input-focus-border: var(--sanpo-color-border-focus);
+  --sanpo-color-input-error-border: var(--sanpo-color-border-attention);
+  --sanpo-color-schedule-current-accent: var(--sanpo-color-status-current);
+  --sanpo-color-schedule-complete-accent: var(--sanpo-color-status-complete);
+  --sanpo-color-schedule-upcoming-accent: var(--sanpo-color-status-upcoming);
+  --sanpo-color-schedule-cancelled-accent: var(--sanpo-color-status-cancelled);
+  --sanpo-color-message-unread-accent: var(--sanpo-color-status-current);
+  --sanpo-color-message-relationship-accent: var(--sanpo-color-status-relationship);
+  --sanpo-color-payment-positive: var(--sanpo-color-status-complete);
+  --sanpo-color-payment-milestone-background: var(--sanpo-color-status-milestone);
+  --sanpo-color-payment-milestone-text: var(--sanpo-color-text-primary);
+  --sanpo-color-navigation-active: var(--sanpo-color-brand-indigo);
+  --sanpo-color-navigation-active-marker: var(--sanpo-color-status-current);
+  --sanpo-color-navigation-inactive: var(--sanpo-color-text-secondary);
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --sanpo-color-text-secondary: var(--sanpo-color-brand-indigo);
+    --sanpo-color-border-subtle: var(--sanpo-color-brand-indigo);
+    --sanpo-color-navigation-inactive: var(--sanpo-color-brand-indigo);
+  }
+}

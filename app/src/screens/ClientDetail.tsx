@@ -66,7 +66,7 @@ export default function ClientDetail() {
     return (
       <div className="page">
         <Card>
-          <EmptyState title="Client not found" hint={error} action={<Button variant="ghost" onClick={() => navigate("/roster")}>Back to roster</Button>} />
+          <EmptyState title="Client not found" hint={error} action={<Button variant="ghost" onClick={() => navigate("/roster")}>Back to clients</Button>} />
         </Card>
       </div>
     );

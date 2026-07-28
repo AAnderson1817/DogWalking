@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="24" height="24" viewBox="0 0 24 24"
+     role="img" aria-labelledby="sanpo-day-title sanpo-day-desc"
+     style="color:#0C4774">
+  <title id="sanpo-day-title">Today</title>
+  <desc id="sanpo-day-desc">A calendar page with one highlighted day.</desc>
+  <path d="M6.25 4.75 H17.75
+           C18.855 4.75 19.75 5.645 19.75 6.75
+           V17.25 C19.75 18.355 18.855 19.25 17.75 19.25
+           H6.25 C5.145 19.25 4.25 18.355 4.25 17.25
+           V6.75 C4.25 5.645 5.145 4.75 6.25 4.75 Z"
+        fill="none" stroke="currentColor" stroke-width="1.75"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M8 9.25 H16" fill="none" stroke="currentColor"
+        stroke-width="1.75" stroke-linecap="round"/>
+  <path d="M8 3.25 V5.5 M16 3.25 V5.5" fill="none"
+        stroke="currentColor" stroke-width="1.75"
+        stroke-linecap="round"/>
+  <rect x="10.25" y="12.5" width="3.5" height="3.5" rx="1"
+        fill="currentColor"/>
+</svg>

@@ -2,6 +2,7 @@
 // deep links to the walk or billing surface for either persona.
 import { useCallback, useEffect, useState, type KeyboardEvent } from "react";
 import { useNavigate } from "react-router-dom";
+import { ApprovedIcon } from "./ApprovedIcon";
 import { Sheet } from "./Sheet";
 import { Spinner } from "./Spinner";
 import { listNotifications, markNotificationRead } from "@/lib/api";
@@ -53,45 +54,18 @@ export function NotificationBell({ persona }: { persona: "operator" | "client" }
     <>
       <button
         onClick={() => setOpen(true)}
-        aria-label={`Notifications, ${unread} unread`}
-        style={{
-          position: "relative",
-          background: "var(--surface)",
-          border: 0,
-          borderRadius: "var(--r-full)",
-          width: 44,
-          height: 44,
-          boxShadow: "var(--shadow-1)",
-          cursor: "pointer",
-          fontSize: "var(--fs-20)",
-        }}
+        aria-label={`Inbox, ${unread} unread`}
+        className="notification-bell"
       >
-        🔔
+        <ApprovedIcon name="inbox" />
         {unread > 0 && (
-          <span
-            className="numeral"
-            style={{
-              position: "absolute",
-              top: -4,
-              right: -4,
-              background: "var(--teal-live)",
-              color: "var(--pine-950)",
-              borderRadius: "var(--r-full)",
-              fontSize: "var(--fs-12)",
-              fontWeight: 700,
-              minWidth: 20,
-              height: 20,
-              display: "grid",
-              placeItems: "center",
-              padding: "0 4px",
-            }}
-          >
+          <span className="notification-bell__count numeral">
             {unread}
           </span>
         )}
       </button>
 
-      <Sheet open={open} onClose={() => setOpen(false)} title="Notifications">
+      <Sheet open={open} onClose={() => setOpen(false)} title="Inbox">
         {items === null ? (
           <Spinner />
         ) : items.length === 0 ? (

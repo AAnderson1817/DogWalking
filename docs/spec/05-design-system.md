@@ -57,7 +57,29 @@ Used on: LiveWalkBanner, active map marker, portal live-tracking header. Respect
 
 ## Component inventory (built phase 03)
 Primitives: `Button` (primary=orange/cream, accent=butter, ghost, danger; bordered + pop shadow; 44px min touch target), `Card`, `Input`/`Textarea`/`Select`, `Badge` (bordered pills: scheduled=lilac, in_progress=sky, completed=mint, cancelled=soft outline, overage=butter), `Sheet` (bottom sheet, mobile-first), `Spinner`, `EmptyState`.
-Composites: `CreditMeter` (bar with bordered track; Baloo numeral; orange under threshold), `WalkCard` (time window, pets avatars, property label, status badge), `MapView` (Mapbox GL when `VITE_MAPBOX_TOKEN` set; else SVG polyline auto-fit fallback — identical props: `points`, `live?`), `LiveWalkBanner` (fixed top, pulse-live + elapsed timer), `ReportCard` (photo grid, route map, potty/fed icons, notes), `BottomNav` (operator: Today · Calendar · Roster · Vault; portal: Home · Book · Walks · Billing).
+Composites: `CreditMeter` (bar with bordered track; Baloo numeral; orange under threshold), `WalkCard` (time window, pets avatars, property label, status badge), `MapView` (Mapbox GL when `VITE_MAPBOX_TOKEN` set; else SVG polyline auto-fit fallback — identical props: `points`, `live?`), `LiveWalkBanner` (fixed top, pulse-live + elapsed timer), `ReportCard` (photo grid, route map, potty/fed icons, notes), `BottomNav` (operator: Today · Calendar · Clients · Money; portal: Home · Book · Walks · Billing).
 
 ## Layout
 Mobile-first, max content width 640px centered; BottomNav fixed, safe-area-inset padding; page padding `--s-4`. Desktop ≥1024px: nav collapses to left rail (operator only).
+
+## Sanpo production navigation override
+
+The following approved production rules supersede the older PawTrail/Biscuit
+operator-navigation examples without otherwise redesigning the component kit:
+
+- Authoritative primary destinations: `Today / Calendar / Clients / Money`.
+- Route mapping: `/`, `/calendar`, `/roster`, `/billing`.
+- Inbox remains a visible secondary utility and is not a bottom-navigation
+  destination.
+- Access Vault remains a secondary client-management utility.
+- Use the byte-approved Day, Calendar, Clients, Payments, Inbox, and Route SVG
+  masters from `app/src/assets/icons`.
+- Utility masters remain on a `24 x 24` grid with `1.75 px` principal strokes,
+  round caps/joins, `currentColor`, a `20 px` minimum, and a `24 px` default.
+- Never alter icon geometry for selected, unread, complete, warning, focus, or
+  disabled state.
+- Primary navigation always retains visible text labels.
+- Operator navigation uses CT-1 roles: Indigo active, Kaki active marker,
+  Muted inactive, Cream canvas, and Asagi focus.
+- `npm run verify:brand-assets` guards the approved asset hashes and runs
+  automatically before production builds.

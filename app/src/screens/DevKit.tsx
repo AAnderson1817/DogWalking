@@ -171,9 +171,9 @@ export default function DevKit() {
           </div>
         </Section>
 
-        <Section title="BottomNav (portal variant below)">
+        <Section title="BottomNav (operator variant below)">
           <p style={{ color: "var(--text-2)", fontSize: "var(--fs-14)" }}>
-            Fixed to the viewport bottom; operator variant becomes a left rail ≥1024px.
+            Approved Today / Calendar / Clients / Money navigation; becomes a left rail ≥1024px.
           </p>
         </Section>
       </div>
@@ -191,7 +191,7 @@ export default function DevKit() {
           <Button full onClick={() => setSheetOpen(false)}>Confirm</Button>
         </div>
       </Sheet>
-      <BottomNav persona="client" />
+      <BottomNav persona="operator" />
     </div>
   );
 }

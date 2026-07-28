@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="24" height="24" viewBox="0 0 24 24"
+     role="img" aria-labelledby="sanpo-calendar-title sanpo-calendar-desc"
+     style="color:#0C4774">
+  <title id="sanpo-calendar-title">Calendar</title>
+  <desc id="sanpo-calendar-desc">A bound month page containing six date marks.</desc>
+  <path d="M6.25 4.75 H17.75
+           C18.855 4.75 19.75 5.645 19.75 6.75
+           V17.25 C19.75 18.355 18.855 19.25 17.75 19.25
+           H6.25 C5.145 19.25 4.25 18.355 4.25 17.25
+           V6.75 C4.25 5.645 5.145 4.75 6.25 4.75 Z"
+        fill="none" stroke="currentColor" stroke-width="1.75"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M5.25 9.25 H18.75"
+        fill="none" stroke="currentColor" stroke-width="1.75"
+        stroke-linecap="round"/>
+  <path d="M8 3.25 V5.5 M16 3.25 V5.5"
+        fill="none" stroke="currentColor" stroke-width="1.75"
+        stroke-linecap="round"/>
+  <g fill="currentColor">
+    <rect x="7" y="11.5" width="2" height="2" rx="0.6"/>
+    <rect x="11" y="11.5" width="2" height="2" rx="0.6"/>
+    <rect x="15" y="11.5" width="2" height="2" rx="0.6"/>
+    <rect x="7" y="15" width="2" height="2" rx="0.6"/>
+    <rect x="11" y="15" width="2" height="2" rx="0.6"/>
+    <rect x="15" y="15" width="2" height="2" rx="0.6"/>
+  </g>
+</svg>

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="24" height="24" viewBox="0 0 24 24"
+     role="img" aria-labelledby="sanpo-clients-r3-title sanpo-clients-r3-desc"
+     style="color:#0C4774">
+  <title id="sanpo-clients-r3-title">Clients</title>
+  <desc id="sanpo-clients-r3-desc">A bound client directory containing three indexed records.</desc>
+  <rect x="4.25" y="3.25" width="16.5" height="17.5" rx="2.25"
+        fill="none" stroke="currentColor" stroke-width="1.75"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M2.75 7.5 H5.25
+           M2.75 12 H5.25
+           M2.75 16.5 H5.25"
+        fill="none" stroke="currentColor" stroke-width="1.75"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M8.25 7.5 H17.5
+           M8.25 12 H16
+           M8.25 16.5 H17.5"
+        fill="none" stroke="currentColor" stroke-width="1.75"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
