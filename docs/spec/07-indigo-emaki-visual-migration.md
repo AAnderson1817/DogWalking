@@ -1,0 +1,71 @@
+# 07 — Indigo Emaki visual migration handoff
+
+## Status and scope
+
+The visual information architecture is approved and closed. This is an
+implementation and verification specification, not a design exploration.
+Sanpo replaces PawTrail throughout the production shell. The Today screen is
+the locked reference for how Indigo Emaki combines illustrated context with an
+efficient interface.
+
+## Locked Today reference
+
+- Art: one continuous Old Town Chicago field with a woman and Golden Retriever,
+  Cream transition, restrained botanical corners, and no separate portraits.
+- Header: date at upper left; approved Inbox icon at upper right with a static
+  Kaki unread dot.
+- Information order: `Today`; completed/total summary and distance; one emaki
+  progress path; operational status; three chronological ruled rows.
+- Fixture order: `9:00 Juniper / Maple Walk / DONE`, `11:30 Mochi / Lakeside
+  Loop · 18 min / END WALK`, `2:00 Luna / Oak Trail / UP NEXT`.
+- State color: Matcha complete, Yamabuki current path/nav marker, Asagi
+  upcoming, Kaki current marker, Indigo text/action, Cream canvas.
+- Navigation: Today, Calendar, Clients, Money with approved icons and visible
+  labels. The active marker is Yamabuki.
+- Exclusions: no `Today's schedule` eyebrow, no `Open walk`, no row portraits,
+  no stacked scenes, cards, badges, map pins, loose dogs, decorative motion,
+  or game HUD.
+
+## Responsive contract
+
+The environmental field preserves its `875 / 1798` ratio through the `640 px`
+working-width cap. Live UI uses container-relative placement so it stays
+registered to the artwork.
+
+| Width | Navigation | Required behavior |
+| --- | --- | --- |
+| `320–639 px` | Fixed bottom bar | Full-bleed field; no horizontal scroll; `END WALK` at least `44 px` high; all four labels visible. |
+| `640–1023 px` | Fixed bottom bar | Field caps at `640 px`; artwork remains native-size backed; schedule alignment is unchanged. |
+| `1024 px+` | Left rail | Field remains `640 px` and centers in the space to the right of the `88 px` rail; no widening or horizontal lockup. |
+
+The component may scroll vertically on a viewport shorter than its preserved
+field ratio. It must never crop or independently stretch the illustrated scene.
+
+## BG-3A verification gate
+
+1. Five-second comprehension: a tester can identify the current walk and next
+   visit after five seconds of viewing the populated screen.
+2. One primary action: only `END WALK` has dominant Indigo treatment.
+3. One continuous day: the tester perceives one scene and one chronological
+   schedule, not separate cards or stacked illustrations.
+4. Exact operational detail: the tester can recall current pet, next pet,
+   current route, elapsed time, and next-visit state.
+5. Outdoor legibility: all operational text remains readable at normal phone
+   brightness in daylight; artwork never sits directly behind the schedule.
+6. Truthful state mapping: completed/current/upcoming color and labels agree
+   with the source walk statuses.
+7. Repeatable production: background artwork is one approved asset; all dates,
+   names, routes, timing, distances, and actions are data-driven DOM content.
+
+## Test procedure
+
+- Run `npm test -- --run` and `npm run test:e2e -- e2e/indigo-emaki-today.spec.ts`.
+- Check `375 x 812`, `430 x 884`, `768 x 1024`, and `1440 x 900`.
+- Perform the five-second comprehension and immediate recall tasks with at
+  least five target users. Record success without coaching. The acceptance
+  threshold is `4/5` users correct for both current walk and next visit.
+- Repeat the mobile task outdoors. Any tester who must zoom or shade the screen
+  is a legibility failure.
+- Do not reopen the composition while addressing implementation defects.
+  Changes are limited to fidelity, responsive behavior, accessibility, and
+  data binding.

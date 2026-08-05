@@ -59,7 +59,7 @@ serveFunction(async (req) => {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      from: Deno.env.get("NOTIFY_FROM_EMAIL") ?? "PawTrail <notifications@pawtrail.app>",
+      from: Deno.env.get("NOTIFY_FROM_EMAIL") ?? "Sanpo <notifications@sanpocare.com>",
       to: [client.email],
       subject: `${n.title} — ${business}`,
       html: renderEmail(business, n.title, n.body ?? ""),
@@ -73,24 +73,24 @@ serveFunction(async (req) => {
   return jsonOk({ sent: true });
 });
 
-/** Minimal pine-styled template (spec 05 palette), inline CSS only. */
+/** Minimal Indigo Emaki email field, inline CSS only. */
 function renderEmail(business: string, title: string, body: string): string {
   return `<!doctype html>
-<body style="margin:0;padding:24px;background:#F6F4EE;font-family:Inter,system-ui,sans-serif;color:#0F1F19;">
+<body style="margin:0;padding:24px;background:#FEF6EA;font-family:Nunito,system-ui,sans-serif;color:#0C4774;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
     <tr><td align="center">
       <table role="presentation" width="480" cellpadding="0" cellspacing="0"
-             style="background:#FFFFFF;border-radius:16px;overflow:hidden;">
-        <tr><td style="background:#0E2A23;padding:16px 24px;">
-          <span style="color:#EDF5F1;font-weight:700;font-size:16px;">${escapeHtml(business)}</span>
-          <span style="float:right;width:10px;height:10px;border-radius:999px;background:#2DD4BF;margin-top:4px;"></span>
+             style="background:#FFFFFF;border:1px solid #CAD7DC;border-radius:12px;overflow:hidden;">
+        <tr><td style="background:#0C4774;padding:16px 24px;">
+          <span style="color:#FEF6EA;font-weight:700;font-size:16px;">${escapeHtml(business)}</span>
+          <span style="float:right;width:10px;height:10px;border-radius:999px;background:#E5AB35;margin-top:4px;"></span>
         </td></tr>
         <tr><td style="padding:24px;">
-          <h1 style="margin:0 0 8px;font-size:20px;color:#0F1F19;">${escapeHtml(title)}</h1>
-          <p style="margin:0;color:#46574F;font-size:14px;line-height:1.6;">${escapeHtml(body)}</p>
+          <h1 style="margin:0 0 8px;font-size:20px;color:#0C4774;">${escapeHtml(title)}</h1>
+          <p style="margin:0;color:#5D7180;font-size:14px;line-height:1.6;">${escapeHtml(body)}</p>
         </td></tr>
         <tr><td style="padding:0 24px 24px;">
-          <p style="margin:0;color:#8A988F;font-size:12px;">Sent by PawTrail on behalf of ${escapeHtml(business)}.</p>
+          <p style="margin:0;color:#5D7180;font-size:12px;">Sent by Sanpo on behalf of ${escapeHtml(business)}.</p>
         </td></tr>
       </table>
     </td></tr>

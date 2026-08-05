@@ -4,7 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
-import { Spinner } from "@/components/Spinner";
+import { LoadError, loadErrorMessage } from "@/components/LoadError";
+import { LoadingState, StateField } from "@/components/StateField";
 import { CredentialRow, PutCredentialSheet } from "@/components/VaultFlows";
 import { listClients, listCredentials, listProperties, type CredentialMeta } from "@/lib/api";
 import type { Clients, Properties } from "@/lib/types";
@@ -17,6 +18,7 @@ export default function AccessVault() {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    setError(null);
     try {
       const [creds, props, cs] = await Promise.all([
         listCredentials(),
@@ -27,7 +29,7 @@ export default function AccessVault() {
       setProperties(props);
       setClients(cs);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "failed to load");
+      setError(loadErrorMessage(e));
     }
   }, []);
 
@@ -36,19 +38,12 @@ export default function AccessVault() {
   }, [load]);
 
   if (error) {
-    return (
-      <div className="page">
-        <h1>Access Vault</h1>
-        <Card style={{ marginTop: "var(--s-4)" }}>
-          <EmptyState title="Couldn't load the vault" hint={error} />
-        </Card>
-      </div>
-    );
+    return <LoadError title="Couldn't load the Access Vault" message={error} onRetry={load} />;
   }
   if (credentials === null) {
     return (
-      <div className="page" style={{ display: "grid", placeItems: "center" }}>
-        <Spinner />
+      <div className="page">
+        <LoadingState label="Loading the Access Vault" />
       </div>
     );
   }
@@ -85,9 +80,7 @@ export default function AccessVault() {
                 </Button>
               </div>
               {byProperty(property.id).length === 0 ? (
-                <p style={{ color: "var(--text-2)", fontSize: "var(--fs-14)", marginTop: "var(--s-2)" }}>
-                  No credentials stored.
-                </p>
+                <StateField compact title="No credentials stored" />
               ) : (
                 byProperty(property.id).map((cred) => (
                   <CredentialRow key={cred.id} credential={cred} onChanged={() => void load()} />

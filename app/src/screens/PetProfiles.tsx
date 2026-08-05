@@ -7,9 +7,11 @@ import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
 import { Input, Textarea } from "@/components/fields";
+import { LoadError, loadErrorMessage } from "@/components/LoadError";
 import { PetFace } from "@/components/PetAvatar";
 import { Sheet } from "@/components/Sheet";
 import { Spinner } from "@/components/Spinner";
+import { LoadingState } from "@/components/StateField";
 import {
   getMyClient,
   listPets,
@@ -29,35 +31,44 @@ export default function PetProfiles() {
   const [photoUrls, setPhotoUrls] = useState<Record<string, string>>({});
   const [editingPet, setEditingPet] = useState<Pets | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const me = await getMyClient();
-    if (!me) return;
-    const [ps, props] = await Promise.all([listPets(me.id), listProperties(me.id)]);
-    setClient(me);
-    setPets(ps);
-    setProperties(props);
-    const urls: Record<string, string> = {};
-    await Promise.all(
-      ps.filter((p) => p.photo_path).map(async (p) => {
-        try {
-          urls[p.id] = await signedPetPhotoUrl(p.photo_path!);
-        } catch {
-          // photo missing — render the initial instead
-        }
-      }),
-    );
-    setPhotoUrls(urls);
+    setLoadError(null);
+    try {
+      const me = await getMyClient();
+      if (!me) throw new Error("We couldn't load your account. Please try again.");
+      const [ps, props] = await Promise.all([listPets(me.id), listProperties(me.id)]);
+      setClient(me);
+      setPets(ps);
+      setProperties(props);
+      const urls: Record<string, string> = {};
+      await Promise.all(
+        ps.filter((p) => p.photo_path).map(async (p) => {
+          try {
+            urls[p.id] = await signedPetPhotoUrl(p.photo_path!);
+          } catch {
+            // photo missing — render the initial instead
+          }
+        }),
+      );
+      setPhotoUrls(urls);
+    } catch (error) {
+      setLoadError(loadErrorMessage(error));
+    }
   }, []);
 
   useEffect(() => {
     void load().finally(() => setLoading(false));
   }, [load]);
 
+  if (loadError && !client) {
+    return <LoadError title="Couldn't load your pets" message={loadError} onRetry={load} />;
+  }
   if (loading || !client) {
     return (
-      <div className="page" style={{ display: "grid", placeItems: "center" }}>
-        <Spinner />
+      <div className="page">
+        <LoadingState label="Loading your pets" />
       </div>
     );
   }

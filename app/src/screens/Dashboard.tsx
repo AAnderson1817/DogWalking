@@ -1,16 +1,17 @@
-// Operator Dashboard (phase 05): today's walks in time order, live banner,
-// low-credit strip, failed payments strip, unread notification count.
-import { useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import todayBackground from "@/assets/illustrations/sanpo-today-indigo-emaki-background-approved-v1.png";
 import { Badge } from "@/components/Badge";
 import { Card } from "@/components/Card";
-import { EmptyState } from "@/components/EmptyState";
-import { InstallPrompt } from "@/components/InstallPrompt";
-import { LiveWalkBanner } from "@/components/LiveWalkBanner";
+import { LoadError, loadErrorMessage } from "@/components/LoadError";
 import { NotificationBell } from "@/components/NotificationInbox";
-import { PawIcon } from "@/components/PetAvatar";
-import { Spinner } from "@/components/Spinner";
-import { WalkCard } from "@/components/WalkCard";
+import { LoadingState } from "@/components/StateField";
+import {
+  TodayCurrentAction,
+  TodayIllustratedSchedule,
+  type TodayIllustratedVisit,
+  type TodayVisitState,
+} from "@/components/TodayIllustratedSchedule";
 import {
   getMyOperator,
   listClients,
@@ -20,7 +21,7 @@ import {
   type WalkDetailed,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { dateLocal, money } from "@/lib/format";
+import { dateLocal, money, time12 } from "@/lib/format";
 import {
   failedPayments,
   liveWalk,
@@ -30,177 +31,157 @@ import {
 } from "@/lib/selectors";
 import type { Clients, Operators, Payments } from "@/lib/types";
 
+const DISPLAY_TZ = "America/Chicago";
+
+function todayDateLabel(at: Date = new Date()) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: DISPLAY_TZ,
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  }).format(at);
+}
+
+function visitState(status: WalkDetailed["status"]): TodayVisitState {
+  if (status === "completed") return "completed";
+  if (status === "in_progress") return "current";
+  if (status === "cancelled") return "cancelled";
+  if (status === "no_show") return "no_show";
+  return "upcoming";
+}
+
+function shortTime(value: string) {
+  return time12(value).replace(/\s[AP]M$/, "");
+}
+
+function elapsedMinutes(startedAt: string | null) {
+  if (!startedAt) return undefined;
+  return `${Math.max(0, Math.floor((Date.now() - new Date(startedAt).getTime()) / 60_000))} min`;
+}
+
 export default function Dashboard() {
   const auth = useAuth();
-  const navigate = useNavigate();
   const [operator, setOperator] = useState<Operators | null>(null);
   const [walks, setWalks] = useState<WalkDetailed[] | null>(null);
   const [clients, setClients] = useState<Clients[]>([]);
   const [payments, setPayments] = useState<Payments[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const today = todayLocal();
-        const [op, todayWalks, allClients, pays] = await Promise.all([
-          getMyOperator(),
-          listWalksDetailed({ date: today }),
-          listClients(),
-          listPayments(),
-        ]);
-        if (cancelled) return;
-        setOperator(op);
-        setWalks(todayWalks);
-        setClients(allClients);
-        setPayments(pays);
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : "failed to load");
-      }
+  const load = useCallback(async () => {
+    setError(null);
+    const today = todayLocal();
+    try {
+      const [op, todayWalks, allClients, pays] = await Promise.all([
+        getMyOperator(),
+        listWalksDetailed({ date: today }),
+        listClients(),
+        listPayments(),
+      ]);
+      setOperator(op);
+      setWalks(todayWalks);
+      setClients(allClients);
+      setPayments(pays);
+    } catch (caught) {
+      setError(loadErrorMessage(caught));
     }
-    void load();
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
+  useEffect(() => {
+    void load();
+  }, [load]);
+
   if (error) {
-    return (
-      <div className="page">
-        <h1>Today</h1>
-        <Card style={{ marginTop: "var(--s-4)" }}>
-          <EmptyState title="Couldn't load the dashboard" hint={error} />
-        </Card>
-      </div>
-    );
+    return <LoadError title="Couldn't load Today" message={error} onRetry={load} />;
   }
   if (walks === null) {
     return (
-      <div className="page" style={{ display: "grid", placeItems: "center" }}>
-        <Spinner />
+      <div className="page">
+        <LoadingState label="Loading today's schedule" />
       </div>
     );
   }
 
-  const today = todayLocal();
-  const ordered = todaysWalks(walks, today);
+  const ordered = todaysWalks(walks, todayLocal());
   const live = liveWalk(walks) as WalkDetailed | null;
   const low = lowCreditClients(clients, operator?.low_credit_threshold ?? 2) as Clients[];
   const failed = failedPayments(payments).slice(0, 5) as Payments[];
-  const clientName = (id: string) => clients.find((c) => c.id === id)?.full_name ?? "";
+  const clientName = (id: string) => clients.find((client) => client.id === id)?.full_name ?? "";
+  const completedDistance = ordered.reduce((total, walk) => total + (walk.distance_m ?? 0), 0);
+  const distanceLabel = completedDistance > 0 ? `${(completedDistance / 1609.344).toFixed(1)} mi` : undefined;
+  const currentIndex = live ? ordered.findIndex((walk) => walk.id === live.id) : -1;
+  const next = ordered.slice(currentIndex + 1).find((walk) => walk.status === "scheduled");
+
+  const visits: TodayIllustratedVisit[] = ordered.map((walk) => ({
+    id: walk.id,
+    time: shortTime(walk.window_start),
+    petName: walkPetNames(walk).join(" & ") || "Pet",
+    route: walk.property?.label || "Route not set",
+    duration: walk.status === "in_progress" ? elapsedMinutes(walk.started_at) : undefined,
+    state: visitState(walk.status),
+  }));
+
+  const paceLabel = live?.is_overage ? "Over time" : live ? "On time" : "Schedule ready";
+  const nextVisitLabel = live && next
+    ? `${walkPetNames(next).join(" & ") || "Next visit"} at ${time12(next.window_start)} after this walk`
+    : next
+      ? `Next: ${walkPetNames(next).join(" & ") || "visit"} at ${time12(next.window_start)}`
+      : ordered.length > 0
+        ? "Today's route is complete"
+        : "Your day is clear";
 
   return (
-    <div className="page" style={live ? { paddingTop: 72 } : undefined}>
-      {live && (
-        <LiveWalkBanner
-          walkId={live.id}
-          startedAt={live.started_at!}
-          label={`Walking ${walkPetNames(live).join(" & ") || "now"}`}
-        />
+    <div className="page today-emaki-page">
+      <TodayIllustratedSchedule
+        backgroundSrc={todayBackground}
+        dateLabel={todayDateLabel()}
+        visits={visits}
+        distanceLabel={distanceLabel}
+        paceLabel={paceLabel}
+        nextVisitLabel={nextVisitLabel}
+        inbox={<NotificationBell persona="operator" />}
+        currentAction={live ? <TodayCurrentAction walkId={live.id} /> : undefined}
+      />
+
+      {(low.length > 0 || failed.length > 0) && (
+        <aside className="today-emaki-followups" aria-label="Items needing attention">
+          {low.length > 0 && (
+            <section>
+              <span className="section-label">Low credits</span>
+              <div className="today-emaki-followups__list">
+                {low.map((client) => (
+                  <Link key={client.id} to={`/clients/${client.id}`} className="today-emaki-followups__link">
+                    <Card className="today-emaki-followups__item">
+                      <span>{client.full_name}</span>
+                      <span className="numeral">{client.credit_balance}</span>
+                    </Card>
+                  </Link>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {failed.length > 0 && (
+            <section>
+              <span className="section-label">Failed payments</span>
+              <div className="today-emaki-followups__list">
+                {failed.map((payment) => (
+                  <Card key={payment.id} className="today-emaki-followups__item">
+                    <span>{clientName(payment.client_id)} · {dateLocal(payment.created_at)}</span>
+                    <span className="today-emaki-followups__value">
+                      <span className="numeral">{money(payment.amount_pence)}</span>
+                      <Badge status="attention">Needs attention</Badge>
+                    </span>
+                  </Card>
+                ))}
+              </div>
+            </section>
+          )}
+        </aside>
       )}
 
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div>
-          <span className="section-label">{dateLocal(new Date())}</span>
-          <h1 style={{ fontSize: "var(--fs-32)" }}>
-            Today <span style={{ color: "var(--brand)" }}>·</span>
-          </h1>
-        </div>
-        <span style={{ color: "var(--brand)", display: "flex", alignItems: "center", gap: "var(--s-2)" }}>
-          <PawIcon size={40} />
-          <NotificationBell persona="operator" />
-        </span>
-      </div>
-
-      <InstallPrompt />
-
-      <section style={{ marginTop: "var(--s-4)", display: "flex", flexDirection: "column", gap: "var(--s-3)" }}>
-        {ordered.length === 0 ? (
-          <Card>
-            <EmptyState title="No walks today" hint="Scheduled walks appear here in route order." />
-          </Card>
-        ) : (
-          ordered.map((w) => (
-            <WalkCard
-              key={w.id}
-              walk={{
-                windowStart: w.window_start,
-                windowEnd: w.window_end,
-                petNames: walkPetNames(w),
-                propertyLabel: w.property?.label ?? "",
-                status: w.status,
-                isOverage: w.is_overage,
-                clientName: w.client?.full_name,
-              }}
-              onClick={() => navigate(`/walks/${w.id}/live`)}
-            />
-          ))
-        )}
-      </section>
-
-      {low.length > 0 && (
-        <section style={{ marginTop: "var(--s-6)" }}>
-          <span className="section-label">Low credits</span>
-          <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-2)", marginTop: "var(--s-2)" }}>
-            {low.map((c) => (
-              <Link key={c.id} to={`/clients/${c.id}`} style={{ textDecoration: "none" }}>
-                <Card style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ fontWeight: 600 }}>{c.full_name}</span>
-                  <span
-                    className="numeral"
-                    style={{ color: "var(--orange-deep)", fontWeight: 800, fontSize: "var(--fs-20)" }}
-                  >
-                    {c.credit_balance}
-                  </span>
-                </Card>
-              </Link>
-            ))}
-          </div>
-        </section>
-      )}
-
-      {failed.length > 0 && (
-        <section style={{ marginTop: "var(--s-6)" }}>
-          <span className="section-label">Failed payments</span>
-          <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-2)", marginTop: "var(--s-2)" }}>
-            {failed.map((p) => (
-              <Card
-                key={p.id}
-                style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}
-              >
-                <div>
-                  <span style={{ fontWeight: 600 }}>{clientName(p.client_id)}</span>
-                  <span style={{ color: "var(--text-2)", marginLeft: "var(--s-2)", fontSize: "var(--fs-14)" }}>
-                    {p.type} · {dateLocal(p.created_at)}
-                  </span>
-                </div>
-                <div style={{ display: "flex", gap: "var(--s-2)", alignItems: "center" }}>
-                  <span className="numeral" style={{ fontWeight: 600 }}>{money(p.amount_pence)}</span>
-                  <Badge status="warn">failed</Badge>
-                </div>
-              </Card>
-            ))}
-          </div>
-        </section>
-      )}
-
-      <p style={{ marginTop: "var(--s-8)", color: "var(--text-2)", fontSize: "var(--fs-14)" }}>
+      <p className="today-emaki-account">
         Signed in as {operator?.display_name ?? auth.session?.user.email}.{" "}
-        <button
-          style={{
-            background: "none",
-            border: 0,
-            color: "var(--pine-600)",
-            padding: 0,
-            font: "inherit",
-            textDecoration: "underline",
-            cursor: "pointer",
-          }}
-          onClick={() => void auth.signOut()}
-        >
-          Sign out
-        </button>
+        <button className="text-button" onClick={() => void auth.signOut()}>Sign out</button>
       </p>
     </div>
   );

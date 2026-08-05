@@ -54,7 +54,11 @@ visible product labels use the approved Sanpo language.
 start → `walks.status='in_progress', started_at` → useGeolocation+broadcast → photo capture `<input capture="environment">` → compress client-side (≤1600px, ~0.8 q) → Storage `walk-photos/{operator}/{walk}/…` → potty/fed toggles → end → distance from point polyline (haversine sum) → `complete-walk` edge fn → render returned billing outcome → ReportCard preview.
 
 ## PWA (phase 08)
-`manifest.webmanifest` (name PawTrail, theme `#0E2A23`, display standalone, icons 192/512 maskable), service worker: precache app shell, stale-while-revalidate for GET API/Storage, network-only for mutations, IndexedDB GPS outbox with background flush + `beforeunload` guard, custom install prompt on Dashboard after 2nd visit.
+`manifest.webmanifest` (name Sanpo, theme `#FEF6EA`, display standalone,
+byte-approved Sanpo icons at 192/512 including maskable entries), service
+worker: precache app shell, stale-while-revalidate for GET API/Storage,
+network-only for mutations, IndexedDB GPS outbox with background flush +
+`beforeunload` guard.
 
 ## Env
 `app/.env.local`: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_MAPBOX_TOKEN` (optional → SVG fallback). Access via typed `lib/env.ts`; build fails on missing required keys.

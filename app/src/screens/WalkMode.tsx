@@ -12,6 +12,11 @@ import { Textarea } from "@/components/fields";
 import { MapView } from "@/components/MapView";
 import { ReportCard } from "@/components/ReportCard";
 import { Spinner } from "@/components/Spinner";
+import { LoadingState, StateField } from "@/components/StateField";
+import {
+  paymentStatusTreatment,
+  walkStatusTreatment,
+} from "@/components/status-treatment";
 import {
   completeWalk,
   getWalk,
@@ -236,14 +241,24 @@ function WalkModeInner({ walkId }: { walkId: string }) {
   if (error && !walk) {
     return (
       <div className="page">
-        <Card><EmptyState title="Walk not found" hint={error} /></Card>
+        <Card>
+          <EmptyState
+            tone="attention"
+            label="Needs attention"
+            title="Couldn't open this walk"
+            hint={error}
+            action={<Button variant="ghost" onClick={() => navigate("/")}>Back to Today</Button>}
+          />
+        </Card>
       </div>
     );
   }
   if (!walk) {
     return (
-      <div className="walkmode" style={{ minHeight: "100dvh", display: "grid", placeItems: "center", background: "var(--bg)" }}>
-        <Spinner />
+      <div className="walkmode" style={{ minHeight: "100dvh", background: "var(--bg)" }}>
+        <div className="page">
+          <LoadingState label="Preparing walk mode" />
+        </div>
       </div>
     );
   }
@@ -254,6 +269,9 @@ function WalkModeInner({ walkId }: { walkId: string }) {
   // ── completed: billing banner + report preview ─────────────────────────
   if (result) {
     const billing = result.billing;
+    const paymentLabel = billing.payment_status
+      ? paymentStatusTreatment(billing.payment_status).label
+      : null;
     return (
       <div className="page">
         <span className="section-label">Walk complete</span>
@@ -261,8 +279,13 @@ function WalkModeInner({ walkId }: { walkId: string }) {
         <Card
           style={{
             marginTop: "var(--s-3)",
-            background: billing.outcome === "overage" ? "var(--butter)" : "var(--mint)",
-            color: billing.outcome === "overage" ? "var(--butter-ink)" : "var(--mint-ink)",
+            background: billing.outcome === "overage"
+              ? "var(--sanpo-color-surface-attention)"
+              : "var(--sanpo-color-surface-success)",
+            color: "var(--sanpo-color-text-primary)",
+            borderColor: billing.outcome === "overage"
+              ? "var(--sanpo-color-border-attention)"
+              : "var(--sanpo-color-status-complete)",
           }}
         >
           <div style={{ fontWeight: 700, fontSize: "var(--fs-20)" }} className="display">
@@ -273,7 +296,7 @@ function WalkModeInner({ walkId }: { walkId: string }) {
           <div style={{ fontSize: "var(--fs-14)", marginTop: "var(--s-1)", opacity: 0.85 }}>
             {billing.outcome === "debited"
               ? "Fully covered by the credit balance."
-              : `Whole walk charged at the plan overage rate${billing.payment_status ? ` (${billing.payment_status})` : ""}.`}
+              : `Whole walk charged at the plan overage rate${paymentLabel ? ` — ${paymentLabel}` : ""}.`}
           </div>
         </Card>
         <div style={{ marginTop: "var(--s-4)" }}>
@@ -311,16 +334,22 @@ function WalkModeInner({ walkId }: { walkId: string }) {
             </p>
           </div>
           {reactive.length > 0 && (
-            <Card style={{ background: "var(--pink)" }}>
+            <Card
+              style={{
+                background: "var(--sanpo-color-surface-attention)",
+                borderColor: "var(--sanpo-color-border-attention)",
+                color: "var(--sanpo-color-text-primary)",
+              }}
+            >
               {reactive.map((p) => (
                 <div key={p.id} style={{ display: "flex", gap: "var(--s-2)", alignItems: "center" }}>
-                  <Badge status="warn">{p.is_reactive ? "Reactive" : "Escape risk"}</Badge>
+                  <Badge status="attention">{p.is_reactive ? "Reactive" : "Escape risk"}</Badge>
                   <span>{p.name}</span>
                 </div>
               ))}
             </Card>
           )}
-          <Button variant="accent" full onClick={() => void start()} disabled={busy}>
+          <Button full onClick={() => void start()} disabled={busy}>
             {busy ? <Spinner /> : "Start walk"}
           </Button>
           {error && <span className="field__error">{error}</span>}
@@ -330,9 +359,10 @@ function WalkModeInner({ walkId }: { walkId: string }) {
   }
 
   if (walk.status !== "in_progress") {
+    const treatment = walkStatusTreatment(walk.status, walk.is_overage);
     return (
       <div className="page">
-        <Card><EmptyState title={`Walk is ${walk.status}`} /></Card>
+        <Card><EmptyState title={`Walk is ${treatment.label.toLowerCase()}`} /></Card>
       </div>
     );
   }
@@ -341,45 +371,39 @@ function WalkModeInner({ walkId }: { walkId: string }) {
   return (
     <div className="walkmode" style={{ minHeight: "100dvh", background: "var(--bg)", color: "var(--text)" }}>
       <div className="page" style={{ display: "flex", flexDirection: "column", gap: "var(--s-4)", paddingBottom: "var(--s-8)" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: "var(--s-2)" }}>
-          {online ? (
-            <span className="pulse-live" aria-hidden />
-          ) : (
-            <span
-              aria-label="offline"
-              style={{
-                width: 10,
-                height: 10,
-                borderRadius: "var(--r-full)",
-                background: "var(--ink-faint)",
-                flexShrink: 0,
-              }}
-            />
-          )}
-          <span style={{ fontWeight: 600 }}>{petNames || "Walking"}</span>
+        <div className={`walk-live-state${online ? "" : " walk-live-state--offline"}`}>
+          <span className={`walk-live-state__label${online ? "" : " walk-live-state__label--offline"}`}>
+            {online ? "CURRENT" : "OFFLINE"}
+          </span>
+          <span className="walk-live-state__pet">{petNames || "Walking"}</span>
           {!online && (
-            <span style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>
+            <span className="walk-live-state__detail">
               {offlineResumed
-                ? "resumed offline — points queued, they'll sync on reconnect"
-                : "offline — points queued, they'll sync on reconnect"}
+                ? "Walk resumed offline. Route points are saved on this device and will sync when the connection returns."
+                : "Route points are saved on this device and will sync when the connection returns."}
             </span>
           )}
         </div>
 
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <div className="walk-metrics">
           <span className="numeral" style={{ fontSize: "var(--fs-44)", fontWeight: 700 }}>
             {walk.started_at ? elapsed(walk.started_at, now) : "00:00"}
           </span>
-          <span className="numeral" style={{ fontSize: "var(--fs-32)", color: "var(--sky-mid)" }}>
+          <span className="numeral" style={{ fontSize: "var(--fs-32)", color: "var(--sanpo-color-text-link)" }}>
             {distanceKm(distance)}
           </span>
         </div>
 
         <MapView points={routePoints} live />
         {geo.error && (
-          <p style={{ color: "var(--orange-deep)", fontSize: "var(--fs-14)", fontWeight: 800 }}>
-            GPS: {geo.error} {geo.permission === "denied" ? "— enable location access to record the route." : ""}
-          </p>
+          <StateField
+            compact
+            tone="attention"
+            label="Location unavailable"
+            title="The route isn't being recorded"
+            detail={`${geo.error}${geo.permission === "denied" ? " Enable location access to record the route." : ""}`}
+            role="alert"
+          />
         )}
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--s-2)" }}>
@@ -391,18 +415,20 @@ function WalkModeInner({ walkId }: { walkId: string }) {
               ["watered", "Water"],
             ] as const
           ).map(([key, label]) => (
-            <Button
+            <button
+              type="button"
               key={key}
-              variant={toggles[key] ? "accent" : "ghost"}
+              className="choice-button"
+              aria-pressed={toggles[key]}
               onClick={() => setToggles((t) => ({ ...t, [key]: !t[key] }))}
             >
               {toggles[key] ? "✓ " : ""}{label}
-            </Button>
+            </button>
           ))}
         </div>
 
         <label className="field">
-          <span className="field__label" style={{ color: "var(--text-2)" }}>Photos</span>
+          <span className="field__label">Photos</span>
           <input
             type="file"
             accept="image/*"
@@ -428,7 +454,7 @@ function WalkModeInner({ walkId }: { walkId: string }) {
         />
 
         {error && <span className="field__error">{error}</span>}
-        <Button variant="accent" full onClick={() => void endAndSend()} disabled={busy || uploading}>
+        <Button full onClick={() => void endAndSend()} disabled={busy || uploading}>
           {busy ? <Spinner /> : "End walk & send report"}
         </Button>
         <p style={{ color: "var(--text-2)", fontSize: "var(--fs-12)", textAlign: "center" }}>

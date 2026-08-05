@@ -5,7 +5,7 @@ import { useNavigate } from "react-router-dom";
 import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
 import { LoadError, loadErrorMessage } from "@/components/LoadError";
-import { Spinner } from "@/components/Spinner";
+import { LoadingState } from "@/components/StateField";
 import { WalkCard } from "@/components/WalkCard";
 import { listWalksDetailed, walkPetNames, type WalkDetailed } from "@/lib/api";
 import { todayLocal } from "@/lib/selectors";
@@ -34,8 +34,8 @@ export default function PortalWalks() {
   }
   if (walks === null) {
     return (
-      <div className="page" style={{ display: "grid", placeItems: "center" }}>
-        <Spinner />
+      <div className="page">
+        <LoadingState label="Loading your walks" />
       </div>
     );
   }

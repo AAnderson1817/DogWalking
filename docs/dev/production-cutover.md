@@ -1,6 +1,6 @@
 # Production cutover — browser-only checklist
 
-Takes PawTrail from the staging stack (test-mode Stripe) to a production
+Takes Sanpo from the staging stack (test-mode Stripe) to a production
 stack that can take real money. Everything runs from a browser. Budget a
 morning; the DNS and Stripe-activation steps have external wait times.
 
@@ -60,7 +60,7 @@ Staging stays exactly as it is — it remains your test bed. Production is a
    | `VAULT_MASTER_KEY` | the fresh key from step 2 |
    | `APP_BASE_URL` | `https://app.yourdomain.com` |
    | `RESEND_API_KEY` | from step 5 |
-   | `NOTIFY_FROM_EMAIL` | e.g. `PawTrail <walks@yourdomain.com>` |
+   | `NOTIFY_FROM_EMAIL` | e.g. `Sanpo <notifications@sanpocare.com>` |
 
 ## 4. Stripe: live mode (this is the income switch)
 
@@ -102,7 +102,7 @@ and will silently strand client invites) and **notifications** (the
      password = the API key, sender = `walks@yourdomain.com`.
    - Then raise Auth → Rate limits → emails to something sane (e.g. 30/hr).
 4. Auth → Email Templates: replace the default copy (confirm signup, magic
-   link, invite) with PawTrail-branded text. Plain but branded beats
+   link, invite) with Sanpo-branded text. Plain but branded beats
    default-Supabase in client trust.
 
 ## 6. Vercel: production frontend

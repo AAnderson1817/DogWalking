@@ -49,7 +49,7 @@ export function InstallPrompt() {
       }}
     >
       <div style={{ flex: 1 }}>
-        <div style={{ fontWeight: 700 }}>Put PawTrail on your home screen</div>
+        <div style={{ fontWeight: 700 }}>Put Sanpo on your home screen</div>
         <div style={{ fontSize: "var(--fs-14)", opacity: 0.8 }}>
           One tap to walk mode — works offline mid-walk.
         </div>
@@ -63,12 +63,12 @@ export function InstallPrompt() {
         Install
       </Button>
       <button
+        className="icon-button"
         aria-label="Dismiss"
         onClick={() => {
           localStorage.setItem(DISMISSED_KEY, "1");
           setEligible(false);
         }}
-        style={{ background: "none", border: 0, color: "var(--ink-700)", cursor: "pointer" }}
       >
         ✕
       </button>

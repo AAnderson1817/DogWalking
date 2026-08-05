@@ -12,6 +12,8 @@ import { LoadError, loadErrorMessage } from "@/components/LoadError";
 import { Input, Select } from "@/components/fields";
 import { Sheet } from "@/components/Sheet";
 import { Spinner } from "@/components/Spinner";
+import { LoadingState } from "@/components/StateField";
+import { walkStatusTreatment } from "@/components/status-treatment";
 import { WalkCard } from "@/components/WalkCard";
 import {
   createWalk,
@@ -27,7 +29,7 @@ import {
   type WalkDetailed,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { time12 } from "@/lib/format";
+import { dateLocal, time12 } from "@/lib/format";
 import { todayLocal } from "@/lib/selectors";
 import type { Clients, Pets, Properties, ServiceTypes } from "@/lib/types";
 
@@ -107,8 +109,8 @@ export default function Calendar() {
   }
   if (walks === null) {
     return (
-      <div className="page" style={{ display: "grid", placeItems: "center" }}>
-        <Spinner />
+      <div className="page">
+        <LoadingState label="Loading the calendar" />
       </div>
     );
   }
@@ -122,28 +124,59 @@ export default function Calendar() {
     <div className="page">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "var(--s-2)" }}>
         <h1>Calendar</h1>
-        <div style={{ display: "flex", gap: "var(--s-1)" }}>
-          <Button variant={view === "day" ? "primary" : "ghost"} onClick={() => setView("day")}>Day</Button>
-          <Button variant={view === "week" ? "primary" : "ghost"} onClick={() => setView("week")}>Week</Button>
+        <div className="segmented-control" role="tablist" aria-label="Calendar view">
+          <button
+            type="button"
+            className="segmented-control__button"
+            role="tab"
+            aria-selected={view === "day"}
+            onClick={() => setView("day")}
+          >
+            Day
+          </button>
+          <button
+            type="button"
+            className="segmented-control__button"
+            role="tab"
+            aria-selected={view === "week"}
+            onClick={() => setView("week")}
+          >
+            Week
+          </button>
         </div>
       </div>
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "var(--s-3)" }}>
-        <Button variant="ghost" onClick={() => setAnchor(addDays(anchor, view === "day" ? -1 : -7))}>←</Button>
+        <Button
+          variant="ghost"
+          aria-label={`Previous ${view}`}
+          onClick={() => setAnchor(addDays(anchor, view === "day" ? -1 : -7))}
+        >
+          <span aria-hidden>←</span>
+        </Button>
         <div style={{ textAlign: "center" }}>
           <span className="numeral" style={{ fontWeight: 600 }}>
-            {view === "day" ? anchor : `${from} → ${to}`}
+            {view === "day"
+              ? dateLocal(`${anchor}T12:00:00Z`)
+              : `${dateLocal(`${from}T12:00:00Z`)} – ${dateLocal(`${to}T12:00:00Z`)}`}
           </span>
           <div>
             <button
+              className="text-button"
               onClick={() => setAnchor(todayLocal())}
-              style={{ background: "none", border: 0, color: "var(--pine-600)", fontSize: "var(--fs-12)", cursor: "pointer" }}
+              style={{ fontSize: "var(--fs-12)" }}
             >
               Jump to today
             </button>
           </div>
         </div>
-        <Button variant="ghost" onClick={() => setAnchor(addDays(anchor, view === "day" ? 1 : 7))}>→</Button>
+        <Button
+          variant="ghost"
+          aria-label={`Next ${view}`}
+          onClick={() => setAnchor(addDays(anchor, view === "day" ? 1 : 7))}
+        >
+          <span aria-hidden>→</span>
+        </Button>
       </div>
 
       <div style={{ marginTop: "var(--s-2)", display: "flex", gap: "var(--s-2)", alignItems: "center" }}>
@@ -154,7 +187,7 @@ export default function Calendar() {
       </div>
 
       {view === "day" ? (
-        <div style={{ marginTop: "var(--s-4)", display: "flex", flexDirection: "column", gap: "var(--s-2)" }}>
+        <div className="walk-list" style={{ marginTop: "var(--s-4)" }}>
           {byDay(anchor).length === 0 ? (
             <Card><EmptyState title="Nothing scheduled" action={<Button variant="ghost" onClick={() => setOneOffDate(anchor)}>Add one-off walk</Button>} /></Card>
           ) : (
@@ -179,18 +212,11 @@ export default function Calendar() {
           )}
         </div>
       ) : (
-        <div
-          style={{
-            marginTop: "var(--s-4)",
-            display: "grid",
-            gridTemplateColumns: "repeat(7, minmax(72px, 1fr))",
-            gap: "var(--s-1)",
-            overflowX: "auto",
-          }}
-        >
+        <div className="calendar-week" style={{ marginTop: "var(--s-4)" }}>
           {days.map((day, i) => (
             <div
               key={day}
+              className={`calendar-week__day${day === todayLocal() ? " calendar-week__day--today" : ""}`}
               onDragOver={(e) => {
                 if (dragId) e.preventDefault();
               }}
@@ -204,68 +230,44 @@ export default function Calendar() {
                   setDragId(null);
                 }
               }}
-              style={{
-                background: day === todayLocal() ? "var(--mist)" : "var(--surface)",
-                borderRadius: "var(--r-md)",
-                padding: "var(--s-1)",
-                minHeight: 160,
-                boxShadow: "var(--shadow-1)",
-              }}
             >
-              <div style={{ textAlign: "center", marginBottom: "var(--s-1)" }}>
+              <div className="calendar-week__header">
                 <div className="section-label">{DAY_LABELS[i]}</div>
                 <div className="numeral" style={{ fontSize: "var(--fs-12)" }}>{day.slice(8)}</div>
               </div>
               {byDay(day).map((w) => {
                 const draggable = w.status === "scheduled";
+                const treatment = walkStatusTreatment(w.status, w.is_overage);
+                const petOrClient = walkPetNames(w)[0] ?? w.client?.full_name ?? "Walk";
                 return (
-                  <div
+                  <button
+                    type="button"
                     key={w.id}
+                    className={`calendar-walk calendar-walk--${treatment.badge}${draggable ? " calendar-walk--draggable" : ""}`}
                     draggable={draggable}
                     onDragStart={() => setDragId(w.id)}
                     onDragEnd={() => setDragId(null)}
                     onClick={() => setSelected(w)}
                     title={`${walkPetNames(w).join(", ")} — ${w.client?.full_name ?? ""}`}
-                    style={{
-                      background: w.status === "cancelled" || w.status === "no_show"
-                        ? "transparent"
-                        : w.status === "in_progress"
-                          ? "var(--teal-live)"
-                          : w.status === "completed"
-                            ? "var(--pine-600)"
-                            : "var(--pine-800)",
-                      color: w.status === "cancelled" || w.status === "no_show"
-                        ? "var(--ink-faint)"
-                        : w.status === "in_progress"
-                          ? "var(--pine-950)"
-                          : "var(--white)",
-                      textDecoration: w.status === "cancelled" ? "line-through" : undefined,
-                      borderRadius: "var(--r-sm)",
-                      padding: "2px var(--s-1)",
-                      fontSize: "var(--fs-12)",
-                      fontWeight: 600,
-                      marginBottom: 2,
-                      cursor: draggable ? "grab" : "pointer",
-                      border: w.status === "cancelled" || w.status === "no_show" ? "1px solid var(--mist)" : 0,
-                    }}
+                    aria-label={`${treatment.label}: ${time12(w.window_start)}, ${petOrClient}`}
                   >
-                    {time12(w.window_start)} {walkPetNames(w)[0] ?? w.client?.full_name ?? ""}
-                  </div>
+                    <span className="calendar-walk__summary">
+                      {time12(w.window_start)} {petOrClient}
+                    </span>
+                    {treatment.badge !== "scheduled" && (
+                      <span className="calendar-walk__status">{treatment.label}</span>
+                    )}
+                  </button>
                 );
               })}
               <button
+                type="button"
+                className="text-button calendar-add-button"
                 onClick={() => setOneOffDate(day)}
                 aria-label={`Add walk on ${day}`}
-                style={{
-                  width: "100%",
-                  border: 0,
-                  background: "none",
-                  color: "var(--ink-faint)",
-                  cursor: "pointer",
-                  fontSize: "var(--fs-12)",
-                }}
+                style={{ fontSize: "var(--fs-12)" }}
               >
-                +
+                + Add
               </button>
             </div>
           ))}
@@ -325,6 +327,7 @@ function WalkActionSheet({
 
   if (!walk) return null;
   const rescheduleable = walk.status === "scheduled";
+  const treatment = walkStatusTreatment(walk.status, walk.is_overage);
 
   async function mark(status: "cancelled" | "no_show") {
     if (!walk) return;
@@ -359,7 +362,7 @@ function WalkActionSheet({
     <Sheet open onClose={onClose} title={walkPetNames(walk).join(" & ") || walk.client?.full_name || "Walk"}>
       <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-3)" }}>
         <div style={{ display: "flex", gap: "var(--s-2)", alignItems: "center" }}>
-          <Badge status={walk.is_overage ? "overage" : walk.status} />
+          <Badge status={treatment.badge}>{treatment.label}</Badge>
           <span style={{ color: "var(--text-2)", fontSize: "var(--fs-14)" }}>
             {walk.scheduled_date} · {time12(walk.window_start)}–{time12(walk.window_end)}
           </span>
