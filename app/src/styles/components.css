@@ -830,15 +830,43 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
   stroke-width: clamp(4px, 0.72cqw, 6px);
   vector-effect: non-scaling-stroke;
 }
-.today-emaki-progress__base { stroke: #acd9ec; }
+/* Emaki path state colors. All four strokes are CT-1 token-derived — no raw
+   hex — so they follow the vendor palette and its prefers-contrast overrides.
+   Ratios below are measured against the Cream canvas (#FEF6EA); WCAG 1.4.11
+   asks 3:1 for graphics that carry state. */
+
+/* Untravelled track. A groove rather than a state signal, so it stays light;
+   neutral-rule holds the previous visual weight (1.37:1 vs the 1.41:1 it
+   replaces) while dropping the hardcoded value. */
+.today-emaki-progress__base { stroke: var(--sanpo-color-neutral-rule); }
 .today-emaki-progress__complete {
-  stroke: var(--sanpo-color-supporting-matcha);
+  stroke: var(--sanpo-color-supporting-matcha); /* 5.03:1 */
 }
+/* Spec 07 calls this segment Yamabuki, but Yamabuki on Cream measures 1.92:1
+   — below the 3:1 floor for a stroke that shows which visit is underway, and
+   the first thing to disappear in the daylight-legibility gate. Deepened
+   toward Kaki-strong to 3.27:1; still reads gold, still derived from the
+   approved palette. Revert to plain Yamabuki if the design owner prefers the
+   exact hue and accepts the contrast. */
 .today-emaki-progress__current {
   stroke: var(--sanpo-color-supporting-yamabuki);
 }
+/* Held in @supports so the minifier cannot collapse the two declarations —
+   merged into one rule it drops the fallback, and a browser without
+   color-mix would then paint no stroke at all. */
+@supports (color: color-mix(in srgb, red, blue)) {
+  .today-emaki-progress__current {
+    stroke: color-mix(
+      in srgb,
+      var(--sanpo-color-supporting-yamabuki) 55%,
+      var(--sanpo-color-supporting-kaki-strong)
+    );
+  }
+}
+/* "You are here". Spec 07 names Kaki for this marker; the raw #c85b13 it
+   replaces was not in CT-1 at all. 4.90:1. */
 .today-emaki-progress__marker {
-  stroke: #c85b13;
+  stroke: var(--sanpo-color-supporting-kaki);
   stroke-linecap: round;
   stroke-width: 6px;
   vector-effect: non-scaling-stroke;
