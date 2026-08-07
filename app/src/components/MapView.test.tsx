@@ -26,6 +26,13 @@ describe("MapView SVG fallback", () => {
   it("shows the live head dot with pulse when live", () => {
     const html = renderToStaticMarkup(<SvgMap points={FIXTURE} live />);
     expect(html).toContain("pulse-live");
+    expect(html).toContain("var(--sanpo-color-status-current)");
+  });
+
+  it("uses a complete endpoint when the route is no longer live", () => {
+    const html = renderToStaticMarkup(<SvgMap points={FIXTURE} />);
+    expect(html).toContain("var(--sanpo-color-status-complete)");
+    expect(html).not.toContain("pulse-live");
   });
 
   it("renders an empty state without points", () => {

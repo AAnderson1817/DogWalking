@@ -10,6 +10,7 @@ import { LoadError, loadErrorMessage } from "@/components/LoadError";
 import { Input, Select } from "@/components/fields";
 import { Sheet } from "@/components/Sheet";
 import { Spinner } from "@/components/Spinner";
+import { LoadingState, StateField } from "@/components/StateField";
 import { WalkCard } from "@/components/WalkCard";
 import {
   bookWalk,
@@ -162,8 +163,8 @@ export default function Booking() {
   }
   if (!client || !operator) {
     return (
-      <div className="page" style={{ display: "grid", placeItems: "center" }}>
-        <Spinner />
+      <div className="page">
+        <LoadingState label="Loading booking options" />
       </div>
     );
   }
@@ -175,17 +176,21 @@ export default function Booking() {
       <h1>Book a walk</h1>
 
       {(properties.length === 0 || pets.length === 0) && (
-        <Card style={{ background: "var(--pink)", boxShadow: "none", marginTop: "var(--s-4)" }}>
-          <span style={{ fontWeight: 800, color: "var(--pink-ink)" }}>
-            Almost there — your walker still needs to add{" "}
-            {properties.length === 0 && pets.length === 0
-              ? "your address and your dog"
-              : properties.length === 0
-                ? "your address"
-                : "your dog"}{" "}
-            to your account before you can book.
-          </span>
-        </Card>
+        <div style={{ marginTop: "var(--s-4)" }}>
+          <StateField
+            compact
+            tone="attention"
+            label="Setup required"
+            title="Booking isn't available yet"
+            detail={`Your walker still needs to add ${
+              properties.length === 0 && pets.length === 0
+                ? "your address and your dog"
+                : properties.length === 0
+                  ? "your address"
+                  : "your dog"
+            } to your account.`}
+          />
+        </div>
       )}
 
       <Card style={{ marginTop: "var(--s-4)" }}>

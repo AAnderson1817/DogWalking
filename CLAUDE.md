@@ -1,8 +1,7 @@
 # Sanpo — solo-first pet-care operations SaaS
 
-The repository and some legacy implementation comments still use the working
-name PawTrail. Sanpo is the production brand and a vertical SaaS platform for
-independent pet-care professionals, not a centralized dog-walking agency.
+Sanpo is the production brand and a vertical SaaS platform for independent
+pet-care professionals, not a centralized dog-walking agency.
 
 React PWA (Vite 8, React 19, TS strict, react-router-dom 6) + Supabase (Postgres 17, Auth, RLS, Realtime, Storage) + Deno edge functions + Stripe Billing + Mapbox (SVG fallback). Currency USD (integer cents — the *_pence column names are historical and hold cents). Timezone US Central — America/Chicago (UTC in DB).
 
@@ -34,11 +33,33 @@ Authoritative specs live in `docs/spec/`. Build plan in `docs/phases/00–08`. S
 ## Conventions
 - TS strict; named exports for lib/components; default export only for route screens.
 - Money = integer minor units (cents; *_pence columns kept their names). Dates stored UTC (`timestamptz`), rendered US Central (America/Chicago) via `lib/format.ts`.
-- Styling: CSS custom properties from `docs/spec/05-design-system.md` (v2 "Biscuit" theme — cream/orange neo-brutalist, from the Claude Design mock). No Tailwind.
+- Styling: the locked Indigo Emaki system in `docs/spec/05-design-system.md`
+  and `docs/spec/07-indigo-emaki-visual-migration.md`. No Tailwind. Never
+  restore PawTrail/Biscuit colors, Baloo, hard shadows, repeated card grids,
+  decorative pet portraits, or a horizontal Sanpo logo.
 - Commit format: `phase(NN): summary`.
 
 ## Workflow
 One phase per session: `/clear` → plan mode against `docs/phases/NN-*.md` → approve → execute → `/validate` → commit → tick the phase below and append one status line.
+
+## Current implementation handoff
+
+The product phases and Indigo Emaki visual migration are complete in this
+working tree. The approved Today composition is closed. Treat
+`app/src/assets/brand`, `app/src/assets/icons`, and the approved Today
+background as byte-locked inputs guarded by `npm run verify:brand-assets`.
+
+Claude's job on receipt is implementation verification and integration:
+
+1. Read `HANDOFF.md`, `docs/spec/05-design-system.md`, and
+   `docs/spec/07-indigo-emaki-visual-migration.md` before editing.
+2. Preserve the full-screen Old Town Today composition, vertical responsive
+   behavior, exact schedule hierarchy, and `END WALK` action.
+3. Run the listed unit, lint, build, and responsive browser gates.
+4. Fix only reproducible implementation defects. Do not reinterpret or reopen
+   approved visual decisions.
+5. Prepare the changes for review without modifying existing migrations or
+   weakening credit, credential, tenancy, or offline-route invariants.
 
 ## Phase status
 - [x] 00 foundations-and-database
@@ -60,4 +81,4 @@ One phase per session: `/clear` → plan mode against `docs/phases/NN-*.md` → 
 - phase(05): Dashboard (today/live/low-credit/failed strips), Roster with invite handoff, 4-tab ClientDetail, AccessVault + shared vault flows (reauth → purpose → 30s reveal, rotate, soft-revoke, audit sheet), full WalkMode (start → GPS broadcast + batched inserts → photos → toggles → complete-walk → billing banner → report preview, exit guard); 47 vitest green incl. dashboard selectors; mapbox-gl split to a lazy chunk; docs/dev/operator-manual-test.md.
 - phase(06): fn_materialize_walks in 0007 (set-based, 14-day horizon, pause/paused-client/date-bound skips, pet copying, ON CONFLICT idempotency) + thin materialize-walks edge fn with 03:00 UTC cron; tests/materializer.sql proves idempotency/no-resurrection through /validate; Schedule tab (days picker, pause-window editor, deactivate-cancels-future) + Calendar day/week with drag-reschedule, action sheet, one-off creation.
 - phase(07): 0008 adds cancellation cutoff (12h default, guard-trigger enforced), cached current_period_end, client booking/cancel policies + photo-read storage policies; change-plan (Stripe proration + fraction fallback) and billing-portal edge fns; PortalHome/Booking (overage confirm)/PortalWalks/WalkDetail (live subscribe)/PortalBilling/PetProfiles + operator BillingConsole (renewals, past-due, overage re-charge, plan change); smoke extended with booking/cutoff guards; docs/dev/portal-manual-test.md.
-- phase(08): 0009 walk_scheduled/walk_cancelled triggers close the notification audit; bell inboxes with deep links (both personas); env-gated send-notification email fn (pine template); fn_expire_credits on the daily cron; versioned SW (shell precache, SWR data GETs, network-only mutations — offline shell reload verified headlessly, docs/dev/pwa-check.md); IndexedDB GPS outbox with backoff + reconnect backfill (grey-dot indicator); install prompt + iOS meta. Final /validate fully green — v1 feature-complete.
+- phase(08): 0009 walk_scheduled/walk_cancelled triggers close the notification audit; bell inboxes with deep links (both personas); env-gated send-notification email fn; fn_expire_credits on the daily cron; versioned SW (shell precache, SWR data GETs, network-only mutations — offline shell reload verified headlessly, docs/dev/pwa-check.md); IndexedDB GPS outbox with backoff + reconnect backfill (grey-dot indicator); install prompt + iOS meta. Final /validate fully green — v1 feature-complete.

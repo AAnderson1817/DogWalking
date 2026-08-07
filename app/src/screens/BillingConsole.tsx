@@ -1,6 +1,5 @@
-// Operator BillingConsole (phase 07): upcoming renewals (cached period
-// ends), past_due dunning list, overage debts with re-charge, and plan
-// changes through the change-plan edge fn.
+// Operator Money surface: payment activity, renewal context, failed-payment
+// recovery, and plan changes through the change-plan edge function.
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Badge } from "@/components/Badge";
@@ -8,31 +7,45 @@ import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
 import { LoadError, loadErrorMessage } from "@/components/LoadError";
+import { MoneyValueRail } from "@/components/MoneyValueRail";
+import { PaymentRow } from "@/components/PaymentRow";
 import { Select } from "@/components/fields";
 import { Sheet } from "@/components/Sheet";
 import { Spinner } from "@/components/Spinner";
+import { LoadingState } from "@/components/StateField";
+import { paymentStatusTreatment } from "@/components/status-treatment";
 import {
   changePlan,
   chargeOverage,
   listClients,
-  listPayments,
+  listPaymentsDetailed,
   listPlans,
+  type PaymentDetailed,
 } from "@/lib/api";
 import { dateLocal, money } from "@/lib/format";
-import type { Clients, Payments, Plans } from "@/lib/types";
+import type {
+  Clients,
+  PaymentStatus,
+  PaymentType,
+  Payments,
+  Plans,
+} from "@/lib/types";
 
 export default function BillingConsole() {
   const [clients, setClients] = useState<Clients[] | null>(null);
   const [plans, setPlans] = useState<Plans[]>([]);
-  const [payments, setPayments] = useState<Payments[]>([]);
+  const [payments, setPayments] = useState<PaymentDetailed[]>([]);
   const [planChangeFor, setPlanChangeFor] = useState<Clients | null>(null);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<PaymentStatus | "all">("all");
+  const [typeFilter, setTypeFilter] = useState<PaymentType | "all">("all");
   const [notice, setNotice] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const [cs, ps, pays] = await Promise.all([listClients(), listPlans(), listPayments()]);
+    const [cs, ps, pays] = await Promise.all([listClients(), listPlans(), listPaymentsDetailed()]);
     setClients(cs);
     setPlans(ps);
     setPayments(pays);
@@ -53,8 +66,8 @@ export default function BillingConsole() {
   }
   if (clients === null) {
     return (
-      <div className="page" style={{ display: "grid", placeItems: "center" }}>
-        <Spinner />
+      <div className="page">
+        <LoadingState label="Loading Money" />
       </div>
     );
   }
@@ -66,7 +79,10 @@ export default function BillingConsole() {
     .filter((c) => c.subscription_status === "active")
     .sort((a, b) => (a.current_period_end ?? "9999").localeCompare(b.current_period_end ?? "9999"));
   const pastDue = clients.filter((c) => c.subscription_status === "past_due");
-  const overageDebts = payments.filter((p) => p.type === "overage" && p.status === "failed");
+  const filteredPayments = payments.filter((payment) =>
+    (statusFilter === "all" || payment.status === statusFilter)
+    && (typeFilter === "all" || payment.type === typeFilter));
+  const activeFilterCount = Number(statusFilter !== "all") + Number(typeFilter !== "all");
 
   async function recharge(payment: Payments) {
     if (!payment.walk_id) return;
@@ -77,11 +93,11 @@ export default function BillingConsole() {
       setNotice(
         result.status === "succeeded"
           ? `Recovered ${money(result.amount_pence)} from ${clientName(payment.client_id)}.`
-          : `Charge attempt is ${result.status}.`,
+          : `Charge attempt: ${paymentStatusTreatment(result.status).label}.`,
       );
       await load();
     } catch (e) {
-      setNotice(e instanceof Error ? e.message : "re-charge failed");
+      setNotice(e instanceof Error ? e.message : "Charge retry failed.");
     } finally {
       setBusyId(null);
     }
@@ -94,85 +110,131 @@ export default function BillingConsole() {
         <p style={{ marginTop: "var(--s-2)", color: "var(--text-2)", fontSize: "var(--fs-14)" }}>{notice}</p>
       )}
 
+      <MoneyValueRail payments={payments} />
+
       <section style={{ marginTop: "var(--s-4)" }}>
+        <div className="money-section-heading">
+          <span className="section-label">Payments</span>
+          <Button variant="ghost" onClick={() => setFilterOpen(true)}>
+            Filter{activeFilterCount ? ` · ${activeFilterCount}` : ""}
+          </Button>
+        </div>
+        {filteredPayments.length === 0 ? (
+          <Card style={{ marginTop: "var(--s-2)" }}>
+            <EmptyState title={payments.length ? "No matching payments" : "No payments yet"} />
+          </Card>
+        ) : (
+          <div className="payment-ledger">
+            {filteredPayments.map((payment) => (
+              <div key={payment.id}>
+                <PaymentRow payment={payment} showClient />
+                {payment.status === "failed" && payment.type === "overage" && payment.walk_id && (
+                  <div className="payment-recovery">
+                    <span>Payment failed. Retry this walk charge.</span>
+                    <Button
+                      variant="ghost"
+                      onClick={() => void recharge(payment)}
+                      disabled={busyId === payment.id}
+                    >
+                      {busyId === payment.id ? <Spinner /> : "Retry charge"}
+                    </Button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section style={{ marginTop: "var(--s-6)" }}>
         <span className="section-label">Upcoming renewals</span>
-        <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-2)", marginTop: "var(--s-2)" }}>
-          {renewals.length === 0 ? (
-            <Card><EmptyState title="No active subscriptions" /></Card>
-          ) : (
-            renewals.map((c) => (
-              <Card key={c.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "var(--s-2)" }}>
-                <div>
-                  <Link to={`/clients/${c.id}`} style={{ fontWeight: 600, color: "var(--text)", textDecoration: "none" }}>
+        {renewals.length === 0 ? (
+          <Card style={{ marginTop: "var(--s-2)" }}><EmptyState title="No active subscriptions" /></Card>
+        ) : (
+          <div className="money-plan-list">
+            {renewals.map((c) => (
+              <div key={c.id} className="money-plan-row">
+                <div className="money-plan-row__main">
+                  <Link to={`/clients/${c.id}`} style={{ fontWeight: 800, color: "var(--text)", textDecoration: "none" }}>
                     {c.full_name}
                   </Link>
-                  <div style={{ color: "var(--text-2)", fontSize: "var(--fs-14)" }}>
+                  <div className="money-plan-row__meta">
                     {planName(c.plan_id)}
                     {c.current_period_end ? ` · renews ${dateLocal(c.current_period_end)}` : " · renewal date syncs from Stripe"}
                   </div>
                 </div>
                 <div style={{ display: "flex", gap: "var(--s-2)", alignItems: "center" }}>
-                  <span className="numeral" style={{ fontWeight: 700 }}>{c.credit_balance}</span>
+                  <span className="numeral" style={{ fontWeight: 800 }}>{c.credit_balance}</span>
                   <Button variant="ghost" onClick={() => setPlanChangeFor(c)}>Change plan</Button>
                 </div>
-              </Card>
-            ))
-          )}
-        </div>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       <section style={{ marginTop: "var(--s-6)" }}>
         <span className="section-label">Past due</span>
-        <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-2)", marginTop: "var(--s-2)" }}>
-          {pastDue.length === 0 ? (
-            <Card><EmptyState title="Nobody past due" hint="Stripe retries failed renewals automatically." /></Card>
-          ) : (
-            pastDue.map((c) => (
-              <Card key={c.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div>
-                  <Link to={`/clients/${c.id}`} style={{ fontWeight: 600, color: "var(--text)", textDecoration: "none" }}>
+        {pastDue.length === 0 ? (
+          <Card style={{ marginTop: "var(--s-2)" }}>
+            <EmptyState title="Nobody past due" hint="Stripe retries failed renewals automatically." />
+          </Card>
+        ) : (
+          <div className="money-plan-list">
+            {pastDue.map((c) => (
+              <div key={c.id} className="money-plan-row">
+                <div className="money-plan-row__main">
+                  <Link to={`/clients/${c.id}`} style={{ fontWeight: 800, color: "var(--text)", textDecoration: "none" }}>
                     {c.full_name}
                   </Link>
-                  <div style={{ color: "var(--text-2)", fontSize: "var(--fs-14)" }}>
+                  <div className="money-plan-row__meta">
                     {planName(c.plan_id)} · Stripe smart retries in progress
                   </div>
                 </div>
-                <Badge status="warn">past due</Badge>
-              </Card>
-            ))
-          )}
-        </div>
+                <Badge status="attention">Past due</Badge>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
-      <section style={{ marginTop: "var(--s-6)" }}>
-        <span className="section-label">Overage debts</span>
-        <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-2)", marginTop: "var(--s-2)" }}>
-          {overageDebts.length === 0 ? (
-            <Card><EmptyState title="No outstanding walk charges" /></Card>
-          ) : (
-            overageDebts.map((p) => (
-              <Card key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div>
-                  <span style={{ fontWeight: 600 }}>{clientName(p.client_id)}</span>
-                  <div style={{ color: "var(--text-2)", fontSize: "var(--fs-14)" }}>
-                    walk overage · {dateLocal(p.created_at)}
-                  </div>
-                </div>
-                <div style={{ display: "flex", gap: "var(--s-2)", alignItems: "center" }}>
-                  <span className="numeral" style={{ fontWeight: 600 }}>{money(p.amount_pence)}</span>
-                  <Button
-                    variant="accent"
-                    onClick={() => void recharge(p)}
-                    disabled={busyId === p.id || !p.walk_id}
-                  >
-                    {busyId === p.id ? <Spinner /> : "Re-charge"}
-                  </Button>
-                </div>
-              </Card>
-            ))
-          )}
+      <Sheet open={filterOpen} onClose={() => setFilterOpen(false)} title="Filter payments">
+        <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-3)" }}>
+          <Select
+            label="Status"
+            value={statusFilter}
+            onChange={(event) => setStatusFilter(event.target.value as PaymentStatus | "all")}
+          >
+            <option value="all">All statuses</option>
+            <option value="succeeded">Collected</option>
+            <option value="pending">Processing</option>
+            <option value="failed">Needs attention</option>
+            <option value="refunded">Refunded</option>
+          </Select>
+          <Select
+            label="Type"
+            value={typeFilter}
+            onChange={(event) => setTypeFilter(event.target.value as PaymentType | "all")}
+          >
+            <option value="all">All payment types</option>
+            <option value="subscription">Subscription</option>
+            <option value="overage">Walk overage</option>
+          </Select>
+          <Button
+            variant="ghost"
+            onClick={() => {
+              setStatusFilter("all");
+              setTypeFilter("all");
+            }}
+            disabled={activeFilterCount === 0}
+          >
+            Clear filters
+          </Button>
+          <Button full onClick={() => setFilterOpen(false)}>
+            Show {filteredPayments.length} {filteredPayments.length === 1 ? "payment" : "payments"}
+          </Button>
         </div>
-      </section>
+      </Sheet>
 
       {planChangeFor && (
         <PlanChangeSheet

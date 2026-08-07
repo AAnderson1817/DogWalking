@@ -1,14 +1,16 @@
 // Portal WalkDetail (phase 07): live map + pulse header while in_progress
 // (useWalkChannel subscribe); full ReportCard once completed (signed photo
 // URLs, route, notes, flags).
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { Badge } from "@/components/Badge";
 import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
+import { LoadError, loadErrorMessage } from "@/components/LoadError";
 import { MapView } from "@/components/MapView";
 import { ReportCard } from "@/components/ReportCard";
-import { Spinner } from "@/components/Spinner";
+import { LoadingState } from "@/components/StateField";
+import { walkStatusTreatment } from "@/components/status-treatment";
 import {
   getWalk,
   listWalkGpsPoints,
@@ -36,27 +38,29 @@ function WalkDetailInner({ walkId }: { walkId: string }) {
   const channel = useWalkChannel(walkId, "subscribe");
   const live = walk?.status === "in_progress" && !channel.ended;
 
-  useEffect(() => {
-    async function load() {
-      try {
-        const w = await getWalk(walkId);
-        setWalk(w);
-        setPets(await listWalkPets(walkId));
-        const points = await listWalkGpsPoints(walkId);
-        setStoredPoints(points.map((p) => ({ lat: p.lat, lng: p.lng })));
-        if (w.status === "completed") {
-          const photos = await listWalkPhotos(walkId);
-          const urls = await Promise.all(
-            photos.map((p) => signedPhotoUrl(p.storage_path).catch(() => "")),
-          );
-          setPhotoUrls(urls.filter(Boolean));
-        }
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "walk not found");
+  const load = useCallback(async () => {
+    setError(null);
+    try {
+      const w = await getWalk(walkId);
+      setWalk(w);
+      setPets(await listWalkPets(walkId));
+      const points = await listWalkGpsPoints(walkId);
+      setStoredPoints(points.map((p) => ({ lat: p.lat, lng: p.lng })));
+      if (w.status === "completed") {
+        const photos = await listWalkPhotos(walkId);
+        const urls = await Promise.all(
+          photos.map((p) => signedPhotoUrl(p.storage_path).catch(() => "")),
+        );
+        setPhotoUrls(urls.filter(Boolean));
       }
+    } catch (loadError) {
+      setError(loadErrorMessage(loadError));
     }
+  }, [walkId]);
+
+  useEffect(() => {
     void load();
-  }, [walkId, channel.ended]);
+  }, [load, channel.ended]);
 
   const mapPoints = useMemo(
     () => [...storedPoints, ...channel.livePoints.map((p) => ({ lat: p.lat, lng: p.lng }))],
@@ -64,28 +68,25 @@ function WalkDetailInner({ walkId }: { walkId: string }) {
   );
 
   if (error) {
-    return (
-      <div className="page">
-        <Card><EmptyState title="Walk not found" hint={error} /></Card>
-      </div>
-    );
+    return <LoadError title="Couldn't load walk details" message={error} onRetry={load} />;
   }
   if (!walk) {
     return (
-      <div className="page" style={{ display: "grid", placeItems: "center" }}>
-        <Spinner />
+      <div className="page">
+        <LoadingState label="Loading walk details" />
       </div>
     );
   }
 
   const names = pets.map((p) => p.name);
+  const treatment = walkStatusTreatment(walk.status, walk.is_overage);
 
   return (
     <div className="page">
       {live && (
-        <div style={{ display: "flex", alignItems: "center", gap: "var(--s-2)", marginBottom: "var(--s-2)" }}>
-          <span className="pulse-live" aria-hidden />
-          <span style={{ fontWeight: 700, color: "var(--teal-dim)" }}>Live — on the trail now</span>
+        <div className="walk-live-state" style={{ marginBottom: "var(--s-2)" }}>
+          <span className="walk-live-state__label">CURRENT</span>
+          <span className="walk-live-state__pet">Live — on the trail now</span>
         </div>
       )}
       <span className="section-label">
@@ -93,7 +94,7 @@ function WalkDetailInner({ walkId }: { walkId: string }) {
       </span>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
         <h1>{names.join(" & ") || "Walk"}</h1>
-        <Badge status={walk.status} />
+        <Badge status={treatment.badge}>{treatment.label}</Badge>
       </div>
 
       {walk.status === "in_progress" ? (
@@ -123,7 +124,7 @@ function WalkDetailInner({ walkId }: { walkId: string }) {
       ) : (
         <Card style={{ marginTop: "var(--s-4)" }}>
           <EmptyState
-            title={walk.status === "scheduled" ? "Booked and waiting" : `Walk ${walk.status}`}
+            title={walk.status === "scheduled" ? "Booked and waiting" : `Walk ${treatment.label.toLowerCase()}`}
             hint={walk.status === "scheduled" ? "Live tracking appears here once the walk starts." : undefined}
           />
         </Card>

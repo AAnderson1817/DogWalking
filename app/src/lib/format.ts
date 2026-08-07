@@ -73,6 +73,46 @@ export function time12(t: string): string {
   return `${h12}:${m} ${suffix}`;
 }
 
+/** Same-period windows avoid repeating AM/PM: "3:00–4:00 PM". */
+export function timeRange12(windowStart: string, windowEnd: string): string {
+  const start = time12(windowStart);
+  const end = time12(windowEnd);
+  const startPeriod = start.slice(-2);
+  const endPeriod = end.slice(-2);
+  return startPeriod === endPeriod
+    ? `${start.slice(0, -3)}–${end}`
+    : `${start}–${end}`;
+}
+
+/** "09:00:00"–"10:30:00" → "1 hr 30 min". Handles an overnight window. */
+export function walkDuration(windowStart: string, windowEnd: string): string {
+  const toMinutes = (value: string) => {
+    const [hours = "0", minutes = "0"] = value.split(":");
+    return Number(hours) * 60 + Number(minutes);
+  };
+  const start = toMinutes(windowStart);
+  let end = toMinutes(windowEnd);
+  if (end < start) end += 24 * 60;
+  const total = Math.max(0, end - start);
+  const hours = Math.floor(total / 60);
+  const minutes = total % 60;
+  if (hours === 0) return `${minutes} min`;
+  if (minutes === 0) return `${hours} hr`;
+  return `${hours} hr ${minutes} min`;
+}
+
+/** Time-of-day greeting in the business timezone, independent of device TZ. */
+export function dayGreeting(at: string | Date = new Date()): string {
+  const hour = Number(new Intl.DateTimeFormat("en-US", {
+    timeZone: DISPLAY_TZ,
+    hour: "numeric",
+    hourCycle: "h23",
+  }).format(typeof at === "string" ? new Date(at) : at));
+  if (hour < 12) return "Good morning";
+  if (hour < 17) return "Good afternoon";
+  return "Good evening";
+}
+
 /**
  * Walk slot label: scheduled date + window (wall-clock times).
  * ("2026-07-06", "12:00:00", "13:00:00") → "Mon, Jul 6, 12:00 PM–1:00 PM"

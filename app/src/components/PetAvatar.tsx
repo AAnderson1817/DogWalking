@@ -1,19 +1,19 @@
-// v2 "Biscuit" dog-face avatar (design mock 2a–2d): ears + face + eyes +
-// muzzle + blush, colorway picked deterministically from the pet's name so
-// the same dog always gets the same face. Pure SVG, no assets.
+// Pet-profile fallback used only when no truthful pet photo exists. The
+// deterministic colorway uses Sanpo's supporting palette; it is excluded from
+// schedule rows, Inbox, and other ambient product decoration.
 
 const COLORWAYS: Array<{ face: string; ears: string }> = [
-  { face: "#F7B733", ears: "#E08E1B" }, // golden
-  { face: "#F5D9A8", ears: "#D9A85F" }, // cream
-  { face: "#B8C4D9", ears: "#8E9DBB" }, // blue-grey
-  { face: "#C68958", ears: "#A06A3E" }, // brown
-  { face: "#9587B8", ears: "#6B5B8C" }, // purple
-  { face: "#E9967A", ears: "#C4645A" }, // salmon
-  { face: "#93A8B8", ears: "#6E7F8D" }, // slate
+  { face: "#F4E4B8", ears: "#E5AB35" },
+  { face: "#FEF6EA", ears: "#B84828" },
+  { face: "#D8EAF0", ears: "#236F86" },
+  { face: "#DEE8D8", ears: "#55724B" },
+  { face: "#E7E0EF", ears: "#796397" },
+  { face: "#F2D7CC", ears: "#B84828" },
+  { face: "#CAD7DC", ears: "#5D7180" },
 ];
 
-const INK = "#3B2A20";
-const BLUSH = "#FF9BB3";
+const INK = "#0C4774";
+const BLUSH = "#F2D7CC";
 
 function hashName(name: string): number {
   let h = 0;
@@ -23,7 +23,7 @@ function hashName(name: string): number {
 
 // oxlint-disable-next-line react/only-export-components
 export function petColorway(name: string): { face: string; ears: string } {
-  return COLORWAYS[hashName(name) % COLORWAYS.length] ?? { face: "#F7B733", ears: "#E08E1B" };
+  return COLORWAYS[hashName(name) % COLORWAYS.length] ?? { face: "#F4E4B8", ears: "#E5AB35" };
 }
 
 export function PetFace({ name, size = 34 }: { name: string; size?: number }) {
@@ -38,18 +38,6 @@ export function PetFace({ name, size = 34 }: { name: string; size?: number }) {
       <ellipse cx="20" cy="27" rx="3.2" ry="2.4" fill={INK} />
       <circle cx="10.5" cy="26" r="2" fill={BLUSH} opacity="0.7" />
       <circle cx="29.5" cy="26" r="2" fill={BLUSH} opacity="0.7" />
-    </svg>
-  );
-}
-
-/** Brand paw mark (4 circles), inherits color via fill=currentColor. */
-export function PawIcon({ size = 16 }: { size?: number }) {
-  return (
-    <svg viewBox="0 0 40 40" width={size} height={size} aria-hidden fill="currentColor">
-      <circle cx="20" cy="24" r="9" />
-      <circle cx="9" cy="14" r="4.5" />
-      <circle cx="20" cy="10" r="4.5" />
-      <circle cx="31" cy="14" r="4.5" />
     </svg>
   );
 }

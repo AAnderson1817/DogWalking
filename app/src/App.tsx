@@ -25,6 +25,8 @@ import NotFound from "@/screens/NotFound";
 // Dev-only component gallery; the statically-false DEV guard removes both
 // the route and the chunk from production builds (verified in build output).
 const DevKit = import.meta.env.DEV ? lazy(() => import("@/screens/DevKit")) : null;
+const InboxPreview = import.meta.env.DEV ? lazy(() => import("@/screens/InboxPreview")) : null;
+const TodayPreview = import.meta.env.DEV ? lazy(() => import("@/screens/TodayPreview")) : null;
 
 function operator(el: React.ReactNode) {
   return (
@@ -76,6 +78,28 @@ export default function App() {
           element={
             <Suspense fallback={null}>
               <DevKit />
+            </Suspense>
+          }
+        />
+      )}
+
+      {InboxPreview && (
+        <Route
+          path="/dev/inbox"
+          element={
+            <Suspense fallback={null}>
+              <InboxPreview />
+            </Suspense>
+          }
+        />
+      )}
+
+      {TodayPreview && (
+        <Route
+          path="/dev/today"
+          element={
+            <Suspense fallback={null}>
+              <TodayPreview />
             </Suspense>
           }
         />

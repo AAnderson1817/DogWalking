@@ -6,10 +6,12 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Button } from "@/components/Button";
+import { BrandLogo } from "@/components/BrandLogo";
 import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
 import { Input } from "@/components/fields";
 import { Spinner } from "@/components/Spinner";
+import { LoadingState, StateField } from "@/components/StateField";
 import { claimInvite, previewInviteAuthed, type InvitePreview } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { supabase } from "@/lib/supabase";
@@ -127,14 +129,12 @@ export default function ClaimInvite() {
     <div className="page" style={{ display: "grid", placeItems: "center" }}>
       <div style={{ width: "100%", maxWidth: 400 }}>
         <div style={{ textAlign: "center", marginBottom: "var(--s-6)" }}>
-          <h1 className="display" style={{ fontSize: "var(--fs-32)" }}>PawTrail</h1>
+          <BrandLogo />
           <p style={{ color: "var(--text-2)" }}>You've been invited.</p>
         </div>
 
         {stage === "loading" && (
-          <div style={{ display: "grid", placeItems: "center" }}>
-            <Spinner />
-          </div>
+          <LoadingState label="Checking your invitation" compact />
         )}
 
         {stage === "signup" && (
@@ -194,26 +194,26 @@ export default function ClaimInvite() {
 
         {stage === "check-email" && (
           <Card>
-            <div style={{ textAlign: "center", padding: "var(--s-4) 0" }}>
-              <p style={{ fontWeight: 600 }}>Confirm your email</p>
-              <p style={{ color: "var(--text-2)", marginTop: "var(--s-2)" }}>
-                We sent a confirmation link to {email}. Open it, then return to
-                this invite link to finish.
-              </p>
-            </div>
+            <StateField
+              tone="information"
+              label="Next step"
+              title="Confirm your email"
+              detail={`We sent a confirmation link to ${email}. Open it, then return to this invite link to finish.`}
+              role="status"
+            />
           </Card>
         )}
 
         {stage === "role-error" && (
           <Card>
-            <div style={{ textAlign: "center", padding: "var(--s-2) 0" }}>
-              <p style={{ fontWeight: 600 }}>Couldn't reach your account</p>
-              <p style={{ color: "var(--text-2)", marginTop: "var(--s-2)" }}>
-                Check your connection and try again.
-              </p>
-              <div style={{ marginTop: "var(--s-4)" }}>
+            <StateField
+              tone="information"
+              label="Connection interrupted"
+              title="Couldn't reach your account"
+              detail="Check your connection and try again."
+              role="alert"
+              action={
                 <Button
-                  full
                   disabled={busy}
                   onClick={() => {
                     setBusy(true);
@@ -226,23 +226,23 @@ export default function ClaimInvite() {
                       .finally(() => setBusy(false));
                   }}
                 >
-                  {busy ? <Spinner /> : "Retry"}
+                  {busy ? <Spinner label="Retrying" /> : "Retry"}
                 </Button>
-              </div>
-            </div>
+              }
+            />
           </Card>
         )}
 
         {stage === "claimed" && (
           <Card>
-            <div style={{ textAlign: "center", padding: "var(--s-2) 0" }}>
-              <p style={{ fontWeight: 600 }}>Invite accepted</p>
-              <p style={{ color: "var(--text-2)", marginTop: "var(--s-2)" }}>
-                We're finishing setting up your portal access.
-              </p>
-              <div style={{ marginTop: "var(--s-4)" }}>
+            <StateField
+              tone="success"
+              label="Complete"
+              title="Invite accepted"
+              detail="We're finishing your portal access."
+              role="status"
+              action={
                 <Button
-                  full
                   disabled={busy}
                   onClick={() => {
                     setBusy(true);
@@ -254,16 +254,18 @@ export default function ClaimInvite() {
                       .finally(() => setBusy(false));
                   }}
                 >
-                  {busy ? <Spinner /> : "Continue to my portal"}
+                  {busy ? <Spinner label="Loading your portal" /> : "Continue to my portal"}
                 </Button>
-              </div>
-            </div>
+              }
+            />
           </Card>
         )}
 
         {stage === "dead-end" && (
           <Card>
             <EmptyState
+              tone="information"
+              label="Invite unavailable"
               title="Invite not available"
               hint={deadEndReason}
               action={

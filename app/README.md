@@ -1,6 +1,6 @@
-# PawTrail web app
+# Sanpo web app
 
-PawTrail is a React/Vite progressive web app for dog-walking operators and client portals. The frontend lives in `app/` and talks to Supabase for auth, row-level-security-protected data, realtime walk updates, edge functions, and Postgres-backed workflows.
+Sanpo is a React/Vite progressive web app for independent pet-care professionals and their clients. The frontend lives in `app/` and talks to Supabase for auth, row-level-security-protected data, realtime walk updates, edge functions, and Postgres-backed workflows.
 
 ## Stack
 
@@ -58,7 +58,7 @@ STRIPE_WEBHOOK_SECRET=<stripe-webhook-signing-secret>
 VAULT_MASTER_KEY=<32-byte-base64-or-hex-key-material>
 APP_BASE_URL=http://localhost:5173
 RESEND_API_KEY=<optional-resend-key>
-NOTIFY_FROM_EMAIL="PawTrail <notifications@example.com>"
+NOTIFY_FROM_EMAIL="Sanpo <notifications@example.com>"
 ```
 
 Never commit real secrets. Use Supabase project secrets for deployed Edge Functions and `.env.local` only for local development.

@@ -36,7 +36,7 @@ export function PlaceholderScreen({
         </p>
         {children}
         <p style={{ marginTop: "var(--s-4)" }}>
-          <Link to="/" style={{ color: "var(--pine-600)" }}>
+          <Link className="secondary-link" to="/">
             Back to Dashboard
           </Link>
         </p>

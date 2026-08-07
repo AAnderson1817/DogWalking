@@ -27,12 +27,12 @@ async function signInAsClient(page) {
   await expect(page).toHaveURL(/\/portal/);
 }
 
-test.describe("critical PawTrail journeys", () => {
+test.describe("critical Sanpo journeys", () => {
   test("signup/invite flow accepts a staged invite claim URL", async ({ page }) => {
     test.skip(!env.E2E_INVITE_URL, "Set E2E_INVITE_URL to a disposable staged invite URL.");
 
     await page.goto(env.E2E_INVITE_URL);
-    await expect(page.getByRole("heading")).toContainText(/invite|claim|pawtrail/i);
+    await expect(page.getByText(/invite|claim|sanpo/i).first()).toBeVisible();
     await expect(page.getByLabel(/email/i).or(page.getByText(/sign in|password|claim/i))).toBeVisible();
   });
 

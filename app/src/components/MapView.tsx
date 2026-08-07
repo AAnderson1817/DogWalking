@@ -39,18 +39,20 @@ export function SvgMap({ points, live }: MapViewProps) {
           <path
             d={toSvgPath(fitted)}
             fill="none"
-            stroke="var(--sky-bright)"
+            stroke="var(--sanpo-color-schedule-upcoming-accent)"
             strokeWidth={4}
             strokeLinecap="round"
             strokeLinejoin="round"
           />
-          {start && <circle cx={start.x} cy={start.y} r={4} fill="var(--pine-400)" />}
+          {start && <circle cx={start.x} cy={start.y} r={4} fill="var(--sanpo-color-brand-indigo)" />}
           {head && (
             <circle
               cx={head.x}
               cy={head.y}
               r={5}
-              fill="var(--teal-live)"
+              fill={live
+                ? "var(--sanpo-color-status-current)"
+                : "var(--sanpo-color-status-complete)"}
               className={live ? "pulse-live" : undefined}
             />
           )}
@@ -117,10 +119,42 @@ function MapboxMap({ points, live }: MapViewProps) {
           id: "route",
           type: "line",
           source: "route",
-          paint: { "line-color": "#38BDF8", "line-width": 4 },
+          paint: { "line-color": "#236F86", "line-width": 4 },
         });
       }
+      const setPoint = (
+        id: "route-start" | "route-head",
+        coordinates: [number, number],
+        color: string,
+        radius: number,
+      ) => {
+        const pointData = {
+          type: "Feature" as const,
+          properties: {},
+          geometry: { type: "Point" as const, coordinates },
+        };
+        const source = map.getSource(id);
+        if (source) {
+          source.setData(pointData);
+          return;
+        }
+        map.addSource(id, { type: "geojson", data: pointData });
+        map.addLayer({
+          id,
+          type: "circle",
+          source: id,
+          paint: {
+            "circle-color": color,
+            "circle-radius": radius,
+            "circle-stroke-color": "#0C4774",
+            "circle-stroke-width": 1.5,
+          },
+        });
+      };
+      const firstPoint = points[0]!;
       const last = points[points.length - 1]!;
+      setPoint("route-start", [firstPoint.lng, firstPoint.lat], "#0C4774", 4);
+      setPoint("route-head", [last.lng, last.lat], live ? "#B84828" : "#55724B", 5);
       if (live) map.easeTo({ center: [last.lng, last.lat] });
     };
     if (map.isStyleLoaded()) draw();

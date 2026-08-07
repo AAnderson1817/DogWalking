@@ -16,9 +16,14 @@ export function Input({
   label,
   error,
   className,
+  id: providedId,
+  "aria-describedby": providedDescription,
   ...rest
 }: InputHTMLAttributes<HTMLInputElement> & FieldChrome) {
-  const id = useId();
+  const generatedId = useId();
+  const id = providedId ?? generatedId;
+  const errorId = error ? `${id}-error` : undefined;
+  const describedBy = [providedDescription, errorId].filter(Boolean).join(" ") || undefined;
   return (
     <label className="field" htmlFor={id}>
       {label && <span className="field__label">{label}</span>}
@@ -26,9 +31,11 @@ export function Input({
         id={id}
         className={["field__control", className ?? ""].filter(Boolean).join(" ")}
         aria-invalid={error ? true : undefined}
+        aria-describedby={describedBy}
+        aria-errormessage={errorId}
         {...rest}
       />
-      {error && <span className="field__error">{error}</span>}
+      {error && <span id={errorId} className="field__error">{error}</span>}
     </label>
   );
 }
@@ -37,9 +44,14 @@ export function Textarea({
   label,
   error,
   className,
+  id: providedId,
+  "aria-describedby": providedDescription,
   ...rest
 }: TextareaHTMLAttributes<HTMLTextAreaElement> & FieldChrome) {
-  const id = useId();
+  const generatedId = useId();
+  const id = providedId ?? generatedId;
+  const errorId = error ? `${id}-error` : undefined;
+  const describedBy = [providedDescription, errorId].filter(Boolean).join(" ") || undefined;
   return (
     <label className="field" htmlFor={id}>
       {label && <span className="field__label">{label}</span>}
@@ -49,9 +61,11 @@ export function Textarea({
           .filter(Boolean)
           .join(" ")}
         aria-invalid={error ? true : undefined}
+        aria-describedby={describedBy}
+        aria-errormessage={errorId}
         {...rest}
       />
-      {error && <span className="field__error">{error}</span>}
+      {error && <span id={errorId} className="field__error">{error}</span>}
     </label>
   );
 }
@@ -61,9 +75,14 @@ export function Select({
   error,
   className,
   children,
+  id: providedId,
+  "aria-describedby": providedDescription,
   ...rest
 }: SelectHTMLAttributes<HTMLSelectElement> & FieldChrome) {
-  const id = useId();
+  const generatedId = useId();
+  const id = providedId ?? generatedId;
+  const errorId = error ? `${id}-error` : undefined;
+  const describedBy = [providedDescription, errorId].filter(Boolean).join(" ") || undefined;
   return (
     <label className="field" htmlFor={id}>
       {label && <span className="field__label">{label}</span>}
@@ -71,11 +90,13 @@ export function Select({
         id={id}
         className={["field__control", className ?? ""].filter(Boolean).join(" ")}
         aria-invalid={error ? true : undefined}
+        aria-describedby={describedBy}
+        aria-errormessage={errorId}
         {...rest}
       >
         {children}
       </select>
-      {error && <span className="field__error">{error}</span>}
+      {error && <span id={errorId} className="field__error">{error}</span>}
     </label>
   );
 }

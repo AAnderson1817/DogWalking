@@ -7,6 +7,7 @@ import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
 import { Input } from "@/components/fields";
 import { Spinner } from "@/components/Spinner";
+import { LoadingState, StateField } from "@/components/StateField";
 import { createOperator } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 
@@ -30,26 +31,32 @@ export default function Onboard() {
   // errored, hold on a retryable state rather than the operator setup form.
   if (auth.roleError) {
     return (
-      <div className="page" style={{ display: "grid", placeItems: "center", gap: "var(--s-3)" }}>
-        <p style={{ color: "var(--text-2)", textAlign: "center" }}>
-          Couldn't confirm your account. Check your connection and try again.
-        </p>
-        <Button
-          disabled={busy}
-          onClick={() => {
-            setBusy(true);
-            void auth.refreshRole().finally(() => setBusy(false));
-          }}
-        >
-          {busy ? <Spinner /> : "Retry"}
-        </Button>
+      <div className="page">
+        <StateField
+          tone="information"
+          label="Connection interrupted"
+          title="Couldn't confirm your account"
+          detail="Check your connection and try again."
+          role="alert"
+          action={
+            <Button
+              disabled={busy}
+              onClick={() => {
+                setBusy(true);
+                void auth.refreshRole().finally(() => setBusy(false));
+              }}
+            >
+              {busy ? <Spinner label="Retrying" /> : "Retry"}
+            </Button>
+          }
+        />
       </div>
     );
   }
   if (auth.loading || !auth.session || auth.role !== null) {
     return (
-      <div className="page" style={{ display: "grid", placeItems: "center" }}>
-        <Spinner />
+      <div className="page">
+        <LoadingState label="Loading account setup" />
       </div>
     );
   }
@@ -92,7 +99,7 @@ export default function Onboard() {
 
   return (
     <div className="page">
-      <h1>Welcome to PawTrail</h1>
+      <h1>Welcome to Sanpo</h1>
       <p style={{ color: "var(--text-2)", marginTop: "var(--s-1)" }}>
         Set up your walking business. Two default services (30 and 60 minute
         private walks) are created for you.

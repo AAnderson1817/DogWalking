@@ -86,7 +86,7 @@ export function makeOverageDeps(db: SupabaseClient, stripe: Stripe): OverageDeps
           payment_method: paymentMethod,
           off_session: true,
           confirm: true,
-          description: "PawTrail walk (overage)",
+          description: "Sanpo walk (overage)",
           metadata: { walk_id: walkId, client_id: clientId },
           expand: ["latest_charge"],
         },

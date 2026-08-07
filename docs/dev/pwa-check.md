@@ -9,7 +9,7 @@ programmatically — script: a Playwright run capturing the values below).
 | Service worker registered | ✅ scope `/`, active, controlling the page |
 | Versioned precache created | ✅ `pawtrail-shell-<build>` (stamped per build) |
 | Offline reload serves the shell | ✅ `document` renders from cache with network cut |
-| Manifest reachable + valid | ✅ name PawTrail, `display: standalone`, `theme_color #0E2A23` |
+| Manifest reachable + valid | ✅ name Sanpo, `display: standalone`, `theme_color #FEF6EA` |
 | Icons | ✅ 192/512 `any` + 192/512 `maskable` |
 | iOS meta | ✅ apple-mobile-web-app-* + apple-touch-icon |
 | Mutations bypass cache | ✅ non-GET and `/auth|/realtime|/functions` never cached (sw.js) |

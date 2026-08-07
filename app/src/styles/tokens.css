@@ -1,20 +1,17 @@
-/* PawTrail v2 "Biscuit" tokens — from the Claude Design mock (PawTrail
-   Screens 2a–2d) via docs/spec/05-design-system.md. Neo-brutalist: cream
-   surfaces, brown ink, chunky #3B2A20 borders with hard offset shadows.
-   Legacy Trailhead var names are kept as aliases so existing screens
-   restyle without edits. */
+/* Sanpo Indigo Emaki production tokens. Older variable names remain as
+   compatibility aliases only; they resolve to the approved Sanpo system. */
 :root {
-  /* palette */
-  --cream-page:#FFF6E9; --cream-deep:#FFF1DC; --card:#FFFFFF;
-  --ink-900:#3B2A20; --ink-700:#7A5B41; --ink-500:#A9856A; --ink-mono:#B4855C;
-  --line-soft:#E8C79A; --hairline:#F3E3CB;
-  --orange:#FF6B35; --orange-deep:#B4520A; --orange-tint:#FFD9C4;
-  --butter:#FFE28A; --butter-ink:#7A4E00;
-  --sky:#8FD8FF; --sky-bright:#38BDF8; --sky-ink:#14344A; --sky-mid:#2E6E8F;
-  --mint:#7FE3B4; --mint-ink:#0E5C3F;
-  --lilac:#DCD2FF; --lilac-ink:#5B4A8C;
-  --pink:#FFC7D8; --pink-ink:#8C4A5C; --blush:#FF9BB3;
-  --red:#E5484D; --green:#0E9F6E; --white:#FFFFFF;
+  /* compatibility aliases */
+  --cream-page:var(--sanpo-color-brand-cream); --cream-deep:#F8ECDC; --card:var(--sanpo-color-production-white);
+  --ink-900:var(--sanpo-color-brand-indigo); --ink-700:var(--sanpo-color-neutral-muted); --ink-500:var(--sanpo-color-neutral-muted); --ink-mono:var(--sanpo-color-neutral-muted);
+  --line-soft:var(--sanpo-color-border-subtle); --hairline:#E6E0D8;
+  --orange:var(--sanpo-color-brand-indigo); --orange-deep:var(--sanpo-color-interaction-indigo-pressed); --orange-tint:var(--sanpo-color-supporting-asagi-tint);
+  --butter:var(--sanpo-color-supporting-yamabuki-tint); --butter-ink:var(--sanpo-color-brand-indigo);
+  --sky:var(--sanpo-color-supporting-asagi-tint); --sky-bright:var(--sanpo-color-supporting-asagi); --sky-ink:var(--sanpo-color-brand-indigo); --sky-mid:var(--sanpo-color-supporting-asagi);
+  --mint:var(--sanpo-color-supporting-matcha-tint); --mint-ink:var(--sanpo-color-brand-indigo);
+  --lilac:var(--sanpo-color-supporting-fuji-tint); --lilac-ink:var(--sanpo-color-brand-indigo);
+  --pink:var(--sanpo-color-supporting-kaki-tint); --pink-ink:var(--sanpo-color-brand-indigo); --blush:var(--sanpo-color-supporting-kaki);
+  --red:var(--sanpo-color-status-critical); --green:var(--sanpo-color-status-complete); --white:var(--sanpo-color-production-white);
 
   /* legacy Trailhead aliases (screens reference these directly) */
   --pine-950:var(--ink-900); --pine-900:var(--ink-900); --pine-800:var(--ink-900);
@@ -29,25 +26,21 @@
   --text-2:var(--ink-700); --brand:var(--orange); --accent:var(--sky-bright);
   --danger:var(--red); --warn:var(--butter);
 
-  /* borders + pop shadows (signature of the v2 look) */
-  --line:var(--ink-900);
-  --bw:2.5px; --bw-sm:2px; --bw-xs:1.5px;
-  --pop:4px 4px 0 var(--ink-900);
-  --pop-sm:3px 3px 0 var(--ink-900);
-  --pop-xs:2px 2px 0 var(--ink-900);
-  --pop-live:4px 4px 0 var(--sky-bright);
+  /* quiet structure; no retired hard shadows */
+  --line:var(--sanpo-color-border-subtle);
+  --bw:1.5px; --bw-sm:1.5px; --bw-xs:1px;
+  --pop:none; --pop-sm:none; --pop-xs:none; --pop-live:none;
 
   /* type */
   --font-body:'Nunito',system-ui,sans-serif;
-  --font-display:'Baloo 2',var(--font-body); /* headings + all GPS/credit numerals, font-feature-settings:'tnum' */
+  --font-display:var(--font-body);
   --fs-12:.75rem; --fs-14:.875rem; --fs-16:1rem; --fs-20:1.25rem;
   --fs-24:1.5rem; --fs-32:2rem; --fs-44:2.75rem;
   /* space (4pt) */ --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-6:24px; --s-8:32px; --s-12:48px;
-  /* radius */ --r-sm:10px; --r-md:14px; --r-lg:18px; --r-full:999px;
-  /* elevation (legacy soft shadows now map to pop shadows) */
+  /* radius */ --r-sm:8px; --r-md:10px; --r-lg:12px; --r-full:999px;
+  /* elevation */
   --shadow-1:var(--pop-sm); --shadow-2:var(--pop);
   /* motion */ --ease:cubic-bezier(.2,.8,.2,1); --t-fast:150ms; --t-med:250ms;
 }
-/* Walk Mode is the light "day" surface in v2 (mock 2b) — same cream page,
-   the mode class is kept for layout hooks. */
+/* Walk Mode retains the same quiet day canvas. */
 .walkmode { --bg:var(--cream-page); --surface:var(--card); --text:var(--ink-900); --text-2:var(--ink-700); }
