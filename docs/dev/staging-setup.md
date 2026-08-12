@@ -112,3 +112,47 @@ anywhere else; rotating it later makes existing vault blobs unreadable
    charge appears in Stripe test payments.
 6. Stripe → Webhooks → the endpoint shows all deliveries 200. Re-deliver
    one → response says `duplicate` and no double grant (idempotency).
+
+## 8. Troubleshooting
+
+### `supabase link` fails with `{"message":"Unauthorized"}`
+
+**`SUPABASE_ACCESS_TOKEN` has almost certainly expired.** Supabase personal
+access tokens are issued with an expiry — a 15-day one lapsed on 2026-08-12
+and broke staging deploys silently for two weeks, because nothing fails until
+the next push to `main` and nobody watches a workflow they did not expect to
+break.
+
+The failure looks like a code or migration problem and is not. It happens in
+the `Apply migrations` job before any migration runs, so **the database is
+untouched** and there is nothing to clean up or roll back. `deploy-functions`
+and `sync-secrets` both `needs: migrate`, so a dead token stops the whole
+deploy at the first step.
+
+Fix:
+
+1. supabase.com → Account → Access Tokens → **Generate new token**. It is
+   shown once.
+2. Repo → Settings → **Environments → `staging` → Environment secrets** →
+   update `SUPABASE_ACCESS_TOKEN`. The deploy jobs declare
+   `environment: staging`, so an environment secret wins over a repository
+   secret of the same name — check both places if you are unsure which
+   exists.
+3. Re-run the failed deploy (Actions → the run → **Re-run all jobs**) or
+   dispatch `Deploy staging (Supabase)` manually. Secrets are read at run
+   time, so no new commit is needed.
+
+If the token is fresh and it still fails: confirm `SUPABASE_PROJECT_REF`
+matches the current project (Settings → General — it is also the subdomain in
+the project URL), and that the account that minted the token is a member of
+the project's organisation. A ref pointing at a deleted or moved project
+returns the same 401.
+
+The `Link project` step names this cause in its own failure annotation, so a
+future occurrence should not need re-diagnosing from scratch.
+
+### Note on renewal
+
+Set a reminder for whatever expiry you chose. Nothing warns you before a
+token lapses, and the first symptom is a red deploy on an unrelated commit —
+which invites blaming that commit's changes.
