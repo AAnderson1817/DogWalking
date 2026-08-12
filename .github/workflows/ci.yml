@@ -12,9 +12,9 @@ jobs:
     name: Frontend — tsc, vitest, build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 (node24)
         with:
           node-version: 22
           cache: npm
@@ -54,9 +54,9 @@ jobs:
     name: Edge functions — deno check + test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
 
-      - uses: denoland/setup-deno@v2  # floating tag: the pinned SHA was unverifiable from this environment
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5 (node24; SHA verified this session, so no longer floating)
         with:
           deno-version: v2.9.1  # verified release (matches the local toolchain)
 
@@ -94,7 +94,7 @@ jobs:
     env:
       LOCAL_DB_URL: postgresql://postgres:postgres@localhost:54322/postgres
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
 
       - name: Reset — shim + migrations 0001..NNNN + seed
         run: ./scripts/db-reset.sh
