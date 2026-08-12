@@ -1306,6 +1306,33 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
     color-mix(in srgb, var(--sanpo-color-brand-cream) 94%, transparent) 78%
   );
 }
+/* Inactive labels are 12px at weight 800 — small text, so the 4.5:1 floor
+   applies. Plain Muted is only 4.73:1 on pure Cream and has no headroom for
+   the artwork now behind this bar, so it measured under the floor even with
+   the scrim. Deepened 30% toward Indigo: 5.79:1 on Cream, and still 1.56:1
+   apart from the active Indigo so the hierarchy survives — reinforced, as
+   before, by weight 900 and the Yamabuki marker, which is what actually
+   carries the state (WCAG 1.4.1). Falls back to plain Muted, today's value,
+   where color-mix is unsupported. */
+.bottom-nav[data-navigation-persona="operator"] {
+  --sanpo-color-navigation-inactive: var(--sanpo-color-neutral-muted);
+}
+@supports (color: color-mix(in srgb, red, blue)) {
+  .bottom-nav[data-navigation-persona="operator"] {
+    --sanpo-color-navigation-inactive: color-mix(
+      in srgb,
+      var(--sanpo-color-neutral-muted) 70%,
+      var(--sanpo-color-brand-indigo)
+    );
+  }
+}
+/* Re-assert CT-1's high-contrast escalation: it is declared on :root, which
+   the override above would otherwise shadow for this bar. */
+@media (prefers-contrast: more) {
+  .bottom-nav[data-navigation-persona="operator"] {
+    --sanpo-color-navigation-inactive: var(--sanpo-color-brand-indigo);
+  }
+}
 .bottom-nav[data-navigation-persona="operator"] .bottom-nav__item {
   position: relative;
   justify-content: flex-start;
