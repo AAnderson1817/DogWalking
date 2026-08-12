@@ -80,6 +80,30 @@ accidental churn; it does not freeze the files. When an asset changes on
 purpose, update its hash in `app/scripts/verify-sanpo-assets.mjs` in the
 same commit and say why in the message.
 
+### How work reaches `main`
+
+`main` is a deploy trigger, not just a branch: `deploy-staging.yml` fires on
+CI completing for `branches: [main]`, which deploys staging Supabase and then
+runs the staging smoke suite against it. A one-line docs commit pushed
+straight to `main` does all of that.
+
+So:
+
+- **Never push to `main` directly.** Every change goes through a pull
+  request, docs included.
+- **Batch.** One PR per unit of work, not per commit — each merge is a
+  staging deploy, so accumulate related commits on the working branch and
+  merge once.
+- **Self-review on the PR.** Post findings there rather than only in chat;
+  it is the durable artifact and it survives a lost session. Reviewing your
+  own work is weaker than an independent reviewer — say so, and look hardest
+  at the things tests do not catch.
+- **Merge on green for routine work** — docs, styling, fixes, assets, tests.
+- **Ask the owner first** for anything touching the money and trust paths:
+  `supabase/migrations/`, credit/ledger/billing/Stripe code, the credential
+  vault, RLS or tenancy, and the deploy workflows themselves. These are where
+  a mistake is expensive and hard to reverse.
+
 ## Phase status
 - [x] 00 foundations-and-database
 - [x] 01 edge-functions
