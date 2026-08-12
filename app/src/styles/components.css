@@ -706,10 +706,48 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
   container-type: inline-size;
   width: 100%;
   aspect-ratio: 875 / 1798;
+  /* The field IS the screen — the operator nav is deliberately transparent
+     and floats on it. On a viewport taller than the artwork's natural ratio
+     the aspect box stopped short and exposed bare Cream beneath the painted
+     bottom border (43px at 390x844, 48px at 430x932), so the basket accents
+     hung above the edge instead of meeting it. Fill the remainder.
+     `object-fit: fill` absorbs it as a <6% vertical stretch the watercolour
+     hides; `cover` would instead crop the left and right border accents,
+     which is the opposite of what this fixes. Shorter viewports already
+     overflow this box and are untouched. Applied in a bounded media query
+     below, not here. */
   overflow: hidden;
   background: var(--sanpo-color-brand-cream);
   color: var(--sanpo-color-brand-indigo);
   font-family: var(--font-body);
+
+  /* Spec 07 names Yamabuki for "underway", but Yamabuki on Cream measures
+     1.92:1 — under the 3:1 floor (WCAG 1.4.11) for a mark that says which
+     visit is happening now, and the first thing to wash out in daylight.
+     Deepened toward Kaki-strong to 3.27:1: still gold, still derived from
+     the approved palette. Set plain Yamabuki here to revert. */
+  --emaki-current: var(--sanpo-color-supporting-yamabuki);
+}
+/* Separate rule, not a second declaration above: the minifier collapses two
+   declarations of one property and drops the fallback, which would leave a
+   browser without color-mix painting no stroke at all. */
+@supports (color: color-mix(in srgb, red, blue)) {
+  .today-emaki {
+    --emaki-current: color-mix(
+      in srgb,
+      var(--sanpo-color-supporting-yamabuki) 55%,
+      var(--sanpo-color-supporting-kaki-strong)
+    );
+  }
+}
+/* Fill the viewport ONLY while the shortfall stays small enough that the
+   stretch is invisible — between the artwork's own 875:1798 ratio and about
+   15% taller than it, which covers the phones this is built for (390x844
+   needs +5.3%, 430x932 +5.5%, 412x915 +8%). Past that bound — an unusually
+   tall narrow window — a strip of bare Cream is the lesser evil against a
+   visibly distorted illustration, so the fill is simply not applied. */
+@media (max-aspect-ratio: 875 / 1798) and (min-aspect-ratio: 875 / 2068) {
+  .today-emaki { min-height: 100dvh; }
 }
 .today-emaki__backdrop {
   position: absolute;
@@ -842,26 +880,11 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
 .today-emaki-progress__complete {
   stroke: var(--sanpo-color-supporting-matcha); /* 5.03:1 */
 }
-/* Spec 07 calls this segment Yamabuki, but Yamabuki on Cream measures 1.92:1
-   — below the 3:1 floor for a stroke that shows which visit is underway, and
-   the first thing to disappear in the daylight-legibility gate. Deepened
-   toward Kaki-strong to 3.27:1; still reads gold, still derived from the
-   approved palette. Revert to plain Yamabuki if the design owner prefers the
-   exact hue and accepts the contrast. */
+/* "Underway" is marked twice — the progress segment and the schedule row's
+   accent bar — so the colour is defined once, on --emaki-current (see
+   .today-emaki), and both read it. Two literals drifted apart once already. */
 .today-emaki-progress__current {
-  stroke: var(--sanpo-color-supporting-yamabuki);
-}
-/* Held in @supports so the minifier cannot collapse the two declarations —
-   merged into one rule it drops the fallback, and a browser without
-   color-mix would then paint no stroke at all. */
-@supports (color: color-mix(in srgb, red, blue)) {
-  .today-emaki-progress__current {
-    stroke: color-mix(
-      in srgb,
-      var(--sanpo-color-supporting-yamabuki) 55%,
-      var(--sanpo-color-supporting-kaki-strong)
-    );
-  }
+  stroke: var(--emaki-current);
 }
 /* "You are here". Spec 07 names Kaki for this marker; the raw #c85b13 it
    replaces was not in CT-1 at all. 4.90:1. */
@@ -908,7 +931,7 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
   background: var(--sanpo-color-schedule-upcoming-accent);
 }
 .today-emaki-visit--completed .today-emaki-visit__bar { background: var(--sanpo-color-schedule-complete-accent); }
-.today-emaki-visit--current .today-emaki-visit__bar { background: var(--sanpo-color-supporting-yamabuki); }
+.today-emaki-visit--current .today-emaki-visit__bar { background: var(--emaki-current); }
 .today-emaki-visit--cancelled .today-emaki-visit__bar,
 .today-emaki-visit--no_show .today-emaki-visit__bar { background: var(--sanpo-color-schedule-cancelled-accent); }
 .today-emaki-visit__time {
@@ -1262,6 +1285,53 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
 .bottom-nav[data-navigation-persona="operator"] {
   background: transparent;
   border-color: transparent;
+}
+/* The Today field now runs under this bar, so the labels sit on painted
+   artwork rather than flat Cream. Without a base they lose contrast over the
+   darker passages (Muted measured 2.27:1 at the 5th percentile against the
+   raw illustration). A gradient rather than a panel: transparent where the
+   basket accents are, settling toward Cream only across the label line, so
+   the artwork still reads as reaching the screen edge. Degrades to no scrim
+   where color-mix is unsupported — which is the pre-existing appearance. */
+.bottom-nav[data-navigation-persona="operator"]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--sanpo-color-brand-cream) 0%, transparent) 0%,
+    color-mix(in srgb, var(--sanpo-color-brand-cream) 62%, transparent) 42%,
+    color-mix(in srgb, var(--sanpo-color-brand-cream) 94%, transparent) 78%
+  );
+}
+/* Inactive labels are 12px at weight 800 — small text, so the 4.5:1 floor
+   applies. Plain Muted is only 4.73:1 on pure Cream and has no headroom for
+   the artwork now behind this bar, so it measured under the floor even with
+   the scrim. Deepened 30% toward Indigo: 5.79:1 on Cream, and still 1.56:1
+   apart from the active Indigo so the hierarchy survives — reinforced, as
+   before, by weight 900 and the Yamabuki marker, which is what actually
+   carries the state (WCAG 1.4.1). Falls back to plain Muted, today's value,
+   where color-mix is unsupported. */
+.bottom-nav[data-navigation-persona="operator"] {
+  --sanpo-color-navigation-inactive: var(--sanpo-color-neutral-muted);
+}
+@supports (color: color-mix(in srgb, red, blue)) {
+  .bottom-nav[data-navigation-persona="operator"] {
+    --sanpo-color-navigation-inactive: color-mix(
+      in srgb,
+      var(--sanpo-color-neutral-muted) 70%,
+      var(--sanpo-color-brand-indigo)
+    );
+  }
+}
+/* Re-assert CT-1's high-contrast escalation: it is declared on :root, which
+   the override above would otherwise shadow for this bar. */
+@media (prefers-contrast: more) {
+  .bottom-nav[data-navigation-persona="operator"] {
+    --sanpo-color-navigation-inactive: var(--sanpo-color-brand-indigo);
+  }
 }
 .bottom-nav[data-navigation-persona="operator"] .bottom-nav__item {
   position: relative;

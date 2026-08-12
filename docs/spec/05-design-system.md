@@ -48,7 +48,15 @@ operator-navigation examples without otherwise redesigning the component kit:
   disabled state.
 - Primary navigation always retains visible text labels.
 - Operator navigation uses CT-1 roles: Indigo active, Yamabuki active marker,
-  Muted inactive, Cream canvas, and Asagi focus.
+  Muted-toward-Indigo inactive, Cream canvas, and Asagi focus.
+- The Today field runs under the operator bar, which is transparent by
+  design, so its labels sit on painted artwork rather than flat Cream. Two
+  things keep them legible and must stay together: a gradient scrim on the
+  bar, and an inactive label deepened 30% toward Indigo. Plain Muted is only
+  4.73:1 even on pure Cream and measured under the 4.5:1 floor over the
+  artwork; deepened it holds 4.79:1 at worst, 5.66:1 median, while active
+  Indigo reads 8.79:1. Active/inactive separation is carried by weight 900
+  and the Yamabuki marker, not by colour alone.
 - `npm run verify:brand-assets` guards the approved asset hashes and runs
   automatically before production builds.
 
