@@ -1,4 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { Button } from "./Button";
+import { StateField } from "./StateField";
 
 interface Props {
   children: ReactNode;
@@ -23,24 +25,14 @@ export class ErrorBoundary extends Component<Props, State> {
     if (this.state.error) {
       return (
         <div className="page">
-          <h1>Something went wrong</h1>
-          <p style={{ color: "var(--text-2)", marginTop: "var(--s-2)" }}>
-            {this.state.error.message}
-          </p>
-          <button
-            style={{
-              marginTop: "var(--s-4)",
-              background: "var(--brand)",
-              color: "var(--white)",
-              border: 0,
-              borderRadius: "var(--r-md)",
-              padding: "var(--s-3) var(--s-4)",
-              minHeight: 44,
-            }}
-            onClick={() => this.setState({ error: null })}
-          >
-            Try again
-          </button>
+          <StateField
+            tone="attention"
+            label="Needs attention"
+            title="Something went wrong"
+            detail="This screen couldn't be displayed. Try it again."
+            role="alert"
+            action={<Button onClick={() => this.setState({ error: null })}>Try again</Button>}
+          />
         </div>
       );
     }

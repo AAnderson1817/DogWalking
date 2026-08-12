@@ -1,19 +1,20 @@
 import type { ReactNode } from "react";
+import { StateField, type StateFieldTone } from "./StateField";
 
 export function EmptyState({
   title,
   hint,
   action,
+  tone = "neutral",
+  label,
 }: {
   title: string;
   hint?: string;
   action?: ReactNode;
+  tone?: StateFieldTone;
+  label?: string;
 }) {
   return (
-    <div className="empty-state">
-      <p className="empty-state__title">{title}</p>
-      {hint && <p style={{ marginTop: "var(--s-2)" }}>{hint}</p>}
-      {action && <div style={{ marginTop: "var(--s-4)" }}>{action}</div>}
-    </div>
+    <StateField tone={tone} label={label} title={title} detail={hint} action={action} role="status" />
   );
 }

@@ -1,4 +1,5 @@
-// Fixed-top live walk banner (spec 05): pulse-live dot + elapsed timer.
+// Inline Current Moment: one explicit live state, route cue, elapsed time,
+// and truthful action without duplicating the schedule row.
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { ApprovedIcon } from "./ApprovedIcon";
@@ -20,11 +21,16 @@ export function LiveWalkBanner({
   }, []);
 
   return (
-    <Link to={`/walks/${walkId}/live`} style={{ textDecoration: "none" }}>
+    <Link
+      to={`/walks/${walkId}/live`}
+      className="live-banner-link"
+      aria-label={`Current walk: ${label}, elapsed ${elapsed(startedAt, now)}. Open walk.`}
+    >
       <div className="live-banner">
         <ApprovedIcon name="route" className="live-banner__route-icon" />
-        <span className="pulse-live" aria-hidden />
-        <span style={{ fontWeight: 800 }}>{label}</span>
+        <span className="live-banner__state">CURRENT</span>
+        <span className="live-banner__label">{label}</span>
+        <span className="live-banner__action">Open walk</span>
         <span className="live-banner__timer numeral">{elapsed(startedAt, now)}</span>
       </div>
     </Link>

@@ -6,8 +6,8 @@ import { Card } from "@/components/Card";
 import { CreditMeter } from "@/components/CreditMeter";
 import { EmptyState } from "@/components/EmptyState";
 import { LoadError, loadErrorMessage } from "@/components/LoadError";
-import { NotificationBell } from "@/components/NotificationInbox";
-import { Spinner } from "@/components/Spinner";
+import { NotificationBell, NotificationList } from "@/components/NotificationInbox";
+import { LoadingState } from "@/components/StateField";
 import { WalkCard } from "@/components/WalkCard";
 import {
   getMyClient,
@@ -75,8 +75,8 @@ export default function PortalHome() {
   }
   if (loading || !client) {
     return (
-      <div className="page" style={{ display: "grid", placeItems: "center" }}>
-        <Spinner />
+      <div className="page">
+        <LoadingState label="Loading your home" />
       </div>
     );
   }
@@ -106,12 +106,6 @@ export default function PortalHome() {
         <div style={{ marginTop: "var(--s-2)" }}>
           {next ? (
             <>
-              {next.status === "in_progress" && (
-                <div style={{ display: "flex", alignItems: "center", gap: "var(--s-2)", marginBottom: "var(--s-2)" }}>
-                  <span className="pulse-live" aria-hidden />
-                  <span style={{ fontWeight: 600, color: "var(--teal-dim)" }}>Live now — tap to watch</span>
-                </div>
-              )}
               <div>
                 <span className="section-label">{dateLocal(`${next.scheduled_date}T12:00:00Z`)}</span>
                 <WalkCard
@@ -131,7 +125,7 @@ export default function PortalHome() {
               <EmptyState
                 title="Nothing booked"
                 hint="Request a walk whenever you need one."
-                action={<Link to="/portal/book" style={{ color: "var(--pine-600)", fontWeight: 600 }}>Book a walk</Link>}
+                action={<Link className="secondary-link" to="/portal/book">Book a walk</Link>}
               />
             </Card>
           )}
@@ -152,22 +146,12 @@ export default function PortalHome() {
       {notifications.length > 0 && (
         <section style={{ marginTop: "var(--s-6)" }}>
           <span className="section-label">Updates</span>
-          <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-2)", marginTop: "var(--s-2)" }}>
-            {notifications.slice(0, 5).map((n) => (
-              <Card key={n.id} style={{ display: "flex", justifyContent: "space-between", gap: "var(--s-2)" }}>
-                <div>
-                  <div style={{ fontWeight: 600, fontSize: "var(--fs-14)" }}>{n.title}</div>
-                  {n.body && <div style={{ color: "var(--text-2)", fontSize: "var(--fs-14)" }}>{n.body}</div>}
-                </div>
-                <button
-                  onClick={() => void markNotificationRead(n.id).then(load)}
-                  aria-label="Mark read"
-                  style={{ background: "none", border: 0, color: "var(--pine-600)", cursor: "pointer", fontWeight: 700 }}
-                >
-                  ✓
-                </button>
-              </Card>
-            ))}
+          <div className="notification-inbox" style={{ marginTop: "var(--s-2)" }}>
+            <NotificationList
+              items={notifications.slice(0, 5)}
+              onOpen={(notification) => void markNotificationRead(notification.id).then(load)}
+              onMarkRead={(notification) => void markNotificationRead(notification.id).then(load)}
+            />
           </div>
         </section>
       )}

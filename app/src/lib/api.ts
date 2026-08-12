@@ -10,6 +10,7 @@ import type {
   Notifications,
   Operators,
   Payments,
+  PaymentStatus,
   Pets,
   Plans,
   Properties,
@@ -241,6 +242,29 @@ export async function listPayments(clientId?: string): Promise<Payments[]> {
   return must(data, error);
 }
 
+export interface PaymentDetailed extends Payments {
+  client: { full_name: string } | null;
+  walk: {
+    service: { name: string } | null;
+    walk_pets: { pets: { name: string } | null }[];
+  } | null;
+}
+
+/** Payment activity with the display context required by the Money ledger. */
+export async function listPaymentsDetailed(clientId?: string): Promise<PaymentDetailed[]> {
+  let query = supabase
+    .from("payments")
+    .select("*, client:clients(full_name), walk:walks(service:service_types(name), walk_pets(pets(name)))")
+    .order("created_at", { ascending: false });
+  if (clientId) query = query.eq("client_id", clientId);
+  const { data, error } = await query;
+  return must(data as unknown as PaymentDetailed[] | null, error);
+}
+
+export function paymentPetNames(payment: PaymentDetailed): string[] {
+  return payment.walk?.walk_pets.flatMap((row) => row.pets ? [row.pets.name] : []) ?? [];
+}
+
 export async function listNotifications(unreadOnly = false): Promise<Notifications[]> {
   let query = supabase.from("notifications").select("*").order("created_at", { ascending: false });
   if (unreadOnly) query = query.is("read_at", null);
@@ -316,7 +340,7 @@ export interface CompleteWalkResult {
     outcome: "debited" | "overage";
     cost_credits?: number;
     charged_pence?: number;
-    payment_status?: string;
+    payment_status?: PaymentStatus;
   };
 }
 

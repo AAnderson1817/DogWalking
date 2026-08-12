@@ -1,11 +1,11 @@
 {
-  "name": "PawTrail",
-  "short_name": "PawTrail",
-  "description": "Dog-walking operations: schedules, live GPS walks, report cards, credits.",
+  "name": "Sanpo",
+  "short_name": "Sanpo",
+  "description": "Business tools for independent pet-care professionals.",
   "start_url": "/",
   "display": "standalone",
-  "theme_color": "#FFF6E9",
-  "background_color": "#FFF6E9",
+  "theme_color": "#FEF6EA",
+  "background_color": "#FEF6EA",
   "icons": [
     {
       "src": "/icons/icon-192.png",

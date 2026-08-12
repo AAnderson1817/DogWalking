@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { businessWallClockToMs, dateLocal, distanceKm, elapsed, money, time12, timeLocal, walkTime } from "./format";
+import {
+  businessWallClockToMs,
+  dateLocal,
+  dayGreeting,
+  distanceKm,
+  elapsed,
+  money,
+  time12,
+  timeLocal,
+  timeRange12,
+  walkDuration,
+  walkTime,
+} from "./format";
 
 describe("money", () => {
   it("formats cents as dollars", () => {
@@ -45,9 +57,39 @@ describe("time12", () => {
   });
 });
 
+describe("timeRange12", () => {
+  it("avoids repeating the same day period", () => {
+    expect(timeRange12("15:00:00", "16:00:00")).toBe("3:00–4:00 PM");
+  });
+
+  it("keeps both day periods when the window crosses noon", () => {
+    expect(timeRange12("11:30:00", "13:00:00")).toBe("11:30 AM–1:00 PM");
+  });
+});
+
 describe("walkTime", () => {
   it("labels the slot with US weekday + 12-hour window", () => {
     expect(walkTime("2026-07-06", "12:00:00", "13:00:00")).toBe("Mon, Jul 6, 12:00 PM–1:00 PM");
+  });
+});
+
+describe("walkDuration", () => {
+  it("states the scheduled duration explicitly", () => {
+    expect(walkDuration("09:00:00", "09:30:00")).toBe("30 min");
+    expect(walkDuration("09:00:00", "10:00:00")).toBe("1 hr");
+    expect(walkDuration("09:00:00", "10:30:00")).toBe("1 hr 30 min");
+  });
+
+  it("supports an overnight window", () => {
+    expect(walkDuration("23:30:00", "00:15:00")).toBe("45 min");
+  });
+});
+
+describe("dayGreeting", () => {
+  it("uses the business timezone", () => {
+    expect(dayGreeting("2026-07-15T13:00:00Z")).toBe("Good morning");
+    expect(dayGreeting("2026-07-15T19:00:00Z")).toBe("Good afternoon");
+    expect(dayGreeting("2026-07-16T01:00:00Z")).toBe("Good evening");
   });
 });
 

@@ -1,5 +1,5 @@
-// Credit balance meter (spec 05): display-font numeral, bar fill, amber
-// under the operator's low-credit threshold.
+// Credit balance meter (spec 05): display-font numeral and bar fill with
+// Kaki attention treatment under the operator's low-credit threshold.
 import { isLowCredit } from "@/lib/credits";
 
 export function CreditMeter({
@@ -25,11 +25,17 @@ export function CreditMeter({
           {balance}
         </span>
       </div>
-      <div className="credit-meter__track" role="meter" aria-valuenow={balance} aria-valuemin={0}>
+      <div
+        className="credit-meter__track"
+        role="meter"
+        aria-valuenow={balance}
+        aria-valuemin={0}
+        aria-valuemax={reference}
+      >
         <div className="credit-meter__fill" style={{ width: `${pct}%` }} />
       </div>
       {low && (
-        <span style={{ fontSize: "var(--fs-12)", color: "var(--orange-deep)", fontWeight: 800 }}>
+        <span style={{ fontSize: "var(--fs-12)", color: "var(--sanpo-color-text-attention)", fontWeight: 800 }}>
           Low balance — {balance} left
         </span>
       )}

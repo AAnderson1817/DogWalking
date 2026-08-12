@@ -10,6 +10,7 @@ import { EmptyState } from "./EmptyState";
 import { Input, Select } from "./fields";
 import { Sheet } from "./Sheet";
 import { Spinner } from "./Spinner";
+import { LoadingState } from "./StateField";
 import { time12 } from "@/lib/format";
 import {
   createSchedule,
@@ -68,6 +69,8 @@ export function ScheduleTab({ clientId }: { clientId: string }) {
     return (
       <Card>
         <EmptyState
+          tone="attention"
+          label="Needs attention"
           title="Couldn't load schedules"
           hint={loadError}
           action={<Button onClick={() => void runLoad()}>Retry</Button>}
@@ -75,7 +78,7 @@ export function ScheduleTab({ clientId }: { clientId: string }) {
       </Card>
     );
   }
-  if (schedules === null) return <Spinner />;
+  if (schedules === null) return <LoadingState label="Loading schedules" compact />;
 
   const serviceName = (id: string) => serviceTypes.find((s) => s.id === id)?.name ?? "";
   const propertyLabel = (id: string) => properties.find((p) => p.id === id)?.label ?? "";
@@ -111,7 +114,7 @@ export function ScheduleTab({ clientId }: { clientId: string }) {
                   {time12(s.window_start)}–{time12(s.window_end)} · {serviceName(s.service_type_id)} · {propertyLabel(s.property_id)}
                 </div>
                 {s.paused_from && (
-                  <div style={{ fontSize: "var(--fs-12)", color: "var(--orange-deep)", marginTop: "var(--s-1)", fontWeight: 800 }}>
+                  <div style={{ fontSize: "var(--fs-12)", color: "var(--sanpo-color-text-secondary)", marginTop: "var(--s-1)", fontWeight: 800 }}>
                     Paused {s.paused_from} → {s.paused_until ?? "indefinitely"}
                   </div>
                 )}
@@ -255,18 +258,9 @@ function ScheduleSheet({
                 <button
                   key={d}
                   type="button"
+                  className="choice-button"
                   onClick={() => toggleDay(d)}
                   aria-pressed={on}
-                  style={{
-                    minWidth: 44,
-                    minHeight: 44,
-                    borderRadius: "var(--r-md)",
-                    border: 0,
-                    fontWeight: 600,
-                    background: on ? "var(--pine-800)" : "var(--mist)",
-                    color: on ? "var(--white)" : "var(--ink-soft)",
-                    cursor: "pointer",
-                  }}
                 >
                   {label}
                 </button>

@@ -1,4 +1,4 @@
-// PawTrail service worker (phase 08; hardened in the QC + re-review passes).
+// Sanpo service worker (phase 08; hardened in the QC + re-review passes).
 // Strategy: precache the complete app shell INCLUDING the build's hashed
 // chunks (stamped in at build time — without them, the activate-time cache
 // wipe broke offline reload after every deploy); cache-first for same-origin

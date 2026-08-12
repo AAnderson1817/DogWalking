@@ -8,6 +8,7 @@ import { Button } from "./Button";
 import { Input, Select } from "./fields";
 import { Sheet } from "./Sheet";
 import { Spinner } from "./Spinner";
+import { LoadingState, StateField } from "./StateField";
 import {
   listCredentialLog,
   vaultDelete,
@@ -214,9 +215,9 @@ export function CredentialRow({
 
       <Sheet open={auditOpen} onClose={() => setAuditOpen(false)} title="Audit trail">
         {audit === null ? (
-          <Spinner />
+          <LoadingState label="Loading audit trail" compact />
         ) : audit.length === 0 ? (
-          <p style={{ color: "var(--text-2)" }}>Never revealed.</p>
+          <StateField compact title="No reveals recorded" detail="This credential has not been opened yet." />
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-2)" }}>
             {audit.map((row) => (
@@ -332,16 +333,10 @@ function LinkButton({
 }) {
   return (
     <button
+      className={`text-button${danger ? " text-button--danger" : ""}`}
       onClick={onClick}
       style={{
-        background: "none",
-        border: 0,
-        padding: 0,
-        font: "inherit",
         fontSize: "var(--fs-12)",
-        fontWeight: 600,
-        color: danger ? "var(--danger)" : "var(--pine-600)",
-        cursor: "pointer",
       }}
     >
       {children}

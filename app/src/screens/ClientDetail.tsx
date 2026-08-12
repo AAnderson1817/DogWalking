@@ -9,6 +9,11 @@ import { EmptyState } from "@/components/EmptyState";
 import { Input, Select, Textarea } from "@/components/fields";
 import { Sheet } from "@/components/Sheet";
 import { Spinner } from "@/components/Spinner";
+import { LoadingState, StateField } from "@/components/StateField";
+import {
+  clientStatusTreatment,
+  subscriptionStatusTreatment,
+} from "@/components/status-treatment";
 import { WalkCard } from "@/components/WalkCard";
 import { CredentialRow, PutCredentialSheet } from "@/components/VaultFlows";
 import { ScheduleTab } from "@/components/ScheduleEditor";
@@ -73,8 +78,8 @@ export default function ClientDetail() {
   }
   if (!client) {
     return (
-      <div className="page" style={{ display: "grid", placeItems: "center" }}>
-        <Spinner />
+      <div className="page">
+        <LoadingState label="Loading client details" />
       </div>
     );
   }
@@ -86,49 +91,39 @@ export default function ClientDetail() {
     { key: "schedule", label: "Schedule" },
     { key: "access", label: "Access" },
   ];
+  const clientTreatment = clientStatusTreatment(client.status);
 
   return (
     <div className="page">
-      <span className="section-label">Client</span>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "var(--s-2)" }}>
-        <h1>{client.full_name}</h1>
-        <span className="numeral" style={{ fontSize: "var(--fs-24)", fontWeight: 700 }} title="Credit balance">
-          {client.credit_balance}
-        </span>
-      </div>
-      <div style={{ color: "var(--text-2)", fontSize: "var(--fs-14)" }}>
-        {client.email ?? "no email"} · {client.phone ?? "no phone"} · <Badge status="neutral">{client.status}</Badge>
-      </div>
+      <header className="client-relationship-header">
+        <span className="section-label">Client</span>
+        <div className="client-relationship-header__title">
+          <h1>{client.full_name}</h1>
+          <span className="client-relationship-header__credits numeral" title="Credit balance">
+            {client.credit_balance} <span>credits</span>
+          </span>
+        </div>
+        <div className="client-relationship-header__meta">
+          <span>{client.email ?? "No email"}</span>
+          <span>{client.phone ?? "No phone"}</span>
+          <Badge status={clientTreatment.badge}>{clientTreatment.label}</Badge>
+        </div>
+      </header>
 
       <div
         role="tablist"
+        className="segmented-control"
         style={{
-          display: "flex",
-          gap: "var(--s-1)",
           marginTop: "var(--s-4)",
-          background: "var(--surface)",
-          border: "var(--bw) solid var(--line)",
-          borderRadius: "var(--r-full)",
-          padding: 4,
         }}
       >
         {TABS.map((t) => (
           <button
             key={t.key}
             role="tab"
+            className="segmented-control__button"
             aria-selected={tab === t.key}
             onClick={() => setTab(t.key)}
-            style={{
-              flex: 1,
-              background: tab === t.key ? "var(--brand)" : "none",
-              border: 0,
-              padding: "7px 0",
-              fontWeight: tab === t.key ? 900 : 800,
-              fontSize: "var(--fs-12)",
-              color: tab === t.key ? "var(--cream-page)" : "var(--ink-500)",
-              borderRadius: "var(--r-full)",
-              cursor: "pointer",
-            }}
           >
             {t.label}
           </button>
@@ -159,10 +154,10 @@ function PetsTab({ clientId }: { clientId: string }) {
     void load();
   }, [load]);
 
-  if (pets === null) return <Spinner />;
+  if (pets === null) return <LoadingState label="Loading pets" compact />;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-3)" }}>
+    <div className="pet-profile-list">
       <div>
         <Button variant="accent" onClick={() => setEditing("new")}>Add pet</Button>
       </div>
@@ -170,25 +165,23 @@ function PetsTab({ clientId }: { clientId: string }) {
         <Card><EmptyState title="No pets yet" /></Card>
       ) : (
         pets.map((pet) => (
-          <Card key={pet.id} onClick={() => setEditing(pet)} style={{ cursor: "pointer" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div>
-                <div style={{ fontWeight: 600 }}>{pet.name}</div>
-                <div style={{ color: "var(--text-2)", fontSize: "var(--fs-14)" }}>
+          <button key={pet.id} type="button" onClick={() => setEditing(pet)} className="pet-profile-row">
+            <span className="pet-profile-row__identity">
+                <strong>{pet.name}</strong>
+                <span>
                   {[pet.breed, pet.size].filter(Boolean).join(" · ") || "—"}
-                </div>
-              </div>
-              <div style={{ display: "flex", gap: "var(--s-1)" }}>
-                {pet.is_reactive && <Badge status="warn">Reactive</Badge>}
-                {pet.is_escape_risk && <Badge status="warn">Escape risk</Badge>}
-              </div>
-            </div>
+                </span>
+            </span>
+            <span className="pet-profile-row__flags">
+                {pet.is_reactive && <Badge status="attention">Reactive</Badge>}
+                {pet.is_escape_risk && <Badge status="attention">Escape risk</Badge>}
+            </span>
             {(pet.temperament || pet.feeding_notes) && (
-              <p style={{ color: "var(--text-2)", fontSize: "var(--fs-14)", marginTop: "var(--s-2)" }}>
+              <span className="pet-profile-row__note">
                 {pet.temperament ?? pet.feeding_notes}
-              </p>
+              </span>
             )}
-          </Card>
+          </button>
         ))
       )}
       <PetSheet
@@ -346,6 +339,7 @@ function PlanTab({
 
   const plan = plans.find((p) => p.id === client.plan_id) ?? null;
   const subscribed = client.subscription_status === "active" || client.subscription_status === "paused";
+  const subscriptionTreatment = subscriptionStatusTreatment(client.subscription_status);
 
   async function submitAdjust(e: FormEvent) {
     e.preventDefault();
@@ -411,13 +405,13 @@ function PlanTab({
               {plan.rollover_policy === "capped" ? ` (cap ${plan.rollover_cap})` : ""}
             </div>
             <div style={{ marginTop: "var(--s-2)" }}>
-              <Badge status={client.subscription_status === "active" ? "completed" : "warn"}>
-                {client.subscription_status}
+              <Badge status={subscriptionTreatment.badge}>
+                {subscriptionTreatment.label}
               </Badge>
             </div>
           </div>
         ) : (
-          <p style={{ color: "var(--text-2)", marginTop: "var(--s-2)" }}>No plan yet.</p>
+          <StateField compact title="No plan yet" detail="Choose a plan to start a subscription." />
         )}
 
         {!subscribed && plans.length > 0 && (
@@ -440,9 +434,9 @@ function PlanTab({
       <Card>
         <span className="section-label">Ledger</span>
         {ledger === null ? (
-          <Spinner />
+          <LoadingState label="Loading credit history" compact />
         ) : ledger.length === 0 ? (
-          <p style={{ color: "var(--text-2)", marginTop: "var(--s-2)" }}>No credit activity yet.</p>
+          <StateField compact title="No credit activity yet" />
         ) : (
           <table style={{ width: "100%", marginTop: "var(--s-2)", borderCollapse: "collapse", fontSize: "var(--fs-14)" }}>
             <tbody>
@@ -506,7 +500,7 @@ function WalksTab({ clientId }: { clientId: string }) {
     );
   }, [clientId]);
 
-  if (walks === null) return <Spinner />;
+  if (walks === null) return <LoadingState label="Loading walks" compact />;
   if (walks.length === 0) return <Card><EmptyState title="No walks yet" /></Card>;
 
   return (
@@ -580,7 +574,7 @@ function AccessTab({ client }: { client: Clients }) {
     }
   }
 
-  if (properties === null) return <Spinner />;
+  if (properties === null) return <LoadingState label="Loading properties" compact />;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-3)" }}>

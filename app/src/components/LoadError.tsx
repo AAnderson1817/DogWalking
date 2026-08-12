@@ -2,9 +2,8 @@
 // states shipped with no retry affordance, a dead end on an installed PWA).
 import { useState } from "react";
 import { Button } from "./Button";
-import { Card } from "./Card";
-import { EmptyState } from "./EmptyState";
 import { Spinner } from "./Spinner";
+import { StateField } from "./StateField";
 
 /** Friendlier copy for the common offline/network case. */
 // oxlint-disable-next-line react/only-export-components
@@ -26,25 +25,27 @@ export function LoadError({
   onRetry: () => void | Promise<void>;
 }) {
   const [busy, setBusy] = useState(false);
+  const offline = /offline|connection/i.test(message);
   return (
     <div className="page">
-      <Card>
-        <EmptyState
-          title={title}
-          hint={message}
-          action={
-            <Button
-              onClick={() => {
-                setBusy(true);
-                void Promise.resolve(onRetry()).finally(() => setBusy(false));
-              }}
-              disabled={busy}
-            >
-              {busy ? <Spinner /> : "Retry"}
-            </Button>
-          }
-        />
-      </Card>
+      <StateField
+        tone={offline ? "information" : "attention"}
+        label={offline ? "Offline" : "Needs attention"}
+        title={title}
+        detail={message}
+        role="alert"
+        action={
+          <Button
+            onClick={() => {
+              setBusy(true);
+              void Promise.resolve(onRetry()).finally(() => setBusy(false));
+            }}
+            disabled={busy}
+          >
+            {busy ? <Spinner label="Retrying" /> : "Retry"}
+          </Button>
+        }
+      />
     </div>
   );
 }

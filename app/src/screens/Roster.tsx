@@ -3,23 +3,18 @@
 // link handoff.
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Badge, type BadgeStatus } from "@/components/Badge";
+import { Badge } from "@/components/Badge";
 import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
 import { Input } from "@/components/fields";
 import { Sheet } from "@/components/Sheet";
 import { Spinner } from "@/components/Spinner";
+import { LoadingState } from "@/components/StateField";
+import { clientStatusTreatment } from "@/components/status-treatment";
 import { createClient, listClients, listPets } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import type { Clients, Pets } from "@/lib/types";
-
-const STATUS_BADGE: Record<Clients["status"], BadgeStatus> = {
-  invited: "neutral",
-  active: "completed",
-  paused: "warn",
-  archived: "cancelled",
-};
 
 export default function Roster() {
   const auth = useAuth();
@@ -36,6 +31,7 @@ export default function Roster() {
   const [busy, setBusy] = useState(false);
 
   async function load() {
+    setError(null);
     const [cs, ps] = await Promise.all([listClients(), listPets()]);
     setClients(cs);
     setPets(ps);
@@ -85,8 +81,18 @@ export default function Roster() {
 
   if (clients === null) {
     return (
-      <div className="page" style={{ display: "grid", placeItems: "center" }}>
-        {error ? <p style={{ color: "var(--danger)" }}>{error}</p> : <Spinner />}
+      <div className="page">
+        {error
+          ? (
+            <EmptyState
+              tone="attention"
+              label="Needs attention"
+              title="Couldn't load clients"
+              hint={error}
+              action={<Button onClick={() => void load().catch((e: unknown) => setError(e instanceof Error ? e.message : "Couldn't load clients."))}>Retry</Button>}
+            />
+          )
+          : <LoadingState label="Loading clients" />}
       </div>
     );
   }
@@ -96,9 +102,9 @@ export default function Roster() {
 
   return (
     <div className="page">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div className="client-index__header">
         <h1>Clients</h1>
-        <div style={{ display: "flex", alignItems: "center", gap: "var(--s-3)" }}>
+        <div className="client-index__actions">
           <Link className="secondary-link" to="/vault">
             Access vault
           </Link>
@@ -108,16 +114,16 @@ export default function Roster() {
         </div>
       </div>
 
-      <div style={{ marginTop: "var(--s-3)" }}>
+      <div className="client-index__search">
         <Input
+          label="Search clients or pets"
           placeholder="Search clients or pets…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          aria-label="Search"
         />
       </div>
 
-      <div style={{ marginTop: "var(--s-4)", display: "flex", flexDirection: "column", gap: "var(--s-2)" }}>
+      <div className="client-list">
         {filtered.length === 0 ? (
           <Card>
             <EmptyState
@@ -126,26 +132,31 @@ export default function Roster() {
             />
           </Card>
         ) : (
-          filtered.map((c) => (
-            <Card
-              key={c.id}
-              onClick={() => navigate(`/clients/${c.id}`)}
-              style={{ cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: "var(--s-2)" }}
-            >
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontWeight: 600 }}>{c.full_name}</div>
-                <div style={{ color: "var(--text-2)", fontSize: "var(--fs-14)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {petsFor(c.id).join(" · ") || "No pets yet"}
-                </div>
-              </div>
-              <div style={{ display: "flex", gap: "var(--s-2)", alignItems: "center", flexShrink: 0 }}>
-                <span className="numeral" style={{ fontWeight: 700 }} title="Credit balance">
-                  {c.credit_balance}
+          filtered.map((c) => {
+            const treatment = clientStatusTreatment(c.status);
+            return (
+              <button
+                type="button"
+                key={c.id}
+                onClick={() => navigate(`/clients/${c.id}`)}
+                className="client-row"
+                aria-label={`${c.full_name}, ${petsFor(c.id).join(" and ") || "No pets yet"}, ${treatment.label}, ${c.credit_balance} credits`}
+              >
+                <span className="client-row__identity">
+                  <strong>{c.full_name}</strong>
+                  <span>
+                    {petsFor(c.id).join(" · ") || "No pets yet"}
+                  </span>
                 </span>
-                <Badge status={STATUS_BADGE[c.status]}>{c.status}</Badge>
-              </div>
-            </Card>
-          ))
+                <span className="client-row__state">
+                  <span className="client-row__credits numeral">
+                    {c.credit_balance} <span>credits</span>
+                  </span>
+                  <Badge status={treatment.badge}>{treatment.label}</Badge>
+                </span>
+              </button>
+            );
+          })
         )}
       </div>
 

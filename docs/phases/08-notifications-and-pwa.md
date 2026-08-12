@@ -6,7 +6,7 @@ Close the loop on notifications and ship the installable, offline-tolerant PWA. 
 ## Deliverables
 1. Notification wiring audit — every spec-02 trigger emits: walk_complete, low_credit (deduped), renewal_upcoming, payment_failed, walk_scheduled/walk_cancelled (booking + cancel paths from 06/07). Backfill any misses.
 2. In-app inboxes: notification bell + list (operator header, portal home), mark-read, deep links to walk/billing.
-3. Email delivery (env-gated on `RESEND_API_KEY`): `send-notification` edge fn + DB webhook (or trigger→pg_net) on `notifications` insert for client-facing types; pine-styled minimal HTML templates; silently skipped when key absent.
+3. Email delivery (env-gated on `RESEND_API_KEY`): `send-notification` edge fn + DB webhook (or trigger→pg_net) on `notifications` insert for client-facing types; Indigo Emaki minimal HTML templates; silently skipped when key absent.
 4. `fn_expire_credits` wiring: daily invocation from the materialize-walks cron (spec 04).
 5. Service worker: precache shell, stale-while-revalidate GETs (API/Storage), network-only mutations, versioned cache busting on deploy.
 6. Offline GPS outbox: IndexedDB queue in front of `useWalkChannel` flush; retries with backoff; survives reload mid-walk; `beforeunload` guard; UI indicator (grey dot replaces pulse-live when offline, backfills on reconnect).

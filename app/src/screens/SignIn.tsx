@@ -3,9 +3,11 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/Button";
+import { BrandLogo } from "@/components/BrandLogo";
 import { Card } from "@/components/Card";
 import { Input } from "@/components/fields";
 import { Spinner } from "@/components/Spinner";
+import { StateField } from "@/components/StateField";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/lib/auth-context";
 
@@ -50,37 +52,37 @@ export default function SignIn() {
     <div className="page" style={{ display: "grid", placeItems: "center" }}>
       <div style={{ width: "100%", maxWidth: 400 }}>
         <div style={{ textAlign: "center", marginBottom: "var(--s-6)" }}>
-          <h1 className="display" style={{ fontSize: "var(--fs-32)" }}>PawTrail</h1>
-          <p style={{ color: "var(--text-2)" }}>Walks, credits, report cards.</p>
+          <BrandLogo />
+          <p style={{ color: "var(--text-2)" }}>Business tools for independent pet pros.</p>
         </div>
         <Card>
           {auth.session && auth.roleError ? (
-            <div style={{ textAlign: "center", padding: "var(--s-4) 0" }}>
-              <p style={{ fontWeight: 600 }}>Couldn't load your account</p>
-              <p style={{ color: "var(--text-2)", marginTop: "var(--s-2)" }}>
-                You're signed in, but we couldn't reach the server. Check your
-                connection and try again.
-              </p>
-              <div style={{ marginTop: "var(--s-4)" }}>
+            <StateField
+              tone="information"
+              label="Connection interrupted"
+              title="Couldn't load your account"
+              detail="You're signed in, but the server couldn't be reached. Check your connection and try again."
+              role="alert"
+              action={
                 <Button
-                  full
                   disabled={busy}
                   onClick={() => {
                     setBusy(true);
                     void auth.refreshRole().finally(() => setBusy(false));
                   }}
                 >
-                  {busy ? <Spinner /> : "Retry"}
+                  {busy ? <Spinner label="Retrying" /> : "Retry"}
                 </Button>
-              </div>
-            </div>
+              }
+            />
           ) : magicSent ? (
-            <div style={{ textAlign: "center", padding: "var(--s-4) 0" }}>
-              <p style={{ fontWeight: 600 }}>Check your email</p>
-              <p style={{ color: "var(--text-2)", marginTop: "var(--s-2)" }}>
-                We sent a sign-in link to {email}.
-              </p>
-            </div>
+            <StateField
+              tone="success"
+              label="Email sent"
+              title="Check your email"
+              detail={`We sent a sign-in link to ${email}.`}
+              role="status"
+            />
           ) : (
             <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: "var(--s-3)" }}>
               <Input

@@ -12,7 +12,7 @@ docs/dev/pwa-check.md and can be re-run headlessly at any time.
 2. Visit the Dashboard twice (visit counter) → the pine install banner
    appears; Install triggers the native prompt; ✕ dismisses permanently.
 3. iOS Safari: Share → Add to Home Screen → black-translucent status bar,
-   PawTrail title (apple meta tags).
+   Sanpo title (apple meta tags).
 
 ## 2. Offline drill — airplane mode mid-walk
 1. Start a walk (Walk Mode), let a few GPS points record with the network
@@ -43,7 +43,7 @@ or tap, deep links to the walk / billing surface.
 ## 4. Email delivery (env-gated)
 1. Without RESEND_API_KEY: POST send-notification with a notification id →
    `{ skipped: true }`; nothing else happens (silent skip).
-2. With the key set: client-facing types deliver the pine-styled email;
+2. With the key set: client-facing types deliver the Indigo Emaki email;
    operator-facing rows (client_id null) are skipped.
 3. Hosted wiring: add a Database Webhook on INSERT into `notifications` →
    send-notification with the service key (see 0009 migration note).

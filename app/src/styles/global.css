@@ -1,5 +1,4 @@
-/* Trailhead base styles (spec 05): reset, fonts, type rules, signature
-   pulse-live, walk-mode inversion, reduced-motion guard. */
+/* Sanpo Indigo Emaki base styles. */
 @import "./vendor/sanpo-product-color-tokens-r1.css";
 @import "./tokens.css";
 @import "./components.css";
@@ -9,13 +8,6 @@
   font-family: "Nunito";
   src: url("/fonts/nunito-var.woff2") format("woff2");
   font-weight: 200 1000;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: "Baloo 2";
-  src: url("/fonts/baloo-2-var.woff2") format("woff2");
-  font-weight: 400 800;
   font-style: normal;
   font-display: swap;
 }
@@ -29,7 +21,7 @@ body {
   color: var(--text);
   font-family: var(--font-body);
   font-size: var(--fs-16);
-  font-weight: 600; /* Nunito reads thin below 600; the v2 mock's body floor */
+  font-weight: 600;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   min-height: 100dvh;
@@ -37,7 +29,12 @@ body {
 img, picture, video, canvas, svg { display: block; max-width: 100%; }
 input, button, textarea, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
 a { color: inherit; }
+:where(a, button, input, textarea, select, [role="button"], [role="tab"]):focus-visible {
+  outline: 3px solid var(--sanpo-color-border-focus);
+  outline-offset: 3px;
+}
 
 /* Approved Sanpo utility SVGs are loaded unchanged and used as alpha masks.
    The element supplies currentColor; product state never rewrites geometry. */
@@ -64,7 +61,7 @@ a { color: inherit; }
   flex: 1;
 }
 
-/* ── type rules (spec 05 v2) ───────────────────────────────────────────── */
+/* ── type rules ───────────────────────────────────────────────────────── */
 h1, h2, h3, .display {
   font-family: var(--font-display);
   font-feature-settings: "tnum";
@@ -85,12 +82,12 @@ h1 { font-size: var(--fs-24); }
 }
 .walkmode .numeral { font-size: var(--fs-32); }
 
-/* ── signature: pulse-live (spec 05 v2, sky) ───────────────────────────── */
-@keyframes pulse-live { 0%{box-shadow:0 0 0 0 rgb(56 189 248/.55)} 70%{box-shadow:0 0 0 12px rgb(56 189 248/0)} 100%{box-shadow:0 0 0 0 rgb(56 189 248/0)} }
-.pulse-live { width:10px;height:10px;border-radius:var(--r-full);background:var(--sky-bright);border:2px solid var(--line);animation:pulse-live 2s infinite; }
+/* Current/live state uses Kaki and retains an adjacent visible text label. */
+@keyframes pulse-live { 0%{box-shadow:0 0 0 0 rgb(184 72 40/.55)} 70%{box-shadow:0 0 0 12px rgb(184 72 40/0)} 100%{box-shadow:0 0 0 0 rgb(184 72 40/0)} }
+.pulse-live { width:10px;height:10px;border-radius:var(--r-full);background:var(--sanpo-color-status-current);border:2px solid var(--sanpo-color-brand-indigo);animation:pulse-live 2s infinite; }
 
 @media (prefers-reduced-motion: reduce) {
-  .pulse-live { animation: none; box-shadow: 0 0 0 3px rgb(56 189 248 / 0.3); }
+  .pulse-live { animation: none; box-shadow: 0 0 0 3px rgb(184 72 40 / 0.3); }
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;

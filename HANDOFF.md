@@ -1,36 +1,68 @@
-# PawTrail handoff — setup & operating procedure
+# Sanpo — final Claude implementation handoff
 
-## Prerequisites
-- Node 20+, Deno 1.4x, Docker (for Supabase local), Supabase CLI, Stripe CLI (optional, for webhook fixtures), Claude Code.
+## Objective
 
-## Drop-in
-1. `mkdir pawtrail && cd pawtrail && git init`
-2. Unzip this package into the repo root (`CLAUDE.md`, `docs/`, `.claude/` at top level).
-3. `git add -A && git commit -m "handoff: specs, phases, claude config"`
-4. `supabase init` (accept defaults; do not overwrite anything from the package).
-5. `supabase start` — note the local API URL, anon key, service-role key, DB URL.
-6. Export `LOCAL_DB_URL` (the `postgresql://…54322/postgres` URL) in your shell profile — the `/validate` skill and smoke tests use it.
+Ship the existing Sanpo product with the approved Indigo Emaki visual system.
+This handoff closes the visual-migration roadmap. It is not authorization for
+concept exploration, a different Today composition, new breeds, a horizontal
+logo, decorative Japanese motifs, or scope beyond implementation defects.
 
-## Per-phase procedure (one phase = one Claude Code session)
-1. `claude` in repo root → `/clear`
-2. `/plan` → prompt: `Execute docs/phases/NN-<name>.md`
-3. Review the plan against the phase file's acceptance criteria; approve.
-4. On completion Claude runs `/validate`; all criteria must pass.
-5. Commit `phase(NN): …`; Claude ticks the box in CLAUDE.md and appends one status line.
+## Read first
 
-## Environment keys
-| Key | Where | Used by |
-|---|---|---|
-| `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` | `app/.env.local` | frontend |
-| `VITE_MAPBOX_TOKEN` | `app/.env.local` | MapView (SVG fallback if absent) |
-| `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` | edge function secrets | all functions |
-| `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | edge function secrets | stripe-webhook, create-checkout, charge-overage, change-plan |
-| `VAULT_MASTER_KEY` | edge function secrets | credential-vault (32-byte base64; generate: `openssl rand -base64 32`) |
-| `RESEND_API_KEY` | edge function secrets | phase 08 email (optional; env-gated) |
-| `LOCAL_DB_URL` | shell | smoke tests |
+1. `CLAUDE.md` — architecture, commands, and non-negotiable security rules.
+2. `docs/spec/05-design-system.md` — production tokens and component rules.
+3. `docs/spec/07-indigo-emaki-visual-migration.md` — locked Today composition,
+   responsive contract, BG-3A gate, and usability protocol.
+4. `app/src/screens/Dashboard.tsx` and
+   `app/src/components/TodayIllustratedSchedule.tsx` — production data binding
+   and presentation.
 
-No secrets are ever committed. Phase 00 creates `.env.example` mirroring this table.
+## Locked source of truth
 
-## Hooks installed by this package
-- PreToolUse guard: blocks edits to existing files under `supabase/migrations/` (append-only rule).
-- PostToolUse typecheck: runs `tsc --noEmit` after TS edits and reports errors back non-blockingly. Remove from `.claude/settings.json` if it slows large phases; `/validate` still gates commits.
+- Production route: `/`
+- Deterministic QA route in development: `/dev/today`
+- Today background:
+  `app/src/assets/illustrations/sanpo-today-indigo-emaki-background-approved-v1.png`
+- Brand masters: `app/src/assets/brand/`
+- Utility icons: `app/src/assets/icons/`
+- Asset-integrity gate: `app/scripts/verify-sanpo-assets.mjs`
+
+The locked fixture reads:
+
+- `9:00 / Juniper / Maple Walk / DONE`
+- `11:30 / Mochi / Lakeside Loop · 18 min / END WALK`
+- `2:00 / Luna / Oak Trail / UP NEXT`
+
+No `Today's schedule` eyebrow, `Open walk` action, row portraits, stacked
+illustrations, repeated schedule cards, map pins, badge wallpaper, or game HUD.
+
+## Verification commands
+
+Run from `app/`:
+
+```bash
+npm test -- --run
+npm run lint
+npm run build
+PLAYWRIGHT_BROWSERS_PATH=/workspace/scratch/2ea4133a22a3/.playwright-browsers \
+  npm run test:e2e -- e2e/indigo-emaki-today.spec.ts
+```
+
+Expected baseline at handoff:
+
+- 19 unit-test files, 93 tests passing.
+- Lint clean.
+- Production build succeeds and verifies all locked brand assets.
+- Indigo Emaki responsive suite passes at `375×812`, `430×884`, `768×1024`,
+  and `1440×900` with no horizontal overflow and a `44 px` action target.
+
+## Completion boundary
+
+Implementation is complete when the packaged source reproduces the verified
+render, all gates pass, and no retired PawTrail visual or customer-facing brand
+language remains. Human five-second comprehension and outdoor-legibility
+checks are launch validation; record their results without altering the locked
+composition unless a measurable usability defect is demonstrated.
+
+Do not push, merge, deploy, rotate secrets, or edit an applied migration
+without explicit authorization from the repository owner.
