@@ -27,8 +27,11 @@ const approved = {
     "f8a61b56b5c6d2555b65465372bfbb1b39b2afef6d2ab0522c3d5f9095d180c0",
   "../src/assets/brand/sanpo-explanatory-lockup-approved-v1.svg":
     "893bd5e87d8447169f4226724522ee58a1885ac1c4cc2a286e19610cbd74d7c4",
-  "../src/assets/illustrations/sanpo-today-indigo-emaki-background-approved-v1.png":
-    "9deb38869c94d1f33d7a747fe618a05ab5da86209c3f37721ee903e80fd8cef8",
+  // Re-encoded from the approved PNG master to WebP q95 (same 875x1798
+  // pixels, PSNR 38.8 dB, 2.25 MiB -> 437 KiB). Artwork is unchanged, so it
+  // stays "v1"; the PNG master is in git history at d313486.
+  "../src/assets/illustrations/sanpo-today-indigo-emaki-background-approved-v1.webp":
+    "a34625fd300b21fc6103dd603fdd919ab1f95641789731642f83b05e93d89b6c",
   "../src/assets/icons/sanpo-calendar-icon-approved-v1.svg":
     "341a47a144c9057aac70888cee6cfddd99082a39bce66b9afb40f093e465b171",
   "../src/assets/icons/sanpo-clients-icon-approved-v1.svg":

@@ -22,7 +22,7 @@ logo, decorative Japanese motifs, or scope beyond implementation defects.
 - Production route: `/`
 - Deterministic QA route in development: `/dev/today`
 - Today background:
-  `app/src/assets/illustrations/sanpo-today-indigo-emaki-background-approved-v1.png`
+  `app/src/assets/illustrations/sanpo-today-indigo-emaki-background-approved-v1.webp`
 - Brand masters: `app/src/assets/brand/`
 - Utility icons: `app/src/assets/icons/`
 - Asset-integrity gate: `app/scripts/verify-sanpo-assets.mjs`

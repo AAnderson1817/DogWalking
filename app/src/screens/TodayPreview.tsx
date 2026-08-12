@@ -1,4 +1,4 @@
-import todayBackground from "@/assets/illustrations/sanpo-today-indigo-emaki-background-approved-v1.png";
+import todayBackground from "@/assets/illustrations/sanpo-today-indigo-emaki-background-approved-v1.webp";
 import { ApprovedIcon } from "@/components/ApprovedIcon";
 import { BottomNav } from "@/components/BottomNav";
 import { TodayCurrentAction, TodayIllustratedSchedule } from "@/components/TodayIllustratedSchedule";
