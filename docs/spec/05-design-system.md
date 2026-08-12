@@ -261,8 +261,10 @@ fixture, not a separate candidate or approval surface.
 - The woman and Golden Retriever belong to the single environmental scene.
   There are no row portraits, avatar circles, or universal dog placeholders.
 - The approved environmental field is
-  `sanpo-today-indigo-emaki-background-approved-v1.png`; UI copy and product
-  state remain live DOM content layered over it.
+  `sanpo-today-indigo-emaki-background-approved-v1.webp` (875 x 1798, WebP q95
+  re-encoded from the PNG master — same pixels, 437 KiB instead of 2.25 MiB, so
+  it can join the offline shell precache); UI copy and product state remain
+  live DOM content layered over it.
 - Product typography is Nunito; semantic Matcha, Kaki, Asagi, Indigo, and Cream
   retain their approved meanings. The composition adds no gradients, opacity
   effects, blend modes, filters, decorative motion, or new icon geometry.

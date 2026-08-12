@@ -7,6 +7,14 @@ import react from "@vitejs/plugin-react";
 // asset list so the shell precache is complete (phase 08; re-review fix —
 // without the chunks, activate's cache wipe broke offline reload after
 // every deploy: the new index.html referenced chunks no cache held).
+//
+// Images count as shell: the Today field and the brand lockups are part of
+// what the operator sees on a cold offline start, and leaving them out left
+// the primary screen rendering without its artwork. Safe to precache only
+// because the background is now WebP (437 KiB, was a 2.25 MiB PNG) — if a
+// future asset lands here at multiple megabytes, revisit rather than
+// silently growing every install.
+const SHELL_ASSET_EXTENSIONS = [".js", ".css", ".woff2", ".webp", ".svg"];
 function stampServiceWorker(): Plugin {
   return {
     name: "pawtrail-sw-version",
@@ -18,7 +26,7 @@ function stampServiceWorker(): Plugin {
         let assets: string[] = [];
         try {
           assets = readdirSync(assetsDir)
-            .filter((f) => f.endsWith(".js") || f.endsWith(".css") || f.endsWith(".woff2"))
+            .filter((f) => SHELL_ASSET_EXTENSIONS.some((ext) => f.endsWith(ext)))
             .map((f) => `/assets/${f}`);
         } catch {
           // no assets dir — precache the bare shell only
