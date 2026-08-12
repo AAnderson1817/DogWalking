@@ -67,11 +67,11 @@ jobs:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
       SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
-      - uses: supabase/setup-cli@v1  # floating tag: the v2.1.1 SHA pin was unverifiable; v1 is proven by every prior deploy
+      - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0 — composite since v2, so it no longer carries a Node runtime at all
         with:
           version: 2.109.1  # pinned to current latest; 2.99.0 predates the local_smtp config key and broke `supabase link`
 
@@ -105,11 +105,11 @@ jobs:
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
-      - uses: supabase/setup-cli@v1  # floating tag: the v2.1.1 SHA pin was unverifiable; v1 is proven by every prior deploy
+      - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0 — composite since v2, so it no longer carries a Node runtime at all
         with:
           version: 2.109.1  # pinned to current latest; 2.99.0 predates the local_smtp config key and broke `supabase link`
 
@@ -127,11 +127,11 @@ jobs:
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
-      - uses: supabase/setup-cli@v1  # floating tag: the v2.1.1 SHA pin was unverifiable; v1 is proven by every prior deploy
+      - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0 — composite since v2, so it no longer carries a Node runtime at all
         with:
           version: 2.109.1  # pinned to current latest; 2.99.0 predates the local_smtp config key and broke `supabase link`
 
