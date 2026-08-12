@@ -75,8 +75,24 @@ jobs:
         with:
           version: 2.109.1  # pinned to current latest; 2.99.0 predates the local_smtp config key and broke `supabase link`
 
+      # A dead SUPABASE_ACCESS_TOKEN surfaces here as a bare
+      # {"message":"Unauthorized"} — which reads like a code or migration
+      # problem and is neither. These tokens expire (a 15-day one lapsed on
+      # 2026-08-12 and silently broke staging deploys for two weeks), so name
+      # the likely cause in the failure itself. The original CLI output is
+      # always printed first, and the hint only fires on an auth rejection so
+      # an unrelated failure is never mislabelled.
       - name: Link project
-        run: supabase link --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
+        run: |
+          if out=$(supabase link --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}" 2>&1); then
+            printf '%s\n' "$out"
+            exit 0
+          fi
+          printf '%s\n' "$out"
+          if printf '%s\n' "$out" | grep -qi 'unauthorized'; then
+            printf '::error title=Supabase rejected the credentials::supabase link returned Unauthorized. Most likely SUPABASE_ACCESS_TOKEN has expired or been revoked — mint a new one at supabase.com/dashboard/account/tokens and update it under Settings -> Environments -> staging. If the token is fresh, check SUPABASE_PROJECT_REF still matches the project and that the token owner is a member of its organisation. See docs/dev/staging-setup.md (Troubleshooting).\n'
+          fi
+          exit 1
 
       - name: Push migrations
         run: supabase db push
