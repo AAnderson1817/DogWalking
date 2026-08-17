@@ -7,7 +7,7 @@ import { Badge } from "./Badge";
 import { Button } from "./Button";
 import { Card } from "./Card";
 import { EmptyState } from "./EmptyState";
-import { Input, Select } from "./fields";
+import { FormError, Input, Select } from "./fields";
 import { Sheet } from "./Sheet";
 import { Spinner } from "./Spinner";
 import { LoadingState } from "./StateField";
@@ -311,7 +311,7 @@ function ScheduleSheet({
           </div>
         </div>
 
-        {error && <span className="field__error">{error}</span>}
+        <FormError message={error} />
         <Button type="submit" full disabled={busy || days.length === 0 || !serviceId || !propertyId}>
           {busy ? <Spinner /> : "Save schedule"}
         </Button>

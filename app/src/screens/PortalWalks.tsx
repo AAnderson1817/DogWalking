@@ -10,8 +10,10 @@ import { WalkCard } from "@/components/WalkCard";
 import { listWalksDetailed, walkPetNames, type WalkDetailed } from "@/lib/api";
 import { todayLocal } from "@/lib/selectors";
 import { walkTime } from "@/lib/format";
+import { useDocumentTitle } from "@/lib/use-document-title";
 
 export default function PortalWalks() {
+  useDocumentTitle("Walk history");
   const navigate = useNavigate();
   const [walks, setWalks] = useState<WalkDetailed[] | null>(null);
   const [error, setError] = useState<string | null>(null);

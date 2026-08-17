@@ -83,10 +83,19 @@
 /* ── Fields ────────────────────────────────────────────────────────────── */
 .field { display: flex; flex-direction: column; gap: var(--s-1); }
 .field__label { font-size: var(--fs-14); font-weight: 800; color: var(--sanpo-color-text-primary); }
+/* The input boundary is the only thing identifying the control, so it has to
+   clear 3:1 on its own (SC 1.4.11). CT-1 points --sanpo-color-input-border at
+   Neutral Rule (#CAD7DC): 1.47:1 on white, 1.37:1 on Cream — invisible on a
+   phone in daylight. Retargeted to Neutral Muted (5.07:1 on white, 4.73:1 on
+   Cream). --sanpo-color-border-subtle keeps Neutral Rule for decorative card
+   edges; splitting the roles is the point.
+   2px, not --bw-sm: Chrome floors border widths to whole device pixels, so
+   1.5px renders as 1px on a DPR-1 display — measured, not assumed. */
+:root { --sanpo-color-input-border: var(--sanpo-color-neutral-muted); }
 .field__control {
   min-height: 44px;
   padding: var(--s-2) var(--s-3);
-  border: var(--bw-xs) solid var(--sanpo-color-input-border);
+  border: 2px solid var(--sanpo-color-input-border);
   border-radius: var(--r-sm);
   background: var(--sanpo-color-input-background);
   color: var(--sanpo-color-input-text);
@@ -111,6 +120,96 @@
 .field__control--textarea { min-height: 88px; resize: vertical; }
 .field__error { font-size: var(--fs-12); font-weight: 800; color: var(--sanpo-color-status-critical); }
 .field__control::placeholder { color: var(--sanpo-color-input-placeholder); font-weight: 600; opacity: 1; }
+
+/* Persistent live region for form errors (FormError in fields.tsx).
+   role="alert" is most reliably announced when the region is already in the
+   accessibility tree and only its text changes — the previous pattern
+   mounted the element and its text in the same commit. So the element is
+   always rendered; when it has no children it is taken out of flow instead
+   of hidden, which keeps it in the accessibility tree and, because an
+   out-of-flow child is not a flex item, contributes no `gap` to the forms it
+   sits inside. */
+.form-error { display: block; margin: 0; }
+/* The one site not inside a gapped flex column. */
+.form-error.claim-invite__error { margin-top: var(--s-2); }
+.form-error:empty {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ── Visually hidden ─────────────────────────────────────────────────── */
+/* Present to assistive technology, absent on screen. Not display:none and
+   not visibility:hidden — both remove the node from the accessibility tree,
+   which is the opposite of the intent. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+/* The skip link is the one exception: hidden until focused, then real.
+   Matched on :focus, not :focus-visible — the link exists only to be reached
+   by keyboard, and :focus is the wider net of the two. */
+.skip-link:focus {
+  position: fixed;
+  top: var(--s-2);
+  left: var(--s-2);
+  z-index: 100;
+  width: auto;
+  height: auto;
+  margin: 0;
+  padding: var(--s-2) var(--s-3);
+  overflow: visible;
+  clip-path: none;
+  background: var(--sanpo-color-brand-indigo);
+  color: var(--sanpo-color-brand-cream);
+  border-radius: var(--r-sm);
+  font-weight: 800;
+  outline: 3px solid var(--sanpo-color-supporting-yamabuki);
+  outline-offset: 2px;
+}
+
+/* The app shell's <main> replaces the screen as #root's flex child, so it
+   carries the flex context .page's `flex: 1` was written against. */
+.app-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+/* ── Credential vault: the revealed secret ───────────────────────────── */
+/* The highest-stakes string the product displays — a door, lockbox or alarm
+   code for a client's home — on a 30 s timer, typically outdoors on a phone.
+   It was painted through the legacy --pine-950 / --teal-live aliases, which
+   the Sanpo remap resolved to Indigo on Asagi: the code rendered at 1.70:1
+   and the accent Copy button, filled with the panel's own Indigo, at 1.00:1.
+   Cream on Indigo is 9.03:1. */
+.vault-reveal {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  border-radius: var(--r-md);
+  background: var(--sanpo-color-brand-indigo);
+  color: var(--sanpo-color-brand-cream);
+  /* Asagi focus rings are 1.70:1 on Indigo. Yamabuki is 4.71:1 — over the
+     3:1 floor for a non-text indicator. Scoped to this panel. */
+  --sanpo-color-border-focus: var(--sanpo-color-supporting-yamabuki);
+  --sanpo-color-button-primary-focus-ring: var(--sanpo-color-supporting-yamabuki);
+}
+.vault-reveal__code {
+  flex: 1;
+  font-size: var(--fs-20);
+  word-break: break-all;
+}
+/* No opacity: the countdown told the operator how long they had left at
+   1.45:1. Full Cream, and the seconds are announced rather than only shown. */
+.vault-reveal__countdown { font-size: var(--fs-12); }
 
 /* ── Link and native-control utilities ───────────────────────────────── */
 .secondary-link,

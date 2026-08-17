@@ -14,7 +14,12 @@ Authoritative specs live in `docs/spec/`. `docs/phases/00–08` is the v1 build 
 - `docs/phases/` — phase files, one per session
 
 ## Commands
-- Frontend typecheck: `npx tsc --noEmit -p app`
+- Frontend typecheck: `npm --prefix app exec tsc -- -b --force app`
+  (**Not** `tsc --noEmit -p app`, which this file used to document and CI used
+  to run: `app/tsconfig.json` is a solution file — `"files": []` plus project
+  references — so `-p` checks *zero files* and exits 0 on a syntax error.
+  Only build mode (`-b`) follows the references. Verified by planting a
+  syntax error: `-p` exit 0, `-b` exit 2.)
 - Frontend build: `npm --prefix app run build` (runs `verify:brand-assets` via `prebuild`)
 - Frontend unit tests: `npm --prefix app test -- --run` (vitest)
 - Frontend lint: `npm --prefix app run lint` (oxlint, `--deny-warnings`)
@@ -98,11 +103,22 @@ So:
   it is the durable artifact and it survives a lost session. Reviewing your
   own work is weaker than an independent reviewer — say so, and look hardest
   at the things tests do not catch.
-- **Merge on green for routine work** — docs, styling, fixes, assets, tests.
-- **Ask the owner first** for anything touching the money and trust paths:
+- **Merge on green.** Merge authority sits in this session, including on the
+  money and trust paths. The owner has asked for as little contact with the
+  code as possible; escalating a routine decision back to them is a failure
+  mode, not caution.
+- **Raise the bar instead of raising a hand** on the money and trust paths —
   `supabase/migrations/`, credit/ledger/billing/Stripe code, the credential
-  vault, RLS or tenancy, and the deploy workflows themselves. These are where
-  a mistake is expensive and hard to reverse.
+  vault, RLS or tenancy, and the deploy workflows. These are where a mistake
+  is expensive and hard to reverse, so they get: a written argument in the PR
+  for why the change is safe, adversarial self-review aimed at the failure
+  case rather than the happy path, and a test that would have failed before
+  the change. The CODEOWNERS entries stay — they make the review request
+  visible in the PR, which is the durable record.
+- **Confirm with the owner only for what a merge cannot undo**: a production
+  deploy, destructive or irreversible operations against live data, spending
+  money, and anything that leaves the repository and reaches real users. A
+  staging deploy is not one of these; it is what every merge already does.
 
 ## Phase status
 - [x] 00 foundations-and-database
@@ -148,3 +164,5 @@ functions.
 - review(2026-08): ten-discipline production-readiness review — security, money, reliability, frontend, a11y, design, strategy, privacy, QA, maintainability — each specialist independently re-checked by an adversarial verifier (20 agents, 973 tool calls). 138 raw findings deduplicated to 8 blockers / 34 high / 41 medium / 23 low in `docs/review/2026-08-review.md`, with a 14-PR sequence in dependency order. Headline: `fn_book_walk` filters a `service_types.active` column that has never existed, so client self-booking has raised 42703 on every call since 0013 — it shipped because Playwright runs in no workflow and the e2e suite self-skips. The live-GPS Realtime topic `walk:{id}` is public and both readable and writable with the shipped anon key. The vault master key has one copy and no rotation path. Also: the Today contrast "fix" earlier in this log was measured against the Cream *token* rather than the rendered watercolour beneath it — the real ratio is 2.75:1, still under the 3:1 floor. Method, not value, was the defect.
 - ci(gates): PR 1 of the review sequence. The e2e suite ran in no workflow, so a Playwright job (`e2e-today`, backend-free, ~2 min against `/dev/today` fixtures) now runs on every push — this is the gate whose absence let a broken `fn_book_walk` reach production. Its 375×812 case was red: `min-height: 100dvh` from `perf(today-field)` made the field fill the viewport while the spec still pinned the locked 875:1798 ratio, so the assertion now encodes the real contract (ratio is a floor, bounded stretch, exact fill when filling) and checks row geometry against the field box and the nav instead of `toBeVisible`, which passes for a clipped row. Also: append-only migration check on `pull_request` (invariant 6 was enforced only by a local hook); `gen-types.py` drift check (committed `types.ts` silently rots); DEV-fixture grep against `dist/`; and the invariant-1 grep replaced with a `pg_proc` catalogue assertion — the old `update +clients +set +credit_balance` was defeated by a newline or a second space, and read migration text rather than what Postgres installed. CODEOWNERS + PR template make the "ask the owner first" paths request review automatically. Branch protection on `main` remains a manual dashboard step.
 - db(0019): PR 2 of the review sequence. `fn_book_walk` filtered `service_types ... and active`, a column that has never existed — Postgres resolves column refs at execution, not at CREATE FUNCTION time, so 0013 installed cleanly and then raised 42703 on every client self-booking since. 0019 is `create or replace` with that one predicate removed; the body diff is exactly one line and the signature, `security definer` and `set search_path` are byte-identical. Deliberately did NOT add an `active` column: nothing in the schema, API or UI has a concept of service deactivation and no surface could set it, so a permanent column to satisfy a typo would be worse than the fix. smoke.sql gains a `fn_book_walk (0019)` block — happy path plus five rejections — and each rejection asserts the SPECIFIC message rather than swallowing anything non-`FAIL:`, because the file's usual idiom would have passed against the broken function: a call dying of undefined_column is indistinguishable from one correctly refused. The unknown-service case is therefore the negative-path regression test. Row count is a delta, since an earlier fixture already books client A on `current_date`.
+- a11y(vault+errors): PR 3 of the review sequence. The vault reveal panel — a door, lockbox or alarm code, on a 30 s timer, outdoors — rendered its code at 1.70:1 and its Copy button at 1.00:1, because the reskin remapped the legacy `--pine-950`/`--teal-live` aliases underneath it and nothing re-checked. Now Cream on Indigo at 9.03:1 with a ghost Copy button and a panel-scoped Yamabuki focus ring (4.71:1; the default Asagi ring is 1.70:1 on Indigo). Every ratio in this entry was sampled from a screenshot of the built stylesheet, not read off a token — that method, not the value, was the defect in `a11y(emaki)`. Twenty error messages were bare spans that announced nothing; they now go through one `FormError` region that mounts before its text arrives and collapses out of flow when empty (an out-of-flow child is not a flex item, so it costs no `gap`), with a CI grep keeping it the only path. `--sanpo-color-input-border` moves from Neutral Rule (1.47:1 on white) to Neutral Muted (5.07:1) at 2px, because Chrome floors 1.5px borders to 1px at DPR 1. Plus `<main>` in both shells, an `h1` on the three screens without one, per-route titles with a polite route announcer, `.sr-only`, skip links to content AND to nav (the operator rail is DOM-last but visually first), named non-interrupting timers, and `Sheet` marking its ancestors' siblings `inert` with `title` now required. The contract is written into `docs/spec/05`. Closes B7, H25, H26, M12, M13, L13, L14.
+- ci(typecheck): found while verifying the above — the `Typecheck` step had never checked anything. `app/tsconfig.json` is a solution file (`"files": []` plus project references), so `tsc --noEmit -p .` resolves zero input files and exits 0; only build mode follows references. Proved by planting a syntax error: `-p` exit 0, `-b` exit 2. Now `npx tsc -b --force` (`--force` because `-b` is incremental and both referenced projects set `noEmit`). Type errors were still being caught, by `npm run build`'s `tsc -b` — so this was a false-assurance bug, not a coverage hole, and the same wrong command in CLAUDE.md is corrected too.

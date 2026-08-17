@@ -9,7 +9,7 @@ import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
 import { LoadError, loadErrorMessage } from "@/components/LoadError";
-import { Input, Select } from "@/components/fields";
+import { FormError, Input, Select } from "@/components/fields";
 import { Sheet } from "@/components/Sheet";
 import { Spinner } from "@/components/Spinner";
 import { LoadingState } from "@/components/StateField";
@@ -32,6 +32,7 @@ import { useAuth } from "@/lib/auth-context";
 import { dateLocal, time12 } from "@/lib/format";
 import { todayLocal } from "@/lib/selectors";
 import type { Clients, Pets, Properties, ServiceTypes } from "@/lib/types";
+import { useDocumentTitle } from "@/lib/use-document-title";
 
 const DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -49,6 +50,7 @@ function weekStart(iso: string): string {
 }
 
 export default function Calendar() {
+  useDocumentTitle("Calendar");
   const navigate = useNavigate();
   const [view, setView] = useState<"day" | "week">("day");
   const [anchor, setAnchor] = useState(() => todayLocal());
@@ -183,7 +185,11 @@ export default function Calendar() {
         <Button variant="ghost" onClick={() => void runMaterializer()} disabled={busy}>
           {busy ? <Spinner /> : "Run materializer"}
         </Button>
-        {notice && <span style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>{notice}</span>}
+        {/* Persistent region: the notice confirms a reschedule or a cancel,
+            which is exactly the outcome a screen-reader user cannot see. */}
+        <span role="status" style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>
+          {notice || null}
+        </span>
       </div>
 
       {view === "day" ? (
@@ -397,7 +403,7 @@ function WalkActionSheet({
           </div>
         )}
 
-        {error && <span className="field__error">{error}</span>}
+        <FormError message={error} />
       </div>
     </Sheet>
   );
@@ -522,7 +528,7 @@ function OneOffWalkSheet({
             </div>
           </>
         )}
-        {error && <span className="field__error">{error}</span>}
+        <FormError message={error} />
         <Button type="submit" full disabled={busy || !clientId || !propertyId}>
           {busy ? <Spinner /> : "Create walk"}
         </Button>

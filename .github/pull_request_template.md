@@ -14,7 +14,7 @@ carry — why, and what was actually checked rather than assumed.
      Measured against rendered output where the claim is visual — a token value
      is not evidence of what a user sees. -->
 
-- [ ] `npx tsc --noEmit -p app`
+- [ ] `npm --prefix app exec tsc -- -b --force app` (`-p` checks zero files — see CLAUDE.md)
 - [ ] `npm --prefix app run lint`
 - [ ] `npm --prefix app test -- --run`
 - [ ] `npm --prefix app run build`
@@ -23,9 +23,12 @@ carry — why, and what was actually checked rather than assumed.
 
 ## Money and trust paths
 
-<!-- CLAUDE.md reserves these for explicit owner sign-off. Tick anything this
-     PR touches; CODEOWNERS will request the review, but say so here too so it
-     is visible in the description rather than only in the file list. -->
+<!-- These are the expensive, hard-to-reverse paths. Ticking one does not
+     block the merge — it raises the bar: argue in "Notes for the reviewer"
+     why the change is safe, review it against the failure case rather than
+     the happy path, and point at a test that would have failed before it.
+     CODEOWNERS requests the review; say so here too, so it is visible in the
+     description rather than only in the file list. -->
 
 - [ ] `supabase/migrations/` — a new migration (never an edit to an existing one)
 - [ ] Credit / ledger / billing / Stripe

@@ -9,16 +9,18 @@ import { Button } from "@/components/Button";
 import { BrandLogo } from "@/components/BrandLogo";
 import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
-import { Input } from "@/components/fields";
+import { FormError, Input } from "@/components/fields";
 import { Spinner } from "@/components/Spinner";
 import { LoadingState, StateField } from "@/components/StateField";
 import { claimInvite, previewInviteAuthed, type InvitePreview } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { supabase } from "@/lib/supabase";
+import { useDocumentTitle } from "@/lib/use-document-title";
 
 type Stage = "loading" | "signup" | "confirm" | "dead-end" | "check-email" | "role-error" | "claimed";
 
 export default function ClaimInvite() {
+  useDocumentTitle("Accept your invite");
   const { token } = useParams<{ token: string }>();
   const auth = useAuth();
   const navigate = useNavigate();
@@ -129,6 +131,7 @@ export default function ClaimInvite() {
     <div className="page" style={{ display: "grid", placeItems: "center" }}>
       <div style={{ width: "100%", maxWidth: 400 }}>
         <div style={{ textAlign: "center", marginBottom: "var(--s-6)" }}>
+          <h1 className="sr-only">Accept your Sanpo invitation</h1>
           <BrandLogo />
           <p style={{ color: "var(--text-2)" }}>You've been invited.</p>
         </div>
@@ -183,11 +186,7 @@ export default function ClaimInvite() {
                   {busy ? <Spinner /> : "Accept invite"}
                 </Button>
               </div>
-              {error && (
-                <span className="field__error" style={{ display: "block", marginTop: "var(--s-2)" }}>
-                  {error}
-                </span>
-              )}
+              <FormError message={error} className="claim-invite__error" />
             </div>
           </Card>
         )}

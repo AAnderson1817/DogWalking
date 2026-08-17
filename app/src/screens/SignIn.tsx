@@ -5,13 +5,15 @@ import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/Button";
 import { BrandLogo } from "@/components/BrandLogo";
 import { Card } from "@/components/Card";
-import { Input } from "@/components/fields";
+import { FormError, Input } from "@/components/fields";
 import { Spinner } from "@/components/Spinner";
 import { StateField } from "@/components/StateField";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/lib/auth-context";
+import { useDocumentTitle } from "@/lib/use-document-title";
 
 export default function SignIn() {
+  useDocumentTitle("Sign in");
   const auth = useAuth();
   const navigate = useNavigate();
   const [mode, setMode] = useState<"password" | "magic">("password");
@@ -52,6 +54,9 @@ export default function SignIn() {
     <div className="page" style={{ display: "grid", placeItems: "center" }}>
       <div style={{ width: "100%", maxWidth: 400 }}>
         <div style={{ textAlign: "center", marginBottom: "var(--s-6)" }}>
+          {/* The logo is the visual heading; this is the same thing for
+              heading navigation, which the logo alone cannot serve. */}
+          <h1 className="sr-only">Sign in to Sanpo</h1>
           <BrandLogo />
           <p style={{ color: "var(--text-2)" }}>Business tools for independent pet pros.</p>
         </div>
@@ -104,7 +109,7 @@ export default function SignIn() {
                   error={error ?? undefined}
                 />
               )}
-              {mode === "magic" && error && <span className="field__error">{error}</span>}
+              {mode === "magic" && <FormError message={error} />}
               <Button type="submit" full disabled={busy}>
                 {busy ? <Spinner /> : mode === "password" ? "Sign in" : "Email me a link"}
               </Button>

@@ -30,6 +30,7 @@ import {
   todaysWalks,
 } from "@/lib/selectors";
 import type { Clients, Operators, Payments } from "@/lib/types";
+import { useDocumentTitle } from "@/lib/use-document-title";
 
 const DISPLAY_TZ = "America/Chicago";
 
@@ -60,6 +61,7 @@ function elapsedMinutes(startedAt: string | null) {
 }
 
 export default function Dashboard() {
+  useDocumentTitle("Today");
   const auth = useAuth();
   const [operator, setOperator] = useState<Operators | null>(null);
   const [walks, setWalks] = useState<WalkDetailed[] | null>(null);

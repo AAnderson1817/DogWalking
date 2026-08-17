@@ -19,7 +19,9 @@ export function Sheet({
 }: {
   open: boolean;
   onClose: () => void;
-  title?: string;
+  /** Required: a dialog without an accessible name is unusable by name or
+      by rotor, and every existing call site already passes one. */
+  title: string;
   children: ReactNode;
 }) {
   const sheetRef = useRef<HTMLDivElement | null>(null);
@@ -34,6 +36,30 @@ export function Sheet({
   useEffect(() => {
     if (!open) return;
     restoreFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+    // aria-modal="true" is a request, not an enforcement: without this the
+    // background stayed in the accessibility tree and modal semantics rested
+    // entirely on the screen reader honouring the attribute. Walk up from
+    // the sheet and mark every sibling `inert`, which removes them from the
+    // accessibility tree AND from hit-testing and focus. The backdrop is
+    // exempt — inert would swallow the click that dismisses the sheet.
+    const inerted: HTMLElement[] = [];
+    for (let node: HTMLElement | null = sheetRef.current; node && node !== document.body; ) {
+      const parent: HTMLElement | null = node.parentElement;
+      if (!parent) break;
+      for (const sibling of Array.from(parent.children)) {
+        if (
+          sibling !== node &&
+          sibling instanceof HTMLElement &&
+          !sibling.hasAttribute("inert") &&
+          !sibling.hasAttribute("data-sheet-backdrop")
+        ) {
+          sibling.setAttribute("inert", "");
+          inerted.push(sibling);
+        }
+      }
+      node = parent;
+    }
 
     const focusFirst = () => {
       const sheet = sheetRef.current;
@@ -72,6 +98,9 @@ export function Sheet({
     return () => {
       window.cancelAnimationFrame(frame);
       window.removeEventListener("keydown", onKey);
+      // Only what this sheet set, so a nested sheet cannot un-inert the
+      // background its parent is still holding.
+      for (const el of inerted) el.removeAttribute("inert");
       restoreFocusRef.current?.focus();
       restoreFocusRef.current = null;
     };
@@ -80,12 +109,10 @@ export function Sheet({
   if (!open) return null;
   return (
     <>
-      <div className="sheet-backdrop" onClick={onClose} aria-hidden />
+      <div className="sheet-backdrop" onClick={onClose} aria-hidden data-sheet-backdrop />
       <div ref={sheetRef} className="sheet" role="dialog" aria-modal="true" aria-label={title} tabIndex={-1}>
         <div className="sheet__handle" />
-        {title && (
-          <h2 style={{ fontSize: "var(--fs-20)", marginBottom: "var(--s-3)" }}>{title}</h2>
-        )}
+        <h2 style={{ fontSize: "var(--fs-20)", marginBottom: "var(--s-3)" }}>{title}</h2>
         {children}
       </div>
     </>

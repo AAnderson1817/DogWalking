@@ -21,8 +21,10 @@ import {
 import { useWalkChannel } from "@/hooks/useWalkChannel";
 import { walkTime } from "@/lib/format";
 import type { Pets, Walks } from "@/lib/types";
+import { useDocumentTitle } from "@/lib/use-document-title";
 
 export default function WalkDetail() {
+  useDocumentTitle("Walk report");
   const { id } = useParams<{ id: string }>();
   if (!id) return null;
   return <WalkDetailInner walkId={id} />;

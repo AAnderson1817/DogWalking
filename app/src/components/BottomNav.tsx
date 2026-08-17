@@ -21,6 +21,9 @@ const PORTAL_ITEMS: NavItem[] = [
   { to: "/portal/billing", label: "Billing", icon: <ApprovedIcon name="payments" /> },
 ];
 
+/** Skip-link target (OperatorShell). */
+export const NAV_ID = "primary-navigation";
+
 export function BottomNav({
   persona,
   activePath,
@@ -38,6 +41,8 @@ export function BottomNav({
 
   return (
     <nav
+      id={NAV_ID}
+      tabIndex={-1}
       className={`bottom-nav${persona === "operator" ? " bottom-nav--rail" : ""}`}
       aria-label="Primary"
       data-navigation-persona={persona}

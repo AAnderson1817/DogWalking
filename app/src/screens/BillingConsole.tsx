@@ -9,7 +9,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { LoadError, loadErrorMessage } from "@/components/LoadError";
 import { MoneyValueRail } from "@/components/MoneyValueRail";
 import { PaymentRow } from "@/components/PaymentRow";
-import { Select } from "@/components/fields";
+import { FormError, Select } from "@/components/fields";
 import { Sheet } from "@/components/Sheet";
 import { Spinner } from "@/components/Spinner";
 import { LoadingState } from "@/components/StateField";
@@ -30,8 +30,10 @@ import type {
   Payments,
   Plans,
 } from "@/lib/types";
+import { useDocumentTitle } from "@/lib/use-document-title";
 
 export default function BillingConsole() {
+  useDocumentTitle("Money");
   const [clients, setClients] = useState<Clients[] | null>(null);
   const [plans, setPlans] = useState<Plans[]>([]);
   const [payments, setPayments] = useState<PaymentDetailed[]>([]);
@@ -106,9 +108,11 @@ export default function BillingConsole() {
   return (
     <div className="page">
       <h1>Money</h1>
-      {notice && (
-        <p style={{ marginTop: "var(--s-2)", color: "var(--text-2)", fontSize: "var(--fs-14)" }}>{notice}</p>
-      )}
+      {/* Persistent region: this is where a re-charge or a plan change
+          reports whether it actually went through. */}
+      <p role="status" style={{ marginTop: "var(--s-2)", color: "var(--text-2)", fontSize: "var(--fs-14)" }}>
+        {notice || null}
+      </p>
 
       <MoneyValueRail payments={payments} />
 
@@ -300,7 +304,7 @@ function PlanChangeSheet({
           Stripe prorates the price; credits prorate by the remaining cycle
           fraction on upgrades and are never clawed back on downgrades.
         </p>
-        {error && <span className="field__error">{error}</span>}
+        <FormError message={error} />
         <Button full onClick={() => void submit()} disabled={busy || !planId}>
           {busy ? <Spinner /> : "Change plan"}
         </Button>

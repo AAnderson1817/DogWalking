@@ -8,7 +8,7 @@ import { Badge } from "@/components/Badge";
 import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
-import { Textarea } from "@/components/fields";
+import { FormError, Textarea } from "@/components/fields";
 import { MapView } from "@/components/MapView";
 import { ReportCard } from "@/components/ReportCard";
 import { Spinner } from "@/components/Spinner";
@@ -42,8 +42,10 @@ import {
   saveWalkSnapshot,
 } from "@/lib/walk-snapshot";
 import type { Pets, Walks } from "@/lib/types";
+import { useDocumentTitle } from "@/lib/use-document-title";
 
 export default function WalkMode() {
+  useDocumentTitle("Walk in progress");
   const { id } = useParams<{ id: string }>();
   if (!id) return null;
   return <WalkModeInner walkId={id} />;
@@ -352,7 +354,7 @@ function WalkModeInner({ walkId }: { walkId: string }) {
           <Button full onClick={() => void start()} disabled={busy}>
             {busy ? <Spinner /> : "Start walk"}
           </Button>
-          {error && <span className="field__error">{error}</span>}
+          <FormError message={error} />
         </div>
       </div>
     );
@@ -385,11 +387,27 @@ function WalkModeInner({ walkId }: { walkId: string }) {
           )}
         </div>
 
+        {/* Both figures were bare spans with no label of any kind, visual or
+            accessible — "12:34" and "1.2 km" with nothing saying which is
+            which. Elapsed time is the number that decides whether the
+            service about to be billed was delivered, so it is named, given
+            role="timer", and marked aria-live="off": it re-renders every
+            second and would otherwise interrupt continuously. */}
         <div className="walk-metrics">
-          <span className="numeral" style={{ fontSize: "var(--fs-44)", fontWeight: 700 }}>
+          <span
+            className="numeral"
+            style={{ fontSize: "var(--fs-44)", fontWeight: 700 }}
+            role="timer"
+            aria-live="off"
+            aria-label={`Elapsed walk time ${walk.started_at ? elapsed(walk.started_at, now) : "00:00"}`}
+          >
             {walk.started_at ? elapsed(walk.started_at, now) : "00:00"}
           </span>
-          <span className="numeral" style={{ fontSize: "var(--fs-32)", color: "var(--sanpo-color-text-link)" }}>
+          <span
+            className="numeral"
+            style={{ fontSize: "var(--fs-32)", color: "var(--sanpo-color-text-link)" }}
+            aria-label={`Distance walked ${distanceKm(distance)}`}
+          >
             {distanceKm(distance)}
           </span>
         </div>
@@ -453,7 +471,7 @@ function WalkModeInner({ walkId }: { walkId: string }) {
           placeholder="How did it go?"
         />
 
-        {error && <span className="field__error">{error}</span>}
+        <FormError message={error} />
         <Button full onClick={() => void endAndSend()} disabled={busy || uploading}>
           {busy ? <Spinner /> : "End walk & send report"}
         </Button>

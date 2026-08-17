@@ -6,7 +6,7 @@ import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
 import { CreditMeter } from "@/components/CreditMeter";
 import { EmptyState } from "@/components/EmptyState";
-import { Input, Select, Textarea } from "@/components/fields";
+import { FormError, Input, Select, Textarea } from "@/components/fields";
 import { Sheet } from "@/components/Sheet";
 import { Spinner } from "@/components/Spinner";
 import { LoadingState, StateField } from "@/components/StateField";
@@ -41,10 +41,12 @@ import { compressImage } from "@/lib/image";
 import { formatLedgerEntry } from "@/lib/credits";
 import { dateLocal, money } from "@/lib/format";
 import type { Clients, CreditLedger, Operators, Pets, Plans, Properties } from "@/lib/types";
+import { useDocumentTitle } from "@/lib/use-document-title";
 
 type Tab = "pets" | "plan" | "walks" | "schedule" | "access";
 
 export default function ClientDetail() {
+  useDocumentTitle("Client");
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [client, setClient] = useState<Clients | null>(null);
@@ -298,7 +300,7 @@ function PetSheet({
           <span className="field__label">Photo</span>
           <input type="file" accept="image/*" onChange={(e) => setPhoto(e.target.files?.[0] ?? null)} />
         </label>
-        {error && <span className="field__error">{error}</span>}
+        <FormError message={error} />
         <Button type="submit" full disabled={busy || !form.name.trim()}>
           {busy ? <Spinner /> : "Save pet"}
         </Button>
@@ -428,7 +430,7 @@ function PlanTab({
             </Button>
           </div>
         )}
-        {error && <span className="field__error">{error}</span>}
+        <FormError message={error} />
       </Card>
 
       <Card>
@@ -621,7 +623,7 @@ function AccessTab({ client }: { client: Clients }) {
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
           />
-          {error && <span className="field__error">{error}</span>}
+          <FormError message={error} />
           <Button type="submit" full disabled={busy || !label.trim()}>
             {busy ? <Spinner /> : "Save property"}
           </Button>

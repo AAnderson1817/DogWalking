@@ -23,8 +23,10 @@ import {
 import { dateLocal } from "@/lib/format";
 import { todayLocal } from "@/lib/selectors";
 import type { Clients, Notifications, Plans } from "@/lib/types";
+import { useDocumentTitle } from "@/lib/use-document-title";
 
 export default function PortalHome() {
+  useDocumentTitle("Your walks");
   const navigate = useNavigate();
   const [client, setClient] = useState<Clients | null>(null);
   const [operator, setOperator] = useState<MyOperatorView | null>(null);

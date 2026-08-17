@@ -7,7 +7,7 @@ import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
 import { LoadError, loadErrorMessage } from "@/components/LoadError";
-import { Input, Select } from "@/components/fields";
+import { FormError, Input, Select } from "@/components/fields";
 import { Sheet } from "@/components/Sheet";
 import { Spinner } from "@/components/Spinner";
 import { LoadingState, StateField } from "@/components/StateField";
@@ -31,8 +31,10 @@ import { effectiveWalkCost } from "@/lib/credits";
 import { money, walkTime } from "@/lib/format";
 import { todayLocal } from "@/lib/selectors";
 import type { Clients, Pets, Plans, Properties, ServiceTypes } from "@/lib/types";
+import { useDocumentTitle } from "@/lib/use-document-title";
 
 export default function Booking() {
+  useDocumentTitle("Book a walk");
   const [client, setClient] = useState<Clients | null>(null);
   const [operator, setOperator] = useState<MyOperatorView | null>(null);
   const [plan, setPlan] = useState<Plans | null>(null);
@@ -264,7 +266,7 @@ export default function Booking() {
             </Card>
           )}
 
-          {error && <span className="field__error">{error}</span>}
+          <FormError message={error} />
           {/* Only hard-block on an unbookable account (no address/pets); every
               other precondition is validated in submit() with a specific
               message, so those branches stay reachable. */}

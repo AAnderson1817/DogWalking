@@ -6,7 +6,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
-import { Input, Textarea } from "@/components/fields";
+import { FormError, Input, Textarea } from "@/components/fields";
 import { LoadError, loadErrorMessage } from "@/components/LoadError";
 import { PetFace } from "@/components/PetAvatar";
 import { Sheet } from "@/components/Sheet";
@@ -23,8 +23,10 @@ import {
 } from "@/lib/api";
 import { compressImage } from "@/lib/image";
 import type { Clients, Pets, Properties } from "@/lib/types";
+import { useDocumentTitle } from "@/lib/use-document-title";
 
 export default function PetProfiles() {
+  useDocumentTitle("Your pets");
   const [client, setClient] = useState<Clients | null>(null);
   const [pets, setPets] = useState<Pets[]>([]);
   const [properties, setProperties] = useState<Properties[]>([]);
@@ -159,7 +161,7 @@ function PropertyNotesCard({ property, onSaved }: { property: Properties; onSave
       <div style={{ marginTop: "var(--s-2)" }}>
         <Textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Gate sticks — lift while pushing." />
       </div>
-      {error && <span className="field__error">{error}</span>}
+      <FormError message={error} />
       {dirty && (
         <div style={{ marginTop: "var(--s-2)" }}>
           <Button variant="ghost" onClick={() => void save()} disabled={busy}>
@@ -229,7 +231,7 @@ function PetCareSheet({
           <span className="field__label">Photo</span>
           <input type="file" accept="image/*" onChange={(e) => setPhoto(e.target.files?.[0] ?? null)} />
         </label>
-        {error && <span className="field__error">{error}</span>}
+        <FormError message={error} />
         <Button type="submit" full disabled={busy}>
           {busy ? <Spinner /> : "Save"}
         </Button>

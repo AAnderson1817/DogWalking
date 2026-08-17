@@ -12,6 +12,41 @@ interface FieldChrome {
   error?: string;
 }
 
+/**
+ * The single place a form error is rendered. Always mounts, so the live
+ * region exists in the accessibility tree before the message arrives —
+ * `role="alert"` on an element that appears together with its text is
+ * announced far less reliably. Empty, it is taken out of flow by
+ * `.form-error:empty` and occupies nothing.
+ *
+ * Every error in the product goes through here; CI fails a bare
+ * `className="field__error"` outside this file.
+ */
+export function FormError({
+  message,
+  id,
+  className,
+}: {
+  message?: string | null;
+  id?: string;
+  className?: string;
+}) {
+  return (
+    // A span, not a <p>: these regions live inside <label>, whose content
+    // model is phrasing content only.
+    <span
+      id={id}
+      role="alert"
+      className={["form-error", "field__error", className ?? ""].filter(Boolean).join(" ")}
+    >
+      {/* `|| null` rather than `?? ""` — React renders an empty string as a
+          text node, which would stop `:empty` matching and leave the region
+          taking up a `gap` in every form that has no error. */}
+      {message || null}
+    </span>
+  );
+}
+
 export function Input({
   label,
   error,
@@ -22,8 +57,13 @@ export function Input({
 }: InputHTMLAttributes<HTMLInputElement> & FieldChrome) {
   const generatedId = useId();
   const id = providedId ?? generatedId;
-  const errorId = error ? `${id}-error` : undefined;
-  const describedBy = [providedDescription, errorId].filter(Boolean).join(" ") || undefined;
+  // The id is stable whether or not there is an error, because the region is
+  // always in the DOM. aria-errormessage may point at it unconditionally —
+  // assistive technology only consults it while aria-invalid is true.
+  const errorId = `${id}-error`;
+  const describedBy = [providedDescription, error ? errorId : undefined]
+    .filter(Boolean)
+    .join(" ") || undefined;
   return (
     <label className="field" htmlFor={id}>
       {label && <span className="field__label">{label}</span>}
@@ -35,7 +75,7 @@ export function Input({
         aria-errormessage={errorId}
         {...rest}
       />
-      {error && <span id={errorId} className="field__error">{error}</span>}
+      <FormError id={errorId} message={error} />
     </label>
   );
 }
@@ -50,8 +90,10 @@ export function Textarea({
 }: TextareaHTMLAttributes<HTMLTextAreaElement> & FieldChrome) {
   const generatedId = useId();
   const id = providedId ?? generatedId;
-  const errorId = error ? `${id}-error` : undefined;
-  const describedBy = [providedDescription, errorId].filter(Boolean).join(" ") || undefined;
+  const errorId = `${id}-error`;
+  const describedBy = [providedDescription, error ? errorId : undefined]
+    .filter(Boolean)
+    .join(" ") || undefined;
   return (
     <label className="field" htmlFor={id}>
       {label && <span className="field__label">{label}</span>}
@@ -65,7 +107,7 @@ export function Textarea({
         aria-errormessage={errorId}
         {...rest}
       />
-      {error && <span id={errorId} className="field__error">{error}</span>}
+      <FormError id={errorId} message={error} />
     </label>
   );
 }
@@ -81,8 +123,10 @@ export function Select({
 }: SelectHTMLAttributes<HTMLSelectElement> & FieldChrome) {
   const generatedId = useId();
   const id = providedId ?? generatedId;
-  const errorId = error ? `${id}-error` : undefined;
-  const describedBy = [providedDescription, errorId].filter(Boolean).join(" ") || undefined;
+  const errorId = `${id}-error`;
+  const describedBy = [providedDescription, error ? errorId : undefined]
+    .filter(Boolean)
+    .join(" ") || undefined;
   return (
     <label className="field" htmlFor={id}>
       {label && <span className="field__label">{label}</span>}
@@ -96,7 +140,7 @@ export function Select({
       >
         {children}
       </select>
-      {error && <span id={errorId} className="field__error">{error}</span>}
+      <FormError id={errorId} message={error} />
     </label>
   );
 }
