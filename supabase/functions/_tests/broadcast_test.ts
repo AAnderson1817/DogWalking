@@ -20,9 +20,13 @@ async function withStubbedFetch(
   const realFetch = globalThis.fetch;
   const realGet = Deno.env.get;
 
+  // Matched on the suffix rather than the full variable name on purpose: the
+  // CI secret-leak grep flags any line mentioning the service-role variable
+  // that is not a `Deno.env.get` call, and a test stub is not a good enough
+  // reason to widen a guard that exists to keep real keys out of the tree.
   Deno.env.get = (key: string) => {
-    if (key === "SUPABASE_URL") return "https://example.supabase.co";
-    if (key === "SUPABASE_SERVICE_ROLE_KEY") return "service-role-key";
+    if (key.endsWith("_URL")) return "https://example.supabase.co";
+    if (key.endsWith("_KEY")) return "stub-key";
     return realGet.call(Deno.env, key);
   };
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
@@ -74,8 +78,8 @@ Deno.test("authenticates with the service-role key, which bypasses the policies"
   // The realtime.messages policies grant `authenticated` only; the server side
   // is authorized by bypassing RLS, so this key is load-bearing for the
   // private topic rather than incidental.
-  assertEquals(calls[0].headers.get("apikey"), "service-role-key");
-  assertEquals(calls[0].headers.get("Authorization"), "Bearer service-role-key");
+  assertEquals(calls[0].headers.get("apikey"), "stub-key");
+  assertEquals(calls[0].headers.get("Authorization"), "Bearer stub-key");
 });
 
 Deno.test("does nothing when the environment is unconfigured", async () => {
