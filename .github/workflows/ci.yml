@@ -104,6 +104,36 @@ jobs:
           fi
           echo "PASS: one main landmark, supplied by the shell"
 
+      # The live-GPS topic carries the real-time position of a named person at
+      # a named residential address. `private` defaults to FALSE in
+      # realtime-js, so omitting the option is not a smaller mistake than
+      # writing `private: false` — it is the same one, and it is invisible in
+      # review. There is exactly one channel in this application; keep it that
+      # way, and keep it private (review H1).
+      - name: The walk channel is private, and is the only channel
+        run: |
+          callers=$(grep -rln 'supabase\.channel(' app/src --include='*.ts' --include='*.tsx' || true)
+          if [ "$callers" != "app/src/hooks/useWalkChannel.ts" ]; then
+            echo "FAIL: supabase.channel() is called outside useWalkChannel.ts:"
+            echo "$callers"
+            echo "Every channel needs its own realtime.messages policy; add one to migration"
+            echo "history and extend this check, rather than opening an unauthorized topic."
+            exit 1
+          fi
+          # Matched on the call itself, not on the string anywhere in the file:
+          # the first version of this check passed against a channel with the
+          # option deleted, because the comment above it still said
+          # "private: true". A grep that a comment can satisfy is not a check.
+          if ! grep -Eq 'supabase\.channel\([^)]*config: *\{ *private: true' app/src/hooks/useWalkChannel.ts; then
+            echo "FAIL: the walk channel is not private — the topic is joinable by any"
+            echo "holder of the anon key, which ships in the bundle (review H1)."
+            exit 1
+          fi
+          if grep -rn 'private: false' supabase/functions/_lib/broadcast.ts; then
+            echo "FAIL: the server publishes to the public topic"; exit 1
+          fi
+          echo "PASS: one channel, private on both sides"
+
   # Backend-free: /dev/today renders deterministic fixtures with no Supabase,
   # so this runs in ~2 minutes against a plain `vite dev` and needs no secrets.
   # It exists because the suite it belongs to previously ran in NO workflow,

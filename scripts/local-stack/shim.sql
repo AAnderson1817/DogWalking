@@ -115,6 +115,47 @@ grant all on storage.buckets, storage.objects to service_role;
 grant select on storage.buckets to anon, authenticated;
 grant select, insert, update, delete on storage.objects to anon, authenticated;
 
+-- ── realtime schema ──────────────────────────────────────────────────────
+-- Realtime Authorization is enforced by RLS policies on realtime.messages:
+-- a SELECT policy grants permission to RECEIVE on a topic, an INSERT policy
+-- to SEND. Realtime evaluates them at connect time by querying the table
+-- with the joining user's JWT and rolling the query back.
+--
+-- The platform provides this table (with RLS already enabled) and the
+-- realtime.topic() function, which returns the topic being joined. Neither
+-- exists on a bare cluster, so 0020's policies would fail to apply and the
+-- authorization matrix would be untestable. This is a faithful stand-in for
+-- the parts the policies actually read — not a Realtime implementation.
+create schema if not exists realtime;
+
+create table if not exists realtime.messages (
+  id bigint generated always as identity primary key,
+  topic text not null,
+  extension text not null,
+  event text,
+  payload jsonb,
+  private boolean default false,
+  inserted_at timestamptz default now()
+);
+
+-- On the platform this is enabled by default; 0020 asserts it rather than
+-- setting it, because a migration cannot own the platform's table.
+alter table realtime.messages enable row level security;
+
+-- The topic the client is asking to join. Realtime sets it per authorization
+-- check; smoke tests set it with set_config, exactly as they already do for
+-- request.jwt.claims.
+create or replace function realtime.topic() returns text
+language sql stable
+as $$
+  select nullif(current_setting('realtime.topic', true), '')
+$$;
+
+grant usage on schema realtime to anon, authenticated, service_role;
+grant execute on function realtime.topic() to anon, authenticated, service_role;
+grant select, insert on realtime.messages to anon, authenticated;
+grant all on realtime.messages to service_role;
+
 -- ── Supabase default privileges on public ────────────────────────────────
 -- The platform grants broad table access and lets RLS + explicit REVOKEs
 -- do the narrowing; our migrations (0004) assume that baseline.

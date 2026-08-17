@@ -1059,6 +1059,13 @@ export type Database = {
         };
         Returns: boolean;
       };
+      fn_walk_channel_access: {
+        Args: {
+          p_topic: string;
+          p_send: boolean;
+        };
+        Returns: boolean;
+      };
       fn_walk_cost: {
         Args: {
           p_walk: string;

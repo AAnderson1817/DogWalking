@@ -24,6 +24,53 @@ Two authenticated personas share the `authenticated` Postgres role, distinguishe
 
 `anon` gets nothing except `EXECUTE` on `fn_claim_invite(token uuid)` (looks up client by invite_token, binds `auth_user_id`, flips status → active; called post-signup so effectively authenticated) — implement as authenticated-only; anon truly gets zero.
 
+## Realtime authorization matrix (`realtime.messages`, migration 0020)
+
+The RLS matrix above governs durable rows. It does **not** govern the live
+Realtime stream, and that omission is why the live-GPS topic shipped public:
+readable *and writable* by any holder of the anon key, which is compiled into
+the shipped bundle (review H1). A stream that mirrors a table needs the
+table's tenancy rules restated for it, in the place Realtime actually reads.
+
+Supabase applies authorization only to **private** channels, and only through
+RLS policies on `realtime.messages`. A `SELECT` policy grants permission to
+*receive* on a topic; an `INSERT` policy grants permission to *send*. Realtime
+evaluates them at connect time with the joining user's JWT.
+
+| Topic | Operator (walk's `operator_id`) | Client (walk's `client_id`) | Other tenants | anon |
+|---|---|---|---|---|
+| `walk:{walk_id}` | receive + send | receive only | — | — |
+
+Mirrors `walk_gps_points` exactly, with one deliberate asymmetry: the client
+may **never** send. They are the audience for the proof of service, and a
+client who can write to the stream can fabricate or terminate their own
+evidence of a visit.
+
+Rules:
+
+- **Exactly one channel exists in this application.** `realtime.messages` is
+  deny-by-default, and `walk:{uuid}` is the only topic any policy authorizes.
+  A new channel needs a new policy in a new migration, and CI fails a
+  `supabase.channel()` call outside `useWalkChannel.ts`.
+- **Both sides declare `private: true`** — the client channel config and the
+  server's `_lib/broadcast` publish. `private` defaults to *false* in
+  `realtime-js`, so omitting the option is the same defect as writing
+  `private: false`, and is invisible in review. CI checks both.
+- **Topic parsing never raises.** `fn_walk_channel_access` regex-guards before
+  the uuid cast: an error inside a policy on a shared platform table would
+  affect every channel on the project, not just this one.
+- **The service role bypasses RLS**, which is how the edge function publishes
+  the `ended` event without a policy granting it anything.
+
+**This is not complete without one dashboard setting.** Policies govern
+private channels; they do not stop a third party opening the same topic as a
+*public* channel. That is the project-level "Allow public access" toggle in
+Realtime settings, which no migration and no file in this repository can set —
+there is no such key in `config.toml`, and neither deploy workflow runs
+`supabase config push` (review H2). Until it is off for a project, this
+hardens our own client and leaves the old door open for everyone else.
+`docs/dev/realtime-authorization.md` has the steps and how to verify them.
+
 ## Column privileges (beyond RLS)
 - `REVOKE UPDATE (credit_balance, plan_id, subscription_status, stripe_customer_id, stripe_subscription_id, invite_token) ON clients FROM authenticated;` — balance unforgeable even by the operator's own JWT (invariant 1); plan/subscription fields move only via definer fns/webhook.
 - `REVOKE INSERT, UPDATE, DELETE ON credit_ledger FROM authenticated;` grant SELECT only. Sole write path = definer functions.
@@ -63,3 +110,4 @@ Body-level tenancy check is mandatory in every definer fn (RLS does not apply in
 4. As operator JWT: direct `INSERT INTO credit_ledger …` → permission denied.
 5. As anon: every table select → denied/0 rows; `EXECUTE fn_grant_credits` → denied.
 6. Ledger chain integrity query returns 0 violations after the full grant/debit/rollover scenario run.
+7. Realtime walk channel (0020): the walk's operator receives **and** sends; its client receives but is refused on send; a foreign operator and another operator's client are refused on both, while that client is still allowed on their own walk; anon is refused; and malformed, foreign-namespace, unknown-walk and null topics all return false rather than raising. Asserted on `fn_walk_channel_access` for the matrix and through `realtime.messages` itself for the two policies, so a correct function behind unwired policies still fails.

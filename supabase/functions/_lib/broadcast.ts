@@ -15,7 +15,13 @@ export async function broadcast(
       Authorization: `Bearer ${key}`,
     },
     body: JSON.stringify({
-      messages: [{ topic, event, payload, private: false }],
+      // Must match the client's channel config: a message published as public
+      // is not delivered to subscribers of the private topic of the same name,
+      // so this is not only the security fix but a correctness one — the
+      // client's "walk ended" signal would stop arriving otherwise.
+      // The service-role key bypasses RLS, so no realtime.messages policy
+      // needs to grant this caller anything.
+      messages: [{ topic, event, payload, private: true }],
     }),
   });
   if (!res.ok) throw new Error(`broadcast failed: ${res.status}`);
