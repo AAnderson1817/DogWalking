@@ -57,4 +57,65 @@ describe("TodayIllustratedSchedule", () => {
     expect(html).not.toContain("Today&#x27;s schedule");
     expect(html).not.toContain("Open walk");
   });
+
+  it("makes each row a link with a label that stands on its own", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <TodayIllustratedSchedule
+          backgroundSrc="/approved-background.png"
+          dateLabel="Wednesday, July 22"
+          visits={visits.map((visit) => ({ ...visit, href: `/clients/${visit.id}` }))}
+          paceLabel="On time"
+          nextVisitLabel="22 min to Luna"
+          currentAction={<TodayCurrentAction walkId="walk-current" />}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(html).toContain('href="/clients/current"');
+    // Read out of context by a rotor, "11:30" says nothing; the state belongs
+    // in the name because colour alone carries it visually (WCAG 1.4.1).
+    expect(html).toContain('aria-label="Mochi, 11:30, Lakeside Loop, underway"');
+    expect(html).toContain('aria-label="Juniper, 9:00, Maple Walk, done"');
+    expect(html).toContain('aria-label="Luna, 2:00, Oak Trail, up next"');
+
+    // END WALK must not end up inside the row link — nested interactive
+    // elements are invalid and unreachable by keyboard.
+    const rowLink = html.slice(html.indexOf('aria-label="Mochi'));
+    const linkEnd = rowLink.indexOf("</a>");
+    expect(rowLink.slice(0, linkEnd)).not.toContain("End walk");
+  });
+
+  it("still renders without hrefs, so the composition survives a read-only caller", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <TodayIllustratedSchedule
+          backgroundSrc="/approved-background.png"
+          dateLabel="Wednesday, July 22"
+          visits={visits}
+          paceLabel="On time"
+          nextVisitLabel="22 min to Luna"
+        />
+      </MemoryRouter>,
+    );
+    expect(html).toContain("Mochi");
+    expect(html).not.toContain('class="today-emaki-visit__link" href');
+  });
+
+  it("offers an action on an empty day", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <TodayIllustratedSchedule
+          backgroundSrc="/approved-background.png"
+          dateLabel="Wednesday, July 22"
+          visits={[]}
+          paceLabel="Schedule ready"
+          nextVisitLabel="Your day is clear"
+          emptyAction={<a href="/calendar">Add a walk</a>}
+        />
+      </MemoryRouter>,
+    );
+    expect(html).toContain("No visits scheduled today.");
+    expect(html).toContain("Add a walk");
+  });
 });

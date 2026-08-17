@@ -41,6 +41,41 @@ registered to the artwork.
 The component may scroll vertically on a viewport shorter than its preserved
 field ratio. It must never crop or independently stretch the illustrated scene.
 
+### The field is not the plate
+
+The illustrated plate and the field that contains it are two different boxes,
+and conflating them is what made the schedule lose visits.
+
+- **The plate** is the approved `875 x 1798` artwork. It is pinned to the top
+  of the field at its intrinsic ratio, full working width, with no
+  `object-fit`. There is no mechanism by which it can be cropped or stretched —
+  the guarantee is structural, not a bounded media query.
+- **The field** is at least as tall as the plate and at least as tall as the
+  viewport, and grows with the schedule. Where it exceeds the plate, the
+  plate's own paper (`--emaki-paper`, sampled from the master's bottom edge)
+  continues beneath it, so the illustration reads as fading into the page
+  rather than stopping at a seam.
+
+A day with more visits than the plate has room for therefore scrolls, and the
+lower part of the schedule sits on bare paper below the scene. That is the
+intended behaviour, not a degradation: the target customer runs six to ten
+visits a day, and the alternative — which shipped — was that the afternoon
+disappeared with no scrollbar and no cue.
+
+The schedule keeps its `86cqw` registration to the artwork, so on an ordinary
+day the composition is unchanged.
+
+**Never reintroduce `overflow: hidden` on the field, and never give it a fixed
+`aspect-ratio`.** Both cap the schedule at the plate's height. `aspect-ratio`
+looks like it should act as a floor and does not — measured, it caps.
+
+### Nav clearance
+
+The nav clearance belongs to whichever section is last on the page, so the
+strip behind the transparent bar is always the same colour as the content above
+it. The operator nav's scrim resolves toward that surface too: Cream on every
+other screen, `--emaki-paper` on Today.
+
 ## BG-3A verification gate
 
 1. Five-second comprehension: a tester can identify the current walk and next

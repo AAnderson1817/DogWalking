@@ -26,6 +26,16 @@
   --text-2:var(--ink-700); --brand:var(--orange); --accent:var(--sky-bright);
   --danger:var(--red); --warn:var(--butter);
 
+  /* The paper the Today artwork is painted on, sampled from the approved
+     master (mean of the bottom six rows, border accents trimmed: #E8DAC4).
+     Not a brand colour and not a CT-1 role — it exists so the field can
+     continue below the illustration without a seam when the schedule grows
+     past the artwork's own height. Update it if the master is ever repainted.
+     Measured on it: Indigo text 7.03:1, Matcha 3.92:1, Kaki 3.82:1 — the
+     schedule's own colours all still clear their floors where a row flows
+     past the illustration onto bare paper. */
+  --emaki-paper:#E8DAC4;
+
   /* quiet structure; no retired hard shadows */
   --line:var(--sanpo-color-border-subtle);
   --bw:1.5px; --bw-sm:1.5px; --bw-xs:1px;

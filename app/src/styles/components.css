@@ -796,27 +796,52 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
 /* ── Approved Indigo Emaki Today composition ─────────────────────────── */
 .page.today-emaki-page {
   max-width: 640px;
+  /* No `overflow: hidden` — that clipped the schedule to the artwork box with
+     no scrollbar to recover it (review B8). Padding stays 0 here: the nav
+     clearance `.page` normally provides is applied to whichever section is
+     actually last, so it is always the same colour as the content above it
+     rather than a strip of a different cream (review M22).  */
   padding: 0;
-  overflow: hidden;
   background: var(--sanpo-color-brand-cream);
 }
 .today-emaki {
   position: relative;
   container-type: inline-size;
+
+  /* A field, not a poster. The schedule used to be absolutely positioned
+     inside a fixed-ratio `overflow: hidden` box, so a day with more visits
+     than the artwork had room for simply lost its afternoon: at 390x844,
+     six rows put the last one behind the nav, eight put one below the
+     viewport, twelve lost five outright — with
+     `scrollHeight === innerHeight`, so there was nothing to scroll to.
+     The rows stayed in the DOM and were read by screen readers and reached
+     by Tab; they were invisible on screen only.
+
+     Now it is a single-cell grid. Everything stacks in that one cell, so the
+     cell — and the field — is as tall as the TALLEST of its children: the
+     illustration's plate on an ordinary day, the schedule on a long one.
+     That is the `max()` this needs, and there is no other way to write a
+     max against a content-dependent value in CSS.
+     (`aspect-ratio: 875/1798` was the obvious first attempt and is wrong.
+     Measured: it CAPS the height at the ratio and the rows overflow it —
+     the original bug wearing a different hat. Verified in a browser at
+     3, 8 and 12 rows across seven viewports before and after.)
+     `min-height` fills a viewport taller than the artwork. Spec 07
+     explicitly permits this component to scroll vertically. */
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   width: 100%;
-  aspect-ratio: 875 / 1798;
-  /* The field IS the screen — the operator nav is deliberately transparent
-     and floats on it. On a viewport taller than the artwork's natural ratio
-     the aspect box stopped short and exposed bare Cream beneath the painted
-     bottom border (43px at 390x844, 48px at 430x932), so the basket accents
-     hung above the edge instead of meeting it. Fill the remainder.
-     `object-fit: fill` absorbs it as a <6% vertical stretch the watercolour
-     hides; `cover` would instead crop the left and right border accents,
-     which is the opposite of what this fixes. Shorter viewports already
-     overflow this box and are untouched. Applied in a bounded media query
-     below, not here. */
-  overflow: hidden;
-  background: var(--sanpo-color-brand-cream);
+  min-height: calc(100dvh - 72px - env(safe-area-inset-bottom, 0px));
+  padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+  /* The field IS the screen, and the operator nav floats on it. Where the
+     field is taller than the illustration — a tall viewport, or a long day —
+     the illustration's own paper continues beneath it, so there is no seam
+     and nothing to stretch. This replaces the `object-fit: fill` fill, which
+     distorted the plate by up to 14.7% in the band it applied to and snapped
+     to a 147px strip of bare Cream the moment the band ended (review H28).
+     Spec 07: the component "must never crop or independently stretch the
+     illustrated scene". It no longer does either, at any viewport. */
+  background: var(--emaki-paper);
   color: var(--sanpo-color-brand-indigo);
   font-family: var(--font-body);
 
@@ -839,23 +864,19 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
     );
   }
 }
-/* Fill the viewport ONLY while the shortfall stays small enough that the
-   stretch is invisible — between the artwork's own 875:1798 ratio and about
-   15% taller than it, which covers the phones this is built for (390x844
-   needs +5.3%, 430x932 +5.5%, 412x915 +8%). Past that bound — an unusually
-   tall narrow window — a strip of bare Cream is the lesser evil against a
-   visibly distorted illustration, so the fill is simply not applied. */
-@media (max-aspect-ratio: 875 / 1798) and (min-aspect-ratio: 875 / 2068) {
-  .today-emaki { min-height: 100dvh; }
-}
+/* Pinned to the top at its own intrinsic ratio: width drives, height follows.
+   No object-fit, so there is no mechanism by which it can be cropped or
+   stretched — the guarantee is structural rather than a bounded media query
+   that has to be kept honest. Where the field is taller, --emaki-paper (the
+   plate's own bottom-edge colour) carries on below it. */
 .today-emaki__backdrop {
   position: absolute;
-  inset: 0;
+  top: 0;
+  left: 0;
   z-index: 0;
   width: 100%;
-  height: 100%;
+  height: auto;
   max-width: none;
-  object-fit: fill;
   user-select: none;
   pointer-events: none;
 }
@@ -916,12 +937,29 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
   color: transparent;
   font-size: 0;
 }
+/* The plate's own height, in flow, as the field's floor. A zero-content
+   spacer sharing the single grid cell with the schedule: whichever is taller
+   sets the field height, so the illustration is never cut off and the
+   schedule is never clipped. 100cqw is the field's inline size (it is the
+   query container), so this tracks the artwork's real rendered height at
+   every width without hardcoding a breakpoint. */
+.today-emaki::before {
+  content: "";
+  grid-area: 1 / 1;
+  height: calc(100cqw * 1798 / 875);
+  pointer-events: none;
+}
+
+/* In flow, so the field's height follows the schedule instead of ignoring it.
+   The 86cqw offset is preserved as a margin rather than a `top`, which keeps
+   the registration to the artwork that spec 07 asks for — the schedule still
+   begins exactly where the painted field opens up — while letting a long day
+   push the field taller. */
 .today-emaki__schedule {
-  position: absolute;
-  top: 86cqw;
-  left: 5.35cqw;
-  right: 5.35cqw;
+  grid-area: 1 / 1;
+  position: relative;
   z-index: 1;
+  margin: 86cqw 5.35cqw 0;
 }
 .today-emaki__schedule h1 {
   color: var(--sanpo-color-brand-indigo);
@@ -1012,10 +1050,31 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
 .today-emaki-visit {
   position: relative;
   display: grid;
-  grid-template-columns: 20.4cqw minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   min-height: 15.7cqw;
   border-bottom: 1px solid rgb(12 71 116 / 0.22);
+}
+/* The row's tappable region: time + identity. The trailing action or state
+   label stays outside it, so END WALK is its own control rather than an
+   interactive element nested inside a link. */
+.today-emaki-visit__link {
+  display: grid;
+  grid-template-columns: 20.4cqw minmax(0, 1fr);
+  align-items: center;
+  min-height: 15.7cqw;
+  color: inherit;
+  text-decoration: none;
+}
+a.today-emaki-visit__link:hover .today-emaki-visit__identity strong {
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+}
+a.today-emaki-visit__link:focus-visible {
+  outline: 3px solid var(--sanpo-color-supporting-kaki);
+  outline-offset: -3px;
+  border-radius: var(--r-sm);
 }
 .today-emaki-visit:last-child { border-bottom: 0; }
 .today-emaki-visit__bar {
@@ -1115,11 +1174,16 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
 }
 .today-emaki-current-action:hover { background: var(--sanpo-color-interaction-indigo-pressed); }
 .today-emaki__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-3);
   padding: 5cqw 3.5cqw;
   color: var(--sanpo-color-text-secondary);
   font-size: clamp(14px, 2.7cqw, 20px);
   font-weight: 700;
 }
+.today-emaki__empty p { margin: 0; }
 .today-emaki-followups,
 .today-emaki-account {
   position: relative;
@@ -1392,6 +1456,16 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
    basket accents are, settling toward Cream only across the label line, so
    the artwork still reads as reaching the screen edge. Degrades to no scrim
    where color-mix is unsupported — which is the pre-existing appearance. */
+/* The scrim resolves toward the surface it actually sits on. Everywhere but
+   Today that is Cream; on Today it is the illustration's own paper, which the
+   field now uses as its ground — a Cream scrim there would end in a pale band
+   against the warmer plate. */
+.bottom-nav[data-navigation-persona="operator"] {
+  --nav-scrim: var(--sanpo-color-brand-cream);
+}
+body:has(.today-emaki-page) .bottom-nav[data-navigation-persona="operator"] {
+  --nav-scrim: var(--emaki-paper);
+}
 .bottom-nav[data-navigation-persona="operator"]::before {
   content: "";
   position: absolute;
@@ -1400,9 +1474,9 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
   pointer-events: none;
   background: linear-gradient(
     to bottom,
-    color-mix(in srgb, var(--sanpo-color-brand-cream) 0%, transparent) 0%,
-    color-mix(in srgb, var(--sanpo-color-brand-cream) 62%, transparent) 42%,
-    color-mix(in srgb, var(--sanpo-color-brand-cream) 94%, transparent) 78%
+    color-mix(in srgb, var(--nav-scrim) 0%, transparent) 0%,
+    color-mix(in srgb, var(--nav-scrim) 62%, transparent) 42%,
+    color-mix(in srgb, var(--nav-scrim) 94%, transparent) 78%
   );
 }
 /* Inactive labels are 12px at weight 800 — small text, so the 4.5:1 floor
@@ -1421,6 +1495,21 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
     --sanpo-color-navigation-inactive: color-mix(
       in srgb,
       var(--sanpo-color-neutral-muted) 70%,
+      var(--sanpo-color-brand-indigo)
+    );
+  }
+}
+/* Today's ground is the illustration's paper, which is warmer and darker than
+   Cream, and the 70/30 mix above measures 4.53:1 on it — over the 4.5:1 floor
+   for 12px/800 text, but with no headroom at all for a screen whose whole job
+   is being read outdoors. Deepened to 60/40 there, which measures 4.83:1 —
+   sampled from the rendered bar, where the scrim is partly transparent, not
+   computed from the tokens, which would have predicted 5.35:1. */
+@supports (color: color-mix(in srgb, red, blue)) {
+  body:has(.today-emaki-page) .bottom-nav[data-navigation-persona="operator"] {
+    --sanpo-color-navigation-inactive: color-mix(
+      in srgb,
+      var(--sanpo-color-neutral-muted) 60%,
       var(--sanpo-color-brand-indigo)
     );
   }

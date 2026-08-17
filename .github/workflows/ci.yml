@@ -64,7 +64,7 @@ jobs:
       # source, so it is asserted against the artefact rather than assumed.
       - name: DEV fixtures absent from the production bundle
         run: |
-          if grep -rlE "Juniper|Lakeside Loop|Oak Trail|Maple Walk|Mira Chen" app/dist/assets/*.js; then
+          if grep -rlE "Juniper|Lakeside Loop|Oak Trail|Maple Walk|Mira Chen|Riverside Path|Bramble|Nutmeg" app/dist/assets/*.js; then
             echo "FAIL: DEV preview fixtures reached the production bundle"; exit 1
           fi
           echo "PASS: no DEV fixtures in dist"
