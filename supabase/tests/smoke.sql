@@ -946,6 +946,171 @@ begin
   raise notice 'fn_book_walk (0019): OK';
 end $$;
 
+-- ── Realtime walk-channel authorization (0020) ───────────────────────────
+-- The live-GPS topic `walk:{id}` was public: readable AND writable by any
+-- holder of the anon key (review H1). 0020 makes it a private channel gated
+-- by realtime.messages policies. This asserts the full matrix on
+-- fn_walk_channel_access — which is where the rule actually lives — and then
+-- proves the two policies are wired to it, in both directions.
+--
+-- Both directions on purpose. A policy that denies everyone would pass a
+-- suite that only checks that attackers are refused, and would take live GPS
+-- off every real walk.
+do $$
+declare
+  v_op_a    uuid := '99999999-0000-4000-a000-000000000001';
+  v_op_b    uuid := '99999999-0000-4000-a000-000000000002';
+  v_auth_a  uuid := '99999999-0000-4000-a000-000000000003';  -- client A's login
+  v_auth_f2 uuid := '99999999-0000-4000-a000-000000000005';  -- client F2's login
+  v_walk_a  uuid := '99999999-0000-4000-2000-000000000001';  -- op A / client A
+  v_walk_b  uuid := '99999999-0000-4000-2000-0000000000b1';  -- op B / client F2
+  v_topic_a text;
+  v_topic_b text;
+  v_seen    int;
+begin
+  v_topic_a := 'walk:' || v_walk_a;
+  v_topic_b := 'walk:' || v_walk_b;
+
+  -- A second tenant with a signed-in client, so "another operator's client"
+  -- is a real persona and not an absence.
+  insert into auth.users (id, email) values (v_auth_f2, 'smoke-client-f2@pawtrail.dev');
+  insert into service_types (id, operator_id, name, duration_minutes, credit_cost)
+  values ('99999999-0000-4000-3000-0000000000b1', v_op_b, 'Smoke B walk', 30, 1);
+  insert into walks (id, operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status)
+  values (v_walk_b, v_op_b, '99999999-0000-4000-c000-0000000000f2',
+          '99999999-0000-4000-d000-0000000000f2',
+          '99999999-0000-4000-3000-0000000000b1',
+          date '2026-07-01', '10:00', '11:00', 'in_progress');
+  update clients set auth_user_id = v_auth_f2
+   where id = '99999999-0000-4000-c000-0000000000f2';
+
+  -- ── The rule itself ────────────────────────────────────────────────────
+  -- receive, then send, for each persona against walk A's topic.
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op_a), true);
+  if not fn_walk_channel_access(v_topic_a, false) then
+    raise exception 'FAIL: the walk''s own operator cannot receive on its topic';
+  end if;
+  if not fn_walk_channel_access(v_topic_a, true) then
+    raise exception 'FAIL: the walk''s own operator cannot send on its topic';
+  end if;
+
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_auth_a), true);
+  if not fn_walk_channel_access(v_topic_a, false) then
+    raise exception 'FAIL: the walk''s own client cannot receive on its topic';
+  end if;
+  -- The client is an audience, not a participant: letting them send would let
+  -- them fabricate the proof of service the product sells.
+  if fn_walk_channel_access(v_topic_a, true) then
+    raise exception 'FAIL: the client can SEND on the walk topic';
+  end if;
+
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op_b), true);
+  if fn_walk_channel_access(v_topic_a, false) then
+    raise exception 'FAIL: a foreign operator can receive on another tenant''s walk';
+  end if;
+  if fn_walk_channel_access(v_topic_a, true) then
+    raise exception 'FAIL: a foreign operator can SEND on another tenant''s walk';
+  end if;
+
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_auth_f2), true);
+  if fn_walk_channel_access(v_topic_a, false) then
+    raise exception 'FAIL: another operator''s client can receive on this walk';
+  end if;
+  -- ...and is still allowed on their own, so the denial above is tenancy and
+  -- not a blanket refusal.
+  if not fn_walk_channel_access(v_topic_b, false) then
+    raise exception 'FAIL: a client cannot receive on their own walk topic';
+  end if;
+
+  -- Anonymous: no sub claim at all.
+  perform set_config('request.jwt.claims', '{"role":"anon"}', true);
+  if fn_walk_channel_access(v_topic_a, false) then
+    raise exception 'FAIL: an anonymous caller can receive on a walk topic';
+  end if;
+
+  -- ── Malformed and unknown topics ───────────────────────────────────────
+  -- A cast error inside an RLS policy on a shared platform table would break
+  -- every channel, not just ours, so these must return false rather than
+  -- raise. Each is also a rejection in its own right.
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op_a), true);
+  if fn_walk_channel_access('walk:not-a-uuid', false) then
+    raise exception 'FAIL: a malformed topic was authorized';
+  end if;
+  if fn_walk_channel_access('presence:' || v_walk_a, false) then
+    raise exception 'FAIL: a non-walk topic namespace was authorized';
+  end if;
+  if fn_walk_channel_access('walk:99999999-0000-4000-2000-0000000000ff', false) then
+    raise exception 'FAIL: a topic for a nonexistent walk was authorized';
+  end if;
+  if fn_walk_channel_access(null, false) then
+    raise exception 'FAIL: a null topic was authorized';
+  end if;
+
+  -- ── The policies are actually wired to it ──────────────────────────────
+  -- Everything above tests the function. These two prove realtime.messages
+  -- consults it: without the policies the function could be perfect and the
+  -- channel still wide open, which is precisely the shape of the original bug.
+  insert into realtime.messages (topic, extension, event, payload, private)
+  values (v_topic_a, 'broadcast', 'gps', '{"lat":1,"lng":2}'::jsonb, true);
+
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op_a), true);
+  perform set_config('realtime.topic', v_topic_a, true);
+  set local session authorization authenticated;
+  select count(*) into v_seen from realtime.messages;
+  if v_seen <> 1 then
+    raise exception 'FAIL: the walk''s operator cannot read its own channel (saw % rows)', v_seen;
+  end if;
+  insert into realtime.messages (topic, extension, event, payload, private)
+  values (v_topic_a, 'broadcast', 'gps', '{"lat":3,"lng":4}'::jsonb, true);
+  reset session authorization;
+
+  -- A foreign operator, joining the same topic, sees nothing and cannot send.
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op_b), true);
+  perform set_config('realtime.topic', v_topic_a, true);
+  set local session authorization authenticated;
+  select count(*) into v_seen from realtime.messages;
+  if v_seen <> 0 then
+    raise exception 'FAIL: a foreign operator read % rows from another tenant''s channel', v_seen;
+  end if;
+  begin
+    insert into realtime.messages (topic, extension, event, payload, private)
+    values (v_topic_a, 'broadcast', 'gps', '{"lat":0,"lng":0}'::jsonb, true);
+    raise exception 'FAIL: a foreign operator SENT on another tenant''s channel';
+  exception when insufficient_privilege then
+    null;
+  end;
+  reset session authorization;
+
+  -- The client of the walk may receive but not send, through the policies.
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_auth_a), true);
+  perform set_config('realtime.topic', v_topic_a, true);
+  set local session authorization authenticated;
+  select count(*) into v_seen from realtime.messages;
+  if v_seen < 1 then
+    raise exception 'FAIL: the walk''s client cannot read its channel';
+  end if;
+  begin
+    insert into realtime.messages (topic, extension, event, payload, private)
+    values (v_topic_a, 'broadcast', 'ended', '{}'::jsonb, true);
+    raise exception 'FAIL: the client SENT on the walk channel';
+  exception when insufficient_privilege then
+    null;
+  end;
+  reset session authorization;
+
+  perform set_config('realtime.topic', '', true);
+  raise notice 'realtime walk-channel authorization (0020): OK';
+end $$;
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;

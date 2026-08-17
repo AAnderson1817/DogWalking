@@ -80,7 +80,15 @@ export function useWalkChannel(
   }, [outbox]);
 
   useEffect(() => {
-    const channel = supabase.channel(`walk:${walkId}`);
+    // `private: true` is what makes Supabase apply authorization at all —
+    // without it the topic is public and any holder of the anon key (which is
+    // compiled into this bundle) can join it from any origin, read the live
+    // position of a named person at a named address, and inject or terminate
+    // the stream. The rules live in realtime.messages policies (migration
+    // 0020): the walk's operator may send and receive, its client may receive.
+    // supabase-js attaches the session JWT to the socket itself, so there is
+    // no setAuth() call to keep in sync here.
+    const channel = supabase.channel(`walk:${walkId}`, { config: { private: true } });
     if (mode === "subscribe") {
       channel
         .on("broadcast", { event: "gps" }, ({ payload }) => {
