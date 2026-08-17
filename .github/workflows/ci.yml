@@ -92,9 +92,11 @@ jobs:
       # notices is wrong, so the rule is checked rather than remembered.
       - name: Exactly one <main>, owned by AppMain
         run: |
+          # `|| true`: steps run under `bash -e`, and a pipeline whose last
+          # grep matches nothing exits 1 — which is the PASS case here.
           offenders=$(grep -rn '<main[ >]' app/src --include='*.tsx' \
                         | grep -v 'src/components/AppMain.tsx' \
-                        | grep -v '\.test\.tsx')
+                        | grep -v '\.test\.tsx' || true)
           if [ -n "$offenders" ]; then
             echo "FAIL: a main element outside AppMain — the shell owns the landmark:"
             echo "$offenders"
