@@ -1,15 +1,16 @@
 # Code owners for Sanpo.
 #
-# CLAUDE.md reserves the money and trust paths for explicit owner sign-off.
-# Until now that rule lived only in prose, which meant it was enforced by
-# whoever happened to remember it. Listing the paths here makes GitHub request
-# the review automatically, and — once branch protection requires owner review
-# on these paths — makes the rule real rather than advisory.
+# CLAUDE.md singles out the money and trust paths for heightened rigour: a
+# written safety argument in the PR, review aimed at the failure case, and a
+# test that would have failed before the change. Merge authority itself sits
+# with the session (the owner asked for minimal contact with the code), so
+# these entries exist to surface the review request and to leave a durable
+# record on the PR — not to gate the merge on a human.
 
 # Default: everything is owned, so nothing lands unreviewed.
 *                           @AAnderson1817
 
-# --- Money and trust paths (CLAUDE.md "ask the owner first") ------------------
+# --- Money and trust paths (CLAUDE.md "raise the bar") -----------------------
 
 # Migrations are append-only and irreversible once applied to a real database.
 /supabase/migrations/       @AAnderson1817

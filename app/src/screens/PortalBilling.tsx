@@ -5,6 +5,7 @@ import { Badge } from "@/components/Badge";
 import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
+import { FormError } from "@/components/fields";
 import { LoadError, loadErrorMessage } from "@/components/LoadError";
 import { PaymentRow } from "@/components/PaymentRow";
 import { Spinner } from "@/components/Spinner";
@@ -21,8 +22,10 @@ import {
 import { formatLedgerEntry } from "@/lib/credits";
 import { dateLocal, money } from "@/lib/format";
 import type { Clients, CreditLedger, Plans } from "@/lib/types";
+import { useDocumentTitle } from "@/lib/use-document-title";
 
 export default function PortalBilling() {
+  useDocumentTitle("Billing");
   const [client, setClient] = useState<Clients | null>(null);
   const [plan, setPlan] = useState<Plans | null>(null);
   const [ledger, setLedger] = useState<CreditLedger[]>([]);
@@ -115,7 +118,7 @@ export default function PortalBilling() {
           <Button variant="ghost" full onClick={() => void openPortal()} disabled={busy}>
             {busy ? <Spinner /> : "Manage payment method, pause or cancel"}
           </Button>
-          {error && <span className="field__error">{error}</span>}
+          <FormError message={error} />
         </div>
       </Card>
 

@@ -9,8 +9,10 @@ import { LoadingState, StateField } from "@/components/StateField";
 import { CredentialRow, PutCredentialSheet } from "@/components/VaultFlows";
 import { listClients, listCredentials, listProperties, type CredentialMeta } from "@/lib/api";
 import type { Clients, Properties } from "@/lib/types";
+import { useDocumentTitle } from "@/lib/use-document-title";
 
 export default function AccessVault() {
+  useDocumentTitle("Access vault");
   const [credentials, setCredentials] = useState<CredentialMeta[] | null>(null);
   const [properties, setProperties] = useState<Properties[]>([]);
   const [clients, setClients] = useState<Clients[]>([]);

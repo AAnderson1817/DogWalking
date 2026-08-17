@@ -15,8 +15,10 @@ import { clientStatusTreatment } from "@/components/status-treatment";
 import { createClient, listClients, listPets } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import type { Clients, Pets } from "@/lib/types";
+import { useDocumentTitle } from "@/lib/use-document-title";
 
 export default function Roster() {
+  useDocumentTitle("Clients");
   const auth = useAuth();
   const navigate = useNavigate();
   const [clients, setClients] = useState<Clients[] | null>(null);

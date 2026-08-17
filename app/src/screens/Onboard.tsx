@@ -5,13 +5,15 @@ import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
-import { Input } from "@/components/fields";
+import { FormError, Input } from "@/components/fields";
 import { Spinner } from "@/components/Spinner";
 import { LoadingState, StateField } from "@/components/StateField";
 import { createOperator } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
+import { useDocumentTitle } from "@/lib/use-document-title";
 
 export default function Onboard() {
+  useDocumentTitle("Set up your business");
   const auth = useAuth();
   const navigate = useNavigate();
   const [businessName, setBusinessName] = useState("");
@@ -127,7 +129,7 @@ export default function Onboard() {
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
           />
-          {error && <span className="field__error">{error}</span>}
+          <FormError message={error} />
           <p style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>
             Currency USD · timezone US Central · low-credit alerts at 2 —
             adjustable later.

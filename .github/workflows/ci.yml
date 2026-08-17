@@ -25,9 +25,17 @@ jobs:
 
       # Run inside app/ so npx resolves app/node_modules/.bin/tsc — from the
       # repo root it would fetch the abandoned `tsc` npm package instead.
+      #
+      # `-b --force`, not `--noEmit -p .`: app/tsconfig.json is a solution
+      # file ("files": [] plus references to tsconfig.app/node.json), so
+      # `-p .` type-checks zero files and exits 0 on a syntax error — this
+      # step passed unconditionally until now. Only build mode follows the
+      # references. --force because -b is incremental and a cached
+      # tsbuildinfo would otherwise let it skip work. Both referenced
+      # projects set noEmit, so nothing is written.
       - name: Typecheck
         working-directory: app
-        run: npx tsc --noEmit -p .
+        run: npx tsc -b --force
 
       - name: Lint (warnings fail)
         working-directory: app
@@ -60,6 +68,22 @@ jobs:
             echo "FAIL: DEV preview fixtures reached the production bundle"; exit 1
           fi
           echo "PASS: no DEV fixtures in dist"
+
+      # Twenty error messages were rendered as bare spans with no role and no
+      # live region, so every failure in the product — including "ending the
+      # walk did not bill" — was silent to a screen reader. FormError in
+      # fields.tsx is now the only place that renders one; this keeps it that
+      # way, because the bare pattern is the more obvious thing to write.
+      - name: Errors go through FormError, not a bare span
+        run: |
+          if grep -rn 'className="field__error"' app/src --include='*.tsx' \
+               | grep -v 'src/components/fields.tsx' | grep -q .; then
+            echo "FAIL: bare field__error outside fields.tsx — use <FormError message={…} />:"
+            grep -rn 'className="field__error"' app/src --include='*.tsx' \
+              | grep -v 'src/components/fields.tsx'
+            exit 1
+          fi
+          echo "PASS: all form errors render through FormError"
 
   # Backend-free: /dev/today renders deterministic fixtures with no Supabase,
   # so this runs in ~2 minutes against a plain `vite dev` and needs no secrets.

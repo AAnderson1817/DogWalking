@@ -280,3 +280,69 @@ fixture, not a separate candidate or approval surface.
 The locked fixture order is Juniper (complete), Mochi (current), and Luna
 (upcoming). The responsive contract and test protocol live in
 `docs/spec/07-indigo-emaki-visual-migration.md`.
+
+## Accessibility contract
+
+These are product rules, not review notes: a change that breaks one of them is
+a regression whether or not a test catches it. Each was a live defect found in
+the 2026-08 review (`docs/review/2026-08-review.md`, B7 / H25 / H26 / M12 /
+M13 / L13 / L14) and closed together.
+
+**Contrast is measured on rendered pixels, never on token values.** A token is
+evidence of intent; the ratio a user experiences depends on what is actually
+painted underneath. The Today progress path was "fixed" twice against the wrong
+background because the value was read from the palette instead of sampled from
+the screen. Every ratio quoted in this spec was sampled from a screenshot of
+the built stylesheet.
+
+**Landmarks and headings.** Every route renders inside exactly one `<main>`
+(`AppMain`, id `main-content`), supplied by the shell for each persona. Every
+route has an `h1` — visually hidden where the design's heading is a logo or a
+state field, present either way, because heading navigation is how a
+screen-reader user orients in an unfamiliar app. Every route sets a distinct
+`document.title` through `useDocumentTitle`, which also writes the screen name
+to a polite live region: a client-side route change is not a page load and
+announces nothing on its own.
+
+**The operator shell carries skip links in both directions** — to content and
+to navigation. The second is not redundant: the operator nav is DOM-last, which
+is right for the mobile bottom bar and wrong for the 88px desktop rail, where
+it is visually first. Without it a keyboard operator tabs through every roster
+row to change section.
+
+**Failures are announced.** Form errors render only through `FormError`
+(`components/fields.tsx`), which mounts its `role="alert"` region whether or
+not there is a message, so the region is in the accessibility tree before the
+text arrives. Empty, it is taken out of flow — an absolutely positioned child
+is not a flex item, so it costs no `gap` in the forms it sits inside. Progress
+and outcome notices (Calendar, Money) use persistent `role="status"` regions on
+the same principle. CI fails a bare `className="field__error"` outside
+`fields.tsx`.
+
+**Controls whose only boundary is a border clear 3:1** (SC 1.4.11).
+`--sanpo-color-input-border` is Neutral Muted — 5.07:1 on white, 4.73:1 on
+Cream — not Neutral Rule, which is 1.47:1 and 1.37:1 and effectively invisible
+outdoors. `--sanpo-color-border-subtle` keeps Neutral Rule for decorative card
+edges; the two roles are deliberately split. Input borders are `2px`: Chrome
+floors border widths to whole device pixels, so `1.5px` renders as `1px` at
+DPR 1.
+
+**The credential vault reveal panel** is Cream on Indigo (9.03:1) with a ghost
+Copy button (Cream fill, 9.03:1 against the panel) and a Yamabuki focus ring
+(4.71:1, scoped to the panel because the default Asagi ring is 1.70:1 on
+Indigo). The countdown carries no opacity. This is the highest-stakes string
+the product displays — a door, lockbox or alarm code — for 30 seconds,
+outdoors, one-handed; it is never routed through legacy colour aliases again.
+
+**Live numbers have names and do not interrupt.** The Walk Mode timer and
+distance, and the live-walk banner timer, carry `role="timer"`,
+`aria-live="off"` and an `aria-label` that says which is which. Elapsed time is
+excluded from the banner link's accessible name — a 1 s tick was renaming the
+link under the user's focus every second.
+
+**Modal sheets enforce modality.** `Sheet` requires a `title` (a dialog with no
+accessible name cannot be reached by name or rotor) and marks every sibling of
+its ancestor chain `inert` while open, restoring exactly what it set.
+`aria-modal="true"` alone is a request that only assistive technology honours;
+`inert` also removes the background from focus and hit-testing. The backdrop is
+exempt, or it would swallow the click that dismisses the sheet.

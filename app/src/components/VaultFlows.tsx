@@ -5,7 +5,7 @@
 // one audit row server-side (fn_read_credential).
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Button } from "./Button";
-import { Input, Select } from "./fields";
+import { FormError, Input, Select } from "./fields";
 import { Sheet } from "./Sheet";
 import { Spinner } from "./Spinner";
 import { LoadingState, StateField } from "./StateField";
@@ -150,32 +150,33 @@ export function CredentialRow({
       </div>
 
       {secret !== null && (
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "var(--s-2)",
-            background: "var(--pine-950)",
-            color: "var(--teal-live)",
-            borderRadius: "var(--r-md)",
-            padding: "var(--s-3)",
-          }}
-        >
-          <code className="numeral" style={{ fontSize: "var(--fs-20)", flex: 1, wordBreak: "break-all" }}>
-            {secret}
-          </code>
+        // Painted by .vault-reveal, not inline styles: this panel used to
+        // route through the legacy --pine-950 / --teal-live aliases, which
+        // the Sanpo remap resolved to Indigo on Asagi — 1.70:1 for the code
+        // itself, and a Copy button filled with the panel's own Indigo at
+        // 1.00:1. Cream on Indigo is 9.03:1.
+        <div className="vault-reveal">
+          <code className="numeral vault-reveal__code">{secret}</code>
           <Button
-            variant="accent"
+            variant="ghost"
             onClick={() => void navigator.clipboard.writeText(secret)}
           >
             Copy
           </Button>
-          <span className="numeral" style={{ fontSize: "var(--fs-12)", opacity: 0.7 }}>
+          <span className="numeral vault-reveal__countdown" aria-hidden>
             {countdown}s
+          </span>
+          {/* The visible countdown is a glance affordance; this is the same
+              information for a screen reader, announced politely at 10 s and
+              then each of the last five seconds rather than every tick. */}
+          <span className="sr-only" role="status">
+            {countdown === 10 || countdown <= 5
+              ? `Code clears in ${countdown} second${countdown === 1 ? "" : "s"}`
+              : ""}
           </span>
         </div>
       )}
-      {error && <span className="field__error">{error}</span>}
+      <FormError message={error} />
 
       <div style={{ display: "flex", gap: "var(--s-3)" }}>
         <LinkButton onClick={() => setRotateOpen(true)}>Rotate</LinkButton>

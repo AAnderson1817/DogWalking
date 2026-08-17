@@ -1,8 +1,9 @@
 // Route table (spec 06).
 import { lazy, Suspense } from "react";
 import { Route, Routes } from "react-router-dom";
-import { BottomNav } from "@/components/BottomNav";
+import { AppMain } from "@/components/AppMain";
 import { OperatorShell } from "@/components/OperatorShell";
+import { PortalShell } from "@/components/PortalShell";
 import { RequireRole } from "@/components/RequireRole";
 import SignIn from "@/screens/SignIn";
 import Onboard from "@/screens/Onboard";
@@ -36,26 +37,34 @@ function operator(el: React.ReactNode) {
   );
 }
 
-// Walk Mode owns the full viewport — no nav chrome.
+// Walk Mode owns the full viewport — no nav chrome, but still a landmark.
 function operatorBare(el: React.ReactNode) {
-  return <RequireRole role="operator">{el}</RequireRole>;
+  return (
+    <RequireRole role="operator">
+      <AppMain>{el}</AppMain>
+    </RequireRole>
+  );
 }
 
 function portal(el: React.ReactNode) {
   return (
     <RequireRole role="client">
-      {el}
-      <BottomNav persona="client" />
+      <PortalShell>{el}</PortalShell>
     </RequireRole>
   );
+}
+
+// Signed-out routes have no chrome to skip past, but still need the landmark.
+function publicRoute(el: React.ReactNode) {
+  return <AppMain>{el}</AppMain>;
 }
 
 export default function App() {
   return (
     <Routes>
-      <Route path="/signin" element={<SignIn />} />
-      <Route path="/onboard" element={<Onboard />} />
-      <Route path="/claim/:token" element={<ClaimInvite />} />
+      <Route path="/signin" element={publicRoute(<SignIn />)} />
+      <Route path="/onboard" element={publicRoute(<Onboard />)} />
+      <Route path="/claim/:token" element={publicRoute(<ClaimInvite />)} />
 
       <Route path="/" element={operator(<Dashboard />)} />
       <Route path="/calendar" element={operator(<Calendar />)} />
@@ -105,7 +114,7 @@ export default function App() {
         />
       )}
 
-      <Route path="*" element={<NotFound />} />
+      <Route path="*" element={publicRoute(<NotFound />)} />
     </Routes>
   );
 }
