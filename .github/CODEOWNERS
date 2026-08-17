@@ -1,0 +1,29 @@
+# Code owners for Sanpo.
+#
+# CLAUDE.md reserves the money and trust paths for explicit owner sign-off.
+# Until now that rule lived only in prose, which meant it was enforced by
+# whoever happened to remember it. Listing the paths here makes GitHub request
+# the review automatically, and — once branch protection requires owner review
+# on these paths — makes the rule real rather than advisory.
+
+# Default: everything is owned, so nothing lands unreviewed.
+*                           @AAnderson1817
+
+# --- Money and trust paths (CLAUDE.md "ask the owner first") ------------------
+
+# Migrations are append-only and irreversible once applied to a real database.
+/supabase/migrations/       @AAnderson1817
+
+# Credit engine, ledger, Stripe, and the edge functions that move money.
+/supabase/functions/        @AAnderson1817
+/app/src/lib/credits.ts     @AAnderson1817
+
+# The credential vault: door, lockbox and alarm codes for clients' homes.
+/app/src/components/VaultFlows.tsx  @AAnderson1817
+/app/src/screens/AccessVault.tsx    @AAnderson1817
+
+# Deploy and CI. A change here can migrate or expose a live database.
+/.github/workflows/         @AAnderson1817
+
+# The seven non-negotiable invariants and the working agreement itself.
+/CLAUDE.md                  @AAnderson1817

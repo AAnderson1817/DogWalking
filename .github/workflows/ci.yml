@@ -50,6 +50,51 @@ jobs:
           fi
           echo "PASS: no secret literals"
 
+      # The DEV-gated preview routes carry hardcoded demo people and pets.
+      # They are stripped by `import.meta.env.DEV` being statically false in a
+      # production build — but that is a property of the bundler, not of the
+      # source, so it is asserted against the artefact rather than assumed.
+      - name: DEV fixtures absent from the production bundle
+        run: |
+          if grep -rlE "Juniper|Lakeside Loop|Oak Trail|Maple Walk|Mira Chen" app/dist/assets/*.js; then
+            echo "FAIL: DEV preview fixtures reached the production bundle"; exit 1
+          fi
+          echo "PASS: no DEV fixtures in dist"
+
+  # Backend-free: /dev/today renders deterministic fixtures with no Supabase,
+  # so this runs in ~2 minutes against a plain `vite dev` and needs no secrets.
+  # It exists because the suite it belongs to previously ran in NO workflow,
+  # which is how a broken client-booking RPC reached production unnoticed.
+  e2e-today:
+    name: E2E — Today composition
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 (node24)
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install
+        run: npm ci --prefix app
+
+      - name: Install Chromium
+        working-directory: app
+        run: npx playwright install --with-deps chromium
+
+      - name: Today composition (4 viewports)
+        working-directory: app
+        run: npx playwright test --config playwright.config.mjs e2e/indigo-emaki-today.spec.ts
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (node24)
+        if: failure()
+        with:
+          name: playwright-report
+          path: app/playwright-report/
+          retention-days: 7
+
   edge-functions:
     name: Edge functions — deno check + test
     runs-on: ubuntu-latest
@@ -113,10 +158,69 @@ jobs:
             | tee /tmp/mat.out
           grep -q "MATERIALIZER PASS" /tmp/mat.out
 
-      - name: Invariant grep — no direct credit_balance writes (phase 00 gate)
+      # Asserted against the catalogue, not the migration text. The grep this
+      # replaces matched `update +clients +set +credit_balance`, so a newline,
+      # a tab, or a second space between any two words walked straight past it
+      # — and it read the files rather than what Postgres actually installed.
+      # pg_proc holds the real bodies of the real functions after all 18
+      # migrations have run, including any later CREATE OR REPLACE.
+      - name: Invariant 1 — credit_balance written only by fn_ledger_apply
         run: |
-          if grep -RiE "update +clients +set +credit_balance" supabase/migrations \
-               | grep -v "fn_ledger_apply" | grep -vi "credit_balance = credit_balance" | grep -q .; then
-            echo "FAIL: direct credit_balance write outside the ledger trigger"; exit 1
+          psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          do $$
+          declare offenders text;
+          begin
+            select string_agg(p.proname, ', ' order by p.proname) into offenders
+            from pg_proc p
+            join pg_namespace n on n.oid = p.pronamespace
+            where n.nspname = 'public'
+              and p.proname <> 'fn_ledger_apply'
+              and p.prosrc ~* 'update[[:space:]]+clients[[:space:]]+set[^;]*credit_balance';
+            if offenders is not null then
+              raise exception 'INVARIANT 1 FAIL: credit_balance written outside fn_ledger_apply by: %', offenders;
+            end if;
+            raise notice 'INVARIANT 1 PASS: credit_balance writes confined to fn_ledger_apply';
+          end $$;
+          SQL
+
+      # types.ts is generated from the live schema by scripts/gen-types.py. It
+      # is committed, so it silently rots whenever a migration lands without a
+      # regeneration — and a stale Database type makes tsc agree with code that
+      # the database will reject at runtime.
+      - name: Generated types match the schema
+        run: |
+          python3 scripts/gen-types.py
+          if ! git diff --exit-code -- app/src/lib/types.ts; then
+            echo "FAIL: app/src/lib/types.ts is stale — run python3 scripts/gen-types.py and commit"
+            exit 1
           fi
-          echo "PASS: balance writes confined to the ledger trigger"
+          echo "PASS: types.ts matches the migrated schema"
+
+  # CLAUDE.md invariant 6 says migrations are append-only once applied. That
+  # rule has been enforced only by a local PreToolUse hook and by whoever is
+  # paying attention — nothing a reviewer or CI could see. An edit to an
+  # already-applied migration diverges every environment that ran the old one.
+  migrations-append-only:
+    name: Migrations — append-only
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+        with:
+          fetch-depth: 0
+
+      - name: No edits to migrations that already exist on the base branch
+        run: |
+          base='${{ github.event.pull_request.base.sha }}'
+          # Three-dot: compare against the merge base, so unrelated commits
+          # landing on the base branch meanwhile are not blamed on this PR.
+          touched=$(git diff --name-status "$base...HEAD" -- supabase/migrations/ \
+                    | awk '$1 != "A" { print }')
+          if [ -n "$touched" ]; then
+            echo "FAIL: existing migrations modified or deleted (invariant 6):"
+            echo "$touched"
+            echo
+            echo "Migrations are append-only. Add a new numbered migration instead."
+            exit 1
+          fi
+          echo "PASS: migrations are append-only"

@@ -13,6 +13,13 @@ export default defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
+    // Opt-in escape hatch for environments that already ship a Chromium whose
+    // build number does not match this @playwright/test pin (containers with a
+    // preinstalled browser, air-gapped runners). Unset in CI, which downloads
+    // the matching build via `playwright install`.
+    ...(process.env.PLAYWRIGHT_CHROMIUM_PATH
+      ? { launchOptions: { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH } }
+      : {}),
   },
   webServer: process.env.E2E_BASE_URL
     ? undefined
