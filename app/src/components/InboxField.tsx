@@ -62,7 +62,8 @@ export function InboxField({
   }
 
   return (
-    <main className={`inbox-field inbox-field--${mobileView}`} aria-label="Inbox">
+    // A section, not a main element: the landmark is the shell's (AppMain).
+    <section className={`inbox-field inbox-field--${mobileView}`} aria-label="Inbox">
       <section className="inbox-index" aria-label="Conversations">
         <header className="inbox-index__header">
           <div>
@@ -165,6 +166,6 @@ export function InboxField({
           <p className="inbox-thread__empty">Select a conversation.</p>
         )}
       </section>
-    </main>
+    </section>
   );
 }

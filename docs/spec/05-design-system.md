@@ -133,7 +133,14 @@ The Today's Schedule composition is locked and promoted to production:
   card, decorative portrait, or game-style HUD.
 - Schedule entries are quiet divider rows rather than rounded-card stacks.
   Every row states the time window, pet name, route/property, and scheduled
-  duration. Clickable rows are native buttons with complete accessible labels.
+  duration. Rows are links to the client record — where the door codes, pets
+  and property notes are — with complete accessible labels of the form
+  `pet, time, route, state`, since the state is carried visually by colour and
+  a name read out of context must not depend on it. Only the time and identity
+  are inside the link: a current row also carries `END WALK`, and nesting one
+  interactive element in another is invalid and unreachable by keyboard.
+- An empty day offers a way to fill it. "No visits scheduled today" alone is
+  the one state that most needs an action next to it.
 - Generic pet avatars, unattended dog markers, map pins, enclosing circles,
   and badge stacks are excluded from schedule rows. The approved Route icon is
   used unchanged at `20 px` or larger with adjacent visible route text.

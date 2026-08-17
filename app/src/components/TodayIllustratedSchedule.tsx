@@ -15,6 +15,13 @@ export interface TodayIllustratedVisit {
   route: string;
   duration?: string;
   state: TodayVisitState;
+  /**
+   * Where the row goes. Spec 05 requires schedule rows to be links with
+   * complete accessible labels; the operator's real question at 1:58 on a
+   * doorstep is "what is the code for Luna's gate", and the client record is
+   * where the vault, the pets and the property notes live.
+   */
+  href?: string;
 }
 
 export interface TodayIllustratedScheduleProps {
@@ -26,6 +33,9 @@ export interface TodayIllustratedScheduleProps {
   nextVisitLabel: string;
   inbox?: ReactNode;
   currentAction?: ReactNode;
+  /** Shown with the empty state. A day with no visits is the one day that
+      most needs a way to add one. */
+  emptyAction?: ReactNode;
 }
 
 const STATE_LABELS: Record<Exclude<TodayVisitState, "completed" | "current">, string> = {
@@ -33,6 +43,31 @@ const STATE_LABELS: Record<Exclude<TodayVisitState, "completed" | "current">, st
   cancelled: "CANCELLED",
   no_show: "NO SHOW",
 };
+
+const SPOKEN_STATE: Record<TodayVisitState, string> = {
+  completed: "done",
+  current: "underway",
+  upcoming: "up next",
+  cancelled: "cancelled",
+  no_show: "no show",
+};
+
+/**
+ * The tappable part of a schedule row. Falls back to a plain span when the
+ * caller has nowhere to send it, so the composition still renders in the DEV
+ * fixture and in any future read-only context.
+ */
+function VisitLink({ visit, children }: { visit: TodayIllustratedVisit; children: ReactNode }) {
+  const label = `${visit.petName}, ${visit.time}, ${visit.route}, ${SPOKEN_STATE[visit.state]}`;
+  if (!visit.href) {
+    return <span className="today-emaki-visit__link">{children}</span>;
+  }
+  return (
+    <Link className="today-emaki-visit__link" to={visit.href} aria-label={label}>
+      {children}
+    </Link>
+  );
+}
 
 /**
  * The approved Indigo Emaki Today composition. The background is the locked
@@ -48,6 +83,7 @@ export function TodayIllustratedSchedule({
   nextVisitLabel,
   inbox,
   currentAction,
+  emptyAction,
 }: TodayIllustratedScheduleProps) {
   const completed = visits.filter((visit) => visit.state === "completed").length;
   const currentIndex = visits.findIndex((visit) => visit.state === "current");
@@ -63,7 +99,12 @@ export function TodayIllustratedSchedule({
   const clipId = useId().replace(/:/g, "");
 
   return (
-    <main className="today-emaki" data-testid="today-illustrated-schedule">
+    // A div, not a main element. This component predates the AppMain
+    // landmark and carried its own, so once the shell supplied one the Today
+    // screen had two — nested, which is invalid and gives the operator's
+    // flagship screen two "main" landmarks to choose between. The landmark
+    // belongs to the shell; this is the composition inside it.
+    <div className="today-emaki" data-testid="today-illustrated-schedule">
       <img
         src={backgroundSrc}
         alt=""
@@ -117,17 +158,28 @@ export function TodayIllustratedSchedule({
         </div>
 
         {visits.length === 0 ? (
-          <p className="today-emaki__empty">No visits scheduled today.</p>
+          <div className="today-emaki__empty">
+            <p>No visits scheduled today.</p>
+            {emptyAction}
+          </div>
         ) : (
           <ol className="today-emaki-visits" aria-label="Today's visits">
             {visits.map((visit) => (
               <li key={visit.id} className={`today-emaki-visit today-emaki-visit--${visit.state}`}>
                 <span className="today-emaki-visit__bar" aria-hidden="true" />
-                <time className="today-emaki-visit__time">{visit.time}</time>
-                <span className="today-emaki-visit__identity">
-                  <strong>{visit.petName}</strong>
-                  <span>{visit.route}{visit.duration ? ` · ${visit.duration}` : ""}</span>
-                </span>
+                {/* The time and identity are one link, not the whole row: the
+                    current row also carries END WALK, and nesting one
+                    interactive element inside another is invalid and
+                    unreachable by keyboard. The label is complete on its own
+                    because a screen-reader user hearing the link list out of
+                    context gets no help from the surrounding cells. */}
+                <VisitLink visit={visit}>
+                  <time className="today-emaki-visit__time">{visit.time}</time>
+                  <span className="today-emaki-visit__identity">
+                    <strong>{visit.petName}</strong>
+                    <span>{visit.route}{visit.duration ? ` · ${visit.duration}` : ""}</span>
+                  </span>
+                </VisitLink>
                 {visit.state === "completed" ? (
                   <span className="today-emaki-visit__completed">
                     <span className="today-emaki-visit__check" aria-hidden="true">✓</span>
@@ -143,7 +195,7 @@ export function TodayIllustratedSchedule({
           </ol>
         )}
       </section>
-    </main>
+    </div>
   );
 }
 

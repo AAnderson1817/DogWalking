@@ -69,8 +69,12 @@ export default function Dashboard() {
   const [payments, setPayments] = useState<Payments[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setError(null);
+  // `background` refreshes never surface an error. A walker between visits is
+  // regularly on no signal at all, and swapping a screen they are reading for
+  // a retry prompt because one poll timed out is worse than showing data that
+  // is a minute stale — the next tick, or their next action, recovers it.
+  const load = useCallback(async ({ background = false } = {}) => {
+    if (!background) setError(null);
     const today = todayLocal();
     try {
       const [op, todayWalks, allClients, pays] = await Promise.all([
@@ -83,8 +87,9 @@ export default function Dashboard() {
       setWalks(todayWalks);
       setClients(allClients);
       setPayments(pays);
+      setError(null);
     } catch (caught) {
-      setError(loadErrorMessage(caught));
+      if (!background) setError(loadErrorMessage(caught));
     }
   }, []);
 
@@ -92,8 +97,31 @@ export default function Dashboard() {
     void load();
   }, [load]);
 
+  // Nothing on this screen was live: no interval, no refetch. Everything froze
+  // at mount — the elapsed counter ("18 min" an hour in), walk statuses, which
+  // walk is current, the low-credit and failed-payment strips, and the date, so
+  // a PWA left open past midnight showed yesterday's walks. The same counter
+  // ticks correctly in Walk Mode, so the product contradicted itself (M10).
+  //
+  // A 60 s poll rather than a Realtime subscription: minute resolution is what
+  // the screen displays, and the operator's own actions already reload. The
+  // visibility refetch is the one that matters in practice — a phone in a
+  // pocket between visits is backgrounded, where timers are throttled or
+  // suspended entirely.
+  useEffect(() => {
+    const tick = setInterval(() => void load({ background: true }), 60_000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void load({ background: true });
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(tick);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [load]);
+
   if (error) {
-    return <LoadError title="Couldn't load Today" message={error} onRetry={load} />;
+    return <LoadError title="Couldn't load Today" message={error} onRetry={() => load()} />;
   }
   if (walks === null) {
     return (
@@ -120,6 +148,10 @@ export default function Dashboard() {
     route: walk.property?.label || "Route not set",
     duration: walk.status === "in_progress" ? elapsedMinutes(walk.started_at) : undefined,
     state: visitState(walk.status),
+    // The client record: door codes, pets, property notes, contact. This is
+    // what the operator is actually looking for when they tap a row on a
+    // doorstep, and until now Today was a poster with nothing to tap.
+    href: `/clients/${walk.client_id}`,
   }));
 
   const paceLabel = live?.is_overage ? "Over time" : live ? "On time" : "Schedule ready";
@@ -142,6 +174,11 @@ export default function Dashboard() {
         nextVisitLabel={nextVisitLabel}
         inbox={<NotificationBell persona="operator" />}
         currentAction={live ? <TodayCurrentAction walkId={live.id} /> : undefined}
+        emptyAction={
+          <Link className="btn btn--ghost" to="/calendar">
+            Add a walk
+          </Link>
+        }
       />
 
       {(low.length > 0 || failed.length > 0) && (
