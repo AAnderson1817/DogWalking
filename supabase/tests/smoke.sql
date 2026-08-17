@@ -788,6 +788,164 @@ begin
   raise notice 'plan-change intents (0018): OK';
 end $$;
 
+-- ── fn_book_walk (0019) ───────────────────────────────────────────────────
+-- Review B1 / issue #9: 0013 shipped this RPC filtering `service_types ...
+-- and active`, a column that has never existed, so every client self-booking
+-- raised 42703. Nothing here called it, so CI stayed green for the entire
+-- life of the bug. The happy path below IS the regression test: run it
+-- against 0013 and it fails with undefined_column.
+do $$
+declare
+  v_walk uuid;
+  v_today date := (now() at time zone 'America/Chicago')::date;
+  v_before int;
+begin
+  reset session authorization;
+  -- Counted as a delta, not an absolute: an earlier fixture already books
+  -- client A a one-off walk on current_date (the cancellation-cutoff block),
+  -- so any absolute expectation here would be wrong the moment fixtures move.
+  select count(*) into v_before from walks
+   where client_id = '99999999-0000-4000-c000-00000000000a'
+     and schedule_id is null;
+
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000000003","role":"authenticated"}', true);
+  set local session authorization authenticated;
+
+  -- Happy path: client A books their own property, their own pet, their
+  -- operator's service, today.
+  select fn_book_walk(
+    '99999999-0000-4000-d000-00000000000a',  -- property: client A's
+    '99999999-0000-4000-3000-000000000001',  -- service: operator A's
+    v_today,
+    '09:00', '10:00',
+    array['99999999-0000-4000-e000-00000000000a']::uuid[]  -- pet: client A's
+  ) into v_walk;
+
+  if v_walk is null then
+    raise exception 'FAIL: fn_book_walk returned null';
+  end if;
+  if not exists (
+    select 1 from walks
+     where id = v_walk
+       and client_id = '99999999-0000-4000-c000-00000000000a'
+       and operator_id = '99999999-0000-4000-a000-000000000001'
+       and property_id = '99999999-0000-4000-d000-00000000000a'
+       and service_type_id = '99999999-0000-4000-3000-000000000001'
+       and scheduled_date = v_today
+       and status = 'scheduled'
+       and schedule_id is null) then
+    raise exception 'FAIL: booked walk row is wrong or missing';
+  end if;
+  -- One-off bookings carry no schedule, so chk_walks_origin (0013) exempts
+  -- them from origin_date. Pin that, or a future NOT NULL breaks booking.
+  if (select origin_date from walks where id = v_walk) is not null then
+    raise exception 'FAIL: one-off booking should not carry an origin_date';
+  end if;
+  if (select count(*) from walk_pets where walk_id = v_walk) <> 1 then
+    raise exception 'FAIL: booked walk did not get exactly one walk_pets row';
+  end if;
+
+  -- Each rejection asserts the SPECIFIC error, not merely that something
+  -- failed. The file's usual idiom swallows any exception that is not
+  -- prefixed FAIL:, which would have passed happily against the broken 0013
+  -- function — a call that dies of 42703 undefined_column looks identical to
+  -- a call that was correctly refused. Pinning the message is what makes the
+  -- unknown-service case below a real regression test rather than a
+  -- tautology: against 0013 it fails, reporting the phantom column.
+
+  -- Rejection: property belonging to a different client of the same operator.
+  begin
+    perform fn_book_walk(
+      '99999999-0000-4000-d000-0000000000a2',  -- client A2's property
+      '99999999-0000-4000-3000-000000000001', v_today, '09:00', '10:00',
+      array['99999999-0000-4000-e000-00000000000a']::uuid[]);
+    raise exception 'FAIL: booked against another client''s property';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%property does not belong to caller%' then
+      raise exception 'FAIL: foreign property rejected for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- Rejection: pet belonging to a different client.
+  begin
+    perform fn_book_walk(
+      '99999999-0000-4000-d000-00000000000a',
+      '99999999-0000-4000-3000-000000000001', v_today, '09:00', '10:00',
+      array['99999999-0000-4000-e000-0000000000a2']::uuid[]);  -- client A2's pet
+    raise exception 'FAIL: booked with another client''s pet';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%pet does not belong to caller%' then
+      raise exception 'FAIL: foreign pet rejected for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- Rejection: a service id that does not exist. THIS is the branch the
+  -- phantom `active` predicate lived in. Against 0013 the call dies of
+  -- undefined_column rather than reaching the intended raise, so this
+  -- assertion is the negative-path regression test for B1.
+  begin
+    perform fn_book_walk(
+      '99999999-0000-4000-d000-00000000000a',
+      '99999999-0000-4000-3000-0000000000ff', v_today, '09:00', '10:00',
+      array['99999999-0000-4000-e000-00000000000a']::uuid[]);
+    raise exception 'FAIL: booked against an unknown service';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%unknown service%' then
+      raise exception 'FAIL: unknown service rejected for the wrong reason (B1 regression?): %', sqlerrm;
+    end if;
+  end;
+
+  -- Rejection: a date in the past.
+  begin
+    perform fn_book_walk(
+      '99999999-0000-4000-d000-00000000000a',
+      '99999999-0000-4000-3000-000000000001', v_today - 1, '09:00', '10:00',
+      array['99999999-0000-4000-e000-00000000000a']::uuid[]);
+    raise exception 'FAIL: booked a walk in the past';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%date must be today or later%' then
+      raise exception 'FAIL: past date rejected for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- Rejection: no pets.
+  begin
+    perform fn_book_walk(
+      '99999999-0000-4000-d000-00000000000a',
+      '99999999-0000-4000-3000-000000000001', v_today, '09:00', '10:00',
+      array[]::uuid[]);
+    raise exception 'FAIL: booked a walk with no pets';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    -- array_length on a zero-length array returns NULL, which is what the
+    -- function's guard tests — so this also pins that behaviour.
+    if sqlerrm not like '%at least one pet required%' then
+      raise exception 'FAIL: empty pet array rejected for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- Every rejection must leave nothing behind. The foreign-pet case is the
+  -- one that matters: it inserts the walk and only then fails inside the pet
+  -- loop, so this asserts PL/pgSQL's exception-block subtransaction actually
+  -- rolled that insert back. Exactly one new row across all six calls.
+  if (select count(*) from walks
+       where client_id = '99999999-0000-4000-c000-00000000000a'
+         and schedule_id is null) <> v_before + 1 then
+    raise exception 'FAIL: expected exactly one new walk, got % (was %)',
+      (select count(*) from walks
+        where client_id = '99999999-0000-4000-c000-00000000000a'
+          and schedule_id is null), v_before;
+  end if;
+
+  reset session authorization;
+  raise notice 'fn_book_walk (0019): OK';
+end $$;
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;
