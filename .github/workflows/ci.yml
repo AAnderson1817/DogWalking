@@ -85,6 +85,23 @@ jobs:
           fi
           echo "PASS: all form errors render through FormError"
 
+      # The shells supply the one <main> per route (AppMain). Two components
+      # carried their own from before that existed, and TodayIllustratedSchedule's
+      # ended up NESTED inside the shell's — invalid, and two "main" landmarks on
+      # the operator's flagship screen. Landmarks are exactly the thing nobody
+      # notices is wrong, so the rule is checked rather than remembered.
+      - name: Exactly one <main>, owned by AppMain
+        run: |
+          offenders=$(grep -rn '<main[ >]' app/src --include='*.tsx' \
+                        | grep -v 'src/components/AppMain.tsx' \
+                        | grep -v '\.test\.tsx')
+          if [ -n "$offenders" ]; then
+            echo "FAIL: a main element outside AppMain — the shell owns the landmark:"
+            echo "$offenders"
+            exit 1
+          fi
+          echo "PASS: one main landmark, supplied by the shell"
+
   # Backend-free: /dev/today renders deterministic fixtures with no Supabase,
   # so this runs in ~2 minutes against a plain `vite dev` and needs no secrets.
   # It exists because the suite it belongs to previously ran in NO workflow,

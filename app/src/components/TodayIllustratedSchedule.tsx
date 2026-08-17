@@ -63,7 +63,12 @@ export function TodayIllustratedSchedule({
   const clipId = useId().replace(/:/g, "");
 
   return (
-    <main className="today-emaki" data-testid="today-illustrated-schedule">
+    // A div, not a main element. This component predates the AppMain
+    // landmark and carried its own, so once the shell supplied one the Today
+    // screen had two — nested, which is invalid and gives the operator's
+    // flagship screen two "main" landmarks to choose between. The landmark
+    // belongs to the shell; this is the composition inside it.
+    <div className="today-emaki" data-testid="today-illustrated-schedule">
       <img
         src={backgroundSrc}
         alt=""
@@ -143,7 +148,7 @@ export function TodayIllustratedSchedule({
           </ol>
         )}
       </section>
-    </main>
+    </div>
   );
 }
 

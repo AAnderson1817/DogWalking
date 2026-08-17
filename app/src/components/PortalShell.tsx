@@ -1,5 +1,5 @@
 // Client portal chrome. Was assembled inline in App.tsx; extracted so the
-// <main> landmark lives in one place per persona, as it does for the
+// main landmark lives in one place per persona, as it does for the
 // operator.
 import type { ReactNode } from "react";
 import { AppMain } from "./AppMain";
