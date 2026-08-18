@@ -139,10 +139,26 @@ export function walkTime(date: string, windowStart: string, windowEnd: string): 
   return `${day}, ${time12(windowStart)}–${time12(windowEnd)}`;
 }
 
-/** 2140 → "2.1 km"; 640 → "0.6 km"; null-safe for unset distances. */
-export function distanceKm(m: number | null | undefined): string {
+const METRES_PER_MILE = 1609.344;
+
+/**
+ * 2140 → "1.3 mi"; 640 → "0.4 mi"; null-safe for unset distances.
+ *
+ * Review M36. There used to be a `distanceKm` here, used by Walk Mode and by
+ * `ReportCard` — the report the pet owner receives — while `Dashboard`
+ * bypassed the formatter entirely with an inline miles conversion. So a US
+ * operator saw "7.2 mi" on their home screen, tapped into the walk they were
+ * running and saw "2.1 km", and their client got a report in kilometres.
+ *
+ * Miles, not kilometres, because everything else about this product is already
+ * US: the currency is USD and the display timezone is America/Chicago. One
+ * formatter, so the next screen cannot invent a third answer — and `spec 06`
+ * is corrected in the same commit, since it named the metric one and would
+ * otherwise have re-created it.
+ */
+export function distanceMi(m: number | null | undefined): string {
   if (m == null) return "—";
-  return `${(m / 1000).toFixed(1)} km`;
+  return `${(m / METRES_PER_MILE).toFixed(1)} mi`;
 }
 
 /** Elapsed mm:ss (or h:mm:ss past the hour) since an ISO start time. */

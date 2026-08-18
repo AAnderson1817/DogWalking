@@ -16,6 +16,8 @@ import {
 } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "./supabase";
+import { deleteOutboxDatabase } from "./gps-outbox";
+import { clearAllWalkSnapshots } from "./walk-snapshot";
 import { Sheet } from "@/components/Sheet";
 import { FormError, Input } from "@/components/fields";
 import { LoadingState } from "@/components/StateField";
@@ -171,6 +173,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signOut = useCallback(async () => {
     await supabase.auth.signOut();
+    // Review M8. Sign-out used to clear the session and three pieces of React
+    // state and nothing else, so this device kept raw GPS coordinates for
+    // another person's client — plus that walk's notes, care toggles and photo
+    // paths — indefinitely. Worse than it looks: the outbox is constructed
+    // only inside Walk Mode, so after sign-out no drain loop existed to clear
+    // them, and they sat there until the NEXT operator opened Walk Mode, at
+    // which point the batches were POSTed under the new session.
+    //
+    // Same shape as the service-worker cache leak already fixed in qc(1-4),
+    // in the two persistence layers that never got the same treatment.
+    //
+    // Deliberately AFTER the session is gone and deliberately non-throwing:
+    // sign-out must complete even if storage is unavailable. Leaving someone
+    // signed in because a cleanup failed is strictly worse than the leak.
+    await deleteOutboxDatabase();
+    clearAllWalkSnapshots();
     resolvedFor.current = null;
     setRole(null);
     setOperatorId(null);

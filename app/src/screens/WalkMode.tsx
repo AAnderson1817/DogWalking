@@ -36,7 +36,7 @@ import { useOnline } from "@/hooks/useOnline";
 import { useWakeLock } from "@/hooks/useWakeLock";
 import { useWalkChannel } from "@/hooks/useWalkChannel";
 import { GPS_GAP_MS, pathDistanceM } from "@/lib/geo";
-import { distanceKm, elapsed, money, time12 } from "@/lib/format";
+import { distanceMi, elapsed, money, time12 } from "@/lib/format";
 import { compressImage } from "@/lib/image";
 import {
   clearWalkSnapshot,
@@ -124,6 +124,12 @@ function WalkModeInner({ walkId }: { walkId: string }) {
   const channel = useWalkChannel(walkId, "broadcast", auth.operatorId ?? "");
   const pendingPoints = channel.pendingPoints;
   const online = useOnline();
+  // Review M7. "Is anything still waiting?" rather than "does the OS think we
+  // have a network?" — `navigator.onLine` is true on a captive portal and on
+  // one bar with no throughput, which is exactly when batches pile up.
+  const pendingBatches = channel.outboxStatus.pending;
+  const lostPoints = channel.outboxStatus.lostPoints;
+  const synced = online && pendingBatches === 0;
   const sentCount = useRef(0);
 
   useEffect(() => {
@@ -557,19 +563,46 @@ function WalkModeInner({ walkId }: { walkId: string }) {
   return (
     <div className="walkmode" style={{ minHeight: "100dvh", background: "var(--bg)", color: "var(--text)" }}>
       <div className="page" style={{ display: "flex", flexDirection: "column", gap: "var(--s-4)", paddingBottom: "var(--s-8)" }}>
-        <div className={`walk-live-state${online ? "" : " walk-live-state--offline"}`}>
-          <span className={`walk-live-state__label${online ? "" : " walk-live-state__label--offline"}`}>
-            {online ? "CURRENT" : "OFFLINE"}
+        {/* Review M7. The label used to be driven purely by `navigator.onLine`,
+            which is true on a captive portal and on one bar with no
+            throughput — so a walk whose route points were piling up unsent
+            read "CURRENT", identical to one syncing perfectly. `synced` is
+            the honest question: is anything still waiting? */}
+        <div className={`walk-live-state${synced ? "" : " walk-live-state--offline"}`}>
+          <span className={`walk-live-state__label${synced ? "" : " walk-live-state__label--offline"}`}>
+            {synced ? "CURRENT" : online ? "SAVING" : "OFFLINE"}
           </span>
           <span className="walk-live-state__pet">{petNames || "Walking"}</span>
-          {!online && (
+          {!synced && (
             <span className="walk-live-state__detail">
-              {offlineResumed
+              {!online && offlineResumed
                 ? "Walk resumed offline. Route points are saved on this device and will sync when the connection returns."
-                : "Route points are saved on this device and will sync when the connection returns."}
+                : !online
+                  ? "Route points are saved on this device and will sync when the connection returns."
+                  : `${pendingBatches} route update${pendingBatches === 1 ? "" : "s"} still saving. `
+                    + "They are stored on this device until they reach the server."}
             </span>
           )}
         </div>
+
+        {/* The batches the server refused often enough that we stopped
+            trying. Before M7 these were deleted outright — no log, no
+            counter, no flag — so the route quietly lost a stretch and the
+            distance under-reported with nothing anywhere saying so. Now
+            they are kept, counted, and said out loud. */}
+        {lostPoints > 0 && (
+          <StateField
+            compact
+            tone="attention"
+            label="Route incomplete"
+            title={`${lostPoints} location update${lostPoints === 1 ? "" : "s"} could not be saved`}
+            detail={
+              "They stay on this device, but they are not in the walk record — the route "
+              + "and the distance on the report leave that stretch out rather than guessing across it."
+            }
+            role="status"
+          />
+        )}
 
         {/* Both figures were bare spans with no label of any kind, visual or
             accessible — "12:34" and "1.2 km" with nothing saying which is
@@ -590,9 +623,9 @@ function WalkModeInner({ walkId }: { walkId: string }) {
           <span
             className="numeral"
             style={{ fontSize: "var(--fs-32)", color: "var(--sanpo-color-text-link)" }}
-            aria-label={`Distance walked ${distanceKm(distance)}`}
+            aria-label={`Distance walked ${distanceMi(distance)}`}
           >
-            {distanceKm(distance)}
+            {distanceMi(distance)}
           </span>
         </div>
 

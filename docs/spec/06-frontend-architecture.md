@@ -43,7 +43,7 @@ visible product labels use the approved Sanpo language.
 - `types.ts` — `supabase gen types typescript --local > app/src/lib/types.ts` after every migration phase; domain aliases exported.
 - `api.ts` — typed wrappers for all reads/writes and edge invocations (`supabase.functions.invoke`). All data access flows through here; screens never call `supabase.from` directly.
 - `credits.ts` — client-side helpers: effective walk cost, low-credit predicate, ledger formatting.
-- `format.ts` — `money(cents)`, `walkTime(date, window)`, `dateLocal(ts)`, `timeLocal(ts)`, `time12(t)`, `distanceKm(m)`, `elapsed(start)`. All display times America/Chicago (US Central), 12-hour.
+- `format.ts` — `money(cents)`, `walkTime(date, window)`, `dateLocal(ts)`, `timeLocal(ts)`, `time12(t)`, `distanceMi(m)`, `elapsed(start)`. All display times America/Chicago (US Central), 12-hour; distance is **miles**, through this formatter and never an inline conversion — Today used to do its own and disagreed with the client's report (review M36).
 - `auth-context.tsx` — session + resolved persona: `{ session, role: 'operator'|'client'|null, operatorId, clientId, reauth() }`. Role resolution on session: `operators` row by uid, else `clients` by `auth_user_id`.
 
 ## hooks/
@@ -172,6 +172,60 @@ un-recorded stretch: H7's defect, rebuilt by the fix for M28. The mark is set
 only if the ended run had produced a fix (otherwise the trail opens with a
 break) and is cleared as soon as it is used (otherwise every later point is a
 new subpath and the rest of the walk's distance disappears).
+
+### The outbox never destroys route data for being offline
+
+`attempts` used to increment on ANY failed send while `navigator.onLine` was
+true. `onLine` is true on a captive portal, on one bar with no throughput, and
+on hotel wifi that resolves DNS and nothing else — so twelve attempts of
+exponential backoff, about nine minutes, silently deleted a batch of route
+points with no log, no counter and no flag, while the screen said the walk was
+recording (review M7). Because `drainOnce` stops after the first failure,
+batches shed one at a time and the route stayed plausibly continuous rather
+than obviously broken.
+
+Three rules now:
+
+1. **A transport failure does not count.** `isTransientSendError` separates "the
+   request never reached a server" from "a server answered and refused". Only
+   the second counts toward `maxAttempts`, whose purpose is to identify a batch
+   the server will never take. Backoff still grows on both — the delay should
+   respond to a bad network; the give-up counter must not.
+2. **A batch given up on is marked, not deleted.** `dead: true` plus a
+   `deadReason`. These are real observations that never reached the database,
+   and destroying them removes the only remaining evidence that the route has a
+   hole in it. Walk Mode surfaces the count: the route and the distance leave
+   that stretch out rather than guessing across it, and say so.
+3. **Order comes from the fixes, not from the store.** `makeIdbOutboxStore`
+   keys on a random uuid, so `getAll()` returns rows in arbitrary order —
+   which a `Map`-backed test fake hides completely. Batches drain, and
+   `pendingFor` returns points, ordered by the fix timestamps themselves.
+   Otherwise a mid-walk resume with several queued batches draws a scrambled
+   polyline and inflates `distance_m`.
+
+The live indicator asks "is anything still waiting?", not "does the OS think we
+have a network?" — `CURRENT` only when online with an empty queue, `SAVING`
+when batches are pending, `OFFLINE` otherwise.
+
+### Sign-out clears this device
+
+`signOut` used to clear the session and three pieces of React state. The outbox
+database and every `pawtrail:walk:*` snapshot survived it, so a shared device
+kept the previous operator's raw GPS coordinates, walk notes, care toggles and
+photo paths indefinitely (review M8). Worse: the outbox is constructed only
+inside Walk Mode, so no drain loop existed to clear them — they sat there until
+the *next* operator opened Walk Mode, at which point they were POSTed under the
+new session.
+
+`signOut` now deletes both, after the session is gone and without throwing:
+leaving someone signed in because a cleanup failed is worse than the leak. The
+second half is `owner` on the outbox — a batch belonging to a different
+operator is marked dead rather than sent, because RLS refusing it is a *server
+answer*, so under rule 1 above it would otherwise count as an attempt and the
+previous operator's route would be destroyed by the next operator merely
+opening the app. An unresolved operator id disables the check; treating "not
+yet known" as "not yours" would destroy the operator's own data on every cold
+start.
 
 ### Today shows unfinished walks regardless of their date
 

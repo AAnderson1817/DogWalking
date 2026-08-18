@@ -3,7 +3,7 @@ import {
   businessWallClockToMs,
   dateLocal,
   dayGreeting,
-  distanceKm,
+  distanceMi,
   elapsed,
   money,
   time12,
@@ -106,15 +106,21 @@ describe("businessWallClockToMs", () => {
   });
 });
 
-describe("distanceKm", () => {
+/**
+ * Review M36. One formatter, in miles. Today used to convert inline and the
+ * client's report used a metric one, so the same walk read "7.2 mi" on the
+ * operator's home screen and "2.1 km" on the report the owner received.
+ */
+describe("distanceMi", () => {
   it("rounds to one decimal", () => {
-    expect(distanceKm(2140)).toBe("2.1 km");
-    expect(distanceKm(640)).toBe("0.6 km");
-    expect(distanceKm(0)).toBe("0.0 km");
+    expect(distanceMi(1609.344)).toBe("1.0 mi");
+    expect(distanceMi(2140)).toBe("1.3 mi");
+    expect(distanceMi(640)).toBe("0.4 mi");
+    expect(distanceMi(0)).toBe("0.0 mi");
   });
   it("dashes unset distances", () => {
-    expect(distanceKm(null)).toBe("—");
-    expect(distanceKm(undefined)).toBe("—");
+    expect(distanceMi(null)).toBe("—");
+    expect(distanceMi(undefined)).toBe("—");
   });
 });
 
