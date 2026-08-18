@@ -277,8 +277,20 @@ jobs:
         run: deno check supabase/functions/*/index.ts
 
       - name: Tests
-        # ./ prefix required: deno skips _-prefixed paths without it
-        run: deno test ./supabase/functions/_tests/
+        # ./ prefix required: deno skips _-prefixed paths without it.
+        #
+        # --allow-read is scoped to the migrations directory and nothing else.
+        # payment_status_test.ts parses the live definition of two partial
+        # unique indexes out of the SQL, because asserting a literal status
+        # list would only restate the code it is checking. Nothing else in the
+        # suite touches the filesystem, and a test that starts needing more
+        # than this should have to say so here.
+        #
+        # This string must stay identical to the one in CLAUDE.md. It was
+        # `deno test` bare while the documented local command was `deno test
+        # -A`, so a test could pass locally on a permission CI does not grant
+        # — which is exactly how the above shipped red.
+        run: deno test --allow-read=supabase/migrations ./supabase/functions/_tests/
 
       - name: No secret logging grep (phase 01 gate)
         run: |
