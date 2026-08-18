@@ -97,9 +97,24 @@ jobs:
       - name: Push migrations
         run: supabase db push
 
+  # Runs AFTER sync-secrets, never alongside it. Both jobs used to declare
+  # `needs: migrate`, so on the one run that matters most — the first deploy of
+  # a project, which the runbook tells you to do with sync_secrets ticked —
+  # they started together and raced. A function that wins that race is live
+  # without VAULT_MASTER_KEY, and the vault is the part of this system where
+  # "live but misconfigured" is worst: it fails on a real door code, in the
+  # dark, at a client's front door (review B3).
+  #
+  # The explicit `if` is required, not decoration. Adding `sync-secrets` to
+  # `needs` would otherwise skip this job on every ordinary push, because
+  # sync-secrets is opt-in and a skipped dependency skips its dependents by
+  # default. Overriding `if` drops that default entirely, which is why
+  # migrate's success is re-asserted here by hand: 'skipped' and 'success' both
+  # proceed, only 'failure' stops us.
   deploy-functions:
     name: Deploy edge functions
-    needs: migrate
+    needs: [migrate, sync-secrets]
+    if: ${{ !cancelled() && needs.migrate.result == 'success' && needs.sync-secrets.result != 'failure' }}
     runs-on: ubuntu-latest
     environment: staging
     env:
@@ -133,8 +148,15 @@ jobs:
           PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
           SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
+          # A warning here and a hard failure in deploy-production.yml, on
+          # purpose. This step's first real run (5193e69) found the secret
+          # unset and passed, verifying nothing — so on staging it is currently
+          # decoration, and issue #31 tracks setting the secret. Staging stays
+          # non-fatal because blocking every deploy on a secret only the owner
+          # can add would be worse than the gap; production does not get that
+          # latitude, because there the gap reaches a real door code.
           if [ -z "$SERVICE_KEY" ]; then
-            echo "::warning title=Vault key not verified::SUPABASE_SERVICE_ROLE_KEY is not set for this environment, so the deployed vault key was not checked against the canary. See docs/dev/vault-key-rotation.md."
+            echo "::warning title=Vault key NOT verified::SUPABASE_SERVICE_ROLE_KEY is not set for the staging environment, so the deployed vault key was not checked against the canary and this deploy proves nothing about it. Add it under Settings -> Environments -> staging (Supabase dashboard -> Settings -> API -> service_role). See docs/dev/vault-key-rotation.md and issue #31."
             exit 0
           fi
           body=$(curl -sS --fail-with-body -X POST \
@@ -148,6 +170,33 @@ jobs:
             }
           # No secret is printed: the response carries a key id and counts only.
           echo "$body"
+
+  # Guards the job above against its own `if`. A skipped job does not fail its
+  # workflow, so an expression mistake there would produce a run that reports
+  # success while deploying no functions at all — the same green-but-empty
+  # failure this file is elsewhere trying to remove. Assert the outcome instead
+  # of trusting the expression that produces it.
+  assert-functions-deployed:
+    name: Functions actually deployed
+    needs: [migrate, deploy-functions]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: deploy-functions must have run, not merely not-failed
+        env:
+          MIGRATE: ${{ needs.migrate.result }}
+          FUNCTIONS: ${{ needs.deploy-functions.result }}
+        run: |
+          echo "migrate=$MIGRATE deploy-functions=$FUNCTIONS"
+          if [ "$MIGRATE" != "success" ]; then
+            echo "migrations did not succeed — that failure is reported by its own job"
+            exit 0
+          fi
+          if [ "$FUNCTIONS" != "success" ]; then
+            echo "::error title=No functions were deployed::migrate succeeded but deploy-functions ended '$FUNCTIONS'. A skipped job does not fail a workflow, so without this check the run would have reported success having deployed nothing."
+            exit 1
+          fi
+          echo "ok"
 
   sync-secrets:
     name: Sync edge secrets (opt-in)

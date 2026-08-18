@@ -19,6 +19,7 @@ dashboards) — no local tooling required. Do the steps in order; ~30–45 min.
    | `SUPABASE_ACCESS_TOKEN` | supabase.com → Account → Access Tokens |
    | `SUPABASE_PROJECT_REF` | project Settings → General (after step 2) |
    | `SUPABASE_DB_PASSWORD` | chosen when creating the project |
+   | `SUPABASE_SERVICE_ROLE_KEY` | project Settings → API → `service_role`. Without it the deploy's `Verify the vault key opens this project` step warns and passes, so nothing confirms `VAULT_MASTER_KEY` can actually read this project's credentials (`docs/dev/vault-key-rotation.md`). |
    | `STRIPE_SECRET_KEY` | Stripe → Developers → API keys (TEST mode `sk_test_…`) |
    | `STRIPE_WEBHOOK_SECRET` | step 4 below (`whsec_…`) |
    | `VAULT_MASTER_KEY` | step 3 below |

@@ -76,6 +76,7 @@ Staging stays exactly as it is — it remains your test bed. Production is a
    | `SUPABASE_ACCESS_TOKEN` | same personal token as staging (account-level) |
    | `SUPABASE_PROJECT_REF` | the **prod** project ref (step 2) |
    | `SUPABASE_DB_PASSWORD` | the **prod** DB password |
+   | `SUPABASE_SERVICE_ROLE_KEY` | the **prod** service_role key (Settings → API). **Required** — the production deploy refuses to run without it, because it is the only way to confirm `VAULT_MASTER_KEY` actually opens this project's door codes. |
    | `STRIPE_SECRET_KEY` | **live** key `sk_live_…` (step 4) |
    | `STRIPE_WEBHOOK_SECRET` | **live** `whsec_…` (step 4) |
    | `VAULT_MASTER_KEY` | the fresh key from step 2 |
@@ -198,7 +199,13 @@ Run the whole loop once as a real customer before inviting anyone:
 ## 10. Ongoing operations
 
 - **Backups**: Supabase Pro does daily backups; check Settings → Backups
-  shows them running after 24 h.
+  shows them running after 24 h. Daily is a **24-hour RPO on the money
+  tables** — a bad write at 4pm costs a full day of walk debits, cycle grants
+  and overage charges, reconcilable against Stripe only by hand. Storage
+  objects are not covered at any tier. `docs/dev/disaster-recovery.md` has
+  what to do when the database is wrong, what each tier actually protects,
+  and the rehearsal that turns the recovery estimates into measurements.
+  Read it before the first paying client, not after.
 - **Money watch**: Stripe → Payments and the in-app Billing Console are
   your two views of the same truth; the `payments` table reconciles them.
 - **Deploys**: frontend ships on every green main push (Vercel); the
