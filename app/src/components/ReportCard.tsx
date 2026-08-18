@@ -1,7 +1,7 @@
 // Walk report card (spec 05): photo grid, route map, potty/fed facts, notes.
 import { Card } from "./Card";
 import { MapView, type MapPoint } from "./MapView";
-import { distanceKm } from "@/lib/format";
+import { distanceMi } from "@/lib/format";
 
 export interface ReportCardData {
   photoUrls: string[];
@@ -46,7 +46,7 @@ export function ReportCard({ report }: { report: ReportCardData }) {
 
       <div className="report-card__facts">
         <span className="report-fact numeral" style={{ fontWeight: 600, color: "var(--text)" }}>
-          {distanceKm(report.distanceM)}
+          {distanceMi(report.distanceM)}
         </span>
         <Fact label="Pee" value={report.pottyPee} />
         <Fact label="Poo" value={report.pottyPoo} />

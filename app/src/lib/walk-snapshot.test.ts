@@ -16,6 +16,7 @@ import {
   resumeNotes,
   saveWalkSnapshot,
   shouldPersistProgress,
+  walkSnapshotKeys,
   type SnapshotStore,
   type WalkSnapshot,
 } from "./walk-snapshot";
@@ -179,5 +180,55 @@ describe("resumeNotes", () => {
   it("returns empty rather than undefined when neither has anything", () => {
     expect(resumeNotes("", null)).toBe("");
     expect(resumeNotes("", undefined)).toBe("");
+  });
+});
+
+/**
+ * Review M8. Sign-out cleared the session and three pieces of React state and
+ * nothing else, so the previous operator's walk notes, care toggles and photo
+ * paths stayed on a shared device — beside the raw GPS coordinates in the
+ * outbox.
+ */
+describe("walkSnapshotKeys", () => {
+  /** Minimal Storage-shaped fake: only `length` and `key(i)` are read. */
+  function fakeStorage(keys: string[]) {
+    return { length: keys.length, key: (i: number) => keys[i] ?? null };
+  }
+
+  it("finds every walk snapshot", () => {
+    const keys = walkSnapshotKeys(
+      fakeStorage(["pawtrail:walk:a", "pawtrail:walk:b", "pawtrail:walk:c"]),
+    );
+    expect(keys).toEqual(["pawtrail:walk:a", "pawtrail:walk:b", "pawtrail:walk:c"]);
+  });
+
+  it("leaves everything else alone", () => {
+    // Supabase keeps the session under `sb-*`, and clearing storage wholesale
+    // would sign the user out of a tab that is not signing out.
+    const keys = walkSnapshotKeys(
+      fakeStorage(["sb-abc-auth-token", "pawtrail:walk:a", "theme", "pawtrail:other"]),
+    );
+    expect(keys).toEqual(["pawtrail:walk:a"]);
+  });
+
+  it("collects before deleting, so no key is skipped", () => {
+    // The bug this shape avoids: removing inside an index-based `key(i)` loop
+    // shifts the remaining entries, so every second match is stepped over. The
+    // function returns a list precisely so the caller cannot make that mistake.
+    const live = ["pawtrail:walk:a", "pawtrail:walk:b", "pawtrail:walk:c", "pawtrail:walk:d"];
+    const store = {
+      get length() {
+        return live.length;
+      },
+      key: (i: number) => live[i] ?? null,
+    };
+    const found = walkSnapshotKeys(store);
+    for (const k of found) live.splice(live.indexOf(k), 1);
+    expect(found).toHaveLength(4);
+    expect(live).toEqual([]);
+  });
+
+  it("finds nothing in empty storage", () => {
+    expect(walkSnapshotKeys(fakeStorage([]))).toEqual([]);
   });
 });

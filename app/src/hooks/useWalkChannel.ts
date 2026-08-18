@@ -29,6 +29,14 @@ function sendBatch(batch: OutboxBatch): Promise<void> {
   );
 }
 
+/** What the outbox is holding for this walk, for the screen to say out loud. */
+export interface OutboxStatus {
+  /** Batches still waiting to be sent. */
+  pending: number;
+  /** Points the server refused often enough that we stopped trying. */
+  lostPoints: number;
+}
+
 export interface WalkChannelBroadcast {
   mode: "broadcast";
   /** Broadcast a point to live subscribers and enqueue its DB insert. */
@@ -38,6 +46,13 @@ export interface WalkChannelBroadcast {
   end: () => Promise<void>;
   /** Points for this walk still queued in the outbox (for resume seeding). */
   pendingPoints: () => Promise<GeoPoint[]>;
+  /**
+   * Live outbox depth and lost-point count (review M7). Before this the
+   * banner was driven purely by `navigator.onLine`, so a walk whose batches
+   * were piling up — or being given up on — looked identical to one syncing
+   * perfectly.
+   */
+  outboxStatus: OutboxStatus;
 }
 
 export interface WalkChannelSubscribe {
@@ -57,11 +72,23 @@ export function useWalkChannel(
   const channelRef = useRef<RealtimeChannel | null>(null);
   const [livePoints, setLivePoints] = useState<GeoPoint[]>([]);
   const [ended, setEnded] = useState(false);
+  const [outboxStatus, setOutboxStatus] = useState<OutboxStatus>({ pending: 0, lostPoints: 0 });
 
   // Phase 08: flushes land in a durable IndexedDB outbox that drains with
   // backoff and backfills after reloads/reconnects.
+  // `operatorId` arrives asynchronously (role resolution), and the outbox
+  // deliberately does not rebuild when it does — a rebuilt outbox drops its
+  // backoff timer. So ownership is read through a ref at drain time.
+  const ownerRef = useRef<string>(operatorId ?? "");
+  ownerRef.current = operatorId ?? "";
+
   const outbox = useMemo(
-    () => (mode === "broadcast" ? new GpsOutbox(makeIdbOutboxStore(), sendBatch) : null),
+    () =>
+      mode === "broadcast"
+        ? new GpsOutbox(makeIdbOutboxStore(), sendBatch, {
+            owner: () => ownerRef.current || null,
+          })
+        : null,
     [mode],
   );
 
@@ -83,6 +110,28 @@ export function useWalkChannel(
       outbox.dispose();
     };
   }, [outbox]);
+
+  // Poll the outbox rather than have it push: a drain can also be triggered by
+  // its own backoff timer, by the `online` event, or by another tab, so a
+  // callback on enqueue would miss most of the transitions worth showing.
+  useEffect(() => {
+    if (!outbox) return;
+    let live = true;
+    const read = async () => {
+      const [pending, dead] = await Promise.all([outbox.pending(), outbox.deadFor(walkId)]);
+      if (!live) return;
+      setOutboxStatus({
+        pending,
+        lostPoints: dead.reduce((n, b) => n + b.points.length, 0),
+      });
+    };
+    void read();
+    const t = setInterval(() => void read(), 5_000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [outbox, walkId]);
 
   useEffect(() => {
     // `private: true` is what makes Supabase apply authorization at all —
@@ -134,7 +183,7 @@ export function useWalkChannel(
   );
 
   if (mode === "broadcast") {
-    return { mode, sendPoint, end, pendingPoints };
+    return { mode, sendPoint, end, pendingPoints, outboxStatus };
   }
   return { mode, livePoints, ended };
 }

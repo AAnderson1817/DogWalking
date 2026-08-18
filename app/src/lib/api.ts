@@ -903,3 +903,19 @@ export function withinCancellationWindow(
   const start = businessWallClockToMs(scheduledDate, windowStart);
   return nowMs <= start - cutoffHours * 3600_000;
 }
+
+/**
+ * PostgREST's "no rows returned" from a `.single()` — the only error that
+ * genuinely means the record does not exist (review M39).
+ *
+ * Everything else a loader can throw — a dropped connection, an expired JWT,
+ * a 5xx — means "we could not find out", and telling an operator standing
+ * outside a client's door that the client does not exist is both wrong and
+ * unrecoverable, because a not-found screen offers no retry.
+ */
+export function isNotFound(err: unknown): boolean {
+  if (typeof err === "object" && err !== null && "code" in err) {
+    return (err as { code?: unknown }).code === "PGRST116";
+  }
+  return err instanceof Error && /PGRST116/.test(err.message);
+}

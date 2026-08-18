@@ -22,7 +22,7 @@ import {
   type WalkDetailed,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { dateLocal, money, time12 } from "@/lib/format";
+import { dateLocal, distanceMi, money, time12 } from "@/lib/format";
 import {
   failedPayments,
   liveWalk,
@@ -141,7 +141,9 @@ export default function Dashboard() {
   const failed = failedPayments(payments).slice(0, 5) as Payments[];
   const clientName = (id: string) => clients.find((client) => client.id === id)?.full_name ?? "";
   const completedDistance = ordered.reduce((total, walk) => total + (walk.distance_m ?? 0), 0);
-  const distanceLabel = completedDistance > 0 ? `${(completedDistance / 1609.344).toFixed(1)} mi` : undefined;
+  // Through the shared formatter, not an inline conversion: the inline one is
+  // how Today and the client's report came to disagree about units (M36).
+  const distanceLabel = completedDistance > 0 ? distanceMi(completedDistance) : undefined;
   const currentIndex = live ? ordered.findIndex((walk) => walk.id === live.id) : -1;
   const next = ordered.slice(currentIndex + 1).find((walk) => walk.status === "scheduled");
 

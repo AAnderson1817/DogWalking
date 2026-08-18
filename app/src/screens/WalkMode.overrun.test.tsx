@@ -31,6 +31,9 @@ vi.mock("@/hooks/useWalkChannel", () => ({
     sendPoint: vi.fn(),
     pendingPoints: async () => [],
     end: vi.fn(),
+    // Everything synced, so the outbox banners stay out of the way of what
+    // this file is testing.
+    outboxStatus: { pending: 0, lostPoints: 0 },
   }),
 }));
 vi.mock("@/lib/auth-context", () => ({

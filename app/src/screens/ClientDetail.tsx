@@ -7,6 +7,7 @@ import { Card } from "@/components/Card";
 import { CreditMeter } from "@/components/CreditMeter";
 import { EmptyState } from "@/components/EmptyState";
 import { FormError, Input, Select, Textarea } from "@/components/fields";
+import { LoadError, loadErrorMessage } from "@/components/LoadError";
 import { Sheet } from "@/components/Sheet";
 import { Spinner } from "@/components/Spinner";
 import { LoadingState, StateField } from "@/components/StateField";
@@ -24,6 +25,7 @@ import {
   createProperty,
   getClient,
   getMyOperator,
+  isNotFound,
   listCredentials,
   listLedger,
   listPets,
@@ -53,6 +55,10 @@ export default function ClientDetail() {
   const [operator, setOperator] = useState<Operators | null>(null);
   const [tab, setTab] = useState<Tab>("pets");
   const [error, setError] = useState<string | null>(null);
+  // Distinguished from `error` on purpose: "this client does not exist" and
+  // "we could not reach the server" need different screens, and conflating
+  // them is the whole of review M39.
+  const [missing, setMissing] = useState(false);
 
   const reload = useCallback(async () => {
     if (!id) return;
@@ -60,8 +66,17 @@ export default function ClientDetail() {
       const [c, op] = await Promise.all([getClient(id), getMyOperator()]);
       setClient(c);
       setOperator(op);
+      setError(null);
+      setMissing(false);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "failed to load client");
+      // Review M39. This screen is the destination of the Clients tab, and it
+      // used to render "Client not found" for EVERY failure with the raw error
+      // as the hint and no retry — so an operator on a weak connection outside
+      // a client's door was told the client did not exist, under a string like
+      // "JWT expired". PGRST116 is PostgREST's "no rows for a .single()",
+      // which is the only failure that actually means not found.
+      setMissing(isNotFound(e));
+      setError(loadErrorMessage(e));
     }
   }, [id]);
 
@@ -69,14 +84,21 @@ export default function ClientDetail() {
     void reload();
   }, [reload]);
 
-  if (error) {
+  if (error && missing) {
     return (
       <div className="page">
         <Card>
-          <EmptyState title="Client not found" hint={error} action={<Button variant="ghost" onClick={() => navigate("/roster")}>Back to clients</Button>} />
+          <EmptyState
+            title="Client not found"
+            hint="This client may have been removed."
+            action={<Button variant="ghost" onClick={() => navigate("/roster")}>Back to clients</Button>}
+          />
         </Card>
       </div>
     );
+  }
+  if (error) {
+    return <LoadError title="Couldn't load this client" message={error} onRetry={() => reload()} />;
   }
   if (!client) {
     return (

@@ -190,6 +190,42 @@ export function shouldPersistProgress(s: {
   return s.hydrated && s.status === "in_progress" && !s.completed;
 }
 
+/** The keys this module owns, for a caller that wants to sweep them. */
+export const SNAPSHOT_KEY_PREFIX = "pawtrail:walk:";
+
+/**
+ * Every walk snapshot key currently in storage (review M8).
+ *
+ * Pure and separately testable because the sweep is the part that can be
+ * subtly wrong: removing while iterating an index-based `key(i)` skips
+ * entries, so the keys are collected first and deleted afterwards.
+ */
+export function walkSnapshotKeys(store: Pick<Storage, "length" | "key">): string[] {
+  const keys: string[] = [];
+  for (let i = 0; i < store.length; i += 1) {
+    const k = store.key(i);
+    if (k?.startsWith(SNAPSHOT_KEY_PREFIX)) keys.push(k);
+  }
+  return keys;
+}
+
+/**
+ * Remove every walk snapshot from this device.
+ *
+ * Called on sign-out. A snapshot carries the client's notes, the care toggles
+ * and the photo paths for a walk — the previous operator's client, on a device
+ * the next one is about to use.
+ */
+export function clearAllWalkSnapshots(): void {
+  try {
+    const store = globalThis.localStorage;
+    if (!store) return;
+    for (const key of walkSnapshotKeys(store)) store.removeItem(key);
+  } catch {
+    // Private mode / disabled storage: there is nothing persisted to clear.
+  }
+}
+
 /** A fetch/network failure (offline) vs. a real 4xx/5xx from the server. */
 export function isNetworkError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? "");
