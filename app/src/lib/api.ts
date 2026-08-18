@@ -325,13 +325,56 @@ interface Envelope<T> {
   error?: { code: string; message: string };
 }
 
-async function invokeEdge<T>(name: string, body: Record<string, unknown>): Promise<T> {
-  const { data, error } = await supabase.functions.invoke<Envelope<T>>(name, { body });
-  if (error) throw new Error(error.message);
+/**
+ * Unwraps one edge-function result. Pure and exported so it can be tested
+ * without a client: the interesting behaviour is entirely in the error path,
+ * and that path is what was broken.
+ *
+ * @supabase/functions-js throws FunctionsHttpError on ANY non-2xx
+ * (FunctionsClient.js:268-269) and its catch returns `{ data: null, error,
+ * response }` (:292-296). So on every error status `data` is null, the branch
+ * that reads `data.error.message` is unreachable, and the message the user saw
+ * was the SDK's fixed string — "Edge Function returned a non-2xx status code"
+ * (types.js:73-76) — for all nine edge calls. An operator whose walk failed to
+ * bill was told that, instead of why.
+ *
+ * The envelope is recoverable because `invoke` also returns the raw Response.
+ * Note the shape: the detail is CAPTURED inside the try and thrown OUTSIDE it.
+ * Throwing inside would be swallowed by the same catch, which is exactly the
+ * no-op this replaces — it reads as "throw the good message, else fall back"
+ * and does the opposite.
+ */
+export async function unwrapEdgeResult<T>(
+  name: string,
+  result: {
+    data?: Envelope<T> | null;
+    error?: { message: string } | null;
+    response?: { json: () => Promise<unknown> } | null;
+  },
+): Promise<T> {
+  const { data, error, response } = result;
+  if (error) {
+    let detail: string | undefined;
+    if (response) {
+      try {
+        const envelope = (await response.json()) as Envelope<T> | null;
+        const message = envelope?.error?.message;
+        if (typeof message === "string" && message.trim() !== "") detail = message;
+      } catch {
+        // No body, or not JSON. Fall back to the SDK's message rather than
+        // masking the failure with a parse error.
+      }
+    }
+    throw new Error(detail ?? error.message);
+  }
   if (!data?.ok || data.data === undefined) {
     throw new Error(data?.error?.message ?? `${name} failed`);
   }
   return data.data;
+}
+
+async function invokeEdge<T>(name: string, body: Record<string, unknown>): Promise<T> {
+  return unwrapEdgeResult<T>(name, await supabase.functions.invoke<Envelope<T>>(name, { body }));
 }
 
 export interface CompleteWalkResult {
