@@ -45,9 +45,45 @@ function stampServiceWorker(): Plugin {
   };
 }
 
+/**
+ * Emit `dist/version.json` naming the commit this bundle was built from.
+ *
+ * Two jobs. The deploy workflows poll it to confirm the frontend they just
+ * released is the one actually being served — pushing a git ref that Vercel
+ * builds is otherwise fire-and-forget, and a deploy step that cannot observe
+ * its own outcome is the green-but-empty failure this repository keeps finding
+ * (review H16). And it answers "which build is this user on?", which nothing
+ * could before.
+ *
+ * The SHA comes from the builder: Vercel sets VERCEL_GIT_COMMIT_SHA, GitHub
+ * Actions sets GITHUB_SHA. A local build says "dev" rather than guessing —
+ * shelling out to git would make the file differ between a clean checkout and
+ * a dirty tree, and a deploy check has to compare against something exact.
+ */
+function stampVersion(): Plugin {
+  return {
+    name: "sanpo-version-stamp",
+    apply: "build",
+    closeBundle() {
+      const commit = process.env.VERCEL_GIT_COMMIT_SHA
+        ?? process.env.GITHUB_SHA
+        ?? "dev";
+      const out = fileURLToPath(new URL("./dist/version.json", import.meta.url));
+      try {
+        writeFileSync(
+          out,
+          JSON.stringify({ commit, built_at: new Date().toISOString() }) + "\n",
+        );
+      } catch {
+        // no dist yet — nothing to stamp
+      }
+    },
+  };
+}
+
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), stampServiceWorker()],
+  plugins: [react(), stampServiceWorker(), stampVersion()],
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),

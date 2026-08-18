@@ -155,6 +155,23 @@ at once.
 4. Deploy → copy the URL → update the `APP_BASE_URL` GitHub secret and the
    Supabase Auth Site URL → re-run the deploy workflow with sync secrets
    (checkout/billing-portal redirects and magic links depend on it).
+5. Settings → Git: set the production branch to **`release/staging`** — not
+   `main`.
+
+   Staging gets the same gate as production, and not only for symmetry. This
+   runbook's posture is that every future change follows the path it followed
+   today: main → CI → staging deploy → staging smoke → then production. If
+   staging's frontend deploys straight off a push while its database waits for
+   the workflow, staging never rehearses the ordering production uses — and
+   rehearsal is the entire point of staging.
+
+   `release/staging` is advanced only by the `frontend` job in
+   `deploy-staging.yml`, after that commit's migrations and edge functions have
+   deployed. Until you change this field the staging frontend keeps deploying
+   on push, and the workflow's last step will say so as a **warning** rather
+   than failing the deploy (the same staging-warns / production-refuses split
+   the vault-key check uses, for the same reason: a dashboard field only you
+   can set should not turn every staging deploy red).
 
 ## 7. First-run verification (in the deployed app)
 

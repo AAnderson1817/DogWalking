@@ -192,29 +192,106 @@ jobs:
           # No secret is printed: the response carries a key id and counts only.
           echo "$body"
 
-  # Guards the job above against its own `if`. A skipped job does not fail its
+  # ── The frontend, LAST ────────────────────────────────────────────────────
+  # Staging gets the same ordering as production, and for a reason beyond
+  # symmetry: the runbook's whole posture is "every future change follows the
+  # path it followed today — main -> CI -> staging deploy -> staging smoke ->
+  # then production". If staging's frontend deploys straight off a push while
+  # its database waits for this workflow, then staging never rehearses the
+  # ordering production uses, and the rehearsal is the point of staging.
+  #
+  # Vercel's staging production-branch is `release/staging`, a ref only this job
+  # advances. See the long note on the same job in deploy-production.yml for why
+  # a release ref rather than a deploy hook or an ignored build step.
+  frontend:
+    name: Release the frontend
+    needs: [migrate, deploy-functions]
+    # deploy-functions DIRECTLY, not assert-deployed — that job exits
+    # 0 when migrate failed, so keying off it would release a frontend onto a
+    # database that never migrated.
+    if: ${{ needs.migrate.result == 'success' && needs.deploy-functions.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Advance release/staging to the deployed commit
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          # Not --force: a rejection means this commit is not a descendant of
+          # what is already released, which on staging usually means two
+          # deploys raced. Re-running on the newer commit is the fix.
+          if git push origin "$SHA:refs/heads/release/staging"; then
+            echo "release/staging -> $SHA"
+          else
+            echo "::error title=Could not advance release/staging::The push was rejected — $SHA is probably not a descendant of the commit currently released. Re-run this workflow on the newest commit on main."
+            exit 1
+          fi
+
+      # Non-fatal here and a hard failure in deploy-production.yml, exactly as
+      # the vault-key step above is, and for the same reason: until the owner
+      # points the Vercel staging project at release/staging this check cannot
+      # pass, and turning every staging deploy red over a dashboard field only
+      # they can set would be worse than the gap. But it says outright that it
+      # proved nothing, rather than passing quietly.
+      - name: Confirm staging is serving this commit
+        env:
+          BASE: ${{ secrets.APP_BASE_URL }}
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          if [ -z "$BASE" ]; then
+            echo "::warning title=Frontend NOT confirmed::APP_BASE_URL is not set for the staging environment, so which build is live was not checked and this deploy proves nothing about the frontend."
+            exit 0
+          fi
+          deadline=$(( $(date +%s) + 300 ))
+          served=""
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            served=$(curl -sS -H 'Cache-Control: no-cache' \
+              "${BASE%/}/version.json?t=$(date +%s)" 2>/dev/null \
+              | jq -r '.commit // empty' 2>/dev/null || true)
+            if [ "$served" = "$SHA" ]; then
+              echo "staging is serving $SHA"
+              exit 0
+            fi
+            echo "serving '${served:-<nothing>}', waiting for $SHA"
+            sleep 15
+          done
+          echo "::warning title=Frontend NOT confirmed::After 5 minutes ${BASE%/}/version.json reports '${served:-<nothing>}' rather than $SHA. Point the Vercel staging project's Git branch at release/staging (Settings -> Git) — see docs/dev/staging-setup.md. Until then the staging frontend is whatever Vercel last built on its own."
+          exit 0
+
+  # Guards the jobs above against their own `if`. A skipped job does not fail its
   # workflow, so an expression mistake there would produce a run that reports
   # success while deploying no functions at all — the same green-but-empty
   # failure this file is elsewhere trying to remove. Assert the outcome instead
   # of trusting the expression that produces it.
-  assert-functions-deployed:
-    name: Functions actually deployed
-    needs: [migrate, deploy-functions]
+  assert-deployed:
+    name: Everything actually deployed
+    needs: [migrate, deploy-functions, frontend]
     if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
-      - name: deploy-functions must have run, not merely not-failed
+      - name: Each stage must have run, not merely not-failed
         env:
           MIGRATE: ${{ needs.migrate.result }}
           FUNCTIONS: ${{ needs.deploy-functions.result }}
+          FRONTEND: ${{ needs.frontend.result }}
         run: |
-          echo "migrate=$MIGRATE deploy-functions=$FUNCTIONS"
+          echo "migrate=$MIGRATE deploy-functions=$FUNCTIONS frontend=$FRONTEND"
           if [ "$MIGRATE" != "success" ]; then
             echo "migrations did not succeed — that failure is reported by its own job"
             exit 0
           fi
           if [ "$FUNCTIONS" != "success" ]; then
             echo "::error title=No functions were deployed::migrate succeeded but deploy-functions ended '$FUNCTIONS'. A skipped job does not fail a workflow, so without this check the run would have reported success having deployed nothing."
+            exit 1
+          fi
+          if [ "$FRONTEND" != "success" ]; then
+            echo "::error title=The frontend was not released::migrate and deploy-functions succeeded but frontend ended '$FRONTEND', so release/staging was not advanced and the staging frontend is behind its database."
             exit 1
           fi
           echo "ok"

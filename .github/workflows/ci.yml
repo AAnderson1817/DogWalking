@@ -74,6 +74,44 @@ jobs:
           fi
           echo "PASS: no secret literals"
 
+      # Both deploy workflows confirm a release by polling
+      # APP_BASE_URL/version.json for the commit they just shipped (review
+      # H16). If the build stops emitting it, that check has nothing to read
+      # and every deploy fails at the last step — after the database has
+      # already migrated. Catch it here instead, where it costs a PR.
+      - name: The build stamps the commit it was built from
+        run: |
+          f=app/dist/version.json
+          if [ ! -f "$f" ]; then
+            echo "FAIL: $f was not emitted — stampVersion() in app/vite.config.ts is not running, and the deploy workflows' release confirmation has nothing to poll."
+            exit 1
+          fi
+          cat "$f"
+          commit=$(jq -r '.commit // empty' "$f")
+          if [ -z "$commit" ]; then
+            echo "FAIL: version.json carries no commit"; exit 1
+          fi
+          # CI sets GITHUB_SHA, so the fallback must not be what lands here —
+          # that would make the deploy poll compare the SHA against "dev"
+          # forever, and time out on a deploy that had actually worked.
+          if [ "$commit" != "$GITHUB_SHA" ]; then
+            echo "FAIL: version.json says '$commit' but this build is $GITHUB_SHA. The builder's commit env var is not being read."
+            exit 1
+          fi
+          echo "PASS: version.json stamped with $commit"
+
+      # The SPA rewrite sends everything it does not exclude to index.html, so
+      # an un-excluded version.json would answer the deploy poll with HTML
+      # forever. Asserted against the config rather than trusted, because the
+      # only place to find out otherwise is a production deploy.
+      - name: version.json is excluded from the SPA rewrite
+        run: |
+          if ! jq -e '.rewrites[0].source | contains("version")' app/vercel.json >/dev/null; then
+            echo "FAIL: app/vercel.json rewrites /version.json to index.html, so the deploy release check can never pass."
+            exit 1
+          fi
+          echo "PASS: version.json is served as a file"
+
       # The DEV-gated preview routes carry hardcoded demo people and pets.
       # They are stripped by `import.meta.env.DEV` being statically false in a
       # production build — but that is a property of the bundler, not of the
