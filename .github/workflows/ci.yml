@@ -157,10 +157,12 @@ jobs:
   e2e-today:
     name: E2E — Today composition
     runs-on: ubuntu-latest
-    # Fail fast rather than hang. This job wedged on the Chromium download
-    # three times in one evening; at GitHub's default six-hour timeout each
-    # stall blocked a merge, and one of them blocked the staging deploy,
-    # because the deploy gate waits on this workflow completing.
+    # Fail fast rather than hang. This job has wedged on the browser install
+    # five times in two evenings; at GitHub's default six-hour timeout each
+    # stall blocked a merge, and two of them blocked the staging deploy,
+    # because the deploy gate waits on this workflow completing. This ceiling
+    # is the backstop, not the fix — the per-attempt timeouts below are what
+    # let a stalled run recover instead of merely failing on schedule.
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
@@ -174,11 +176,10 @@ jobs:
       - name: Install
         run: npm ci --prefix app
 
-      # Cache the browser: the download is the step that actually stalls, and
-      # it is pure network. Keyed on the resolved Playwright version so a
-      # dependency bump fetches a fresh browser instead of reusing a mismatched
-      # one — the version skew that already needs a local escape hatch in
-      # playwright.config.mjs.
+      # Cache the browser so the common case makes no network call at all.
+      # Keyed on the resolved Playwright version so a dependency bump fetches a
+      # fresh browser instead of reusing a mismatched one — the version skew
+      # that already needs a local escape hatch in playwright.config.mjs.
       - name: Resolve the Playwright version
         id: pw
         working-directory: app
@@ -190,9 +191,42 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
 
-      - name: Install Chromium
+      # `--with-deps` is deliberately gone, and this is the whole fix.
+      #
+      # The old single step ran apt-get and the browser download in one
+      # command, so five stalls against a 33 s median produced no evidence
+      # about which half hung. Splitting it named the culprit on the first
+      # outing: three consecutive stalls in the apt half while the download
+      # never got a turn.
+      #
+      # apt also cannot be bounded from inside the step, which is why it is
+      # removed rather than retried. `playwright install-deps` shells out to
+      # `sudo`, so apt-get runs as root; `timeout` runs as `runner` and is not
+      # permitted to signal a root process, so the orphan survives its own
+      # timeout and holds the step's stdout pipe open — the step keeps running
+      # after the command it was waiting on is gone. A same-user child does die
+      # with the group (verified); a root child does not. No amount of
+      # per-attempt timeout fixes that.
+      #
+      # Dropping it is safe because the ubuntu-latest image already ships the
+      # libraries Chromium links against — it ships Chrome and Edge. If that
+      # ever stops being true the failure is loud and immediate: Playwright
+      # refuses to launch and prints the exact missing packages. Restore a
+      # bounded `install-deps` then, with the sudo problem solved.
+      #
+      # The download keeps a timeout and a retry: it is a plain network call
+      # owned by `runner`, so `timeout` genuinely does bound it, and a stall is
+      # precisely the failure a retry fixes. 90 s is ~3x the median.
+      - name: Chromium browser
         working-directory: app
-        run: npx playwright install --with-deps chromium
+        run: |
+          for attempt in 1 2 3; do
+            if timeout -k 10s 90s npx playwright install chromium; then exit 0; fi
+            echo "::warning::browser download attempt $attempt stalled or failed; retrying"
+            sleep $((attempt * 5))
+          done
+          echo "::error::Chromium download failed three times"
+          exit 1
 
       - name: Today composition (4 viewports)
         working-directory: app
