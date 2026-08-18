@@ -26,6 +26,7 @@ grant to `anon` raises `insufficient_privilege` and the loop swallows it, so an
 unprotected table passes it. Verified by adding a grantless table — the sweep
 stayed green and assertion 6 caught it. They are two controls and they need two
 assertions.
+
 | Table | Operator (`operator_id = auth.uid()`) | Client (own rows via `client_id = my_client_id()`) | anon |
 |---|---|---|---|
 | operators | select/update own row | select `display_name,business_name` of own operator only (view `v_my_operator`) | — |
