@@ -321,12 +321,31 @@ export interface PaymentDetailed extends Payments {
 }
 
 /** Payment activity with the display context required by the Money ledger. */
-export async function listPaymentsDetailed(clientId?: string): Promise<PaymentDetailed[]> {
+/**
+ * Bounded, because PostgREST caps an unbounded select at 1000 rows by default
+ * and returns the first page WITHOUT SAYING SO (review M3/M9). The Money
+ * screen sums this list into its three headline totals, so past that cap every
+ * one of them silently under-reported — the worst possible failure on the
+ * screen an operator uses to decide whether they have been paid.
+ *
+ * An explicit limit does not fix the truncation; it makes it visible and
+ * deliberate, and `PAYMENTS_PAGE` is the number the caller can then say out
+ * loud. A `since` bound is what actually keeps the totals meaningful, and the
+ * Money rail passes one.
+ */
+export const PAYMENTS_PAGE = 500;
+
+export async function listPaymentsDetailed(
+  clientId?: string,
+  since?: Date,
+): Promise<PaymentDetailed[]> {
   let query = supabase
     .from("payments")
     .select("*, client:clients(full_name), walk:walks(service:service_types(name), walk_pets(pets(name)))")
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false })
+    .limit(PAYMENTS_PAGE);
   if (clientId) query = query.eq("client_id", clientId);
+  if (since) query = query.gte("created_at", since.toISOString());
   const { data, error } = await query;
   return must(data as unknown as PaymentDetailed[] | null, error);
 }
@@ -475,7 +494,15 @@ export function createCheckout(clientId: string, planId: string): Promise<{ url:
   return invokeEdge("create-checkout", { client_id: clientId, plan_id: planId });
 }
 
-export function chargeOverage(walkId: string): Promise<{ payment: Payments }> {
+/**
+ * `already_charged` is returned by the edge function and was dropped by this
+ * type, so no caller could tell a fresh charge from a no-op that found an
+ * existing succeeded row — and BillingConsole announced "Recovered $22.00" for
+ * money it had not moved (review M3).
+ */
+export function chargeOverage(
+  walkId: string,
+): Promise<{ payment: Payments; already_charged?: boolean }> {
   return invokeEdge("charge-overage", { walk_id: walkId });
 }
 

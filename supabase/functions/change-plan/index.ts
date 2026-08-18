@@ -14,6 +14,7 @@ import {
 } from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
 import { stripeClient } from "../_lib/stripe.ts";
+import { type PeriodBounds, remainingFraction } from "./period.ts";
 
 interface Body {
   client_id?: string;
@@ -66,6 +67,7 @@ serveFunction(async (req) => {
   }
 
   let fraction: number;
+  let periodEnd: number | null = null;
 
   if (client.stripe_subscription_id) {
     if (!plan.stripe_price_id) {
@@ -81,15 +83,25 @@ serveFunction(async (req) => {
     if (!item) throw new HttpError(409, "no_subscription_item", "subscription has no items");
 
     // Remaining fraction of the current period drives the credit proration.
-    // Newer Stripe API versions carry the period on the item; older on the
-    // subscription — read both shapes defensively. Persist it with the intent
-    // so the webhook applies the same credit effect the operator requested.
-    const itemAny = item as unknown as { current_period_start?: number; current_period_end?: number };
-    const subAny = sub as unknown as { current_period_start?: number; current_period_end?: number };
-    const start = itemAny.current_period_start ?? subAny.current_period_start ?? 0;
-    const end = itemAny.current_period_end ?? subAny.current_period_end ?? 0;
-    const now = Math.floor(Date.now() / 1000);
-    fraction = end > start ? Math.min(1, Math.max(0, (end - now) / (end - start))) : 0;
+    // A MISSING period is now a 409, not a silent zero (review M35): both
+    // reads used to fall through to `?? 0`, so a Stripe field move would have
+    // prorated the client to zero credits and answered 200. See period.ts.
+    const period = remainingFraction(
+      item as unknown as PeriodBounds,
+      sub as unknown as PeriodBounds,
+      Math.floor(Date.now() / 1000),
+    );
+    if (!period.ok) {
+      throw new HttpError(
+        409,
+        period.reason,
+        "Stripe did not return a usable billing period for this subscription, so the credit proration cannot be computed. Nothing has been changed.",
+        `remainingFraction: ${period.reason}`,
+        { client_id: body.client_id, plan_id: body.new_plan_id },
+      );
+    }
+    fraction = period.fraction;
+    periodEnd = period.periodEnd;
 
     // Atomic reuse-or-supersede-or-insert under a per-client lock (0018):
     // a repeat of the same request replays the same Stripe idempotency key;
@@ -137,7 +149,9 @@ serveFunction(async (req) => {
     );
 
     await db.from("clients")
-      .update({ current_period_end: end ? new Date(end * 1000).toISOString() : null })
+      .update({
+        current_period_end: periodEnd ? new Date(periodEnd * 1000).toISOString() : null,
+      })
       .eq("id", client.id);
 
     return jsonOk({
