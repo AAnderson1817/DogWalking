@@ -248,6 +248,16 @@ and will silently strand client invites) and **notifications** (the
      Until then, on the money paths, you learn about failures from the customer.
    - **Email webhook**: Database → Webhooks → on `notifications` INSERT →
      Edge Function `send-notification`, service-role auth header.
+     Delivery state lives on the row from 0029 (`email_status`, `email_attempts`, `email_sent_at`,
+     `email_last_error`). The webhook does NOT retry a non-2xx, so the
+     daily `Nightly ops check` workflow drains whatever is still owed and
+     goes red if a backlog survives the retry.
+
+     Set `RESEND_API_KEY` before the first real client. Without it every
+     `send-notification` call now returns **500** rather than a quiet 200
+     (review H17), so the daily `Nightly ops check` workflow goes red — which
+     is the point: silently sending zero email is how a client never learns
+     their card failed.
 3. Seed the business: Table editor → `plans` → create your real plans with
    the **live** `price_…` ids in `stripe_price_id`. Never run `seed.sql`
    here.

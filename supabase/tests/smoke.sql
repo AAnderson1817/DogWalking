@@ -2042,6 +2042,208 @@ begin
 end $$;
 
 
+-- ═══ Email delivery state (0029) ═════════════════════════════════════════
+-- `notifications` recorded whether the in-app bell had a row and nothing about
+-- whether the email ever left. A Resend outage lost it permanently with
+-- nothing on the row to show it.
+do $$
+declare
+  v_n uuid;
+  v_skipped uuid;
+  v_status email_delivery_status;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+
+  insert into notifications (operator_id, client_id, type, title, body)
+  values ('99999999-0000-4000-a000-000000000001',
+          '99999999-0000-4000-c000-00000000000a',
+          'walk_complete', 'Walk report ready', 'test')
+  returning id, email_status into v_n, v_status;
+
+  -- A fresh row is owed an email. Anything else and the backlog cannot find it.
+  if v_status <> 'pending' then
+    raise exception 'FAIL: a new notification starts as % rather than pending', v_status;
+  end if;
+  if not exists (select 1 from fn_notification_backlog() where id = v_n) then
+    raise exception 'FAIL: a pending notification is not in the backlog';
+  end if;
+
+  -- Sent leaves the backlog.
+  update notifications set email_status = 'sent', email_sent_at = now(), email_attempts = 1
+   where id = v_n;
+  if exists (select 1 from fn_notification_backlog() where id = v_n) then
+    raise exception 'FAIL: a sent notification is still in the backlog';
+  end if;
+
+  -- Skipped is TERMINAL. An operator-only notification, or a client with no
+  -- address, must never be retried — retrying forever is the failure mode of a
+  -- naive "sent_at is null" sweep.
+  --
+  -- A FRESH row, deliberately: reusing the one above would leave email_sent_at
+  -- set from the 'sent' step, so a naive sweep would exclude it for the wrong
+  -- reason and this assertion would pass against the very implementation it
+  -- exists to reject. Confirmed: it did.
+  insert into notifications (operator_id, client_id, type, title, body, email_status)
+  values ('99999999-0000-4000-a000-000000000001', null,
+          'walk_scheduled', 'Operator-only', 'test', 'skipped')
+  returning id into v_skipped;
+  if exists (select 1 from fn_notification_backlog() where id = v_skipped) then
+    raise exception 'FAIL: a skipped notification is in the retry backlog';
+  end if;
+
+  -- Failed is retryable.
+  update notifications set email_status = 'failed', email_attempts = 1,
+         email_last_error = 'resend 500' where id = v_n;
+  if not exists (select 1 from fn_notification_backlog() where id = v_n) then
+    raise exception 'FAIL: a failed notification is not retryable';
+  end if;
+
+  raise notice 'email delivery states (0029): OK';
+end $$;
+
+-- Retrying has to stop. Without a bound, a permanently-rejected recipient is
+-- attempted every night forever and the backlog never empties.
+do $$
+declare
+  v_n uuid;
+  v_abandoned int;
+  v_err text;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  delete from notifications
+   where operator_id = '99999999-0000-4000-a000-000000000001'
+     and title = 'Walk report ready';
+
+  insert into notifications (operator_id, client_id, type, title, body,
+                             email_status, email_attempts, email_last_error)
+  values ('99999999-0000-4000-a000-000000000001',
+          '99999999-0000-4000-c000-00000000000a',
+          'walk_complete', 'Attempt ceiling', 'test', 'failed', 5, 'resend 422')
+  returning id into v_n;
+
+  if exists (select 1 from fn_notification_backlog() where id = v_n) then
+    raise exception 'FAIL: a row at the attempt ceiling is still being retried';
+  end if;
+
+  v_abandoned := fn_expire_notification_backlog();
+  if v_abandoned < 1 then
+    raise exception 'FAIL: the ceiling row was not marked abandoned';
+  end if;
+  select email_last_error into v_err from notifications where id = v_n;
+  if v_err not like '%gave up after%' then
+    raise exception 'FAIL: the row does not say it was given up on: %', v_err;
+  end if;
+
+  -- Idempotent: a second night must not append a second give-up note forever.
+  if fn_expire_notification_backlog() <> 0 then
+    raise exception 'FAIL: expiring the backlog twice abandoned the same row again';
+  end if;
+
+  raise notice 'email retry bound and give-up note (0029): OK';
+end $$;
+
+-- A row older than the retry window is abandoned too: an email about a walk
+-- three weeks ago should not suddenly arrive.
+do $$
+declare
+  v_n uuid;
+  v_err text;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  insert into notifications (operator_id, client_id, type, title, body,
+                             email_status, email_attempts, created_at)
+  values ('99999999-0000-4000-a000-000000000001',
+          '99999999-0000-4000-c000-00000000000a',
+          'walk_complete', 'Stale', 'test', 'failed', 1, now() - interval '5 days')
+  returning id into v_n;
+
+  if exists (select 1 from fn_notification_backlog() where id = v_n) then
+    raise exception 'FAIL: a 5-day-old notification is still being retried';
+  end if;
+  perform fn_expire_notification_backlog();
+  select email_last_error into v_err from notifications where id = v_n;
+  if v_err not like '%aged out%' then
+    raise exception 'FAIL: the stale row does not say why it was abandoned: %', v_err;
+  end if;
+
+  raise notice 'stale notifications age out (0029): OK';
+end $$;
+
+-- The nightly job reports what is still owed.
+do $$
+declare
+  v_result jsonb;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  insert into notifications (operator_id, client_id, type, title, body)
+  values ('99999999-0000-4000-a000-000000000001',
+          '99999999-0000-4000-c000-00000000000a',
+          'payment_failed', 'Card declined', 'test');
+
+  v_result := fn_run_nightly_jobs(14);
+  if (v_result ->> 'email_backlog')::int < 1 then
+    raise exception 'FAIL: the nightly job reports no email backlog when one exists';
+  end if;
+  if v_result ? 'emails_abandoned' is false then
+    raise exception 'FAIL: the nightly job does not report what it gave up on';
+  end if;
+  raise notice 'nightly job reports the email backlog (0029): OK';
+end $$;
+
+-- A client must not be able to mark their own payment_failed email as sent.
+-- 0004 grants `authenticated` only `update (read_at)` — a COLUMN-level grant —
+-- so this holds today by design rather than by luck. Asserted because a later
+-- table-level `grant update on notifications` would silently remove it.
+do $$
+declare
+  v_n uuid;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  select id into v_n from notifications
+   where client_id = '99999999-0000-4000-c000-00000000000a' limit 1;
+
+  set local role authenticated;
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-b000-00000000000a","role":"authenticated"}', true);
+  begin
+    update notifications set email_status = 'sent' where id = v_n;
+    raise exception 'FAIL: a client marked their own notification email as sent';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+  begin
+    update notifications set email_attempts = 99 where id = v_n;
+    raise exception 'FAIL: a client rewrote the email attempt count';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  raise notice 'delivery columns are not client-writable (0029): OK';
+end $$;
+
+-- Backlog machinery is service-role only (invariant 5).
+do $$
+begin
+  set local role authenticated;
+  begin
+    perform fn_expire_notification_backlog();
+    raise exception 'FAIL: an operator expired the notification backlog';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+  begin
+    perform count(*) from fn_notification_backlog();
+    raise exception 'FAIL: an operator read the notification backlog';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  raise notice 'notification backlog is service-role only (0029): OK';
+end $$;
+
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;

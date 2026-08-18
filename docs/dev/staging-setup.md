@@ -147,6 +147,10 @@ at once.
    - **Email webhook** (only when Resend is configured): Database →
      Webhooks → new webhook on `notifications` INSERT → Edge Function
      `send-notification`, auth header with the service role key.
+     Delivery state lives on the row from 0029 (`email_status`, `email_attempts`, `email_sent_at`,
+     `email_last_error`). The webhook does NOT retry a non-2xx, so the
+     daily `Nightly ops check` workflow drains whatever is still owed and
+     goes red if a backlog survives the retry.
 3. Seed business data: Table editor → `plans` → add your plans with the
    Stripe `price_…` ids in `stripe_price_id`. (Do NOT run `seed.sql` on
    staging — it's dev fixture data.)

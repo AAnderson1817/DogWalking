@@ -159,6 +159,10 @@ const NOTIFICATIONS: Notifications[] = [
     read_at: null,
     created_at: "2026-08-05T14:42:00Z",
     updated_at: "2026-08-05T14:42:00Z",
+    email_status: "sent",
+    email_attempts: 1,
+    email_sent_at: "2026-08-05T14:43:00Z",
+    email_last_error: null,
   },
   {
     id: "notification-read",
@@ -171,6 +175,10 @@ const NOTIFICATIONS: Notifications[] = [
     read_at: "2026-08-04T20:00:00Z",
     created_at: "2026-08-04T19:50:00Z",
     updated_at: "2026-08-04T20:00:00Z",
+    email_status: "sent",
+    email_attempts: 1,
+    email_sent_at: "2026-08-05T14:43:00Z",
+    email_last_error: null,
   },
 ];
 

@@ -216,6 +216,82 @@ failure therefore left the claim pending forever: the walk never completed at
 all, and every retry hit the same wall. The operator-facing message names the
 setting to fix rather than repeating Stripe's developer-facing text.
 
+## send-notification — POST, service key (DB webhook) or operator JWT
+
+Emails client-facing notifications through Resend, and **records what happened**
+(review H17). `CLIENT_FACING` decides which types reach a client at all; the
+rest are bell-only.
+
+### Delivery is fire-and-forget no longer
+
+The trigger is a Supabase Database Webhook on `notifications` INSERT, which is
+`pg_net`-based and **does not retry on a non-2xx**. So a Resend outage, a rate
+limit, or the sending domain falling out of verification lost the email
+permanently: the function threw a 502, the webhook recorded a row in
+`net._http_response` (short retention), and nothing on the notification said
+anything. The in-app bell still showed it, so the system looked healthy from the
+inside while the outside channel was dead — for `payment_failed` and
+`walk_cancelled` among others.
+
+0029 adds four columns and an `email_delivery_status` enum. Four states, not a
+bare `sent_at`, because "not sent" is three different things and a sweep that
+cannot tell them apart either retries forever or abandons real failures:
+
+| State | Meaning | In the retry backlog? |
+| --- | --- | --- |
+| `pending` | nobody has looked at it | yes |
+| `sent` | it left | no |
+| `skipped` | **terminal** non-send: operator-only, or the client has no address | **no** |
+| `failed` | provider or we broke | yes, within bounds |
+
+A **skip does not increment `email_attempts`** — it is a decision, not a try, and
+counting it would march terminal rows toward the give-up ceiling for no reason.
+
+**A missing `RESEND_API_KEY` is now a 500.** It used to return
+`{ ok: true, skipped: true }`, so a deploy that forgot the secret reported
+uniform success forever while sending zero email. Since H14 that 500 also writes
+a log line naming what is missing.
+
+### Bounds, and giving up on purpose
+
+`fn_notification_backlog(window, max_attempts)` returns what is retryable:
+non-terminal, inside 24 hours, under 5 attempts. Deliberately **not** filtered by
+notification type — that list lives in `CLIENT_FACING` and duplicating it in SQL
+would give it two homes and one would drift. Instead the function marks anything
+it will not send as `skipped` the first time it sees the row.
+
+`fn_expire_notification_backlog()` marks rows terminal once they age out or hit
+the ceiling, and returns how many it abandoned. Without it the backlog grows
+forever and every future check reports the same dead rows; with it, the
+*retryable* backlog stays bounded and the abandoned count is itself the thing
+worth reporting. It is idempotent — a row already carrying a give-up note must
+not accrue a second one nightly.
+
+Rows predating 0029 are backfilled to `skipped` with "unknown whether sent". We
+genuinely do not know, and retrying would send a client "your walk is complete"
+about a walk from last month — the same call 0023 made about untraceable
+payments.
+
+### Who retries
+
+`POST { action: "drain" }`, **service role only** — a client triggering a mass
+send would be a mail-bomb and a way to burn the operator's Resend quota. It
+carries on past a failure, since one bad recipient must not strand the rest of a
+backlog somebody is already owed, and returns 200 even with failures: each row
+records its own outcome and stays queued, so reporting success for the *attempt*
+is honest.
+
+`.github/workflows/job-health.yml` drains daily and **goes red if a backlog
+survives the retry** — a blip clears, a misconfiguration does not.
+
+### Not client-writable
+
+0004 grants `authenticated` only `update (read_at)`, a **column-level** grant, so
+the four delivery columns are unwritable by a client with nothing further added.
+That is the existing design being right rather than luck, and smoke.sql asserts
+it: a later table-level `grant update on notifications` would silently let a
+client mark their own `payment_failed` email as sent.
+
 ## credential-vault — POST, operator JWT
 Body: `{ action: 'put'|'get'|'delete', credential_id?, property_id?, entry_method?, label?, secret?, key_location_hint?, purpose?, password }`
 Every action re-verifies `password` against the caller's account (Auth admin check); rate-limit 5/min/user (in-memory + 429).

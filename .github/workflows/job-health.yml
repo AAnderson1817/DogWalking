@@ -1,4 +1,4 @@
-name: Nightly job health
+name: Nightly ops check
 
 # Is the job that generates every walk on every calendar still running?
 #
@@ -10,6 +10,14 @@ name: Nightly job health
 # 0028 makes every run leave a `job_runs` row. This asks `fn_job_health()`
 # whether the last successful one is recent, and goes red when it is not. A
 # failed run notifies the repository owner, which is the delivery mechanism.
+#
+# It also drains the email backlog (review H17). Delivery is a Database Webhook
+# on INSERT, which is pg_net-based and does NOT retry on a non-2xx — so a Resend
+# outage used to lose the email permanently. 0029 records every outcome and the
+# nightly job counts what is still owed; something has to actually retry it, and
+# a workflow that already fetches the service key daily is the cheapest honest
+# place. If a backlog survives the retry, this goes red: a client who never
+# learned their card failed is worth a red check.
 #
 # WHAT THIS IS NOT: monitoring. It is one cron watching another, so it shares
 # their failure modes — GitHub disables scheduled workflows on a repository
@@ -86,3 +94,45 @@ jobs:
           fi
 
           echo "All jobs have run recently."
+
+      # Retry what 0029 recorded as still owed, then re-ask. Draining before
+      # re-checking is the point: a backlog that clears on retry is a provider
+      # blip and needs no attention, while one that survives is a real
+      # misconfiguration — an unverified sending domain, a dead API key.
+      - name: Drain the email backlog, then insist it is empty
+        run: |
+          base="https://${{ secrets.SUPABASE_PROJECT_REF }}.supabase.co"
+          hdr=(-H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY" \
+               -H "Content-Type: application/json")
+
+          before=$(curl -sS -X POST "$base/rest/v1/rpc/fn_notification_backlog" \
+            "${hdr[@]}" -d '{}' --max-time 30 | jq 'length')
+          echo "backlog before: ${before:-unknown}"
+          if [ "${before:-0}" = "0" ]; then
+            echo "Nothing owed."
+            exit 0
+          fi
+
+          body=$(mktemp)
+          status=$(curl -sS -o "$body" -w '%{http_code}' -X POST \
+            "$base/functions/v1/send-notification" \
+            -H "Authorization: Bearer $SERVICE_KEY" -H "Content-Type: application/json" \
+            -d '{"action":"drain"}' --max-time 120)
+          echo "drain -> HTTP $status"; cat "$body"; echo
+
+          if [ "$status" != "200" ]; then
+            # A 500 here with code email_not_configured is the case H17 exists
+            # for: the deploy forgot RESEND_API_KEY and every notification has
+            # been silently unsent. It used to answer 200.
+            echo "::error::Draining the email backlog failed (HTTP $status). If the body says email_not_configured, RESEND_API_KEY is unset for this project and NO email has been sent at all — see docs/dev/staging-setup.md."
+            exit 1
+          fi
+
+          after=$(curl -sS -X POST "$base/rest/v1/rpc/fn_notification_backlog" \
+            "${hdr[@]}" -d '{}' --max-time 30 | jq 'length')
+          echo "backlog after: ${after:-unknown}"
+          if [ "${after:-0}" != "0" ]; then
+            echo "::error::${after} notification emails are still undelivered after a retry. Check notifications.email_last_error for the provider's reason — a common cause is the Resend sending domain falling out of verification. Rows give up after 5 attempts or 24 hours (migration 0029) and are then marked failed permanently."
+            exit 1
+          fi
+          echo "Backlog drained."
