@@ -20,6 +20,30 @@ Verify `stripe-signature` with `STRIPE_WEBHOOK_SECRET`. Idempotency: `INSERT INT
 - `invoice.upcoming`: `renewal_upcoming` notification (client).
 - `customer.subscription.updated`: map Stripe status/pause_collection → `subscription_status` (`paused` when pause_collection set).
 - `customer.subscription.deleted`: `subscription_status='cancelled'`.
+
+Reversals (0023, review B4). Sanpo cannot issue a refund — the Stripe
+dashboard does — so these arms exist to make the books agree with what Stripe
+already did, and to tell the operator it happened.
+- `charge.refunded`: reverse using `charge.amount_refunded`, which is
+  **cumulative** across partial refunds. Passing a per-event delta would
+  double-claw on Stripe's redelivery (it retries for three days).
+- `charge.dispute.created`, `charge.dispute.funds_withdrawn`: reverse as kind
+  `dispute`. A dispute is a distinct payment state from a refund — the money
+  is pulled by the cardholder's bank, it carries a fee, and it can still be
+  contested.
+- `credit_note.created`: a credit note against a paid invoice is a refund by
+  another name. Prefer the invoice's `post_payment_credit_notes_amount`
+  (cumulative); the note's own `amount` is not, and is used only when Stripe
+  did not expand the invoice.
+- `invoice.voided`: reverse `amount_paid`.
+
+All five funnel through `fn_reverse_payment` so the row lock, the clawback
+floor and the idempotency live in one place. A charge matching no payments row
+is **ignored** — a customer can have charges created outside Sanpo, and
+inventing a row for one is worse than skipping it. A reversal reported `noop`
+(a cumulative total already applied) is acked but raises no second
+notification.
+
 Always 200 on handled/ignored types; 400 only on bad signature.
 
 ## charge-overage — POST, operator JWT (also invoked in-process by complete-walk)

@@ -6,6 +6,9 @@ const MARKS: Record<PaymentStatusValue, string> = {
   pending: "…",
   failed: "!",
   refunded: "↩",
+  // Distinct from the refund arrow: a dispute is money taken back by the
+  // cardholder's bank, not returned by the operator.
+  disputed: "⚠",
 };
 
 export function PaymentStatus({ status }: { status: PaymentStatusValue }) {

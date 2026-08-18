@@ -598,6 +598,17 @@ input::file-selector-button {
   font-weight: 700;
 }
 .payment-row__status { grid-area: status; justify-self: end; }
+
+/* What a reversal cost, under the row it belongs to (review B4). Body text,
+   so it needs 4.5:1 — text-2 is a body-text role and carries that against the
+   surface; the row's own status badge carries the 3:1 non-text contrast. */
+.payment-row__reversal {
+  margin: 0;
+  padding: 0 var(--s-4) var(--s-3);
+  color: var(--text-2);
+  font-size: var(--fs-13);
+  line-height: 1.45;
+}
 .payment-row__amount {
   grid-area: amount;
   justify-self: end;

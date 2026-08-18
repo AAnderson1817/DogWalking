@@ -66,6 +66,44 @@ export interface WebhookDeps {
   hasPaymentForInvoice(invoiceId: string): Promise<boolean>;
   insertPayment(row: Record<string, unknown>): Promise<void>;
   insertNotification(row: Record<string, unknown>): Promise<void>;
+
+  /** Locate the payments row a Stripe reversal refers to. Tried in the order
+   * the identifiers are trustworthy: the payment intent (what overage rows
+   * store), then the invoice (what subscription rows store), then the charge
+   * id we may have recorded on a previous reversal. */
+  findPaymentForReversal(ref: {
+    paymentIntentId?: string | null;
+    invoiceId?: string | null;
+    chargeId?: string | null;
+  }): Promise<PaymentRow | null>;
+  /** fn_reverse_payment: definer, per-client row lock, ledger-only balance
+   * movement. p_amount_pence is the CUMULATIVE reversed total. */
+  reversePayment(args: {
+    paymentId: string;
+    kind: "refund" | "dispute";
+    amountPence: number;
+    reason: string;
+  }): Promise<ReversalResult>;
+  /** Records the charge id once we learn it, so a later dispute on the same
+   * charge is findable even when it carries no payment intent. */
+  noteChargeId(paymentId: string, chargeId: string): Promise<void>;
+}
+
+export interface PaymentRow {
+  id: string;
+  operator_id: string;
+  client_id: string;
+  type: string;
+  amount_pence: number;
+  status: string;
+  stripe_charge_id: string | null;
+}
+
+export interface ReversalResult {
+  outcome: "reversed" | "noop";
+  credits_reversed: number;
+  credits_unrecovered: number;
+  needs_review: boolean;
 }
 
 export class InFlightError extends Error {
@@ -277,9 +315,125 @@ async function applyEvent(
       return { status: "processed" };
     }
 
+    // ── Reversals (review B4) ────────────────────────────────────────────
+    // None of these existed. A refund issued from the Stripe dashboard — the
+    // only way to issue one — left the payments row reading 'succeeded' with
+    // the cycle grant still in the ledger, so the client kept credits they
+    // had been refunded for, and the operator learned about a dispute only
+    // if they happened to read Stripe's email.
+    //
+    // Every arm funnels into one definer function so the row lock, the
+    // clawback floor and the idempotency live in exactly one place.
+    case "charge.refunded": {
+      // amount_refunded is CUMULATIVE across partial refunds, which is the
+      // quantity fn_reverse_payment expects. Passing a per-refund delta here
+      // would double-claw on Stripe's redelivery.
+      return await reverse(deps, {
+        paymentIntentId: asString(obj.payment_intent),
+        invoiceId: asString(obj.invoice),
+        chargeId: asString(obj.id),
+      }, "refund", numberOr(obj.amount_refunded, 0), "refunded in Stripe");
+    }
+
+    case "charge.dispute.created":
+    case "charge.dispute.funds_withdrawn": {
+      const reason = asString(obj.reason) ?? "disputed";
+      return await reverse(deps, {
+        paymentIntentId: asString(obj.payment_intent),
+        chargeId: asString(obj.charge),
+      }, "dispute", numberOr(obj.amount, 0), `dispute: ${reason}`);
+    }
+
+    case "credit_note.created": {
+      // A credit note against an already-paid invoice is a refund by another
+      // name. post_payment_credit_notes_amount is the invoice's cumulative
+      // credited total; the note's own amount is not, so prefer it and fall
+      // back only when Stripe did not expand the invoice.
+      const inv = obj.invoice as Record<string, unknown> | string | null;
+      const invoiceId = typeof inv === "string" ? inv : asString((inv ?? {}) as never);
+      const cumulative = typeof inv === "object" && inv
+        ? numberOr((inv as Record<string, unknown>).post_payment_credit_notes_amount, NaN)
+        : NaN;
+      const amount = Number.isFinite(cumulative) ? cumulative : numberOr(obj.amount, 0);
+      return await reverse(deps, { invoiceId }, "refund", amount, "credit note issued");
+    }
+
+    case "invoice.voided": {
+      const invoiceId = asString(obj.id);
+      if (!invoiceId) return { status: "ignored" };
+      return await reverse(deps, { invoiceId }, "refund",
+        numberOr(obj.amount_paid, 0), "invoice voided");
+    }
+
     default:
       return { status: "ignored" };
   }
+}
+
+/**
+ * Shared tail for every reversal event. Returns 'ignored' when the charge
+ * belongs to no payment we know about — a customer can have charges created
+ * outside Sanpo, and inventing a row for one would be worse than skipping it.
+ */
+async function reverse(
+  deps: WebhookDeps,
+  ref: { paymentIntentId?: string | null; invoiceId?: string | null; chargeId?: string | null },
+  kind: "refund" | "dispute",
+  amountPence: number,
+  reason: string,
+): Promise<{ status: "processed" | "ignored" }> {
+  const payment = await deps.findPaymentForReversal(ref);
+  if (!payment) return { status: "ignored" };
+  if (amountPence <= 0) return { status: "ignored" };
+
+  // Remember the charge id the first time we see it: a dispute can arrive
+  // carrying only `charge`, and older overage rows store only the intent.
+  if (ref.chargeId && !payment.stripe_charge_id) {
+    await deps.noteChargeId(payment.id, ref.chargeId);
+  }
+
+  const result = await deps.reversePayment({
+    paymentId: payment.id,
+    kind,
+    amountPence,
+    reason,
+  });
+  if (result.outcome === "noop") return { status: "processed" };
+
+  await deps.insertNotification({
+    operator_id: payment.operator_id,
+    client_id: null,
+    type: kind === "dispute" ? "payment_disputed" : "payment_refunded",
+    title: kind === "dispute" ? "Payment disputed" : "Payment refunded",
+    body: reversalBody(kind, result),
+    walk_id: null,
+  });
+  return { status: "processed" };
+}
+
+/** The operator is the audience: they are the one out of pocket. */
+export function reversalBody(kind: "refund" | "dispute", r: ReversalResult): string {
+  const head = kind === "dispute"
+    ? "A charge has been disputed and the funds pulled back by the cardholder's bank."
+    : "A charge has been refunded.";
+  if (r.needs_review) {
+    return `${head} This payment predates credit tracking, so no credits were reclaimed automatically — check the balance by hand.`;
+  }
+  if (r.credits_unrecovered > 0) {
+    return `${head} ${r.credits_reversed} credit(s) reclaimed; ${r.credits_unrecovered} could not be — the client had already spent them.`;
+  }
+  if (r.credits_reversed > 0) {
+    return `${head} ${r.credits_reversed} credit(s) reclaimed.`;
+  }
+  return `${head} No credits were involved.`;
+}
+
+function asString(v: unknown): string | null {
+  return typeof v === "string" && v ? v : null;
+}
+
+function numberOr(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
 }
 
 function invoiceSubscriptionId(obj: Record<string, unknown>): string | null {

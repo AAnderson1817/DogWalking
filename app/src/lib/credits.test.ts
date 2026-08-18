@@ -35,6 +35,7 @@ describe("formatLedgerEntry", () => {
     expires_at: null,
     note: "walk debit",
     created_at: "2026-07-01T12:00:00Z",
+    stripe_invoice_id: null,
   };
   it("signs amounts and labels entry types", () => {
     expect(formatLedgerEntry(base)).toMatchObject({ label: "Walk", amount: "−2", balanceAfter: 3 });

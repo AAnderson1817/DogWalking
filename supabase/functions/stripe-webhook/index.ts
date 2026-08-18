@@ -164,6 +164,52 @@ function makeDeps(): WebhookDeps {
       const { error } = await db.from("notifications").insert(row);
       if (error) throw new Error("notification insert failed");
     },
+
+    async findPaymentForReversal({ paymentIntentId, invoiceId, chargeId }) {
+      const cols = "id, operator_id, client_id, type, amount_pence, status, stripe_charge_id";
+      // Ordered by how specific the identifier is. The payment intent points
+      // at one charge; the invoice can carry a failed row alongside the paid
+      // one, so that lookup excludes 'failed' rather than taking whichever
+      // row Postgres happened to return first.
+      const attempts: Array<[string, string | null | undefined]> = [
+        ["stripe_payment_intent_id", paymentIntentId],
+        ["stripe_charge_id", chargeId],
+        ["stripe_invoice_id", invoiceId],
+      ];
+      for (const [col, val] of attempts) {
+        if (!val) continue;
+        const { data, error } = await db
+          .from("payments")
+          .select(cols)
+          .eq(col, val)
+          .neq("status", "failed")
+          .limit(1);
+        if (error) throw new Error("payment lookup failed");
+        if (data?.length) return data[0] as never;
+      }
+      return null;
+    },
+
+    async reversePayment({ paymentId, kind, amountPence, reason }) {
+      const { data, error } = await db.rpc("fn_reverse_payment", {
+        p_payment: paymentId,
+        p_kind: kind,
+        p_amount_pence: amountPence,
+        p_reason: reason,
+      });
+      if (error) throw new Error("payment reversal failed");
+      const row = Array.isArray(data) ? data[0] : data;
+      if (!row) throw new Error("payment reversal returned nothing");
+      return row as never;
+    },
+
+    async noteChargeId(paymentId, chargeId) {
+      const { error } = await db
+        .from("payments")
+        .update({ stripe_charge_id: chargeId })
+        .eq("id", paymentId);
+      if (error) throw new Error("charge id write failed");
+    },
   };
 }
 
