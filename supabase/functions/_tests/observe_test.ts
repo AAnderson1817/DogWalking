@@ -61,15 +61,19 @@ Deno.test("safeCause DROPS details and hint — that is where Postgres puts valu
 });
 
 Deno.test("safeCause drops a response body — Stripe and fetch errors carry them", () => {
+  // The canary is a made-up token, not a realistically-shaped API key: the
+  // repository's own secret-leak grep forbids those literals anywhere under
+  // app/src or supabase/functions, and it is right to. A distinctive string
+  // proves the same property.
+  const CANARY = "MUST-NOT-BE-LOGGED-9f2c";
   const err = {
     message: "request failed",
-    body: "{\"secret\":\"sk_live_abc\"}",
-    data: { plaintext: "1234#" },
-    response: { headers: { authorization: "Bearer sk_live_abc" } },
+    body: `{"api_key":"${CANARY}"}`,
+    data: { plaintext: CANARY },
+    response: { headers: { authorization: `Bearer ${CANARY}` } },
   };
   const out = JSON.stringify(safeCause(err));
-  assertFalse(out.includes("sk_live"), "a key from body/response survived");
-  assertFalse(out.includes("1234#"), "a plaintext from data survived");
+  assertFalse(out.includes(CANARY), "a value from body/data/response survived");
   assertEquals(safeCause(err), { message: "request failed" });
 });
 
