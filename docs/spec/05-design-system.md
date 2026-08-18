@@ -334,6 +334,24 @@ edges; the two roles are deliberately split. Input borders are `2px`: Chrome
 floors border widths to whole device pixels, so `1.5px` renders as `1px` at
 DPR 1.
 
+**Contrast over artwork is measured from the artwork.** Where ink sits on a
+painted backdrop rather than a flat token — today that is only Today — the
+ratio is sampled from the rendered pixels, never computed from
+`--sanpo-color-brand-cream`. `e2e/today-contrast.spec.ts` takes the ink from
+computed style, hides it, screenshots the page and reads the pixel underneath;
+it fails the build under 3:1 for graphics that carry state and 4.5:1 for text,
+and prints the whole table on success so a comment in `components.css` can be
+checked against a run. Every ratio written in a comment on those elements comes
+from that run.
+
+The rule exists because the alternative was tried twice. Both rounds computed
+against Cream, both stated a confident figure in a comment, and both were about
+16% optimistic — the paper under the schedule samples rgb(237,224,208), not
+`#FEF6EA`. A logged, reasoned ratio that is still under the floor is worse than
+an open bug, because nobody looks again. Text that carries a `text-shadow`
+outline is measured against its own halo instead, and the sampler asserts the
+halo exists; an exemption needs a written reason in the target itself.
+
 **The credential vault reveal panel** is Cream on Indigo (9.03:1) with a ghost
 Copy button (Cream fill, 9.03:1 against the panel) and a Yamabuki focus ring
 (4.71:1, scoped to the panel because the default Asagi ring is 1.70:1 on

@@ -294,6 +294,16 @@ jobs:
         working-directory: app
         run: npx playwright test --config playwright.config.mjs e2e/indigo-emaki-today.spec.ts
 
+      # Contrast measured from the rendered pixels rather than from tokens
+      # (review H23). This is the gate whose absence let the same path be
+      # "fixed" twice against the wrong background — both times with a
+      # confident comment stating a ratio nobody had measured. The log prints
+      # the full table on success too, so the numbers in components.css can be
+      # checked against a run instead of trusted.
+      - name: Today contrast (sampled from the artwork)
+        working-directory: app
+        run: npx playwright test --config playwright.config.mjs e2e/today-contrast.spec.ts
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (node24)
         if: failure()
         with:
