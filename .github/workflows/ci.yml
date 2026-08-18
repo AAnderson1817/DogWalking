@@ -191,34 +191,32 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
 
-      # These two were one step, `playwright install --with-deps chromium`,
-      # which has now stalled five times against a 33 s median. That command
-      # does two unrelated network things — apt-get, then the browser CDN — so
-      # as a single step its timings cannot say which half hung, and five
-      # stalls produced no evidence. Split, the step boundary IS the diagnosis:
-      # the next stall names its own cause. Delete `install-deps` when it is
-      # the guilty one and the runner image proves to ship the libraries
-      # anyway, but delete it on evidence, not on the assumption that got us a
-      # cache keyed to the wrong hypothesis.
+      # `--with-deps` is deliberately gone, and this is the whole fix.
       #
-      # Both halves are bounded and retried. `timeout` turns a stall into a
-      # failed attempt instead of a hang to the job ceiling, and a stall is
-      # precisely the failure a retry fixes; `-k` kills the process group after
-      # SIGTERM so a wedged apt child cannot survive to hold the dpkg lock
-      # against the next attempt. 90 s is ~3x the median: past it the step is
-      # not slow, it is stuck. Worst case is 3 attempts x 90 s x 2 halves plus
-      # the run itself, which stays inside timeout-minutes.
-      - name: Chromium system dependencies (apt)
-        working-directory: app
-        run: |
-          for attempt in 1 2 3; do
-            if timeout -k 10s 90s npx playwright install-deps chromium; then exit 0; fi
-            echo "::warning::install-deps attempt $attempt stalled or failed; retrying"
-            sleep $((attempt * 5))
-          done
-          echo "::error::Chromium system dependencies failed three times"
-          exit 1
-
+      # The old single step ran apt-get and the browser download in one
+      # command, so five stalls against a 33 s median produced no evidence
+      # about which half hung. Splitting it named the culprit on the first
+      # outing: three consecutive stalls in the apt half while the download
+      # never got a turn.
+      #
+      # apt also cannot be bounded from inside the step, which is why it is
+      # removed rather than retried. `playwright install-deps` shells out to
+      # `sudo`, so apt-get runs as root; `timeout` runs as `runner` and is not
+      # permitted to signal a root process, so the orphan survives its own
+      # timeout and holds the step's stdout pipe open — the step keeps running
+      # after the command it was waiting on is gone. A same-user child does die
+      # with the group (verified); a root child does not. No amount of
+      # per-attempt timeout fixes that.
+      #
+      # Dropping it is safe because the ubuntu-latest image already ships the
+      # libraries Chromium links against — it ships Chrome and Edge. If that
+      # ever stops being true the failure is loud and immediate: Playwright
+      # refuses to launch and prints the exact missing packages. Restore a
+      # bounded `install-deps` then, with the sudo problem solved.
+      #
+      # The download keeps a timeout and a retry: it is a plain network call
+      # owned by `runner`, so `timeout` genuinely does bound it, and a stall is
+      # precisely the failure a retry fixes. 90 s is ~3x the median.
       - name: Chromium browser
         working-directory: app
         run: |
