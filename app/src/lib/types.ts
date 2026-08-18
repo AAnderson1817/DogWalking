@@ -224,6 +224,10 @@ export type Database = {
           read_at: string | null;
           created_at: string;
           updated_at: string;
+          email_status: Database["public"]["Enums"]["email_delivery_status"];
+          email_attempts: number;
+          email_sent_at: string | null;
+          email_last_error: string | null;
         };
         Insert: {
           id?: string;
@@ -236,6 +240,10 @@ export type Database = {
           read_at?: string | null;
           created_at?: string;
           updated_at?: string;
+          email_status?: Database["public"]["Enums"]["email_delivery_status"];
+          email_attempts?: number;
+          email_sent_at?: string | null;
+          email_last_error?: string | null;
         };
         Update: {
           id?: string;
@@ -248,6 +256,10 @@ export type Database = {
           read_at?: string | null;
           created_at?: string;
           updated_at?: string;
+          email_status?: Database["public"]["Enums"]["email_delivery_status"];
+          email_attempts?: number;
+          email_sent_at?: string | null;
+          email_last_error?: string | null;
         };
         Relationships: [];
       };
@@ -1046,6 +1058,13 @@ export type Database = {
         Args: Record<string, never>;
         Returns: number;
       };
+      fn_expire_notification_backlog: {
+        Args: {
+          p_window: unknown;
+          p_max_attempts: number;
+        };
+        Returns: number;
+      };
       fn_grant_credits: {
         Args: {
           p_client: string;
@@ -1102,6 +1121,13 @@ export type Database = {
           p_horizon_days: number;
         };
         Returns: number;
+      };
+      fn_notification_backlog: {
+        Args: {
+          p_window: unknown;
+          p_max_attempts: number;
+        };
+        Returns: Array<{ id: string; email_status: Database["public"]["Enums"]["email_delivery_status"]; email_attempts: number; created_at: string }>;
       };
       fn_notify_low_credit: {
         Args: {
@@ -1241,6 +1267,7 @@ export type Database = {
     Enums: {
       billing_cycle: "weekly" | "monthly";
       client_status: "invited" | "active" | "paused" | "archived";
+      email_delivery_status: "pending" | "sent" | "skipped" | "failed";
       entry_method: "key_on_file" | "lockbox" | "smart_lock" | "door_code" | "buzzer_fob";
       ledger_entry_type: "grant" | "debit" | "adjust" | "rollover" | "expiry";
       notification_type: "walk_complete" | "low_credit" | "renewal_upcoming" | "payment_failed" | "walk_scheduled" | "walk_cancelled" | "payment_refunded" | "payment_disputed" | "subscription_cancelled" | "plan_changed_externally" | "payment_taken";
@@ -1280,6 +1307,7 @@ export type WalkPhotos = Database["public"]["Tables"]["walk_photos"]["Row"];
 export type Walks = Database["public"]["Tables"]["walks"]["Row"];
 export type BillingCycle = Database["public"]["Enums"]["billing_cycle"];
 export type ClientStatus = Database["public"]["Enums"]["client_status"];
+export type EmailDeliveryStatus = Database["public"]["Enums"]["email_delivery_status"];
 export type EntryMethod = Database["public"]["Enums"]["entry_method"];
 export type LedgerEntryType = Database["public"]["Enums"]["ledger_entry_type"];
 export type NotificationType = Database["public"]["Enums"]["notification_type"];

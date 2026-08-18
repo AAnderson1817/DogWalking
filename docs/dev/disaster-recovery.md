@@ -139,7 +139,7 @@ item and not the last.
 6. Re-point `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` in Vercel.
 7. Confirm the nightly job actually runs: `select * from fn_job_health();`
    reads `stale = true` immediately after a rebuild and must read `false`
-   after the next 03:00 UTC. The `Nightly job health` workflow asks the same
+   after the next 03:00 UTC. The `Nightly ops check` workflow asks the same
    question daily and goes red when the answer is wrong.
 
 Step 5 is the one that gets forgotten, and every item in it fails silently:

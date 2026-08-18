@@ -1,22 +1,104 @@
 // send-notification — POST (service key via DB webhook, or operator JWT).
-// Emails client-facing notifications through Resend; env-gated on
-// RESEND_API_KEY and silently skipped when absent (phase 08).
+//
+// Emails client-facing notifications through Resend, and RECORDS WHAT HAPPENED
+// (review H17). Delivery is driven by a Database Webhook on INSERT, which is
+// pg_net-based and does not retry on a non-2xx — so before 0029 a provider
+// outage lost the email permanently with nothing on the row to show it, while
+// the in-app bell still displayed it. The system looked healthy from the inside
+// with the outside channel dead.
+//
+// The decisions live in handler.ts with dependencies injected; this file is the
+// wiring. Every path leaves the row in a terminal ('sent'/'skipped') or
+// retryable ('failed') state, and the nightly job counts what is still owed.
 import { isServiceAuth, jsonOk, readJson, requireOperator, serveFunction, HttpError } from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
-
-const CLIENT_FACING = new Set([
-  "walk_complete",
-  "low_credit",
-  "renewal_upcoming",
-  "payment_failed",
-  "walk_scheduled",
-  "walk_cancelled",
-]);
+import {
+  deliverNotification,
+  drainBacklog,
+  failureResponse,
+  type NotificationRow,
+  recordPatch,
+  type SendDeps,
+} from "./handler.ts";
 
 interface Body {
   notification_id?: string;
   /** Supabase DB webhook payload shape (INSERT). */
   record?: { id?: string };
+  /**
+   * Retry everything the nightly job counted. Service-role only: a client
+   * triggering a mass send would be both a mail-bomb and a way to burn the
+   * operator's Resend quota.
+   */
+  action?: "drain";
+}
+
+const COLS = "id, operator_id, client_id, type, title, body, walk_id, email_attempts";
+
+function makeDeps(apiKey: string): SendDeps {
+  const db = adminClient();
+  return {
+    async getNotification(id) {
+      const { data, error } = await db.from("notifications").select(COLS).eq("id", id).maybeSingle();
+      if (error) {
+        throw new HttpError(500, "db_error", "notification lookup failed", error, {
+          notification_id: id,
+        });
+      }
+      return data as NotificationRow | null;
+    },
+
+    async backlogIds() {
+      const { data, error } = await db.rpc("fn_notification_backlog", {});
+      if (error) throw new HttpError(500, "db_error", "backlog lookup failed", error);
+      return ((data ?? []) as Array<{ id: string }>).map((r) => r.id);
+    },
+
+    async getClient(id) {
+      const { data } = await db.from("clients").select("full_name, email").eq("id", id).maybeSingle();
+      return data;
+    },
+
+    async getOperator(id) {
+      const { data } = await db.from("operators").select("business_name").eq("id", id).maybeSingle();
+      return data;
+    },
+
+    async sendEmail({ to, subject, html }) {
+      const res = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from: Deno.env.get("NOTIFY_FROM_EMAIL") ?? "Sanpo <notifications@sanpocare.com>",
+          to: [to],
+          subject,
+          html,
+        }),
+      });
+      if (res.ok) return { ok: true };
+      // Resend's body says WHY — domain out of verification, rate limited, bad
+      // recipient — and dropping it left "email_failed" as the entire record.
+      // Read defensively: a non-JSON error page must not turn a send failure
+      // into an unhandled 500.
+      return { ok: false, status: res.status, detail: await res.text().catch(() => "") };
+    },
+
+    async record(id, outcome, previousAttempts) {
+      const patch = recordPatch(outcome, previousAttempts);
+      const { error } = await db.from("notifications").update(patch).eq("id", id);
+      // Deliberately loud. If the outcome cannot be written the row goes back to
+      // looking un-attempted, which is the original defect — better to fail the
+      // request and let the backlog retry than to send an email nothing records.
+      if (error) {
+        throw new HttpError(500, "db_error", "could not record the delivery outcome", error, {
+          notification_id: id,
+          outcome: outcome.kind,
+        });
+      }
+    },
+
+    renderEmail,
+  };
 }
 
 serveFunction(async (req) => {
@@ -27,64 +109,46 @@ serveFunction(async (req) => {
   if (!isService) await requireOperator(req);
 
   const body = await readJson<Body>(req);
-  const id = body?.notification_id ?? body?.record?.id;
-  if (!id) throw new HttpError(400, "bad_request", "notification_id is required");
 
+  // A missing key is a 500, not a 200. It used to return
+  // `{ skipped: true, reason: "email delivery not configured" }`, so a
+  // production deploy that forgot the secret reported uniform success forever
+  // while sending zero email — and because these notifications include
+  // payment_failed and walk_cancelled, nobody outside the app ever heard
+  // anything at all. This now fails loudly and, since review H14, writes a
+  // structured log line naming what is missing.
   const apiKey = Deno.env.get("RESEND_API_KEY");
-  if (!apiKey) return jsonOk({ skipped: true, reason: "email delivery not configured" });
-
-  const db = adminClient();
-  const { data: n, error } = await db
-    .from("notifications")
-    .select("id, operator_id, client_id, type, title, body, walk_id")
-    .eq("id", id)
-    .maybeSingle();
-  if (error) {
-    throw new HttpError(500, "db_error", "notification lookup failed", error, {
-      notification_id: id,
-    });
-  }
-  if (!n) throw new HttpError(404, "not_found", "notification not found");
-  if (!n.client_id || !CLIENT_FACING.has(n.type)) {
-    return jsonOk({ skipped: true, reason: "not a client-facing notification" });
-  }
-
-  const [{ data: client }, { data: operator }] = await Promise.all([
-    db.from("clients").select("full_name, email").eq("id", n.client_id).maybeSingle(),
-    db.from("operators").select("business_name, email").eq("id", n.operator_id).maybeSingle(),
-  ]);
-  if (!client?.email) return jsonOk({ skipped: true, reason: "client has no email" });
-
-  const business = operator?.business_name ?? "Your walker";
-  const res = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      from: Deno.env.get("NOTIFY_FROM_EMAIL") ?? "Sanpo <notifications@sanpocare.com>",
-      to: [client.email],
-      subject: `${n.title} — ${business}`,
-      html: renderEmail(business, n.title, n.body ?? ""),
-    }),
-  });
-  if (!res.ok) {
-    // Resend's body says WHY — domain out of verification, rate limited, bad
-    // recipient — and dropping it left "email_failed" as the whole record.
-    // The body is read defensively: a non-JSON error page must not turn a
-    // send failure into an unhandled 500.
-    const detail = await res.text().catch(() => "");
+  if (!apiKey) {
     throw new HttpError(
-      502,
-      "email_failed",
-      "email provider rejected the message",
-      { code: `resend_${res.status}`, message: detail.slice(0, 300) },
-      { notification_id: n.id, type: n.type, client_id: n.client_id },
+      500,
+      "email_not_configured",
+      "email delivery is not configured, so this notification was not emailed",
+      "the Resend API key env var is unset in this deployment",
+      { notification_id: body?.notification_id ?? body?.record?.id },
     );
   }
 
-  return jsonOk({ sent: true });
+  const deps = makeDeps(apiKey);
+
+  if (body?.action === "drain") {
+    if (!isService) {
+      throw new HttpError(403, "forbidden", "draining the backlog requires the service role");
+    }
+    // 200 even when some rows failed: each records its own outcome and stays in
+    // the backlog, so reporting success for the ATTEMPT is honest. A non-2xx
+    // would make the caller retry the whole sweep immediately.
+    return jsonOk(await drainBacklog(deps));
+  }
+
+  const id = body?.notification_id ?? body?.record?.id;
+  if (!id) throw new HttpError(400, "bad_request", "notification_id is required");
+
+  const row = await deps.getNotification(id);
+  if (!row) throw new HttpError(404, "not_found", "notification not found");
+
+  const outcome = await deliverNotification(row, deps);
+  if (outcome.kind === "failed") throw failureResponse(row, outcome);
+  return jsonOk(outcome.kind === "sent" ? { sent: true } : { skipped: true, reason: outcome.reason });
 });
 
 /** Minimal Indigo Emaki email field, inline CSS only. */
