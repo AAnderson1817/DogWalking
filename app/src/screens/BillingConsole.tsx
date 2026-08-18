@@ -92,9 +92,15 @@ export default function BillingConsole() {
     setBusyId(payment.id);
     setNotice(null);
     try {
-      const { payment: result } = await chargeOverage(payment.walk_id);
+      const { payment: result, already_charged } = await chargeOverage(payment.walk_id);
+      // `already_charged` means the function found an existing succeeded row
+      // and moved no money. Reporting that as "Recovered $22.00" told the
+      // operator they had just collected something they had collected before —
+      // on the screen whose entire job is saying what has been paid (M3).
       setNotice(
-        result.status === "succeeded"
+        already_charged
+          ? `Already paid — ${money(result.amount_pence)} was collected earlier, so no new charge was made.`
+          : result.status === "succeeded"
           ? `Recovered ${money(result.amount_pence)} from ${clientName(payment.client_id)}.`
           : `Charge attempt: ${paymentStatusTreatment(result.status).label}.`,
       );
