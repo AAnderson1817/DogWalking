@@ -2410,7 +2410,13 @@ body:has(.today-emaki-page) .bottom-nav[data-navigation-persona="operator"] {
   position: fixed;
   left: 50%;
   transform: translateX(-50%);
-  bottom: calc(var(--nav-h, 64px) + var(--s-3));
+  /* `--today-nav-reserve` is the existing name for the bar's footprint; it is
+     scoped to `.page` there, so the same 72px + safe-area is restated here
+     rather than referencing a property that does not exist at this level.
+     Two undefined names (`--nav-h`, `--shadow-raised`) got this far with
+     fallbacks that made them render correctly — CI's custom-property check
+     caught both, which is exactly why it does not accept a fallback. */
+  bottom: calc(72px + env(safe-area-inset-bottom, 0px) + var(--s-3));
   z-index: 40;
   display: flex;
   align-items: center;
@@ -2423,7 +2429,7 @@ body:has(.today-emaki-page) .bottom-nav[data-navigation-persona="operator"] {
   border-radius: var(--r-lg);
   background: var(--sanpo-color-surface-raised);
   color: var(--sanpo-color-text-primary);
-  box-shadow: var(--shadow-raised, none);
+  box-shadow: var(--shadow-2);
 }
 .update-prompt__text { font-size: var(--fs-14); }
 .update-prompt__actions { display: flex; gap: var(--s-2); }
