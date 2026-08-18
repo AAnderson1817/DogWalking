@@ -51,6 +51,11 @@ begin
   if new.status <> 'succeeded' then
     return new;
   end if;
+  -- An already-succeeded row being updated for some other reason (a receipt
+  -- url arriving, say) has already superseded whatever it was going to.
+  if tg_op = 'UPDATE' and old.status = 'succeeded' then
+    return new;
+  end if;
 
   -- Subscription: same invoice. Scoped by operator as well, because
   -- stripe_invoice_id comes from a Connect webhook and every other lookup in
@@ -83,8 +88,19 @@ end $$;
 
 revoke all on function fn_supersede_settled_failures() from public, anon, authenticated;
 
+-- INSERT **OR UPDATE OF status**, and the update half is not belt-and-braces:
+-- it is the only branch the overage path ever takes. `chargeOverageForWalk`
+-- inserts a `pending` claim FIRST and then moves that same row to `succeeded`
+-- via `updatePayment` (`_lib/overage.ts`), so an insert-only trigger sees
+-- `pending`, returns, and never supersedes the earlier failed attempt — the
+-- exact case this migration exists for.
+--
+-- The first version of this file was insert-only and its smoke test passed,
+-- because the test INSERTED a succeeded row directly. That is not what the
+-- product does. The test below now follows the real path, and it is the one
+-- that would have caught this.
 create trigger trg_payments_supersede_failures
-  after insert on payments
+  after insert or update of status on payments
   for each row execute function fn_supersede_settled_failures();
 
 -- ── Backfill, and why this one is safe to do ─────────────────────────────
