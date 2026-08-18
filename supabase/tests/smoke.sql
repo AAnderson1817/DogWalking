@@ -681,7 +681,12 @@ begin
     raise exception 'FAIL: superseding rewrote the payment status';
   end if;
 
-  -- Overage: same walk, not same invoice.
+  -- Overage, following the REAL path: the charge flow inserts a `pending`
+  -- claim and then UPDATEs that row to `succeeded` (_lib/overage.ts). An
+  -- insert-only trigger never sees the success at all. The first version of
+  -- this block inserted a succeeded row directly and passed against a trigger
+  -- that could not work in production — a fixture that did not match the code
+  -- it was standing in for.
   -- A walk with no overage payment yet: uq_overage_payment_per_walk is a
   -- partial index over the claim statuses, so reusing a walk an earlier block
   -- already charged collides before this block can test anything.
@@ -699,7 +704,12 @@ begin
   returning id into v_failed;
   insert into payments (operator_id, client_id, walk_id, type, amount_pence,
                         currency, status)
-  values (v_op, v_cl, v_walk, 'overage', 1800, 'USD', 'succeeded');
+  values (v_op, v_cl, v_walk, 'overage', 1800, 'USD', 'pending')
+  returning id into v_other;
+  if (select superseded_at from payments where id = v_failed) is not null then
+    raise exception 'FAIL: a pending claim superseded a failure before it settled';
+  end if;
+  update payments set status = 'succeeded' where id = v_other;
   if (select superseded_at from payments where id = v_failed) is null then
     raise exception 'FAIL: a collected overage left its failed attempt open';
   end if;
