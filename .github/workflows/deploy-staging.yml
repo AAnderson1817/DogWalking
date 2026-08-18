@@ -55,6 +55,27 @@ jobs:
              && [ "$repo" = "${{ github.repository }}" ]; then
             echo "CI green on a push to ${{ github.repository }} — deploying"; exit 0
           fi
+          # Still a refusal, and still red — a skipped gate would let the run
+          # conclude 'success' and fire the chained smoke against a commit
+          # that never deployed. But a refusal on a CANCELLED run means
+          # something quite different from one on a FAILED run, and the two
+          # are indistinguishable at a glance in the Actions list.
+          #
+          # Cancelled is routine: CI carries cancel-in-progress, so two pushes
+          # close together cancel the first run, and a run wedged on a network
+          # step is cancelled by GitHub's six-hour ceiling hours later. Both
+          # fire workflow_run on completion. One did exactly that at 07:21 on
+          # 2026-08-18, six hours after the b4697d1 run stalled — a red deploy
+          # for a commit whose work had already shipped.
+          #
+          # So say which it is. A red that explains itself in its own first
+          # line costs a reader seconds; one that does not costs them the
+          # whole investigation, and teaches them to skim past the next.
+          if [ "$conclusion" = "cancelled" ]; then
+            printf '::warning title=Nothing to deploy::CI for this commit was cancelled, not failed — superseded by a newer push, or killed by GitHub six-hour job ceiling. No deploy is expected. If a newer commit is on main its own run deploys it; if not, re-run CI for this commit.\n'
+            echo "Refusing to deploy a cancelled CI run (conclusion=$conclusion event=$evt)"
+            exit 1
+          fi
           echo "Refusing to deploy: conclusion=$conclusion event=$evt repo=$repo"
           exit 1
 
