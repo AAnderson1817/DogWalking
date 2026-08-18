@@ -137,9 +137,41 @@ whatever navigation triggered it.
 ## PWA (phase 08)
 `manifest.webmanifest` (name Sanpo, theme `#FEF6EA`, display standalone,
 byte-approved Sanpo icons at 192/512 including maskable entries), service
-worker: precache app shell, stale-while-revalidate for GET API/Storage,
-network-only for mutations, IndexedDB GPS outbox with background flush +
-`beforeunload` guard.
+worker: precache the built app shell (the hashed `.js`/`.css`/`.woff2`/`.webp`/
+`.svg` assets, stamped into `__BUILD_ASSETS__` by `vite.config.ts`), IndexedDB
+GPS outbox with background flush + `beforeunload` guard.
+
+### Supabase traffic is network-only. This is a security boundary.
+
+Nothing under `/rest/`, `/auth/`, `/realtime/`, `/functions/` or `/storage/` is
+ever cached or served from cache, for GET as well as for mutations.
+`public/sw.js` returns early for those paths before any cache logic runs.
+
+**This spec used to say "stale-while-revalidate for GET API/Storage", and that
+sentence describes the design that caused a real cross-account data leak.** The
+Cache API is keyed by URL and knows nothing about the `Authorization` header,
+so on a shared device — a household tablet, an operator's phone handed to a
+colleague, a library machine — a PostgREST response cached for account A was
+served to account B. Same URL, different person, no revalidation required to
+render. It was found in the qc(1–4) pass and fixed in the service worker; the
+spec was not updated, so for four hardening waves the authoritative document
+still prescribed the bug.
+
+That is why this section is written as a prohibition rather than a preference.
+An engineer told the specs win, asked to make the service worker match spec 06,
+would have reintroduced the leak *with a written authority for doing so*. If
+offline reads of account data are ever wanted, they need a cache partitioned by
+authenticated user identity and cleared on sign-out — a different design, not a
+relaxation of this one.
+
+`scripts/service-worker.test.ts` enforces it, and it drives the real `fetch`
+handler rather than grepping for the prefix list — a grep passes against a
+handler that computes the list correctly and then ignores it, and this
+repository has already shipped one check a *comment* could satisfy. It asserts
+`respondWith` is never called for the five path families or for any mutation,
+and — in the other direction, so that deleting the handler outright cannot
+satisfy it — that the app shell and navigations still are. Confirmed red by
+reinstating exactly what this section used to prescribe.
 
 ## Env
 `app/.env.local`: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_MAPBOX_TOKEN` (optional → SVG fallback). Access via typed `lib/env.ts`; build fails on missing required keys.
