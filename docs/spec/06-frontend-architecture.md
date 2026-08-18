@@ -209,6 +209,41 @@ Rules that follow from it:
   actually matched files, because an include glob that stops matching looks
   exactly like a suite with nothing to say.
 
+## Security headers (review M30)
+
+`app/vercel.json` carries them; there is no other deploy config in the tree,
+and before this there were none at all — no CSP, HSTS, `X-Content-Type-Options`,
+`Referrer-Policy` or `Permissions-Policy` anywhere. The session token lives in
+`localStorage`, so one XSS in the dependency tree read it and then read every
+client's address with no further obstacle. That is what made H3 compound.
+
+`script-src 'self'` is the directive doing the work — it is what stops an
+injected payload executing at all — and CI fails the build if it ever gains
+`'unsafe-inline'` or `'unsafe-eval'`, which would make the whole header
+decorative. `frame-ancestors 'none'`, `object-src 'none'` and `base-uri 'self'`
+are depth. `Permissions-Policy` grants `geolocation=(self)` and denies the
+rest, because an injected iframe would otherwise inherit geolocation on a page
+whose entire purpose is precise location.
+
+Two deliberate loosenings, both stated rather than hidden:
+
+- **`style-src 'unsafe-inline'`** is required by ~240 inline `style={{…}}`
+  objects (review M38). It cannot be tightened without that refactor.
+- **`img-src … https:`** is broad because walk photos arrive as Supabase signed
+  URLs on an origin unknown at build time. The residual is that an injected
+  `<img>` could beacon to any host — verified: the foreign image was NOT
+  blocked while the foreign `fetch` was. Acceptable only because `script-src`
+  blocks the injection that would place it.
+
+Verified in a browser against a server replaying these exact headers, not
+reasoned about: the app renders with **zero** violations, `connect-src` permits
+the Supabase origin, `font-src` serves the self-hosted variable fonts, and
+`worker-src blob:` permits the worker mapbox-gl builds. In the other direction,
+an injected `<script>` is refused (`script-src-elem`) and never executes, and a
+fetch to a foreign origin is refused (`connect-src`). Detected through the
+`securitypolicyviolation` event, because a CSP-blocked `fetch` rejects with a
+generic `TypeError` that is indistinguishable from a DNS failure.
+
 ## Env
 `app/.env.local`: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_MAPBOX_TOKEN`
 (optional → SVG fallback). Access via typed `lib/env.ts`.

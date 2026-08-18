@@ -91,6 +91,45 @@ jobs:
           fi
           echo "PASS: the build gate refuses an unconfigured production build"
 
+      # The deployed frontend had NO security headers at all: vercel.json was a
+      # single rewrites array (review M30). The session token lives in
+      # localStorage, so one XSS in the dependency tree read it and then every
+      # client's address — which is what made H3 compound. This asserts the
+      # headers survive the next edit to that file; the CSP itself was verified
+      # in a browser against a server replaying these exact headers (injected
+      # script blocked via script-src-elem, foreign fetch blocked via
+      # connect-src, app renders with zero violations).
+      - name: The deployed frontend sets its security headers
+        run: |
+          python3 - <<'PY'
+          import json, sys, pathlib
+          cfg = json.loads(pathlib.Path("app/vercel.json").read_text())
+          block = next((h for h in cfg.get("headers", []) if h["source"] == "/(.*)"), None)
+          if block is None:
+              print("::error file=app/vercel.json::no catch-all headers block"); sys.exit(1)
+          have = {h["key"]: h["value"] for h in block["headers"]}
+          required = [
+              "Content-Security-Policy", "Strict-Transport-Security",
+              "X-Content-Type-Options", "Referrer-Policy", "Permissions-Policy",
+          ]
+          missing = [k for k in required if k not in have]
+          if missing:
+              print(f"::error file=app/vercel.json::missing header(s): {', '.join(missing)}")
+              sys.exit(1)
+          csp = have["Content-Security-Policy"]
+          # script-src is the directive that actually stops an injected payload
+          # executing; the rest is depth. 'unsafe-inline'/'unsafe-eval' there
+          # would make the whole header decorative.
+          for bad in ("'unsafe-inline'", "'unsafe-eval'"):
+              seg = next((d for d in csp.split(";") if d.strip().startswith("script-src")), "")
+              if bad in seg:
+                  print(f"::error file=app/vercel.json::script-src allows {bad}"); sys.exit(1)
+          for directive in ("default-src", "script-src", "frame-ancestors", "object-src", "base-uri"):
+              if directive not in csp:
+                  print(f"::error file=app/vercel.json::CSP has no {directive}"); sys.exit(1)
+          print("PASS: security headers present, script-src has no unsafe-* escape")
+          PY
+
       - name: Secret-leak grep (validate gate 7)
         run: |
           if grep -RInE "(VAULT_MASTER_KEY|SERVICE_ROLE|sk_live|sk_test)" \

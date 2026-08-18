@@ -351,6 +351,7 @@ export type Database = {
           credits_unrecovered: number;
           reversal_needs_review: boolean;
           stripe_charge_id: string | null;
+          superseded_at: string | null;
         };
         Insert: {
           id?: string;
@@ -373,6 +374,7 @@ export type Database = {
           credits_unrecovered?: number;
           reversal_needs_review?: boolean;
           stripe_charge_id?: string | null;
+          superseded_at?: string | null;
         };
         Update: {
           id?: string;
@@ -395,6 +397,7 @@ export type Database = {
           credits_unrecovered?: number;
           reversal_needs_review?: boolean;
           stripe_charge_id?: string | null;
+          superseded_at?: string | null;
         };
         Relationships: [];
       };
@@ -1248,6 +1251,10 @@ export type Database = {
           p_schedule: string;
           p_pet_ids: string[];
         };
+        Returns: unknown;
+      };
+      fn_supersede_settled_failures: {
+        Args: Record<string, never>;
         Returns: unknown;
       };
       fn_touch_updated_at: {

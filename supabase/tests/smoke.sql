@@ -635,6 +635,78 @@ begin
   raise notice 'security 6 (RLS enabled+forced on every public table): OK';
 end $$;
 
+-- ═══ Settled failures stop needing attention (0034, review M3) ════════════
+do $$
+declare
+  v_op uuid := '99999999-0000-4000-a000-000000000001';
+  v_cl uuid := '99999999-0000-4000-c000-00000000000a';
+  v_walk uuid;
+  v_failed uuid;
+  v_other uuid;
+begin
+  reset session authorization;
+
+  -- A subscription invoice that failed, then paid.
+  insert into payments (operator_id, client_id, type, amount_pence, currency,
+                        status, stripe_invoice_id)
+  values (v_op, v_cl, 'subscription', 9000, 'USD', 'failed', 'in_smoke_m3')
+  returning id into v_failed;
+
+  -- An UNRELATED failure that must not be touched. Without this the test
+  -- passes against a trigger that supersedes every failed row it can find,
+  -- which would hide real unpaid invoices — the opposite defect, and worse.
+  insert into payments (operator_id, client_id, type, amount_pence, currency,
+                        status, stripe_invoice_id)
+  values (v_op, v_cl, 'subscription', 4200, 'USD', 'failed', 'in_smoke_m3_other')
+  returning id into v_other;
+
+  if (select superseded_at from payments where id = v_failed) is not null then
+    raise exception 'FAIL: a failure was superseded before anything settled it';
+  end if;
+
+  insert into payments (operator_id, client_id, type, amount_pence, currency,
+                        status, stripe_invoice_id)
+  values (v_op, v_cl, 'subscription', 9000, 'USD', 'succeeded', 'in_smoke_m3');
+
+  if (select superseded_at from payments where id = v_failed) is null then
+    raise exception 'FAIL: a paid invoice left its failed row needing attention';
+  end if;
+  if (select superseded_at from payments where id = v_other) is not null then
+    raise exception 'FAIL: an unrelated unpaid invoice was marked settled';
+  end if;
+
+  -- The failed row keeps its status: it DID fail, and that is history rather
+  -- than something to rewrite. Only whether it still needs attention changes.
+  if (select status from payments where id = v_failed) <> 'failed' then
+    raise exception 'FAIL: superseding rewrote the payment status';
+  end if;
+
+  -- Overage: same walk, not same invoice.
+  -- A walk with no overage payment yet: uq_overage_payment_per_walk is a
+  -- partial index over the claim statuses, so reusing a walk an earlier block
+  -- already charged collides before this block can test anything.
+  select w.id into v_walk from walks w
+   where w.operator_id = v_op and w.client_id = v_cl
+     and not exists (select 1 from payments p
+                      where p.walk_id = w.id and p.type = 'overage')
+   limit 1;
+  if v_walk is null then
+    raise exception 'FAIL: no uncharged walk available for the overage case';
+  end if;
+  insert into payments (operator_id, client_id, walk_id, type, amount_pence,
+                        currency, status)
+  values (v_op, v_cl, v_walk, 'overage', 1800, 'USD', 'failed')
+  returning id into v_failed;
+  insert into payments (operator_id, client_id, walk_id, type, amount_pence,
+                        currency, status)
+  values (v_op, v_cl, v_walk, 'overage', 1800, 'USD', 'succeeded');
+  if (select superseded_at from payments where id = v_failed) is null then
+    raise exception 'FAIL: a collected overage left its failed attempt open';
+  end if;
+
+  raise notice 'settled failures superseded (0034): OK';
+end $$;
+
 -- ═══ Extra guards: claim invite + client partial-column updates ═══════════
 do $$
 declare
