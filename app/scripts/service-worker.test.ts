@@ -30,6 +30,8 @@ const SW_SOURCE = readFileSync(
 
 interface Handlers {
   fetch?: (event: FetchEventStub) => void;
+  install?: (event: { waitUntil: (p: Promise<unknown>) => void }) => void;
+  message?: (event: { data: unknown }) => void;
 }
 
 interface FetchEventStub {
@@ -42,23 +44,50 @@ interface FetchEventStub {
  * registered. The build-time placeholders are filled the way `vite.config.ts`
  * fills them, so what runs here is what ships.
  */
-function loadServiceWorker(): Handlers {
+interface SwHarness extends Handlers {
+  /** URLs `cache.add` was called with during install. */
+  added: string[];
+  /** URLs the fake cache refuses, to model a CDN hiccup or a 404. */
+  reject: Set<string>;
+  /** Whether the worker asked to take over immediately. */
+  skipWaitingCalls: number;
+}
+
+function loadServiceWorker(): SwHarness {
   const handlers: Handlers = {};
+  const added: string[] = [];
+  const reject = new Set<string>();
+  let skipWaitingCalls = 0;
   const source = SW_SOURCE
     .replace('"__BUILD_VERSION__"', JSON.stringify("test"))
     .replace('"__BUILD_ASSETS__"', JSON.stringify(["/assets/index-abc123.js"]));
 
   const context: Record<string, unknown> = {
     self: {
-      addEventListener: (name: string, fn: (e: FetchEventStub) => void) => {
-        if (name === "fetch") handlers.fetch = fn;
+      addEventListener: (name: string, fn: (e: never) => void) => {
+        if (name === "fetch") handlers.fetch = fn as Handlers["fetch"];
+        if (name === "install") handlers.install = fn as Handlers["install"];
+        if (name === "message") handlers.message = fn as Handlers["message"];
       },
       location: { origin: "https://app.sanpo.test" },
-      skipWaiting: () => undefined,
+      skipWaiting: () => {
+        skipWaitingCalls += 1;
+      },
       clients: { claim: () => Promise.resolve() },
     },
     caches: {
-      open: () => Promise.resolve({ match: () => Promise.resolve(undefined), put: () => undefined, addAll: () => Promise.resolve() }),
+      open: () =>
+        Promise.resolve({
+          match: () => Promise.resolve(undefined),
+          put: () => undefined,
+          add: (url: string) => {
+            added.push(url);
+            return reject.has(url)
+              ? Promise.reject(new Error(`404 ${url}`))
+              : Promise.resolve();
+          },
+          addAll: () => Promise.resolve(),
+        }),
       keys: () => Promise.resolve([]),
       match: () => Promise.resolve(undefined),
       delete: () => Promise.resolve(true),
@@ -68,11 +97,31 @@ function loadServiceWorker(): Handlers {
     Response: { error: () => ({}) },
     Promise,
     Array,
+    Error,
     console,
   };
   vm.createContext(context);
   vm.runInContext(source, context);
-  return handlers;
+  return {
+    ...handlers,
+    added,
+    reject,
+    get skipWaitingCalls() {
+      return skipWaitingCalls;
+    },
+  } as SwHarness;
+}
+
+/** Runs the install handler and reports whether it resolved or rejected. */
+async function install(sw: SwHarness): Promise<"ok" | "failed"> {
+  let promise: Promise<unknown> = Promise.resolve();
+  sw.install?.({ waitUntil: (p) => (promise = p) });
+  try {
+    await promise;
+    return "ok";
+  } catch {
+    return "failed";
+  }
 }
 
 /** Returns true when the worker intercepted the request. */
@@ -143,5 +192,66 @@ describe("the service worker never caches Supabase traffic", () => {
   it("still serves the app shell, or it is not a service worker", () => {
     expect(intercepts(handlers, "https://app.sanpo.test/assets/index-abc123.js")).toBe(true);
     expect(intercepts(handlers, "https://app.sanpo.test/roster", { mode: "navigate" })).toBe(true);
+  });
+});
+
+/**
+ * Review M6. Two install-time defects, both silent.
+ *
+ * `cache.addAll` is atomic, so ONE failing asset — a CDN hiccup, a font 404, a
+ * chunk that rolled off after a fast redeploy — voided the entire install and
+ * left the user on whatever worker they had, or none. And install called
+ * `skipWaiting()` unconditionally, so a deploy replaced the controller under a
+ * running session; `activate` then deleted the cache holding that session's
+ * chunks, and the next lazy import fetched a hashed file the new deploy no
+ * longer serves — a 404 mid-walk.
+ */
+describe("the service worker's install", () => {
+  it("caches each URL separately, so one bad asset costs one asset", async () => {
+    const sw = loadServiceWorker();
+    sw.reject.add("/fonts/baloo-2-var.woff2");
+    expect(await install(sw)).toBe("ok");
+    // Everything else was still attempted — `addAll` would have abandoned the
+    // whole list at the first rejection.
+    expect(sw.added).toContain("/index.html");
+    expect(sw.added).toContain("/manifest.webmanifest");
+    expect(sw.added.length).toBeGreaterThan(3);
+  });
+
+  it("still fails when the offline document itself cannot be cached", async () => {
+    // Best-effort must not mean "install a shell that cannot start". Without
+    // the document there is nothing to serve a navigation, so a worker that
+    // reported success would be worse than no worker at all.
+    const sw = loadServiceWorker();
+    sw.reject.add("/index.html");
+    expect(await install(sw)).toBe("failed");
+  });
+
+  it("precaches the build's hashed assets, not just the static shell", async () => {
+    const sw = loadServiceWorker();
+    expect(await install(sw)).toBe("ok");
+    expect(sw.added).toContain("/assets/index-abc123.js");
+  });
+
+  it("does NOT take over on its own", async () => {
+    const sw = loadServiceWorker();
+    await install(sw);
+    expect(sw.skipWaitingCalls).toBe(0);
+  });
+
+  it("takes over only when the page asks it to", async () => {
+    const sw = loadServiceWorker();
+    await install(sw);
+    sw.message?.({ data: { type: "SKIP_WAITING" } });
+    expect(sw.skipWaitingCalls).toBe(1);
+  });
+
+  it("ignores messages it does not recognise", async () => {
+    const sw = loadServiceWorker();
+    await install(sw);
+    sw.message?.({ data: { type: "something-else" } });
+    sw.message?.({ data: null });
+    sw.message?.({ data: "SKIP_WAITING" });
+    expect(sw.skipWaitingCalls).toBe(0);
   });
 });

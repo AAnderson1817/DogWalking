@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { ConfigError } from "@/components/ConfigError";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { UpdatePrompt } from "@/components/UpdatePrompt";
 import { AuthProvider } from "@/lib/auth-context";
 import { missingEnvKeys } from "@/lib/env";
 import App from "@/App";
@@ -40,6 +41,10 @@ if (missing.length > 0) {
         <BrowserRouter>
           <AuthProvider>
             <App />
+            {/* Review M6. Outside <App> so it survives every route, and
+                inside the router because it is part of the shell, not of a
+                screen. */}
+            <UpdatePrompt />
           </AuthProvider>
         </BrowserRouter>
       </ErrorBoundary>

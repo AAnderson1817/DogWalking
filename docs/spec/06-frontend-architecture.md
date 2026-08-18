@@ -244,6 +244,51 @@ worker: precache the built app shell (the hashed `.js`/`.css`/`.woff2`/`.webp`/
 `.svg` assets, stamped into `__BUILD_ASSETS__` by `vite.config.ts`), IndexedDB
 GPS outbox with background flush + `beforeunload` guard.
 
+### What goes in the precache, and what does not (review M6)
+
+The precache was every `.js` in `dist/assets`, which swept in the code-split
+`mapbox-gl` chunk — 1.8 MB of a 3.0 MB precache, 59% of every install,
+re-downloaded on every deploy, and executed only by the users who open a map.
+
+The rule is **static reachability**, not size: start at the entry chunks and
+follow `imports` transitively; anything reachable only through
+`dynamicImports` is excluded and picked up by the worker's cache-first rule the
+first time it is genuinely used. A size threshold was tried first and the build
+refuted it immediately — at 512 KiB it also excluded the app entry, which is
+the one chunk without which there is no offline shell at all. Size cannot tell
+the shell from a lazy chunk; the module graph can, and it stays right as both
+grow.
+
+Two build-time failures rather than warnings, because both used to be silent:
+a `sw.js` whose placeholders are missing (an unstamped worker has no cache
+versioning **and** no precached chunks, from a green build), and a precache
+containing no JavaScript at all. CI re-asserts both on the shipped `dist/sw.js`
+plus the absence of any lazily-imported chunk.
+
+### Install is per-URL, and taking over is the page's decision
+
+`cache.addAll` is atomic: one failing asset — a CDN hiccup, a font 404, a chunk
+that rolled off after a fast redeploy — voided the entire install, leaving the
+user on whatever worker they had or none. Install is now per-URL under
+`Promise.allSettled`, with `/index.html` **required**: best effort must not
+mean installing a shell that cannot start.
+
+`skipWaiting()` no longer runs at install. It used to, so a deploy replaced the
+controller under a running session and `activate` then deleted the cache
+holding that session's chunks — the next lazy import fetched a hashed file the
+new deploy no longer serves, a 404 in the middle of a walk. The new worker now
+waits; `UpdatePrompt` offers a reload; only accepting it posts `SKIP_WAITING`.
+
+The update is also *found*: registration had no `update()`, no `updatefound`
+and no `controllerchange`, and a browser only checks on navigation — which an
+installed PWA resumed from the app switcher does rarely or never. `watchForUpdate`
+covers all three triggers (already-waiting at load, installed while open, and an
+hourly poll), and `hasWaitingUpdate` requires a controller so a **first**
+install does not announce a new version to someone opening the app for the
+first time. The reload is gated on a flag, because another tab accepting an
+update also fires `controllerchange` here and reloading a walk out from under
+an operator would be worse than the stale bundle.
+
 ### Supabase traffic is network-only. This is a security boundary.
 
 Nothing under `/rest/`, `/auth/`, `/realtime/`, `/functions/` or `/storage/` is
