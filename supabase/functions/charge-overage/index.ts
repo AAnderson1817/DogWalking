@@ -25,7 +25,11 @@ serveFunction(async (req) => {
     .select("id, operator_id")
     .eq("id", body.walk_id)
     .maybeSingle();
-  if (error) throw new HttpError(500, "db_error", "walk lookup failed");
+  if (error) {
+    throw new HttpError(500, "db_error", "walk lookup failed", error, {
+      walk_id: body.walk_id,
+    });
+  }
   if (!walk || walk.operator_id !== operator.id) {
     throw new HttpError(404, "walk_not_found", "walk not found");
   }

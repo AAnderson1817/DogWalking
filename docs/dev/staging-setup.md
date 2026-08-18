@@ -138,6 +138,12 @@ at once.
      `cron.job_run_details` carries the real outcome, which the dashboard
      cron never did — it marked a run "successful" once the call was
      *dispatched*, so a 500 looked exactly like a good night.
+   - **Log retention**: nothing to do on staging, but know what you have.
+     Edge functions now emit one structured JSON line per 5xx
+     (`{level,fn,request_id,status,code,message,cause,context}` — review H14),
+     and platform log retention is the default for your plan. There is no drain
+     and no error monitor, so failures are *reconstructable* but nobody is told.
+     Search by `context.walk_id` or `request_id` in Logs → Edge Functions.
    - **Email webhook** (only when Resend is configured): Database →
      Webhooks → new webhook on `notifications` INSERT → Edge Function
      `send-notification`, auth header with the service role key.

@@ -25,7 +25,11 @@ serveFunction(async (req) => {
     .select("id, operator_id, full_name, email, stripe_customer_id, stripe_subscription_id, subscription_status")
     .eq("id", body.client_id)
     .maybeSingle();
-  if (cErr) throw new HttpError(500, "db_error", "client lookup failed");
+  if (cErr) {
+    throw new HttpError(500, "db_error", "client lookup failed", cErr, {
+      client_id: body.client_id,
+    });
+  }
   if (!client || client.operator_id !== operator.id) {
     throw new HttpError(404, "client_not_found", "client not found");
   }
@@ -35,7 +39,11 @@ serveFunction(async (req) => {
     .select("id, operator_id, name, stripe_price_id, active")
     .eq("id", body.plan_id)
     .maybeSingle();
-  if (pErr) throw new HttpError(500, "db_error", "plan lookup failed");
+  if (pErr) {
+    throw new HttpError(500, "db_error", "plan lookup failed", pErr, {
+      plan_id: body.plan_id,
+    });
+  }
   if (!plan || plan.operator_id !== operator.id) {
     throw new HttpError(404, "plan_not_found", "plan not found");
   }
@@ -80,7 +88,15 @@ serveFunction(async (req) => {
       .from("clients")
       .update({ stripe_customer_id: customerId })
       .eq("id", client.id);
-    if (uErr) throw new HttpError(500, "db_error", "failed to persist stripe customer");
+    if (uErr) {
+      // The Stripe customer exists at this point and the row does not name it,
+      // so the cause here is what tells a later reconciliation which customer
+      // was orphaned.
+      throw new HttpError(500, "db_error", "failed to persist stripe customer", uErr, {
+        client_id: client.id,
+        stripe_customer_id: customerId,
+      });
+    }
   }
 
   const base = Deno.env.get("APP_BASE_URL") ?? "http://localhost:5173";

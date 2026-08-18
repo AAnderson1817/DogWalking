@@ -39,7 +39,11 @@ serveFunction(async (req) => {
     .select("id, operator_id, client_id, type, title, body, walk_id")
     .eq("id", id)
     .maybeSingle();
-  if (error) throw new HttpError(500, "db_error", "notification lookup failed");
+  if (error) {
+    throw new HttpError(500, "db_error", "notification lookup failed", error, {
+      notification_id: id,
+    });
+  }
   if (!n) throw new HttpError(404, "not_found", "notification not found");
   if (!n.client_id || !CLIENT_FACING.has(n.type)) {
     return jsonOk({ skipped: true, reason: "not a client-facing notification" });
@@ -66,8 +70,18 @@ serveFunction(async (req) => {
     }),
   });
   if (!res.ok) {
-    console.error("email send failed:", res.status);
-    throw new HttpError(502, "email_failed", "email provider rejected the message");
+    // Resend's body says WHY — domain out of verification, rate limited, bad
+    // recipient — and dropping it left "email_failed" as the whole record.
+    // The body is read defensively: a non-JSON error page must not turn a
+    // send failure into an unhandled 500.
+    const detail = await res.text().catch(() => "");
+    throw new HttpError(
+      502,
+      "email_failed",
+      "email provider rejected the message",
+      { code: `resend_${res.status}`, message: detail.slice(0, 300) },
+      { notification_id: n.id, type: n.type, client_id: n.client_id },
+    );
   }
 
   return jsonOk({ sent: true });

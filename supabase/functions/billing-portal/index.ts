@@ -17,7 +17,11 @@ serveFunction(async (req) => {
     .select("id, stripe_customer_id, operator:operators!clients_operator_id_fkey(stripe_account_id, stripe_charges_enabled)")
     .eq("auth_user_id", user.id)
     .maybeSingle();
-  if (error) throw new HttpError(500, "db_error", "client lookup failed");
+  if (error) {
+    throw new HttpError(500, "db_error", "client lookup failed", error, {
+      auth_user_id: user.id,
+    });
+  }
   if (!client) throw new HttpError(403, "not_client", "caller is not a client");
   if (!client.stripe_customer_id) {
     throw new HttpError(409, "no_billing", "no billing profile yet — ask your walker to set up your plan");

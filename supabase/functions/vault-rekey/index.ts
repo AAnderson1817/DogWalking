@@ -11,6 +11,7 @@ import {
   serveFunction,
 } from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
+import { causeCode } from "../_lib/observe.ts";
 import {
   bytesToPgHex,
   decryptSecret,
@@ -36,7 +37,12 @@ async function getRing(): Promise<KeyRing> {
   if (ring) return ring;
   const primaryRaw = Deno.env.get("VAULT_MASTER_KEY");
   if (!primaryRaw) {
-    throw new HttpError(500, "vault_key_missing", "the vault key is not configured");
+    throw new HttpError(
+      500,
+      "vault_key_missing",
+      "the vault key is not configured",
+      "VAULT_MASTER_KEY is unset in this deployment",
+    );
   }
   const primary = await importVaultKey(primaryRaw);
   const byId = new Map<string, VaultKey>([[primary.id, primary]]);
@@ -75,7 +81,9 @@ function makeDeps(): RekeyDeps {
     },
     async census(keyId) {
       const { data, error } = await db.rpc("fn_vault_census", { p_key_id: keyId });
-      if (error) throw new HttpError(500, "db_error", "vault census failed");
+      if (error) {
+        throw new HttpError(500, "db_error", "vault census failed", error, { key_id: keyId });
+      }
       const row = (Array.isArray(data) ? data[0] : data) as Record<string, number> | null;
       return {
         total: Number(row?.total ?? 0),
@@ -86,14 +94,17 @@ function makeDeps(): RekeyDeps {
     },
     async readCanary() {
       const { data, error } = await db.from("vault_canary").select("ciphertext").maybeSingle();
-      if (error) throw new HttpError(500, "db_error", "canary lookup failed");
+      if (error) throw new HttpError(500, "db_error", "canary lookup failed", error);
       return data?.ciphertext ? pgHexToBytes(data.ciphertext as string) : null;
     },
     async setCanary(blob) {
       const { data, error } = await db.rpc("fn_vault_set_canary", {
         p_ciphertext: bytesToPgHex(blob),
       });
-      if (error) throw new HttpError(500, "db_error", "canary write failed");
+      // causeCode: the statement carries the canary ciphertext.
+      if (error) {
+        throw new HttpError(500, "db_error", "canary write failed", causeCode(error));
+      }
       return String(data);
     },
     async rewrapBatch(keyId, limit) {
@@ -101,7 +112,10 @@ function makeDeps(): RekeyDeps {
         p_key_id: keyId,
         p_limit: limit,
       });
-      if (error) throw new HttpError(500, "db_error", "rewrap batch failed");
+      // causeCode: this reads ciphertext rows, so the error text is untrusted.
+      if (error) {
+        throw new HttpError(500, "db_error", "rewrap batch failed", causeCode(error));
+      }
       return ((data ?? []) as Array<Record<string, unknown>>).map((r): RekeyRow => ({
         id: String(r.id),
         operator_id: String(r.operator_id),
@@ -116,7 +130,10 @@ function makeDeps(): RekeyDeps {
         p_new_ciphertext: bytesToPgHex(next),
         p_expect_key_id: expectKeyId,
       });
-      if (error) throw new HttpError(500, "db_error", "rewrap apply failed");
+      // causeCode: this WRITES rewrapped ciphertext.
+      if (error) {
+        throw new HttpError(500, "db_error", "rewrap apply failed", causeCode(error));
+      }
       return Boolean(data);
     },
   };

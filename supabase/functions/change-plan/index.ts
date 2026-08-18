@@ -36,7 +36,11 @@ serveFunction(async (req) => {
     .select("id, operator_id, plan_id, stripe_subscription_id, credit_balance")
     .eq("id", body.client_id)
     .maybeSingle();
-  if (cErr) throw new HttpError(500, "db_error", "client lookup failed");
+  if (cErr) {
+    throw new HttpError(500, "db_error", "client lookup failed", cErr, {
+      client_id: body.client_id,
+    });
+  }
   if (!client || client.operator_id !== operator.id) {
     throw new HttpError(404, "client_not_found", "client not found");
   }
@@ -46,7 +50,11 @@ serveFunction(async (req) => {
     .select("id, operator_id, name, stripe_price_id, credits_per_cycle, price_pence, cycle, overage_rate_pence")
     .eq("id", body.new_plan_id)
     .maybeSingle();
-  if (pErr) throw new HttpError(500, "db_error", "plan lookup failed");
+  if (pErr) {
+    throw new HttpError(500, "db_error", "plan lookup failed", pErr, {
+      plan_id: body.new_plan_id,
+    });
+  }
   if (!plan || plan.operator_id !== operator.id) {
     throw new HttpError(404, "plan_not_found", "plan not found");
   }
@@ -97,7 +105,15 @@ serveFunction(async (req) => {
       p_fraction: fraction,
     });
     const intentData = Array.isArray(intentRow) ? intentRow[0] : intentRow;
-    if (iErr || !intentData) throw new HttpError(500, "intent_failed", "plan change intent could not be saved");
+    if (iErr || !intentData) {
+      throw new HttpError(
+        500,
+        "intent_failed",
+        "plan change intent could not be saved",
+        iErr ?? "fn_record_plan_change_intent returned no row",
+        { client_id: body.client_id, plan_id: body.new_plan_id },
+      );
+    }
     const intent = {
       id: (intentData as { o_intent_id: string }).o_intent_id,
       stripe_update_idempotency_key: (intentData as { o_idempotency_key: string }).o_idempotency_key,
@@ -146,7 +162,12 @@ serveFunction(async (req) => {
     p_new_plan: plan.id,
     p_remaining_fraction: fraction,
   });
-  if (rpcErr) throw new HttpError(500, "proration_failed", "credit proration failed");
+  if (rpcErr) {
+    throw new HttpError(500, "proration_failed", "credit proration failed", rpcErr, {
+      client_id: body.client_id,
+      plan_id: body.new_plan_id,
+    });
+  }
 
   return jsonOk({ new_balance: newBalance as number, plan });
 });

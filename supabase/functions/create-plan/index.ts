@@ -97,7 +97,12 @@ serveFunction(async (req) => {
   // orphaned Stripe Price nothing references is inert and free, whereas
   // archiving it on a transient DB error would strand a retry that then
   // creates a second one.
-  if (error) throw new HttpError(500, "db_error", "plan could not be saved");
+  if (error) {
+    throw new HttpError(500, "db_error", "plan could not be saved", error, {
+      operator_id: operator.id,
+      stripe_price_id: price.id,
+    });
+  }
 
   return jsonOk({ plan: data });
 });

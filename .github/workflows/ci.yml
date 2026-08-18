@@ -330,6 +330,47 @@ jobs:
         # — which is exactly how the above shipped red.
         run: deno test --allow-read=supabase/migrations ./supabase/functions/_tests/
 
+      # Every deliberate 5xx used to discard the underlying Postgres/Stripe
+      # error at the throw site, because HttpError had nowhere to put one
+      # (review H14). Now it does — and this is what stops the next throw site
+      # added from quietly going back to dropping it, which would be invisible
+      # until an operator asked why a walk failed and there was no answer.
+      #
+      # A 5xx with three arguments is the defect. 4xx is exempt: those are the
+      # caller being told something true about their own request, and there is
+      # no underlying system error to attach.
+      - name: Every 5xx throw carries its cause
+        run: |
+          python3 - <<'PY'
+          import glob, re, sys
+          # The whole call, across line breaks, so a wrapped throw is judged on
+          # its arguments rather than on where the author put a newline.
+          call = re.compile(r'new HttpError\(\s*(5\d\d)\s*,(.*?)\)\s*;', re.S)
+          bad = []
+          for f in glob.glob('supabase/functions/**/*.ts', recursive=True):
+              if '/_tests/' in f:
+                  continue
+              src = open(f).read()
+              for m in call.finditer(src):
+                  args = m.group(2)
+                  # code, message, cause -> at least two commas after the status.
+                  depth, commas = 0, 0
+                  for ch in args:
+                      if ch in '([{': depth += 1
+                      elif ch in ')]}': depth -= 1
+                      elif ch == ',' and depth == 0: commas += 1
+                  if commas < 2:
+                      line = src[:m.start()].count('\n') + 1
+                      bad.append(f"{f}:{line}")
+          if bad:
+              for b in bad:
+                  print(f"::error file={b.split(':')[0]},line={b.split(':')[1]}::"
+                        "this 5xx throws away the underlying error. Pass it as the "
+                        "4th argument to HttpError (review H14).")
+              sys.exit(1)
+          print("PASS: every 5xx throw passes a cause")
+          PY
+
       - name: No secret logging grep (phase 01 gate)
         run: |
           if grep -RInE "console\.(log|error|warn|info)\(.*\b(secret|password|ciphertext|plaintext|decrypted)" \

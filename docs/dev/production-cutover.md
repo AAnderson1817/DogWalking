@@ -233,6 +233,19 @@ and will silently strand client invites) and **notifications** (the
      `.github/workflows/job-health.yml` (it currently only runs against
      staging, because production did not exist when it was written). Without
      this the production job is unwatched.
+   - **Log drain + error monitor** — the one item on this list with no code
+     behind it, and the reason review H14 is only half closed.
+
+     Edge functions now emit one structured JSON line per 5xx
+     (`{level,fn,request_id,status,code,message,cause,context}`), so an
+     incident is reconstructable: search Logs → Edge Functions by
+     `context.walk_id`, `context.client_id` or `request_id`, and the response
+     the operator saw carries that same `request_id`.
+
+     What does NOT exist is anyone finding out without a phone call, or
+     retention beyond your plan's default. Wire a drain (Settings → Log Drains,
+     Team plan and above) and an error monitor to whatever you actually read.
+     Until then, on the money paths, you learn about failures from the customer.
    - **Email webhook**: Database → Webhooks → on `notifications` INSERT →
      Edge Function `send-notification`, service-role auth header.
 3. Seed the business: Table editor → `plans` → create your real plans with
