@@ -4,6 +4,12 @@ const baseURL = process.env.E2E_BASE_URL ?? "http://127.0.0.1:5173";
 
 export default defineConfig({
   testDir: "./e2e",
+  // The manual suite needs disposable fixtures on a real staging project and
+  // is excluded from the default run (review H18). It used to sit alongside
+  // the rest and skip on unset `E2E_*` variables, so it never executed and was
+  // nonetheless counted as coverage. Run it explicitly:
+  //   npx playwright test --config playwright.config.mjs e2e/manual/
+  testIgnore: "**/manual/**",
   timeout: 45_000,
   expect: { timeout: 10_000 },
   fullyParallel: false,
