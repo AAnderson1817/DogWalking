@@ -859,22 +859,59 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
   color: var(--sanpo-color-brand-indigo);
   font-family: var(--font-body);
 
-  /* Spec 07 names Yamabuki for "underway", but Yamabuki on Cream measures
-     1.92:1 — under the 3:1 floor (WCAG 1.4.11) for a mark that says which
-     visit is happening now, and the first thing to wash out in daylight.
-     Deepened toward Kaki-strong to 3.27:1: still gold, still derived from
-     the approved palette. Set plain Yamabuki here to revert. */
+  /* Today's own on-artwork variants of the two status colours it uses.
+     They exist because THE BACKDROP IS A PAINTING: CT-1's roles are chosen
+     to clear their floors on Cream and White, and this component sits on
+     neither. Sampled from the rendered pixels, the paper under the schedule
+     is rgb(237,224,208) at its worst — darker than Cream (#FEF6EA), so every
+     ratio computed from the token is optimistic by about 16%.
+
+     That is review H23, and it is the third time round on this exact path.
+     The previous two fixes were confidently wrong for the same reason: they
+     measured against `--sanpo-color-brand-cream` rather than against what is
+     painted there. `e2e/today-contrast.spec.ts` now takes the ink from
+     computed style, hides it, screenshots the page and reads the pixel — so
+     these numbers are measured, not derived, and a change to the artwork
+     fails the build rather than quietly invalidating a comment.
+
+     Ratios below are against rgb(237,224,208), the worst backdrop the
+     sampler finds inside these elements' own boxes at 390x844 and 640x1200. */
+
+  /* "Underway". Spec 07 names Yamabuki, which is hopeless for a mark saying
+     which visit is happening now — the first thing to wash out in daylight.
+     Deepened toward Kaki-strong. Measured 3.48–3.51:1 against a 3:1 floor
+     (WCAG 1.4.11); the previous 55% mix measured 2.70:1 while its comment
+     claimed 3.27:1. 35% is chosen for margin rather than for the minimum
+     that passes: this is the third round on this path, and a mark that
+     clears by a hundredth is one artwork revision from failing again. */
   --emaki-current: var(--sanpo-color-supporting-yamabuki);
+
+  /* "Travelled" and "DONE". Plain Matcha measures 4.15:1 — fine for the
+     stroke and the accent bar (3:1) but under the 4.5:1 floor for the words
+     "On time" and "DONE", which are body-size text. One variable rather than
+     two, so the stroke and the label it explains cannot drift apart — which
+     is what happened to --emaki-current's two literals once already.
+     Measured 4.72–4.76:1. */
+  --emaki-complete: var(--sanpo-color-supporting-matcha);
 }
 /* Separate rule, not a second declaration above: the minifier collapses two
    declarations of one property and drops the fallback, which would leave a
-   browser without color-mix painting no stroke at all. */
+   browser without color-mix painting no stroke at all. The fallbacks above
+   are the undeepened palette entries — 2.70:1 and 4.15:1, i.e. the defect —
+   so this block is load-bearing rather than a progressive enhancement.
+   color-mix has been Baseline since 2023 (Chrome 111, Safari 16.2, Firefox
+   113); no supported browser takes the fallback path. */
 @supports (color: color-mix(in srgb, red, blue)) {
   .today-emaki {
     --emaki-current: color-mix(
       in srgb,
-      var(--sanpo-color-supporting-yamabuki) 55%,
+      var(--sanpo-color-supporting-yamabuki) 35%,
       var(--sanpo-color-supporting-kaki-strong)
+    );
+    --emaki-complete: color-mix(
+      in srgb,
+      var(--sanpo-color-supporting-matcha) 80%,
+      var(--sanpo-color-brand-indigo)
     );
   }
 }
@@ -1021,24 +1058,34 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
 }
 /* Emaki path state colors. All four strokes are CT-1 token-derived — no raw
    hex — so they follow the vendor palette and its prefers-contrast overrides.
-   Ratios below are measured against the Cream canvas (#FEF6EA); WCAG 1.4.11
-   asks 3:1 for graphics that carry state. */
+   WCAG 1.4.11 asks 3:1 for graphics that carry state. Every ratio in this
+   block is SAMPLED from the rendered artwork by e2e/today-contrast.spec.ts,
+   not computed against a token; the numbers the previous two rounds left here
+   were computed against Cream and were wrong by about 16%. */
 
-/* Untravelled track. A groove rather than a state signal, so it stays light;
-   neutral-rule holds the previous visual weight (1.37:1 vs the 1.41:1 it
-   replaces) while dropping the hardcoded value. */
+/* Untravelled track. Measured 1.13:1 — its previous comment claimed 1.37:1,
+   which is the same wrong method as everything else in this block.
+   Deliberately left light and deliberately NOT asserted at 3:1: the track is
+   the container, and what carries the state is the coloured stroke drawn ON
+   it. WCAG 1.4.11 applies to the parts of a graphic "required to understand
+   the content"; an empty groove is not one. The sampler still measures and
+   prints it every run, so the number stays honest even though it is exempt —
+   guessing it is what got the last two rounds here. */
 .today-emaki-progress__base { stroke: var(--sanpo-color-neutral-rule); }
+/* "Travelled" and "DONE" share --emaki-complete — see .today-emaki. 4.72:1. */
 .today-emaki-progress__complete {
-  stroke: var(--sanpo-color-supporting-matcha); /* 5.03:1 */
+  stroke: var(--emaki-complete);
 }
 /* "Underway" is marked twice — the progress segment and the schedule row's
    accent bar — so the colour is defined once, on --emaki-current (see
-   .today-emaki), and both read it. Two literals drifted apart once already. */
+   .today-emaki), and both read it. Two literals drifted apart once already.
+   3.50:1. */
 .today-emaki-progress__current {
   stroke: var(--emaki-current);
 }
 /* "You are here". Spec 07 names Kaki for this marker; the raw #c85b13 it
-   replaces was not in CT-1 at all. 4.90:1. */
+   replaces was not in CT-1 at all. 4.05:1 (its previous comment claimed
+   4.90:1, measured against Cream). */
 .today-emaki-progress__marker {
   stroke: var(--sanpo-color-supporting-kaki);
   stroke-linecap: round;
@@ -1053,7 +1100,7 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
   line-height: 1.2;
 }
 .today-emaki-progress__copy strong {
-  color: var(--sanpo-color-supporting-matcha);
+  color: var(--emaki-complete);
   font-weight: 900;
 }
 .today-emaki-visits {
@@ -1102,7 +1149,7 @@ a.today-emaki-visit__link:focus-visible {
   border-radius: 999px;
   background: var(--sanpo-color-schedule-upcoming-accent);
 }
-.today-emaki-visit--completed .today-emaki-visit__bar { background: var(--sanpo-color-schedule-complete-accent); }
+.today-emaki-visit--completed .today-emaki-visit__bar { background: var(--emaki-complete); }
 .today-emaki-visit--current .today-emaki-visit__bar { background: var(--emaki-current); }
 .today-emaki-visit--cancelled .today-emaki-visit__bar,
 .today-emaki-visit--no_show .today-emaki-visit__bar { background: var(--sanpo-color-schedule-cancelled-accent); }
@@ -1156,7 +1203,7 @@ a.today-emaki-visit__link:focus-visible {
   flex-direction: column;
   align-items: center;
   gap: 0.9cqw;
-  color: var(--sanpo-color-supporting-matcha);
+  color: var(--emaki-complete);
 }
 .today-emaki-visit__check {
   font-size: clamp(22px, 4.2cqw, 31px);
