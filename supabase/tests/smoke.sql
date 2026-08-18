@@ -3086,6 +3086,70 @@ begin
 end $$;
 
 
+
+-- ── 0037 · one lock order for walks and clients ──────────────────────────
+-- Review M32. `fn_refund_cancelled_debit` is a BEFORE UPDATE trigger on
+-- `walks`, so its body runs with the walk tuple already locked and can only
+-- reach `clients` afterwards. Any function taking the two locks the other way
+-- round completes a deadlock cycle with it.
+--
+-- Asserted on `pg_get_functiondef` — what Postgres actually installed, after
+-- every `create or replace` — rather than on migration text, for the same
+-- reason the invariant-1 check moved to the catalogue: a later migration can
+-- replace a body, and the file that first defined it never changes.
+--
+-- Checked for EVERY function that locks both, not just `fn_debit_walk`,
+-- because the next one to invert the order will be a new function and a
+-- name-specific test would never look at it. `concurrency.sh` case 5 is the
+-- behavioural half; this is the half that runs on every commit.
+--
+-- The extraction is a regex per LOCKING statement, not `position()` on a table
+-- name. The first draft used the latter and would have missed the live
+-- violation: `fn_debit_walk` opened with an UNLOCKED `from walks where id =
+-- p_walk`, so the first mention of `walks` preceded the `clients` lock and the
+-- order read as compliant. `[^;]*?` keeps each match inside one statement.
+do $$
+declare
+  r record;
+  v_locks text[];
+  v_bad text[] := '{}';
+  v_scanned int := 0;
+begin
+  for r in
+    select p.oid, p.proname
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public' and p.prokind = 'f'
+  loop
+    select array_agg(m[1] order by ord) into v_locks
+      from regexp_matches(pg_get_functiondef(r.oid),
+                          '\m(clients|walks)\M[^;]*?\yfor update\y', 'g')
+           with ordinality as t(m, ord);
+
+    if v_locks @> array['clients'] and v_locks @> array['walks'] then
+      v_scanned := v_scanned + 1;
+      if array_position(v_locks, 'clients') < array_position(v_locks, 'walks') then
+        v_bad := v_bad || r.proname;
+      end if;
+    end if;
+  end loop;
+
+  if array_length(v_bad, 1) > 0 then
+    raise exception
+      'FAIL: % locks clients before walks — the cancel-refund trigger cannot, so this deadlocks (0037)',
+      array_to_string(v_bad, ', ');
+  end if;
+
+  -- Vacuity guard. With no function locking both tables the loop above proves
+  -- nothing, which is exactly what a typo in the pattern produces.
+  if v_scanned = 0 then
+    raise exception 'FAIL: the lock-order check matched no function at all — the pattern is broken';
+  end if;
+
+  raise notice 'walks is locked before clients everywhere (0037): OK';
+end $$;
+
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;

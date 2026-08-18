@@ -5,6 +5,27 @@ Single source of truth = `credit_ledger`. `clients.credit_balance` is a denormal
 ## Locking protocol
 Every function below begins `SELECT credit_balance INTO … FROM clients WHERE id = p_client_id FOR UPDATE;` — serializing all balance mutations per client. Ledger insert and `clients.credit_balance` update happen in the same transaction.
 
+### The canonical order is walks, then clients (0037)
+
+A function needing both row locks takes the **walk first**. This is not a
+preference between two workable orders — it is the only one available.
+`fn_refund_cancelled_debit` is a BEFORE UPDATE trigger on `walks`, so its body
+runs with the walk tuple already locked by the UPDATE that fired it and can
+only reach `clients` afterwards. Anything taking them the other way round
+completes a deadlock cycle with it (review M32).
+
+Walks-first was chosen over the alternative — a cancel RPC that takes the
+client lock before updating the walk — because the trigger fires for *every*
+path that cancels a walk (portal cancel, pause-window sweep, schedule
+deactivation, whatever is written next), and only walks-first is an order those
+paths cannot violate even without knowing the rule exists.
+
+`fn_debit_walk` was the one violator and is fixed in 0037; nothing else in the
+tree takes both. Two tests hold the line: `smoke.sql` reads the lock sequence
+out of `pg_get_functiondef` for every function that takes both and fails on
+any that inverts it, and `concurrency.sh` case 5 reproduces the deadlock itself
+against two real backends.
+
 ## Functions (all `SECURITY DEFINER`, `SET search_path = public`; grants per spec 03)
 
 **fn_grant_credits(p_client uuid, p_amount int, p_note text) → int** — inserts `grant` (+p_amount), updates balance, returns new balance. Called by stripe-webhook on `invoice.paid`.
@@ -25,7 +46,7 @@ Every function below begins `SELECT credit_balance INTO … FROM clients WHERE i
 
 **fn_walk_cost(p_walk uuid) → int** — `service_types.credit_cost` + `weekend_surcharge_credits` if `scheduled_date` is Sat/Sun. STABLE, no lock.
 
-**fn_debit_walk(p_walk uuid) → table(outcome text, cost int, new_balance int)** — locks client; cost := fn_walk_cost. If `balance >= cost`: ledger `debit` (−cost, walk_id), set `walks.credits_debited = cost`, `is_overage = false` → outcome `'debited'`. Else: NO ledger entry, balance untouched, set `credits_debited = 0`, `is_overage = true` → outcome `'overage'` (caller charges the WHOLE walk at `plans.overage_rate_pence` — invariant 3, never partial). Idempotent: if walk already debited or already flagged overage, returns prior outcome without re-applying.
+**fn_debit_walk(p_walk uuid) → table(outcome text, cost int, new_balance int)** — locks the **walk, then the client** (0037, see the lock order below); cost := fn_walk_cost. If `balance >= cost`: ledger `debit` (−cost, walk_id), set `walks.credits_debited = cost`, `is_overage = false` → outcome `'debited'`. Else: NO ledger entry, balance untouched, set `credits_debited = 0`, `is_overage = true` → outcome `'overage'` (caller charges the WHOLE walk at `plans.overage_rate_pence` — invariant 3, never partial). Idempotent: if walk already debited or already flagged overage, returns prior outcome without re-applying.
 
 **fn_adjust_credits(p_client uuid, p_amount int, p_note text) → int** — operator manual `adjust` (±). Rejects if result < 0.
 
