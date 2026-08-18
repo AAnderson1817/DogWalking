@@ -45,6 +45,20 @@ export interface CredentialMeta {
 export interface VaultDeps {
   /** Shared sliding-window limiter; false ⇒ over 5/min for this user. */
   allowAttempt(userId: string): boolean | Promise<boolean>;
+  /**
+   * How many VERIFIED MFA factors this account has.
+   *
+   * The gate is graduated on purpose (review H2). Requiring aal2
+   * unconditionally would lock every operator out of the vault, because MFA
+   * needs the Supabase Pro plan and TOTP enrolment is off — so the vault would
+   * be unusable until a billing decision is made. Instead: if the operator has
+   * enrolled a factor, a password-only session is refused; if they have not,
+   * the password stands and the audit row records the reduced assurance.
+   *
+   * That means enrolling a factor is what closes the exploit, and does so
+   * without any further code change.
+   */
+  verifiedFactorCount(userId: string): Promise<number>;
   verifyPassword(email: string, password: string): Promise<boolean>;
   /** The binding is authenticated (AES-GCM additionalData), so a ciphertext
    *  cannot be moved to another row or another tenant (review B2). */
@@ -91,8 +105,27 @@ export interface VaultDeps {
   logReauthFailure(operatorId: string, credentialId: string | null): Promise<void>;
 }
 
+/**
+ * Three outcomes, not two: `aal2` (best), `aal1_no_factor` (what this product
+ * is today — allowed, and recorded), `insufficient` (a factor exists but this
+ * session did not present it — refused).
+ */
+export type AssuranceOutcome = "aal2" | "aal1_no_factor" | "insufficient";
+
+export async function resolveAssurance(
+  operator: { id: string; aal?: "aal1" | "aal2" | null },
+  deps: VaultDeps,
+): Promise<AssuranceOutcome> {
+  if (operator.aal === "aal2") return "aal2";
+  // A missing claim is treated exactly like aal1. It is what a project with no
+  // MFA configured emits, and assuming the stronger value from an ABSENT claim
+  // would be the whole gate failing open.
+  const factors = await deps.verifiedFactorCount(operator.id);
+  return factors > 0 ? "insufficient" : "aal1_no_factor";
+}
+
 export async function handleVault(
-  operator: { id: string; email?: string },
+  operator: { id: string; email?: string; aal?: "aal1" | "aal2" | null },
   body: VaultBody,
   deps: VaultDeps,
 ): Promise<Record<string, unknown>> {
@@ -121,6 +154,27 @@ export async function handleVault(
       // swallowed deliberately — see above
     }
     throw new HttpError(401, "reauth_failed", "password verification failed");
+  }
+
+  // The password alone is not enough when something better exists.
+  //
+  // An attacker holding only a live session can change the account password
+  // without knowing the old one and then pass the check above with the password
+  // they just set, which reduces "one compromised browser session" to "every
+  // entry code for every one of this operator's clients". They cannot
+  // manufacture aal2, because that needs the second factor itself.
+  //
+  // Refused only when the operator HAS a verified factor — see
+  // verifiedFactorCount. An operator with no factor is where the product is
+  // today, and the audit row records that the reveal happened at reduced
+  // assurance rather than pretending otherwise.
+  const assurance = await resolveAssurance(operator, deps);
+  if (assurance === "insufficient") {
+    throw new HttpError(
+      401,
+      "second_factor_required",
+      "Your account has two-factor authentication enabled, so the vault needs it for this session. Sign in again and complete the second step.",
+    );
   }
 
   switch (body.action) {

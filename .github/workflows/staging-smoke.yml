@@ -57,6 +57,88 @@ jobs:
   # SELECT → cleanup. Prints real PostgREST statuses/bodies (no tokens, no
   # emails beyond the fixture address) so auth/RLS/grant regressions on the
   # hosted project are visible instead of being swallowed by the UI.
+  # ── What auth settings does the deployed project ACTUALLY have? ──────────
+  # Before this, nothing in the repository could answer that (review H2).
+  # `supabase/config.toml` governs `supabase start` on a laptop: neither deploy
+  # workflow runs `supabase config push`, and that string appears in no
+  # workflow. So every auth decision in that file — signup policy, password
+  # rules, session lifetime, MFA, OTP expiry, rate limits — was fiction as far
+  # as staging and production were concerned, and the real settings lived in a
+  # dashboard no file records, no test asserts and no reviewer can see.
+  #
+  # This reads them back through the Management API and prints them, then FAILS
+  # on the ones that are load-bearing for a vault of other people's door codes.
+  # It does not push anything: see the note in docs/dev/auth-posture.md for why
+  # `config push` is not wired up yet.
+  auth-posture:
+    name: Read back the deployed auth settings
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+
+      - name: Fetch and check the live auth config
+        run: |
+          cfg=$(mktemp)
+          status=$(curl -sS -o "$cfg" -w '%{http_code}' \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_ACCESS_TOKEN }}" \
+            "https://api.supabase.com/v1/projects/${{ secrets.SUPABASE_PROJECT_REF }}/config/auth")
+          if [ "$status" != "200" ]; then
+            echo "::error title=Could not read the auth config::Management API returned HTTP $status. If 401, SUPABASE_ACCESS_TOKEN has expired — see docs/dev/staging-setup.md Troubleshooting."
+            cat "$cfg"; echo
+            exit 1
+          fi
+
+          # Print the posture. This alone is the fix for "unknown from this
+          # repository" — a reader of the Actions log can now see it.
+          echo "## Deployed auth posture (staging)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          jq '{
+            password_min_length,
+            password_required_characters,
+            secure_password_change: .secure_password_change_enabled,
+            session_timebox: .sessions_timebox,
+            session_inactivity: .sessions_inactivity_timeout,
+            mfa_totp_enroll: .mfa_totp_enroll_enabled,
+            mfa_totp_verify: .mfa_totp_verify_enabled,
+            signup_enabled: .disable_signup | not,
+            jwt_expiry: .jwt_exp,
+            refresh_token_rotation: .refresh_token_rotation_enabled
+          }' "$cfg" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          # Then insist on the two that decide whether the vault's re-auth means
+          # anything. Warnings, not failures, for the rest: this job exists to
+          # make the posture visible, and turning staging red over settings only
+          # the owner can change in a dashboard would just teach everyone to
+          # ignore it.
+          fail=0
+          secure=$(jq -r '.secure_password_change_enabled // false' "$cfg")
+          if [ "$secure" != "true" ]; then
+            echo "::error title=secure_password_change is OFF::An attacker holding only a live session can call updateUser({password}) with no knowledge of the current password, then satisfy the vault's password check with the one they just set. The vault re-auth is ceremony until this is on. Set it in Dashboard -> Authentication -> Providers -> Email."
+            fail=1
+          fi
+          minlen=$(jq -r '.password_min_length // 0' "$cfg")
+          if [ "$minlen" -lt 12 ]; then
+            echo "::error title=Password floor is $minlen::config.toml asks for 12. This password is the only thing between a live session and every door code the operator holds."
+            fail=1
+          fi
+
+          for pair in "sessions_timebox:session timebox" "sessions_inactivity_timeout:inactivity timeout"; do
+            key=${pair%%:*}; label=${pair#*:}
+            val=$(jq -r ".${key} // empty" "$cfg")
+            if [ -z "$val" ] || [ "$val" = "0" ] || [ "$val" = "null" ]; then
+              echo "::warning title=No $label::An exfiltrated session token is valid until its refresh token is revoked. config.toml asks for 12h/2h."
+            fi
+          done
+
+          if [ "$(jq -r '.mfa_totp_verify_enabled // false' "$cfg")" != "true" ]; then
+            echo "::warning title=TOTP is not enabled::The vault accepts a password alone. MFA requires the Supabase Pro plan, so this is partly a billing decision — see docs/dev/auth-posture.md."
+          fi
+
+          exit $fail
+
   onboard-repro:
     name: Replay operator onboard flow
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}

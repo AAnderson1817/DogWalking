@@ -1,6 +1,13 @@
 // credential-vault — POST, operator JWT (spec 03/04).
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { jsonOk, readJson, requireOperator, serveFunction, HttpError } from "../_lib/http.ts";
+import {
+  HttpError,
+  jsonOk,
+  readJson,
+  requireOperator,
+  serveFunction,
+  sessionAssurance,
+} from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
 import { causeCode } from "../_lib/observe.ts";
 import {
@@ -270,6 +277,20 @@ function makeDeps(
       }
     },
 
+    async verifiedFactorCount(userId) {
+      // Verified factors only. An enrolled-but-unverified factor is a TOTP
+      // enrolment somebody started and abandoned; refusing the vault over one
+      // would lock the operator out of their own door codes over a half-finished
+      // settings visit.
+      const { data, error } = await db.auth.admin.mfa.listFactors({ userId });
+      if (error) {
+        throw new HttpError(500, "db_error", "MFA factor lookup failed", error, {
+          user_id: userId,
+        });
+      }
+      return (data?.factors ?? []).filter((f) => f.status === "verified").length;
+    },
+
     async logReauthFailure(operator, credentialId) {
       const { error } = await db.rpc("fn_log_credential_action", {
         p_credential: credentialId,
@@ -319,8 +340,12 @@ serveFunction(async (req) => {
   // Truncated here as well as in the SQL: a caller controls this header, and a
   // multi-kilobyte user agent should not reach the database at all.
   const userAgent = req.headers.get("user-agent")?.slice(0, 400) || null;
+  // Read from THIS request's token, not from the operator row: assurance is a
+  // property of the session presenting itself, which is exactly what a stolen
+  // one lacks.
+  const aal = sessionAssurance(req.headers.get("Authorization"));
   const result = await handleVault(
-    operator,
+    { ...operator, aal },
     body,
     makeDeps(operator.id, clientIp, userAgent),
   );
