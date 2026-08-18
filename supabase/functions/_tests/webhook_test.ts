@@ -556,6 +556,13 @@ Deno.test("credit_note.created prefers the invoice's cumulative credited total",
   );
   const rev = calls.find((c) => c.fn === "reversePayment");
   assertEquals((rev!.args[0] as { amountPence: number }).amountPence, 3000);
+
+  // The invoice id must survive the expanded-object form. Asserting only the
+  // amount passed against a version that read the object itself as a string,
+  // got null, and would have dropped the reversal entirely in production —
+  // the mock finds a payment whatever reference it is handed.
+  const look = calls.find((c) => c.fn === "findPaymentForReversal");
+  assertEquals((look!.args[0] as { invoiceId?: string | null }).invoiceId, "in_9");
 });
 
 Deno.test("credit_note.created falls back to the note amount when the invoice is a bare id", async () => {

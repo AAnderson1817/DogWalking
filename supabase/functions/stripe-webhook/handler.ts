@@ -350,9 +350,13 @@ async function applyEvent(
       // credited total; the note's own amount is not, so prefer it and fall
       // back only when Stripe did not expand the invoice.
       const inv = obj.invoice as Record<string, unknown> | string | null;
-      const invoiceId = typeof inv === "string" ? inv : asString((inv ?? {}) as never);
+      // Stripe sends `invoice` either as a bare id or as an expanded object,
+      // and the expanded case is the one that carries the cumulative total we
+      // want. Reach into `.id` for it — reading the object itself as a string
+      // yields null, which silently drops the reversal.
+      const invoiceId = typeof inv === "string" ? inv : asString(inv?.id);
       const cumulative = typeof inv === "object" && inv
-        ? numberOr((inv as Record<string, unknown>).post_payment_credit_notes_amount, NaN)
+        ? numberOr(inv.post_payment_credit_notes_amount, NaN)
         : NaN;
       const amount = Number.isFinite(cumulative) ? cumulative : numberOr(obj.amount, 0);
       return await reverse(deps, { invoiceId }, "refund", amount, "credit note issued");
