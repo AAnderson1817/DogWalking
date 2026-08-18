@@ -88,6 +88,7 @@ db_cleanup() {
     delete from schedule_pets where operator_id::text like '${NS}%';
     delete from recurring_schedules where operator_id::text like '${NS}%';
     delete from walks where operator_id::text like '${NS}%';
+    drop function if exists fn_debit_walk_barrier(uuid);
     delete from pets where operator_id::text like '${NS}%';
     delete from properties where operator_id::text like '${NS}%';
     delete from clients where operator_id::text like '${NS}%';
@@ -130,7 +131,8 @@ from (values
   ('${NS}-000000000301'::uuid, '09:00', '10:00'),
   ('${NS}-000000000302'::uuid, '11:00', '12:00'),
   ('${NS}-000000000303'::uuid, '13:00', '14:00'),
-  ('${NS}-000000000304'::uuid, '15:00', '16:00')
+  ('${NS}-000000000304'::uuid, '15:00', '16:00'),
+  ('${NS}-000000000305'::uuid, '17:00', '18:00')
 ) as v(id, s, e);
 SQL
 echo "== concurrency: fixtures committed =="
@@ -144,14 +146,21 @@ exec 3>"$WORK/a"
 # Wait until B's statement is actually waiting on a lock. Polls rather than
 # sleeping a fixed time: a fixed sleep is a race with the machine, and on a
 # slow runner it would report "not blocked" for a lock that is working.
+# A needle containing a quote breaks the SQL, `q` then prints nothing, and the
+# old `!= "0"` test read that empty string as "blocked" — so the precondition
+# passed VACUOUSLY, in every case, without ever looking at pg_stat_activity.
+# Found while adding case 5. The count must be a number and it must be > 0.
 wait_until_blocked() {
-  local needle="$1" i
+  local needle="$1" i n
+  case "$needle" in *"'"*) echo "bad needle (contains a quote)"; return;; esac
   for i in $(seq 1 100); do
-    if [ "$(q "select count(*) from pg_stat_activity
-                where state = 'active' and wait_event_type = 'Lock'
-                  and query like '%${needle}%'")" != "0" ]; then
-      echo blocked; return
-    fi
+    n="$(q "select count(*) from pg_stat_activity
+             where state = 'active' and wait_event_type = 'Lock'
+               and query like '%${needle}%'")"
+    case "$n" in
+      ''|*[!0-9]*) echo "probe failed"; return;;
+    esac
+    if [ "$n" -gt 0 ]; then echo blocked; return; fi
     sleep 0.1
   done
   echo "not blocked"
@@ -298,6 +307,116 @@ expect_eq "one invoice, one cycle grant" \
            and entry_type = 'grant' and stripe_invoice_id = '${INV}'")" "1"
 expect_eq "one payments row for the invoice" \
   "$(q "select count(*) from payments where stripe_invoice_id = '${INV}'")" "1"
+
+# ── Case 5: the lock-order inversion between debit and cancel-refund ──────
+#
+# Review M32. `fn_debit_walk` locked `clients` and then `walks`. The cancel
+# path cannot do that: a BEFORE UPDATE trigger on `walks` runs with the walk
+# tuple ALREADY locked by the UPDATE that fired it, and
+# `fn_refund_cancelled_debit` then reaches for `clients`. Two orders, one
+# cycle — an already-debited walk cancelled while a retry of complete-walk is
+# between `fn_debit_walk`'s two lock statements.
+#
+# The outcome is a detected 40P01 abort rather than corruption, which is
+# exactly why it needs a test: it surfaces as END WALK failing occasionally
+# with no reproduction, on a screen the operator is standing outside a house
+# holding.
+#
+# ── Why this is not timing-based ─────────────────────────────────────────
+#
+# The race needs an interleave INSIDE `fn_debit_walk`, between its two locks,
+# and the harness cannot interleave a single RPC. So the function is copied
+# with a BARRIER injected between them — and copied from
+# `pg_get_functiondef`, not hand-written, so the copy provably carries the
+# shipped lock order and cannot drift from it. The anchor is the first
+# `for update;`, which means "after the first lock" whichever table that is,
+# so this same test exercises both the old order and the new one.
+#
+# The barrier is an advisory lock held by session A, not a sleep. A sleep too
+# short reports "no deadlock" — a FALSE PASS, the worst direction. Note that
+# the advisory lock gates ONE session only; it never stands between the two
+# contending sessions, so it cannot serialise them the way the discarded first
+# draft of this file did.
+echo
+echo "== case 5: cancel-refund racing a debit retry on the same walk =="
+
+# An in-progress walk that has already been debited: the only state
+# `fn_refund_cancelled_debit` acts on.
+psql "$DB" -v ON_ERROR_STOP=1 -q -c "
+  update walks set status = 'in_progress', credits_debited = 1
+   where id = '${NS}-000000000305';"
+
+psql "$DB" -v ON_ERROR_STOP=1 -q -c "
+do \$outer\$
+declare
+  v_def text;
+  v_at int;
+begin
+  select pg_get_functiondef('fn_debit_walk(uuid)'::regprocedure) into v_def;
+  v_def := replace(v_def, 'FUNCTION public.fn_debit_walk(',
+                          'FUNCTION public.fn_debit_walk_barrier(');
+  v_at := position('for update;' in v_def) + length('for update;');
+  if v_at <= length('for update;') then
+    raise exception 'case 5: no lock statement found in fn_debit_walk';
+  end if;
+  v_def := left(v_def, v_at)
+        || E'\n  perform pg_advisory_xact_lock(919);'
+        || substr(v_def, v_at + 1);
+  execute v_def;
+end \$outer\$;"
+
+# Session A holds the barrier shut.
+echo "select pg_advisory_lock(919);" >&3
+for _ in $(seq 1 50); do
+  [ "$(q "select count(*) from pg_locks where locktype = 'advisory' and objid = 919 and granted")" != "0" ] && break
+  sleep 0.1
+done
+
+# B is the complete-walk retry. It takes its FIRST lock and stops at the barrier.
+psql "$DB" -q -v ON_ERROR_STOP=1 -c \
+  "begin; select fn_debit_walk_barrier('${NS}-000000000305'); commit;" >"$WORK/b5.out" 2>&1 &
+B5_PID=$!
+expect_eq "the debit retry reached the barrier holding its first lock" \
+  "$(wait_until_blocked fn_debit_walk_barrier)" "blocked"
+
+# C is the operator cancelling that same walk. Its UPDATE locks the walk row,
+# then the refund trigger reaches for the client.
+psql "$DB" -q -v ON_ERROR_STOP=1 -c \
+  "begin; update walks set status = 'cancelled' where id = '${NS}-000000000305'; commit;" \
+  >"$WORK/c5.out" 2>&1 &
+C5_PID=$!
+expect_eq "the cancel genuinely contended with the debit retry" \
+  "$(wait_until_blocked "update walks set status")" "blocked"
+
+# Release the barrier: B now reaches for its second lock.
+echo "select pg_advisory_unlock(919);" >&3
+
+B5_RC=0; C5_RC=0
+wait $B5_PID || B5_RC=$?
+wait $C5_PID || C5_RC=$?
+
+if [ "$B5_RC" != "0" ] || [ "$C5_RC" != "0" ]; then
+  fail "neither the debit nor the cancel is aborted" \
+       "$(grep -ih "deadlock\|ERROR" "$WORK/b5.out" "$WORK/c5.out" | head -3)"
+else
+  pass "neither the debit nor the cancel is aborted"
+fi
+if grep -qi "deadlock detected" "$WORK/b5.out" "$WORK/c5.out"; then
+  fail "no deadlock was detected" "$(grep -ih "deadlock detected" "$WORK/b5.out" "$WORK/c5.out" | head -1)"
+else
+  pass "no deadlock was detected"
+fi
+
+# The refund still happened — a fix that made the two paths agree by removing
+# the refund would satisfy every assertion above.
+expect_eq "the cancelled walk's credit came back" \
+  "$(q "select count(*) from credit_ledger
+         where walk_id = '${NS}-000000000305' and entry_type = 'adjust' and amount > 0")" "1"
+expect_eq "and the walk stops claiming it was paid for" \
+  "$(q "select credits_debited from walks where id = '${NS}-000000000305'")" "0"
+
+psql "$DB" -q -c "drop function if exists fn_debit_walk_barrier(uuid);" >/dev/null
+
 
 exec 3>&-
 wait $A_PID 2>/dev/null || true
