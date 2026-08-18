@@ -54,7 +54,11 @@ a { color: inherit; }
 #root { min-height: 100dvh; display: flex; flex-direction: column; }
 .page {
   width: 100%;
-  max-width: 640px;
+  /* A variable rather than a literal because the desktop rail centres the page
+     with an expression that has to know this number, and Today narrows it to
+     fit its own artwork on a short viewport (review H27). Two copies of 640
+     is how those two get out of step. */
+  max-width: var(--page-max, 640px);
   margin: 0 auto;
   padding: var(--s-4);
   padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px)); /* BottomNav space */

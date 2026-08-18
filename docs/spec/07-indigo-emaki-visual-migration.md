@@ -48,12 +48,36 @@ registered to the artwork.
 
 | Width | Navigation | Required behavior |
 | --- | --- | --- |
-| `320–639 px` | Fixed bottom bar | Full-bleed field; no horizontal scroll; `END WALK` at least `44 px` high; all four labels visible. |
-| `640–1023 px` | Fixed bottom bar | Field caps at `640 px`; artwork remains native-size backed; schedule alignment is unchanged. |
-| `1024 px+` | Left rail | Field remains `640 px` and centers in the space to the right of the `88 px` rail; no widening or horizontal lockup. |
+| `320–767 px` | Fixed bottom bar | Full-bleed field up to `640 px`; no horizontal scroll; `END WALK` at least `44 px` high; all four labels visible. Scrolls vertically — that is what a phone is for. |
+| `768–1023 px` | Fixed bottom bar | Field width is bounded by the height available, `clamp(420px, (100dvh − nav) × 875/1798, 640px)`, and centres. |
+| `1024 px+` | Left rail | Same bound with no nav reserve, since the rail takes no vertical space. Centres in the area to the right of the `88 px` rail; no widening or horizontal lockup. |
+
+**Above `768 px`, horizontal slack is spent on vertical fit.** The plate's ratio
+means a `640 px` field is `1315 px` tall — taller than a laptop viewport before
+the schedule begins. That is why Today broke at both viewports this document
+names for testing: at `1440×900` the current visit straddled the fold, `END
+WALK` was cut in half and the next visit was entirely off-screen; at
+`768×1024` the last row ran under the bottom bar (review H27).
+
+Narrowing the field is the correct lever because **every dimension in this
+composition is `cqw` against the field**, so the whole thing scales
+proportionally. The approved composition is preserved exactly, at a smaller
+size — nothing reflows and no breakpoint re-lays it out. Below `768 px` there
+is no slack to spend and the phone is untouched.
+
+The `420 px` floor is where proportionality stops holding: the type `clamp()`
+floors engage around there (`h1` at `28px / 6.15cqw = 455px`), so below it the
+text no longer shrinks with the artwork. Where the floor binds, the component
+scrolls again. A short viewport genuinely cannot hold this composition, and
+shrinking past the floor would trade a visible defect for a subtler one.
 
 The component may scroll vertically on a viewport shorter than its preserved
 field ratio. It must never crop or independently stretch the illustrated scene.
+
+At widths beyond the field, the page's Cream shows either side of the plate's
+warmer paper. That is a mount, and it is deliberate: the plate is a painting
+with a fixed ratio, and a mount is what a painting gets when the wall is wider
+than the frame.
 
 ### The field is not the plate
 

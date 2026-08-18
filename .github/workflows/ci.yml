@@ -135,7 +135,10 @@ jobs:
           import re, pathlib, glob, sys
           defined, used = set(), {}
           for f in glob.glob('app/src/styles/**/*.css', recursive=True):
-              t = pathlib.Path(f).read_text()
+              # Comments first. A `var(--role)` written in prose to explain a
+              # rule is not a use, and neither is a `--x:` inside one; without
+              # this the check fails on its own documentation.
+              t = re.sub(r'/\*.*?\*/', '', pathlib.Path(f).read_text(), flags=re.S)
               defined |= set(re.findall(r'(--[a-zA-Z0-9-]+)\s*:', t))
               for m in re.finditer(r'var\(\s*(--[a-zA-Z0-9-]+)', t):
                   used.setdefault(m.group(1), f)

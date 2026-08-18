@@ -32,6 +32,15 @@ async function geometry(page: Page) {
       pageScrolls: document.documentElement.scrollHeight > window.innerHeight + 1,
       lastRowBottom: rows.length ? Math.max(...rows.map((r) => r.bottom)) : 0,
       rowCount: rows.length,
+      viewportHeight: window.innerHeight,
+      actionBottom: action?.bottom ?? 0,
+      // A row is out of reach at first paint if it is below the fold, or
+      // behind the fixed bottom bar. `toBeVisible` says nothing about either:
+      // it passes for a row painted underneath an opaque nav.
+      rowsBelowFold: rows.filter((r) => r.bottom > window.innerHeight).length,
+      rowsUnderBar: nav && nav.top > window.innerHeight / 2
+        ? rows.filter((r) => r.bottom > nav.top).length
+        : 0,
       names: [...document.querySelectorAll(".today-emaki-visit__identity strong")].map((n) => n.textContent),
     };
   });
@@ -75,6 +84,21 @@ for (const viewport of viewports) {
     // The illustration is never cut off: the field is at least as tall as the
     // plate, and its own paper carries on below.
     expect(m.fieldHeight).toBeGreaterThanOrEqual(m.plateWidth * PLATE_RATIO - 1);
+
+    // Review H27. An ordinary three-visit day has to land on one screen at the
+    // two viewports this spec names for testing — operators schedule and bill
+    // on a laptop, and an investor demo runs on one. Before the fit-to-height
+    // bound, 1440x900 put `END WALK` across the fold at 853-914 and Luna
+    // entirely off-screen at 935-1035, while 768x1024 ran the last row to 1035
+    // against a nav whose top edge is 967. Both were red against the old CSS.
+    if (viewport.width >= 768) {
+      expect(m.rowsBelowFold, "a visit is below the fold at first paint").toBe(0);
+      expect(m.rowsUnderBar, "a visit is behind the bottom bar").toBe(0);
+      expect(m.actionBottom, "END WALK is cut off by the fold").toBeLessThanOrEqual(m.viewportHeight);
+      // The bound must actually bind, rather than the field silently staying
+      // 640 wide because the expression failed to parse.
+      expect(m.fieldWidth).toBeLessThan(640);
+    }
 
     const nav = page.getByRole("navigation", { name: "Primary" });
     for (const label of ["Today", "Calendar", "Clients", "Money"]) {
