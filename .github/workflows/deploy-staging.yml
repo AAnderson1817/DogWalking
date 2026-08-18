@@ -171,6 +171,33 @@ jobs:
           # No secret is printed: the response carries a key id and counts only.
           echo "$body"
 
+  # Guards the job above against its own `if`. A skipped job does not fail its
+  # workflow, so an expression mistake there would produce a run that reports
+  # success while deploying no functions at all — the same green-but-empty
+  # failure this file is elsewhere trying to remove. Assert the outcome instead
+  # of trusting the expression that produces it.
+  assert-functions-deployed:
+    name: Functions actually deployed
+    needs: [migrate, deploy-functions]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: deploy-functions must have run, not merely not-failed
+        env:
+          MIGRATE: ${{ needs.migrate.result }}
+          FUNCTIONS: ${{ needs.deploy-functions.result }}
+        run: |
+          echo "migrate=$MIGRATE deploy-functions=$FUNCTIONS"
+          if [ "$MIGRATE" != "success" ]; then
+            echo "migrations did not succeed — that failure is reported by its own job"
+            exit 0
+          fi
+          if [ "$FUNCTIONS" != "success" ]; then
+            echo "::error title=No functions were deployed::migrate succeeded but deploy-functions ended '$FUNCTIONS'. A skipped job does not fail a workflow, so without this check the run would have reported success having deployed nothing."
+            exit 1
+          fi
+          echo "ok"
+
   sync-secrets:
     name: Sync edge secrets (opt-in)
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.sync_secrets }}
