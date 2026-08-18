@@ -39,6 +39,10 @@ const PAYMENT_TREATMENTS: Record<PaymentStatus, StatusTreatment> = {
   succeeded: { badge: "completed", label: "Collected" },
   failed: { badge: "attention", label: "Needs attention" },
   refunded: { badge: "cancelled", label: "Refunded" },
+  // A dispute is not a refund: the cardholder's bank pulled the money, it
+  // carries a fee, and it can still be contested. It reads as attention
+  // rather than cancelled because it is a thing the operator must act on.
+  disputed: { badge: "attention", label: "Disputed" },
 };
 
 export function walkStatusTreatment(

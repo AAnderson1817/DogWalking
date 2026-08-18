@@ -2,6 +2,7 @@ import { useRef, useState, type TouchEvent } from "react";
 import { PaymentStatus } from "./PaymentStatus";
 import { paymentPetNames, type PaymentDetailed } from "@/lib/api";
 import { dateLocal, money } from "@/lib/format";
+import { reversalNote } from "@/lib/reversal";
 
 function paymentTypeLabel(type: PaymentDetailed["type"]): string {
   return type === "overage" ? "Walk overage" : "Subscription";
@@ -23,6 +24,7 @@ export function PaymentRow({
   const statusDate = payment.status === "pending"
     ? `Processing since ${dateLocal(payment.created_at)}`
     : dateLocal(payment.created_at);
+  const reversal = reversalNote(payment);
 
   function onTouchStart(event: TouchEvent<HTMLDivElement>) {
     touchStart.current = event.touches[0]?.clientX ?? null;
@@ -60,6 +62,9 @@ export function PaymentRow({
         <div className="payment-row__status"><PaymentStatus status={payment.status} /></div>
         <span className="payment-row__amount numeral">{money(payment.amount_pence)}</span>
       </div>
+      {reversal && (
+        <p className="payment-row__reversal">{reversal}</p>
+      )}
       {payment.receipt_url && (
         <a
           className="payment-row__receipt"

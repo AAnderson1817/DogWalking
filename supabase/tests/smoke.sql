@@ -1292,6 +1292,249 @@ begin
   raise notice 'vault machinery is service-role only (0021): OK';
 end $$;
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- fn_reverse_payment + reversal indexes (0023) — review B4
+--
+-- The negative-path cases assert the SPECIFIC message or the SPECIFIC row
+-- count, not merely that something happened. This file's usual "anything
+-- non-FAIL passes" idiom would have passed against the broken system: before
+-- 0023 a reversal simply did not exist, so "no clawback occurred" and "the
+-- clawback was correctly zero" are the same observation.
+-- ═══════════════════════════════════════════════════════════════════════════
+do $$
+declare
+  v_op   uuid := '99999999-0000-4000-a000-000000000001';
+  v_cli  uuid := '99999999-0000-4000-c000-00000000000b';   -- rollover 'none'
+  v_pay  uuid;
+  r      record;
+  v_bal  int;
+  v_n    int;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+
+  -- ── 1. Full refund of a cycle invoice, credits untouched ───────────────
+  perform fn_apply_invoice_paid(v_cli, 10, 'in_smoke_full', 9000, 'USD', null);
+  select id into v_pay from payments
+   where stripe_invoice_id = 'in_smoke_full' and status = 'succeeded';
+  select credit_balance into v_bal from clients where id = v_cli;
+  if v_bal < 10 then raise exception 'FAIL: setup expected >=10 credits, got %', v_bal; end if;
+
+  select * into r from fn_reverse_payment(v_pay, 'refund', 9000, 'customer changed mind');
+  if r.outcome <> 'reversed' then raise exception 'FAIL: expected reversed, got %', r.outcome; end if;
+  if r.credits_reversed <> 10 then
+    raise exception 'FAIL: full refund should claw back 10, clawed %', r.credits_reversed;
+  end if;
+  if r.credits_unrecovered <> 0 then
+    raise exception 'FAIL: nothing should be unrecovered, got %', r.credits_unrecovered;
+  end if;
+  if (select status from payments where id = v_pay) <> 'refunded' then
+    raise exception 'FAIL: a fully refunded payment must read refunded';
+  end if;
+  -- invariant 1: the balance moved via the ledger, not a direct write.
+  if not exists (select 1 from credit_ledger
+                  where client_id = v_cli and entry_type = 'adjust' and amount = -10) then
+    raise exception 'FAIL: clawback did not go through the ledger';
+  end if;
+
+  -- ── 2. Replay of the same cumulative amount is a no-op ─────────────────
+  select * into r from fn_reverse_payment(v_pay, 'refund', 9000, 'duplicate delivery');
+  if r.outcome <> 'noop' then
+    raise exception 'FAIL: replayed refund should be a noop, got % (clawed %)',
+      r.outcome, r.credits_reversed;
+  end if;
+  select count(*) into v_n from credit_ledger
+   where client_id = v_cli and entry_type = 'adjust' and amount = -10;
+  if v_n <> 1 then raise exception 'FAIL: replay produced % clawback rows, expected 1', v_n; end if;
+
+  -- ── 3. THE REGRESSION: a refunded invoice must never re-grant ──────────
+  -- fn_apply_invoice_paid decided idempotency by looking for a SUCCEEDED
+  -- payment on the invoice. Flipping the row to 'refunded' dropped it out of
+  -- both that test and its partial unique index, so Stripe's redelivery (it
+  -- retries for three days) granted a second cycle of credits.
+  --
+  -- Asserted on the LEDGER, not the balance: rollover 'none' wipes the
+  -- balance before each grant, so the balance reads identically whether or
+  -- not the second grant happened. Confirmed against the pre-0023 body — two
+  -- grant rows — before this assertion was written.
+  perform fn_apply_invoice_paid(v_cli, 10, 'in_smoke_full', 9000, 'USD', null);
+  select count(*) into v_n from credit_ledger
+   where entry_type = 'grant' and stripe_invoice_id = 'in_smoke_full';
+  if v_n <> 1 then
+    raise exception 'FAIL: replayed invoice.paid after a refund produced % grants, expected 1', v_n;
+  end if;
+
+  -- ── 4. Partial refund floors at the balance and reports the shortfall ──
+  perform fn_apply_invoice_paid(v_cli, 10, 'in_smoke_part', 9000, 'USD', null);
+  select id into v_pay from payments
+   where stripe_invoice_id = 'in_smoke_part' and status = 'succeeded';
+  insert into credit_ledger (operator_id, client_id, entry_type, amount, note)
+    values (v_op, v_cli, 'debit', -9, 'smoke: spent on walks');
+
+  select * into r from fn_reverse_payment(v_pay, 'refund', 4500, 'half back');
+  -- half of 9000 bought half of 10 credits = 5 due; only 1 is left.
+  if r.credits_reversed <> 1 or r.credits_unrecovered <> 4 then
+    raise exception 'FAIL: expected clawed=1 unrecovered=4, got clawed=% unrecovered=%',
+      r.credits_reversed, r.credits_unrecovered;
+  end if;
+  -- A half-refunded payment is not 'refunded'. There is no partial status and
+  -- claiming the stronger one would overstate it; refunded_amount_pence carries it.
+  if (select status from payments where id = v_pay) <> 'succeeded' then
+    raise exception 'FAIL: a partial refund must not flip status to refunded';
+  end if;
+  if (select refunded_amount_pence from payments where id = v_pay) <> 4500 then
+    raise exception 'FAIL: cumulative refunded amount not recorded';
+  end if;
+  if (select credit_balance from clients where id = v_cli) < 0 then
+    raise exception 'FAIL: clawback drove the balance negative';
+  end if;
+
+  -- ── 5. Overage reversal moves money only (invariant 3) ─────────────────
+  -- A walk is EITHER credit-funded OR charged, so an overage payment bought
+  -- no credits and reversing it must leave the ledger completely alone.
+  select count(*) into v_n from credit_ledger where client_id = v_cli;
+  insert into payments (operator_id, client_id, type, amount_pence, currency, status)
+    values (v_op, v_cli, 'overage', 2500, 'USD', 'succeeded') returning id into v_pay;
+  select * into r from fn_reverse_payment(v_pay, 'dispute', 2500, 'chargeback');
+  if r.credits_reversed <> 0 or r.needs_review then
+    raise exception 'FAIL: overage reversal touched credits (clawed=% review=%)',
+      r.credits_reversed, r.needs_review;
+  end if;
+  if (select count(*) from credit_ledger where client_id = v_cli) <> v_n then
+    raise exception 'FAIL: overage reversal wrote a ledger row';
+  end if;
+  if (select status from payments where id = v_pay) <> 'disputed' then
+    raise exception 'FAIL: a dispute must read disputed, not refunded';
+  end if;
+
+  -- ── 6. An untraceable grant is flagged, never guessed ──────────────────
+  -- Grants written before 0023 carry no stripe_invoice_id. Reversal could
+  -- reconstruct a number from the plan's current credits_per_cycle, which is
+  -- wrong whenever the plan changed between the grant and the refund. It
+  -- refuses instead.
+  insert into payments (operator_id, client_id, type, amount_pence, currency,
+                        status, stripe_invoice_id)
+    values (v_op, v_cli, 'subscription', 9000, 'USD', 'succeeded', 'in_smoke_legacy')
+    returning id into v_pay;
+  select * into r from fn_reverse_payment(v_pay, 'refund', 9000, 'pre-0023 grant');
+  if r.credits_reversed <> 0 or not r.needs_review then
+    raise exception 'FAIL: untraceable grant should flag review and claw nothing, got clawed=% review=%',
+      r.credits_reversed, r.needs_review;
+  end if;
+  if not (select reversal_needs_review from payments where id = v_pay) then
+    raise exception 'FAIL: needs-review flag not persisted for manual reconciliation';
+  end if;
+
+  -- ── 7. Refuses to reverse more than was charged ────────────────────────
+  begin
+    perform fn_reverse_payment(v_pay, 'refund', 999999, 'too much');
+    raise exception 'FAIL: reversed more than the charge';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%exceeds charged%' then
+      raise exception 'FAIL: wrong error for over-reversal: %', sqlerrm;
+    end if;
+  end;
+
+  -- ── 8. Rejects an unknown kind ─────────────────────────────────────────
+  begin
+    perform fn_reverse_payment(v_pay, 'clawback', 100, 'typo');
+    raise exception 'FAIL: accepted an unknown reversal kind';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%kind must be refund or dispute%' then
+      raise exception 'FAIL: wrong error for bad kind: %', sqlerrm;
+    end if;
+  end;
+
+  raise notice 'fn_reverse_payment (0023): OK';
+end $$;
+
+-- Reversal is service-role only: an operator JWT must not be able to write
+-- off their own client's debt, and neither may anon.
+do $$
+declare v_pay uuid;
+begin
+  select id into v_pay from payments limit 1;
+
+  set local role authenticated;
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000000001","role":"authenticated"}', true);
+  begin
+    perform fn_reverse_payment(v_pay, 'refund', 1, 'as operator');
+    raise exception 'FAIL: an operator could reverse a payment';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  set local role anon;
+  begin
+    perform fn_reverse_payment(v_pay, 'refund', 1, 'as anon');
+    raise exception 'FAIL: anon could reverse a payment';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  reset role;
+  raise notice 'fn_reverse_payment is service-role only (0023): OK';
+end $$;
+
+-- L6 (0023): the auto-refund trigger was guarded on `old.status not in
+-- (cancelled, no_show)`, which also matches a COMPLETED walk. Marking a
+-- delivered walk no_show refunded the credit AND left credits_debited set,
+-- so any re-completion would have been free. Narrowed to in_progress, and it
+-- now zeroes credits_debited on the way out.
+do $$
+declare
+  v_op    uuid := '99999999-0000-4000-a000-000000000001';
+  v_cli   uuid := '99999999-0000-4000-c000-00000000000a';
+  v_prop  uuid := '99999999-0000-4000-d000-00000000000a';
+  v_walk  uuid;
+  v_n     int;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+
+  insert into walks (id, operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end,
+                     status, credits_debited, origin_date)
+  select gen_random_uuid(), v_op, v_cli, v_prop, st.id,
+         date '2026-07-02', '10:00', '11:00', 'completed', 1, date '2026-07-02'
+    from service_types st
+   where st.operator_id = v_op and st.is_default
+  returning id into v_walk;
+
+  update walks set status = 'no_show' where id = v_walk;
+
+  select count(*) into v_n from credit_ledger
+   where walk_id = v_walk and note = 'auto refund: walk cancelled after debit';
+  if v_n <> 0 then
+    raise exception 'FAIL: a COMPLETED walk marked no_show was refunded (L6)';
+  end if;
+
+  -- and the live case it was actually written for still works
+  insert into walks (id, operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end,
+                     status, credits_debited, origin_date)
+  select gen_random_uuid(), v_op, v_cli, v_prop, st.id,
+         date '2026-07-03', '10:00', '11:00', 'in_progress', 1, date '2026-07-03'
+    from service_types st
+   where st.operator_id = v_op and st.is_default
+  returning id into v_walk;
+
+  update walks set status = 'cancelled' where id = v_walk;
+
+  select count(*) into v_n from credit_ledger
+   where walk_id = v_walk and note = 'auto refund: walk cancelled after debit';
+  if v_n <> 1 then
+    raise exception 'FAIL: cancelling a debited in-progress walk did not refund (% rows)', v_n;
+  end if;
+  if (select credits_debited from walks where id = v_walk) <> 0 then
+    raise exception 'FAIL: refunded walk still claims credits_debited — a re-completion would be free';
+  end if;
+
+  raise notice 'auto-refund trigger narrowed to in_progress (0023, L6): OK';
+end $$;
+
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;

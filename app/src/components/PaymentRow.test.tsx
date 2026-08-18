@@ -20,6 +20,13 @@ const PAYMENT: PaymentDetailed = {
   receipt_url: "https://example.com/receipt",
   created_at: "2026-07-15T14:00:00Z",
   updated_at: "2026-07-15T14:00:00Z",
+  refunded_amount_pence: 0,
+  reversed_at: null,
+  reversal_reason: null,
+  credits_reversed: 0,
+  credits_unrecovered: 0,
+  reversal_needs_review: false,
+  stripe_charge_id: null,
   client: { full_name: "Amelia Hart" },
   walk: {
     service: { name: "Private walk 60" },

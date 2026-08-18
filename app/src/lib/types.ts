@@ -152,6 +152,7 @@ export type Database = {
           expires_at: string | null;
           note: string | null;
           created_at: string;
+          stripe_invoice_id: string | null;
         };
         Insert: {
           id?: string;
@@ -164,6 +165,7 @@ export type Database = {
           expires_at?: string | null;
           note?: string | null;
           created_at?: string;
+          stripe_invoice_id?: string | null;
         };
         Update: {
           id?: string;
@@ -176,6 +178,7 @@ export type Database = {
           expires_at?: string | null;
           note?: string | null;
           created_at?: string;
+          stripe_invoice_id?: string | null;
         };
         Relationships: [];
       };
@@ -275,6 +278,13 @@ export type Database = {
           receipt_url: string | null;
           created_at: string;
           updated_at: string;
+          refunded_amount_pence: number;
+          reversed_at: string | null;
+          reversal_reason: string | null;
+          credits_reversed: number;
+          credits_unrecovered: number;
+          reversal_needs_review: boolean;
+          stripe_charge_id: string | null;
         };
         Insert: {
           id?: string;
@@ -290,6 +300,13 @@ export type Database = {
           receipt_url?: string | null;
           created_at?: string;
           updated_at?: string;
+          refunded_amount_pence?: number;
+          reversed_at?: string | null;
+          reversal_reason?: string | null;
+          credits_reversed?: number;
+          credits_unrecovered?: number;
+          reversal_needs_review?: boolean;
+          stripe_charge_id?: string | null;
         };
         Update: {
           id?: string;
@@ -305,6 +322,13 @@ export type Database = {
           receipt_url?: string | null;
           created_at?: string;
           updated_at?: string;
+          refunded_amount_pence?: number;
+          reversed_at?: string | null;
+          reversal_reason?: string | null;
+          credits_reversed?: number;
+          credits_unrecovered?: number;
+          reversal_needs_review?: boolean;
+          stripe_charge_id?: string | null;
         };
         Relationships: [];
       };
@@ -981,6 +1005,15 @@ export type Database = {
         };
         Returns: number;
       };
+      fn_grant_cycle_credits: {
+        Args: {
+          p_client: string;
+          p_amount: number;
+          p_note: string;
+          p_invoice_id: string;
+        };
+        Returns: number;
+      };
       fn_guard_clients_update: {
         Args: Record<string, never>;
         Returns: unknown;
@@ -1054,6 +1087,15 @@ export type Database = {
       fn_refund_cancelled_debit: {
         Args: Record<string, never>;
         Returns: unknown;
+      };
+      fn_reverse_payment: {
+        Args: {
+          p_payment: string;
+          p_kind: string;
+          p_amount_pence: number;
+          p_reason: string;
+        };
+        Returns: Array<{ outcome: string; credits_reversed: number; credits_unrecovered: number; needs_review: boolean }>;
       };
       fn_seed_operator_defaults: {
         Args: Record<string, never>;
@@ -1134,8 +1176,8 @@ export type Database = {
       client_status: "invited" | "active" | "paused" | "archived";
       entry_method: "key_on_file" | "lockbox" | "smart_lock" | "door_code" | "buzzer_fob";
       ledger_entry_type: "grant" | "debit" | "adjust" | "rollover" | "expiry";
-      notification_type: "walk_complete" | "low_credit" | "renewal_upcoming" | "payment_failed" | "walk_scheduled" | "walk_cancelled";
-      payment_status: "pending" | "succeeded" | "failed" | "refunded";
+      notification_type: "walk_complete" | "low_credit" | "renewal_upcoming" | "payment_failed" | "walk_scheduled" | "walk_cancelled" | "payment_refunded" | "payment_disputed";
+      payment_status: "pending" | "succeeded" | "failed" | "refunded" | "disputed";
       payment_type: "subscription" | "overage" | "topup";
       pet_size: "small" | "medium" | "large" | "giant";
       rollover_policy: "none" | "capped" | "unlimited";
