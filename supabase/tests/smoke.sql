@@ -211,6 +211,9 @@ begin
     raise exception 'FAIL: negative-overshoot adjust was not rejected';
   exception when others then
     if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%adjustment would make balance negative%' then
+      raise exception 'FAIL: negative-overshoot adjust was not rejected — rejected for the wrong reason: %', sqlerrm;
+    end if;
   end;
 
   reset session authorization;
@@ -228,6 +231,9 @@ begin
     raise exception 'FAIL: cross-tenant adjust was not rejected';
   exception when others then
     if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%caller is not the operator of this client%' then
+      raise exception 'FAIL: cross-tenant adjust was not rejected — rejected for the wrong reason: %', sqlerrm;
+    end if;
   end;
   reset session authorization;
   raise notice 'cross-tenant adjust rejection: OK';
@@ -565,12 +571,16 @@ declare
 begin
   perform set_config('request.jwt.claims', '{"role":"anon"}', true);
   set local session authorization anon;
-  foreach t in array array[
-    'operators','plans','clients','properties','access_credentials',
-    'credential_access_log','pets','service_types','recurring_schedules',
-    'schedule_pets','walks','walk_pets','walk_gps_points','walk_photos',
-    'credit_ledger','payments','notifications','stripe_events'
-  ] loop
+  -- From the CATALOGUE, not a literal list (review M31). The array this
+  -- replaces was the 18 tables that existed in 0002, copied from
+  -- 0004_security.sql, so the suite was structurally incapable of noticing
+  -- `plan_change_intents`, `vault_rate_limit_attempts` or `job_runs` — all of
+  -- which had been added since, two of them with no RLS at all. A test that
+  -- enumerates what it checks can only ever check what somebody remembered.
+  for t in
+    select c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'public' and c.relkind = 'r' order by c.relname
+  loop
     begin
       execute format('select count(*) from %I', t) into n;
       if n <> 0 then
@@ -581,6 +591,14 @@ begin
     end;
   end loop;
 
+  -- The loop must have had something to iterate. An empty catalogue query
+  -- passes every assertion inside it and proves nothing — the vacuity failure
+  -- this repository keeps finding.
+  if (select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace
+       where n.nspname = 'public' and c.relkind = 'r') < 18 then
+    raise exception 'FAIL: the anon sweep found fewer tables than 0002 created';
+  end if;
+
   begin
     perform fn_grant_credits('99999999-0000-4000-c000-00000000000a', 1, 'anon grant');
     raise exception 'FAIL: anon executed fn_grant_credits';
@@ -590,6 +608,31 @@ begin
 
   reset session authorization;
   raise notice 'security 5 (anon denied everywhere): OK';
+end $$;
+
+-- ═══ Security assertion 6: RLS covers every table, now and later ══════════
+-- The anon sweep above tests GRANTS: a table with no grant to `anon` raises
+-- insufficient_privilege and the loop swallows it, so an unprotected table
+-- passes that sweep. Verified — adding a grantless table left it green.
+--
+-- RLS is a separate control and needs its own assertion, and it needs to live
+-- HERE rather than only in 0032. A migration's assertion runs once, when that
+-- migration applies; a table added in 0033 would apply cleanly and 0032 would
+-- never look again. This runs after every migration, on every CI database job.
+do $$
+declare
+  missing text;
+  exempt text[] := array[]::text[];  -- nothing is exempt; add a name AND a reason
+begin
+  select string_agg(c.relname, ', ' order by c.relname) into missing
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace
+   where n.nspname = 'public' and c.relkind = 'r'
+     and not (c.relrowsecurity and c.relforcerowsecurity)
+     and not (c.relname = any (exempt));
+  if missing is not null then
+    raise exception 'FAIL: RLS not enabled+forced on: % (invariant 7)', missing;
+  end if;
+  raise notice 'security 6 (RLS enabled+forced on every public table): OK';
 end $$;
 
 -- ═══ Extra guards: claim invite + client partial-column updates ═══════════
@@ -631,6 +674,9 @@ begin
     raise exception 'FAIL: double claim succeeded';
   exception when others then
     if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%invalid or already claimed invite%' then
+      raise exception 'FAIL: double claim succeeded — rejected for the wrong reason: %', sqlerrm;
+    end if;
   end;
   reset session authorization;
 
@@ -646,6 +692,9 @@ begin
     raise exception 'FAIL: client updated operator notes';
   exception when others then
     if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%may update contact fields only%' then
+      raise exception 'FAIL: client updated operator notes — rejected for the wrong reason: %', sqlerrm;
+    end if;
   end;
   reset session authorization;
 
@@ -680,15 +729,26 @@ begin
     raise exception 'FAIL: client could not cancel own future walk';
   end if;
 
-  -- Booking for another client is invisible/blocked by RLS.
+  -- Booking for another client is blocked by RLS.
+  --
+  -- Review M34: this used client A's property (`v_prop`) with client A2's id,
+  -- so the TENANT-CONSISTENCY TRIGGER raised first — P0001, "walk property
+  -- must belong to client/operator" — and RLS was never the control under
+  -- test. Weakening the policy's `client_id` predicate would not have failed
+  -- it. Probed to confirm before changing anything, rather than inferred.
+  --
+  -- A2's own property makes the trigger happy, so the only thing left to
+  -- refuse is the policy. Pinned to 42501 for the same reason: `when others`
+  -- would go green again the moment some other control fired first.
   begin
     insert into walks (operator_id, client_id, property_id, service_type_id,
                        scheduled_date, window_start, window_end, status)
     values ('99999999-0000-4000-a000-000000000001', '99999999-0000-4000-c000-0000000000a2',
-            v_prop, v_service, current_date + 10, '10:00', '11:00', 'scheduled');
+            '99999999-0000-4000-d000-0000000000a2', v_service,
+            current_date + 10, '10:00', '11:00', 'scheduled');
     raise exception 'FAIL: client booked a walk for another client';
-  exception when others then
-    if sqlerrm like 'FAIL:%' then raise; end if;
+  exception when insufficient_privilege then
+    null;  -- RLS refused, which is the control this asserts
   end;
 
   -- Cancelling inside the cutoff window is rejected by the guard.
@@ -708,6 +768,9 @@ begin
     raise exception 'FAIL: client cancelled inside the cutoff window';
   exception when others then
     if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%contact your walker to cancel%' then
+      raise exception 'FAIL: client cancelled inside the cutoff window — rejected for the wrong reason: %', sqlerrm;
+    end if;
   end;
 
   -- Clients may not touch other columns even on their own scheduled walks.
@@ -717,6 +780,9 @@ begin
     raise exception 'FAIL: client updated walk fields other than status';
   exception when others then
     if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%may only cancel scheduled walks%' then
+      raise exception 'FAIL: client updated walk fields other than status — rejected for the wrong reason: %', sqlerrm;
+    end if;
   end;
 
   reset session authorization;
@@ -1235,6 +1301,9 @@ begin
     raise exception 'FAIL: a non-v2 canary was accepted — an unreadable pin is not a pin';
   exception when others then
     if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%not a v2 blob%' then
+      raise exception 'FAIL: a non-v2 canary was accepted — rejected for the wrong reason: %', sqlerrm;
+    end if;
   end;
 
   delete from access_credentials where id = v_cred;

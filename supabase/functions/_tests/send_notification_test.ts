@@ -237,3 +237,39 @@ Deno.test("a single-notification failure surfaces as a 502 naming the row", asyn
   assertEquals(err.message, "email provider rejected the message");
   assert(String(err.cause).includes("domain not verified"));
 });
+
+// ── send-once, and the tenant scope (review M1) ────────────────────────────
+
+Deno.test("a notification already recorded as sent is not sent again", async () => {
+  const { deps, sentTo, recorded } = makeDeps();
+  const outcome = await deliverNotification(
+    { ...ROW, email_delivery_status: "sent" },
+    deps,
+  );
+  assertEquals(outcome.kind, "skipped");
+  // The endpoint accepts a notification_id directly, so without this an
+  // operator could POST the same id in a loop and mail-bomb their client.
+  assertEquals(sentTo.length, 0);
+  // And it writes nothing: re-recording would move email_sent_at forward and
+  // make a delivered notification look like it had just been delivered again.
+  assertEquals(recorded.length, 0);
+});
+
+Deno.test("a FAILED attempt stays retryable — send-once is not attempt-once", async () => {
+  const { deps, sentTo } = makeDeps();
+  // The distinction the guard has to preserve: 0029's whole backlog exists so
+  // a failure is retried. Only a recorded `sent` is terminal.
+  const outcome = await deliverNotification(
+    { ...ROW, email_delivery_status: "failed", email_attempts: 2 },
+    deps,
+  );
+  assertEquals(outcome.kind, "sent");
+  assertEquals(sentTo, ["ada@example.test"]);
+});
+
+Deno.test("a pending notification sends normally", async () => {
+  const { deps, sentTo } = makeDeps();
+  const outcome = await deliverNotification({ ...ROW, email_delivery_status: "pending" }, deps);
+  assertEquals(outcome.kind, "sent");
+  assertEquals(sentTo.length, 1);
+});

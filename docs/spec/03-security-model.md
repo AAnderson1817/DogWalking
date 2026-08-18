@@ -3,6 +3,29 @@
 Two authenticated personas share the `authenticated` Postgres role, distinguished by data: **operator** (`operators.id = auth.uid()`) and **client** (`clients.auth_user_id = auth.uid()`). Helper predicates (STABLE, `SECURITY DEFINER` to avoid RLS recursion): `is_operator()`, `my_client_id()`.
 
 ## RLS matrix (RLS enabled + FORCED on every table)
+
+**"Every table" is asserted from the catalogue, not from a list.** `0004`
+enabled RLS by iterating a literal array of the 18 tables that existed in
+`0002`, and `smoke.sql` re-hardcoded the same array — so three tables added
+later were invisible to both: `plan_change_intents` and
+`vault_rate_limit_attempts` had no RLS at all, and `job_runs` was enabled but
+never FORCED (review M31). No live exposure, because the grants held and
+PostgREST could reach none of them — which is the point: the only thing
+standing there was a single `revoke`, and one future blanket `grant` would have
+failed open with nothing to catch it.
+
+`0032` enables and forces all three, and both the migration and `smoke.sql`
+now derive the set from `pg_class`. The smoke check lives outside the migration
+deliberately: a migration asserts once, when it applies, so a table added in a
+later migration would never be looked at again. Assertion 6 runs after every
+migration on every CI database job, and its exemption list is empty — adding a
+name there requires writing a reason next to it.
+
+Note the anon sweep (assertion 5) tests **grants**, not RLS: a table with no
+grant to `anon` raises `insufficient_privilege` and the loop swallows it, so an
+unprotected table passes it. Verified by adding a grantless table — the sweep
+stayed green and assertion 6 caught it. They are two controls and they need two
+assertions.
 | Table | Operator (`operator_id = auth.uid()`) | Client (own rows via `client_id = my_client_id()`) | anon |
 |---|---|---|---|
 | operators | select/update own row | select `display_name,business_name` of own operator only (view `v_my_operator`) | — |
