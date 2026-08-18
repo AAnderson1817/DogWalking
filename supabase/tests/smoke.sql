@@ -2244,6 +2244,234 @@ begin
 end $$;
 
 
+-- ═══ Vault audit trail + the hint that was never protected (0030) ════════
+-- key_location_hint was an ordinary column with SELECT/INSERT/UPDATE granted
+-- to `authenticated`, rendered with no re-auth, no audit row and no rate
+-- limit — so a borrowed session returned, for every client, the full address
+-- and where the key was hidden. For a lockbox client AES-GCM was protecting
+-- the less useful half.
+do $$
+begin
+  if exists (select 1 from information_schema.columns
+              where table_name = 'access_credentials' and column_name = 'key_location_hint') then
+    raise exception 'FAIL: key_location_hint is back — a means of entry in plaintext';
+  end if;
+  raise notice 'key_location_hint is gone (0030): OK';
+end $$;
+
+-- Every action leaves a row, not just a successful reveal.
+do $$
+declare
+  v_cred uuid := gen_random_uuid();
+  v_op uuid := '99999999-0000-4000-a000-000000000001';
+  v_prop uuid := '99999999-0000-4000-d000-00000000000a';
+  v_actions text;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+
+  perform fn_write_credential(v_cred, v_op, v_prop, 'lockbox',
+    decode('000102030405060708090a0b101112131415161718191a1b1c1dff', 'hex'),
+    'Smoke door', '203.0.113.9', 'smoke/1.0');
+  perform fn_rotate_credential(v_cred, v_op,
+    decode('0102030405060708090a0b0c101112131415161718191a1b1c1dee', 'hex'),
+    null, null, '203.0.113.9', 'smoke/1.0');
+  perform fn_log_credential_action(v_cred, v_op, 'reauth_failed', null, '203.0.113.9', 'smoke/1.0', null);
+  perform fn_revoke_credential(v_cred, v_op, '203.0.113.9', 'smoke/1.0');
+
+  select string_agg(action::text, ',' order by accessed_at, action) into v_actions
+    from credential_access_log where credential_id = v_cred;
+  if v_actions is null or v_actions not like '%create%' then
+    raise exception 'FAIL: creating a credential wrote no audit row (got %)', v_actions;
+  end if;
+  if v_actions not like '%rotate%' then
+    raise exception 'FAIL: rotating wrote no audit row — the question "who changed my code" is unanswerable';
+  end if;
+  if v_actions not like '%revoke%' then
+    raise exception 'FAIL: revoking wrote no audit row';
+  end if;
+  if v_actions not like '%reauth_failed%' then
+    raise exception 'FAIL: a failed re-auth wrote no audit row';
+  end if;
+
+  -- The IP is the half the log never had. Without it the trail cannot
+  -- distinguish the operator's own phone from somebody else's browser.
+  if not exists (select 1 from credential_access_log
+                  where credential_id = v_cred and ip = '203.0.113.9'::inet) then
+    raise exception 'FAIL: the caller IP was not recorded';
+  end if;
+  if not exists (select 1 from credential_access_log
+                  where credential_id = v_cred and user_agent = 'smoke/1.0') then
+    raise exception 'FAIL: the user agent was not recorded';
+  end if;
+
+  raise notice 'every vault action is audited (0030): OK';
+end $$;
+
+-- A malformed forwarded-for header must not fail the operation it describes.
+do $$
+declare
+  v_cred uuid := gen_random_uuid();
+  v_op uuid := '99999999-0000-4000-a000-000000000001';
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  perform fn_write_credential(v_cred, v_op, '99999999-0000-4000-d000-00000000000a', 'door_code',
+    decode('000102030405060708090a0b101112131415161718191a1b1c1dff', 'hex'),
+    'Bad IP', 'not-an-ip; DROP', 'smoke/1.0');
+  if not exists (select 1 from credential_access_log
+                  where credential_id = v_cred and ip is null) then
+    raise exception 'FAIL: a malformed IP should be recorded as null, not lose the row';
+  end if;
+  raise notice 'a malformed IP loses the IP, not the audit row (0030): OK';
+end $$;
+
+-- The log is immortal, like the ledger. It had no mutation block at all, so
+-- the operator whose reads it records could rewrite or delete them.
+do $$
+declare
+  v_row uuid;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  select id into v_row from credential_access_log limit 1;
+
+  begin
+    update credential_access_log set purpose = 'rewritten' where id = v_row;
+    raise exception 'FAIL: an audit row was UPDATED';
+  exception when raise_exception then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%append-only%' then raise; end if;
+  end;
+
+  begin
+    delete from credential_access_log where id = v_row;
+    raise exception 'FAIL: an audit row was DELETED';
+  exception when raise_exception then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%append-only%' then raise; end if;
+  end;
+
+  raise notice 'the credential audit log is append-only (0030): OK';
+end $$;
+
+-- And no API-role write path: an operator forging a 'read' row would be worse
+-- than a missing trail, because it attributes an entry to a time.
+do $$
+begin
+  set local role authenticated;
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000000001","role":"authenticated"}', true);
+  begin
+    insert into credential_access_log (operator_id, credential_id, accessed_by, action, purpose)
+    values ('99999999-0000-4000-a000-000000000001',
+            (select id from access_credentials limit 1),
+            '99999999-0000-4000-a000-000000000001', 'read', 'forged');
+    raise exception 'FAIL: an operator forged an audit row';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  raise notice 'audit rows cannot be forged by an operator (0030): OK';
+end $$;
+
+-- A walk reference must be a visit to THIS property by THIS operator. A
+-- mismatched one would make the trail worse than empty: it would attribute an
+-- entry to a visit that was somewhere else.
+do $$
+declare
+  v_cred uuid;
+  v_foreign_walk uuid;
+  v_op uuid := '99999999-0000-4000-a000-000000000001';
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  select id into v_cred from access_credentials
+   where operator_id = v_op and revoked_at is null limit 1;
+  select id into v_foreign_walk from walks
+   where operator_id <> v_op limit 1;
+
+  if v_foreign_walk is not null then
+    begin
+      perform fn_read_credential(v_cred, 'entry', v_op, null, null, v_foreign_walk);
+      raise exception 'FAIL: a reveal was attributed to another operator''s walk';
+    exception when raise_exception then
+      if sqlerrm like 'FAIL:%' then raise; end if;
+      if sqlerrm not like '%not a visit to this property%' then raise; end if;
+    end;
+  end if;
+  raise notice 'a reveal cannot name a walk that was elsewhere (0030): OK';
+end $$;
+
+-- The person whose door it is can read the trail. They had no read path at
+-- all, which is what made the trail unable to answer their question.
+do $$
+declare
+  v_visible int;
+  v_client_user uuid;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  select auth_user_id into v_client_user from clients
+   where id = '99999999-0000-4000-c000-00000000000a';
+
+  set local role authenticated;
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_client_user), true);
+
+  select count(*) into v_visible from credential_access_log;
+  if v_visible = 0 then
+    raise exception 'FAIL: the client cannot see any of their own door''s activity';
+  end if;
+
+  -- ...and only their own. Every visible row must belong to a credential on a
+  -- property this client owns.
+  if exists (
+    select 1 from credential_access_log l
+     where not exists (
+       select 1 from access_credentials ac
+         join properties p on p.id = ac.property_id
+         join clients c on c.id = p.client_id
+        where ac.id = l.credential_id and c.auth_user_id = v_client_user)
+  ) then
+    raise exception 'FAIL: a client can read another household''s door activity';
+  end if;
+
+  -- The ciphertext stays unreadable (invariant 2) even though the client can
+  -- now select the credential metadata the trail names.
+  begin
+    perform ciphertext from access_credentials limit 1;
+    raise exception 'FAIL: a client read the ciphertext column';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  raise notice 'the client reads their own trail, and no ciphertext (0030): OK';
+end $$;
+
+-- Definer functions are service-role only (invariant 5).
+do $$
+begin
+  set local role authenticated;
+  begin
+    perform fn_write_credential(gen_random_uuid(),
+      '99999999-0000-4000-a000-000000000001', '99999999-0000-4000-d000-00000000000a',
+      'door_code', decode('00', 'hex'), 'nope', null, null);
+    raise exception 'FAIL: an operator called fn_write_credential directly';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+  begin
+    perform fn_log_credential_action(gen_random_uuid(),
+      '99999999-0000-4000-a000-000000000001', 'read', 'nope', null, null, null);
+    raise exception 'FAIL: an operator wrote an audit row through the logger';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  raise notice 'vault write functions are service-role only (0030): OK';
+end $$;
+
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;

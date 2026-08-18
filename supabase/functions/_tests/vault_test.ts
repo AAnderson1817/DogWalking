@@ -14,7 +14,6 @@ function cred(overrides: Partial<CredentialMeta> = {}): CredentialMeta {
     property_id: "prop-1",
     entry_method: "lockbox",
     label: "Front door",
-    key_location_hint: null,
     rotated_at: null,
     revoked_at: null,
     ...overrides,
@@ -25,6 +24,10 @@ interface Seen {
   encryptBinding?: VaultBinding;
   decryptBinding?: VaultBinding;
   insertedId?: string;
+  /** Which credential a failed re-auth was reaching for (review H3). */
+  reauthFailureFor?: string | null;
+  /** The walk a reveal was attributed to, if any. */
+  readWalkId?: string;
 }
 
 function makeVaultDeps(opts: {
@@ -55,6 +58,11 @@ function makeVaultDeps(opts: {
       seen.decryptBinding = binding;
       return Promise.resolve("s3cret");
     },
+    logReauthFailure: (_op, credentialId) => {
+      calls.push("logReauthFailure");
+      seen.reauthFailureFor = credentialId;
+      return Promise.resolve();
+    },
     getProperty: (id) => Promise.resolve(id === "prop-1" ? { id, operator_id: "op-1" } : null),
     getCredential: (_id) =>
       Promise.resolve(opts.credential === undefined ? cred() : opts.credential),
@@ -71,8 +79,9 @@ function makeVaultDeps(opts: {
       calls.push("revokeCredential");
       return Promise.resolve();
     },
-    readCredential: (_c, _p, _o) => {
+    readCredential: (_c, _p, _o, walkId) => {
       calls.push("readCredential");
+      seen.readWalkId = walkId;
       return Promise.resolve({ ciphertext: blob, label: "Front door", entry_method: "lockbox" });
     },
   };
@@ -485,4 +494,87 @@ Deno.test("a card decline is still its own class — client told, claim failed",
   const result = await chargeOverageForWalk("walk-1", deps);
   assertEquals(result.payment.status, "failed");
   assert(calls.includes("notify:client"));
+});
+
+// ── The audit trail records every event, not one in four (review H3) ───────
+// `credential_access_log` was written in exactly one place — inside
+// fn_read_credential, on a SUCCESSFUL reveal. Create, rotate, revoke and a
+// failed re-auth wrote nothing, so the trail could answer neither "who changed
+// my garage code on the 14th" nor "did anybody try to open my door".
+
+Deno.test("a FAILED re-auth is recorded — the event an attacker wants missing", async () => {
+  // Previously somebody with a live session could try passwords against the
+  // vault until the rate limiter stopped them and leave no trace whatsoever.
+  const { deps, calls, seen } = makeVaultDeps({ passwordOk: false });
+  await assertRejects(() =>
+    handleVault(OP, { action: "get", credential_id: "cred-1", purpose: "walk", password: "bad" }, deps)
+  );
+  assert(calls.includes("logReauthFailure"), "a failed re-auth left no audit row");
+  assertEquals(seen.reauthFailureFor, "cred-1", "the row must name what was being reached for");
+});
+
+Deno.test("a failed re-auth naming no credential still records", async () => {
+  const { deps, calls, seen } = makeVaultDeps({ passwordOk: false });
+  await assertRejects(() => handleVault(OP, { action: "delete", password: "bad" }, deps));
+  assert(calls.includes("logReauthFailure"));
+  assertEquals(seen.reauthFailureFor, null);
+});
+
+Deno.test("the caller is still refused when the audit write itself fails", async () => {
+  // A 500 here would tell an attacker they had found a way to turn the audit
+  // trail off. The refusal is what matters; the log is best-effort.
+  const { deps, calls } = makeVaultDeps({ passwordOk: false });
+  deps.logReauthFailure = () => {
+    calls.push("logReauthFailure");
+    return Promise.reject(new Error("audit table gone"));
+  };
+  const err = await assertRejects(() =>
+    handleVault(OP, { action: "get", credential_id: "cred-1", purpose: "walk", password: "bad" }, deps)
+  );
+  assert(calls.includes("logReauthFailure"));
+  assertEquals((err as { code?: string }).code, "reauth_failed", "the refusal must survive");
+});
+
+Deno.test("a reveal passes the walk through, so the purpose is not the only witness", async () => {
+  // The purpose is typed by the person under suspicion. A walk reference is
+  // something the system knows independently, and 0030 validates it against
+  // both the operator and the property.
+  const { deps, seen } = makeVaultDeps();
+  await handleVault(
+    OP,
+    { action: "get", credential_id: "cred-1", purpose: "pre-walk entry", password: "pw", walk_id: "walk-7" },
+    deps,
+  );
+  assertEquals(seen.readWalkId, "walk-7");
+});
+
+Deno.test("a reveal without a walk still works — the field is optional", async () => {
+  const { deps, seen } = makeVaultDeps();
+  await handleVault(
+    OP,
+    { action: "get", credential_id: "cred-1", purpose: "ad-hoc check", password: "pw" },
+    deps,
+  );
+  assertEquals(seen.readWalkId, undefined);
+});
+
+Deno.test("the credential metadata no longer carries a key location hint", async () => {
+  // The field was an ordinary column, client-readable, rendered with no
+  // re-auth and no audit row, and its placeholder coached a means of entry.
+  // Asserted on the RESPONSE because that is what a borrowed session sees.
+  const { deps } = makeVaultDeps();
+  const res = await handleVault(
+    OP,
+    {
+      action: "put",
+      property_id: "prop-1",
+      entry_method: "lockbox",
+      label: "Front door",
+      secret: "1234",
+      password: "pw",
+    },
+    deps,
+  );
+  const meta = (res as { credential: Record<string, unknown> }).credential;
+  assert(!("key_location_hint" in meta), "the hint is back in the vault response");
 });

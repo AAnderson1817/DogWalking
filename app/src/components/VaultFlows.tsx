@@ -138,7 +138,6 @@ export function CredentialRow({
           <div style={{ fontWeight: 600 }}>{credential.label ?? entryMethodLabel(credential.entry_method)}</div>
           <div style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>
             {entryMethodLabel(credential.entry_method)}
-            {credential.key_location_hint ? ` · ${credential.key_location_hint}` : ""}
             {credential.rotated_at ? ` · rotated ${dateLocal(credential.rotated_at)}` : ""}
           </div>
         </div>
@@ -256,7 +255,6 @@ export function PutCredentialSheet({
   const [entryMethod, setEntryMethod] = useState<string>(credential?.entry_method ?? "lockbox");
   const [label, setLabel] = useState(credential?.label ?? "");
   const [secret, setSecret] = useState("");
-  const [hint, setHint] = useState(credential?.key_location_hint ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -273,7 +271,6 @@ export function PutCredentialSheet({
         entry_method: entryMethod,
         label: label.trim() || undefined,
         secret,
-        key_location_hint: hint.trim() || undefined,
         password,
       });
       setSecret("");
@@ -304,16 +301,19 @@ export function PutCredentialSheet({
           onChange={(e) => setSecret(e.target.value)}
           autoComplete="off"
         />
-        <Input
-          label="Non-secret hint (optional)"
-          placeholder="Left of the porch, behind the planter"
-          value={hint}
-          onChange={(e) => setHint(e.target.value)}
-          error={error ?? undefined}
-        />
+        {/* The "non-secret hint" field is gone (review H3). It was an
+            ordinary column — client-readable, rendered with no re-auth, no
+            audit row and no rate limit — and its placeholder read "Left of the
+            porch, behind the planter", so the field actively coached a means of
+            entry into plaintext. For a key-on-file or lockbox client, AES-GCM
+            was protecting the less useful half of the secret. Key locations go
+            in the encrypted secret above, whose own placeholder already
+            invited them. `Label` remains for telling credentials apart. */}
+        <FormError message={error} />
         <p style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>
           Stored encrypted (AES-256-GCM). Nobody — including you — can read it
-          back without a fresh password check, and every reveal is audited.
+          back without a fresh password check. Every reveal, change and
+          revocation is recorded, and your client can see that record.
         </p>
         <Button type="submit" full disabled={busy || secret.length === 0}>
           {busy ? <Spinner /> : credential ? "Rotate" : "Encrypt & save"}

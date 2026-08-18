@@ -36,6 +36,18 @@ export function timeLocal(ts: string | Date): string {
 }
 
 /**
+ * "2026-07-05T16:30:00Z" → "Jul 5, 2026, 11:30 AM" (Central).
+ *
+ * Date AND time together, because an audit row where only the date is legible
+ * cannot answer "who opened my door at 2pm" (review H3). Composed from the two
+ * formatters above rather than a third Intl instance so the timezone rule has
+ * one home.
+ */
+export function dateTimeLocal(ts: string | Date): string {
+  return `${dateLocal(ts)}, ${timeLocal(ts)}`;
+}
+
+/**
  * UTC epoch ms for a wall-clock date+time interpreted in the business
  * timezone (America/Chicago), independent of the device timezone. Used for
  * cutoff math so a traveling client isn't gated by their local clock.

@@ -540,7 +540,6 @@ export function vaultPut(body: {
   entry_method?: string;
   label?: string;
   secret: string;
-  key_location_hint?: string;
   password: string;
 }): Promise<{ credential: Record<string, unknown> }> {
   return invokeEdge("credential-vault", { action: "put", ...body });
@@ -639,7 +638,7 @@ export async function previewInviteAuthed(token: string): Promise<InvitePreview 
 // IMPORTANT: never select * on access_credentials — the ciphertext column
 // has no SELECT grant (invariant 2) and a wildcard select would be denied.
 const CRED_META =
-  "id, operator_id, property_id, entry_method, label, key_location_hint, rotated_at, revoked_at, created_at";
+  "id, operator_id, property_id, entry_method, label, rotated_at, revoked_at, created_at";
 
 export interface CredentialMeta {
   id: string;
@@ -647,7 +646,6 @@ export interface CredentialMeta {
   property_id: string;
   entry_method: Database["public"]["Enums"]["entry_method"];
   label: string | null;
-  key_location_hint: string | null;
   rotated_at: string | null;
   revoked_at: string | null;
   created_at: string;
@@ -664,16 +662,42 @@ export interface CredentialLogRow {
   id: string;
   credential_id: string;
   accessed_by: string;
-  purpose: string;
+  action: Database["public"]["Enums"]["credential_action"];
+  purpose: string | null;
   accessed_at: string;
+  walk_id: string | null;
 }
+
+const CRED_LOG = "id, credential_id, accessed_by, action, purpose, accessed_at, walk_id";
 
 export async function listCredentialLog(credentialId: string): Promise<CredentialLogRow[]> {
   const { data, error } = await supabase
     .from("credential_access_log")
-    .select("id, credential_id, accessed_by, purpose, accessed_at")
+    .select(CRED_LOG)
     .eq("credential_id", credentialId)
     .order("accessed_at", { ascending: false });
+  return must(data as CredentialLogRow[] | null, error);
+}
+
+/**
+ * The trail for every credential on the signed-in CLIENT's properties
+ * (review H3).
+ *
+ * The person whose door it is had no read path at all, which is what made the
+ * audit trail unable to answer the question it exists for. RLS does the scoping
+ * — `credential_access_log_client_select` in 0030 joins credential → property →
+ * client — so this passes no ids and cannot be widened from here.
+ *
+ * Deliberately NOT selecting `ip` or `user_agent`: those describe the operator's
+ * device, and a client does not need their walker's IP address to know their
+ * door was opened.
+ */
+export async function listMyCredentialLog(limit = 100): Promise<CredentialLogRow[]> {
+  const { data, error } = await supabase
+    .from("credential_access_log")
+    .select(CRED_LOG)
+    .order("accessed_at", { ascending: false })
+    .limit(limit);
   return must(data as CredentialLogRow[] | null, error);
 }
 

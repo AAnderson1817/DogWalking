@@ -14,7 +14,6 @@ export type Database = {
           entry_method: Database["public"]["Enums"]["entry_method"];
           ciphertext: string;
           label: string | null;
-          key_location_hint: string | null;
           rotated_at: string | null;
           revoked_at: string | null;
           created_at: string;
@@ -28,7 +27,6 @@ export type Database = {
           entry_method: Database["public"]["Enums"]["entry_method"];
           ciphertext: string;
           label?: string | null;
-          key_location_hint?: string | null;
           rotated_at?: string | null;
           revoked_at?: string | null;
           created_at?: string;
@@ -41,7 +39,6 @@ export type Database = {
           entry_method?: Database["public"]["Enums"]["entry_method"];
           ciphertext?: string;
           label?: string | null;
-          key_location_hint?: string | null;
           rotated_at?: string | null;
           revoked_at?: string | null;
           created_at?: string;
@@ -115,27 +112,39 @@ export type Database = {
           operator_id: string;
           credential_id: string;
           accessed_by: string;
-          purpose: string;
+          purpose: string | null;
           accessed_at: string;
           created_at: string;
+          action: Database["public"]["Enums"]["credential_action"];
+          ip: unknown | null;
+          user_agent: string | null;
+          walk_id: string | null;
         };
         Insert: {
           id?: string;
           operator_id: string;
           credential_id: string;
           accessed_by: string;
-          purpose: string;
+          purpose?: string | null;
           accessed_at?: string;
           created_at?: string;
+          action?: Database["public"]["Enums"]["credential_action"];
+          ip?: unknown | null;
+          user_agent?: string | null;
+          walk_id?: string | null;
         };
         Update: {
           id?: string;
           operator_id?: string;
           credential_id?: string;
           accessed_by?: string;
-          purpose?: string;
+          purpose?: string | null;
           accessed_at?: string;
           created_at?: string;
+          action?: Database["public"]["Enums"]["credential_action"];
+          ip?: unknown | null;
+          user_agent?: string | null;
+          walk_id?: string | null;
         };
         Relationships: [];
       };
@@ -1037,6 +1046,10 @@ export type Database = {
         };
         Returns: string;
       };
+      fn_credential_log_block_mutation: {
+        Args: Record<string, never>;
+        Returns: unknown;
+      };
       fn_deactivate_schedule: {
         Args: {
           p_schedule: string;
@@ -1116,6 +1129,18 @@ export type Database = {
         Args: Record<string, never>;
         Returns: unknown;
       };
+      fn_log_credential_action: {
+        Args: {
+          p_credential: string;
+          p_operator: string;
+          p_action: Database["public"]["Enums"]["credential_action"];
+          p_purpose: string;
+          p_ip: string;
+          p_user_agent: string;
+          p_walk: string;
+        };
+        Returns: string;
+      };
       fn_materialize_walks: {
         Args: {
           p_horizon_days: number;
@@ -1156,6 +1181,9 @@ export type Database = {
           p_credential: string;
           p_purpose: string;
           p_operator: string;
+          p_ip: string;
+          p_user_agent: string;
+          p_walk: string;
         };
         Returns: Array<{ ciphertext: string; label: string; entry_method: Database["public"]["Enums"]["entry_method"] }>;
       };
@@ -1183,6 +1211,27 @@ export type Database = {
           p_reason: string;
         };
         Returns: Array<{ outcome: string; credits_reversed: number; credits_unrecovered: number; needs_review: boolean }>;
+      };
+      fn_revoke_credential: {
+        Args: {
+          p_id: string;
+          p_operator: string;
+          p_ip: string;
+          p_user_agent: string;
+        };
+        Returns: string;
+      };
+      fn_rotate_credential: {
+        Args: {
+          p_id: string;
+          p_operator: string;
+          p_ciphertext: string;
+          p_entry_method: Database["public"]["Enums"]["entry_method"];
+          p_label: string;
+          p_ip: string;
+          p_user_agent: string;
+        };
+        Returns: string;
       };
       fn_run_nightly_jobs: {
         Args: {
@@ -1255,6 +1304,19 @@ export type Database = {
         };
         Returns: number;
       };
+      fn_write_credential: {
+        Args: {
+          p_id: string;
+          p_operator: string;
+          p_property: string;
+          p_entry_method: Database["public"]["Enums"]["entry_method"];
+          p_ciphertext: string;
+          p_label: string;
+          p_ip: string;
+          p_user_agent: string;
+        };
+        Returns: string;
+      };
       is_operator: {
         Args: Record<string, never>;
         Returns: boolean;
@@ -1267,6 +1329,7 @@ export type Database = {
     Enums: {
       billing_cycle: "weekly" | "monthly";
       client_status: "invited" | "active" | "paused" | "archived";
+      credential_action: "read" | "create" | "rotate" | "revoke" | "reauth_failed";
       email_delivery_status: "pending" | "sent" | "skipped" | "failed";
       entry_method: "key_on_file" | "lockbox" | "smart_lock" | "door_code" | "buzzer_fob";
       ledger_entry_type: "grant" | "debit" | "adjust" | "rollover" | "expiry";
@@ -1307,6 +1370,7 @@ export type WalkPhotos = Database["public"]["Tables"]["walk_photos"]["Row"];
 export type Walks = Database["public"]["Tables"]["walks"]["Row"];
 export type BillingCycle = Database["public"]["Enums"]["billing_cycle"];
 export type ClientStatus = Database["public"]["Enums"]["client_status"];
+export type CredentialAction = Database["public"]["Enums"]["credential_action"];
 export type EmailDeliveryStatus = Database["public"]["Enums"]["email_delivery_status"];
 export type EntryMethod = Database["public"]["Enums"]["entry_method"];
 export type LedgerEntryType = Database["public"]["Enums"]["ledger_entry_type"];

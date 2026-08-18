@@ -293,12 +293,83 @@ it: a later table-level `grant update on notifications` would silently let a
 client mark their own `payment_failed` email as sent.
 
 ## credential-vault — POST, operator JWT
-Body: `{ action: 'put'|'get'|'delete', credential_id?, property_id?, entry_method?, label?, secret?, key_location_hint?, purpose?, password }`
-Every action re-verifies `password` against the caller's account (Auth admin check); rate-limit 5/min/user (in-memory + 429).
-- `put`: encrypt `secret` → upsert row (metadata plaintext, secret in ciphertext).
-- `get`: `fn_read_credential(credential_id, purpose)` (writes audit row) → decrypt → `{ secret, label, entry_method }`. `purpose` required, non-empty.
-- `delete`: delete row (cascades audit log retention: log rows persist — FK is `on delete cascade` per spec 01; change to `on delete restrict` + soft-delete flag `revoked_at` instead. **Authoritative: soft delete.** Add `revoked_at timestamptz` to access_credentials; `delete` action sets it; audit log immortal.)
+Body: `{ action: 'put'|'get'|'delete', credential_id?, property_id?, entry_method?, label?, secret?, purpose?, walk_id?, password }`
+Every action re-verifies `password` against the caller's account (Auth admin check); rate-limit 5/min/user (Postgres-backed, 0016 + 429).
+- `put`: encrypt `secret` → `fn_write_credential` (new) or `fn_rotate_credential` (existing).
+- `get`: `fn_read_credential` → decrypt → `{ secret, label, entry_method }`. `purpose` required, non-empty; `walk_id` optional.
+- `delete`: `fn_revoke_credential` — a soft revoke setting `revoked_at`. The audit log is immortal.
+
 Plaintext secrets never appear in logs, errors, or analytics.
+
+### There is no unencrypted hint (review H3)
+
+`key_location_hint` is **gone**, and this spec used to authorise it. It was an
+ordinary column with SELECT, INSERT and UPDATE granted to `authenticated`,
+rendered inline in the credential list with no re-auth, no audit row and no
+rate limit, and its placeholder read verbatim *"Left of the porch, behind the
+planter"* — so the field actively coached a means of entry into plaintext,
+sitting beside `properties.address_line1`. One `GET /rest/v1/properties` plus
+one `GET /rest/v1/access_credentials` with a borrowed session returned, for
+every client: full residential address, entry method, and where the key was
+hidden. For a `key_on_file` or `lockbox` client, AES-GCM was protecting the
+less useful half of the secret.
+
+Dropped rather than encrypted in place. `label` already exists to tell
+credentials apart, and the secret field's own placeholder ("Code, key location,
+alarm sequence…") always covered key locations — so a second encrypted column
+would add a reveal path, an audit event and a decision for the operator, for
+nothing. **Key locations belong in the encrypted secret.**
+
+### Every action is audited, not one in four
+
+`credential_access_log` was written in exactly **one** place — inside
+`fn_read_credential`, on a successful reveal. Create, rotate, revoke and a
+failed re-auth wrote nothing.
+
+That is why the trail could answer neither of the questions it exists for. In
+the scenario the product implicitly promises to handle — a client is burgled and
+the walker is a suspect — the log said "opened 14:02, purpose 'pre-walk entry'",
+where the purpose was typed by the suspect. And "who changed my garage code on
+the 14th" had only a `rotated_at` that the next rotation overwrote, so a door's
+code history was exactly one entry long.
+
+| Action | Written by | Purpose |
+| --- | --- | --- |
+| `read` | `fn_read_credential` | required |
+| `create` | `fn_write_credential` | — |
+| `rotate` | `fn_rotate_credential` | — |
+| `revoke` | `fn_revoke_credential` | — |
+| `reauth_failed` | `fn_log_credential_action` | — |
+
+Every row carries the caller's **IP** and **user agent**, captured by the edge
+function. `walk_id` is optional on a read and is validated against the operator
+**and** the property — a walk reference pointing elsewhere would make the trail
+worse than empty, since it would attribute an entry to a visit that was
+somewhere else. The purpose is still required for a read; the walk is the half
+the system can vouch for independently of what the caller typed.
+
+The writes go through definer functions so the row and its audit entry land in
+**one transaction**. Two statements from the edge function could half-succeed,
+and the half that survives would be the one that changes the door.
+
+A **failed re-auth** is recorded before the refusal, and best-effort: if the log
+write itself fails the caller is still refused, because a 500 there would tell
+an attacker they had found a way to turn the audit trail off.
+
+### The log is append-only and the client can read it
+
+It had no mutation-block trigger at all — unlike `credit_ledger` — so the
+operator whose reads it records could rewrite or delete them through PostgREST.
+An audit trail its own subject can edit is not one. `INSERT`/`UPDATE`/`DELETE`
+are revoked from `authenticated` entirely and a `BEFORE UPDATE OR DELETE`
+trigger raises, so every row comes from a definer function.
+
+The **client** now has a SELECT policy scoped through credential → property →
+client, plus one on the credential metadata so the trail has something to name.
+The ciphertext column stays revoked from every API role (invariant 2). Surfaced
+read-only on the portal home as *Entry code activity*, showing no IP or user
+agent — those describe the operator's device, and a client does not need their
+walker's IP to know their door was opened.
 
 ## change-plan — POST, operator JWT (built in phase 07)
 Body: `{ client_id, new_plan_id }` → Stripe: update subscription item to new price, `proration_behavior='create_prorations'` → compute `remaining_fraction` from current period bounds → `fn_change_plan(client, new_plan, fraction)`.

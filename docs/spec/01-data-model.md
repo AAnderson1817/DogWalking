@@ -24,7 +24,9 @@ Insert trigger seeds default service types (below).
 
 **properties** — `operator_id`, `client_id`, `label` (e.g. "Home"), `address_line1`, `address_line2`, `city`, `postcode`, `access_notes_public text` (non-secret: "gate sticks, lift on left"), `lat/lng double precision null`.
 
-**access_credentials** — `operator_id`, `property_id`, `entry_method entry_method`, `ciphertext bytea not null` (AES-256-GCM: iv‖tag‖ct per spec 04), `label text` ("front door", "alarm"), `key_location_hint text` (non-secret), `rotated_at timestamptz`. One row per secret; a property may hold several.
+**access_credentials** — `operator_id`, `property_id`, `entry_method entry_method`, `ciphertext bytea not null` (versioned AES-256-GCM blob per spec 04), `label text` ("front door", "alarm"), `key_id` (GENERATED, 0021), `rotated_at timestamptz`, `revoked_at timestamptz`. One row per secret; a property may hold several.
+
+There is **no** `key_location_hint`. It existed until 0030 as an ordinary, client-readable, unaudited column whose placeholder coached a means of entry — so for a lockbox client AES-GCM was protecting the less useful half of the secret (review H3). Key locations belong in the encrypted `ciphertext`; `label` is what distinguishes credentials in a list.
 
 **credential_access_log** — `operator_id`, `credential_id references access_credentials on delete cascade`, `accessed_by uuid` (auth uid), `purpose text not null`, `accessed_at timestamptz default now()`. Append-only; no UPDATE/DELETE grants to anyone but service role.
 
