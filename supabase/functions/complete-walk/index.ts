@@ -14,10 +14,14 @@ import { makeOverageDeps } from "../_lib/overage_deps.ts";
 import { broadcast } from "../_lib/broadcast.ts";
 import { completeWalk, type CompleteWalkBody, type CompleteWalkDeps, type WalkRow } from "./handler.ts";
 
-// `account` threads through to the overage charge — the operator is the
-// merchant of record (review B5), so an overage taken here lands on their
-// Stripe account, not the platform's.
-function makeDeps(account: { stripeAccount: string }): CompleteWalkDeps {
+// `resolveAccount` is a THUNK, not a value. The operator is the merchant of
+// record (review B5) so an overage lands on their Stripe account — but a
+// credit-funded walk never touches Stripe at all, and resolving eagerly meant
+// an operator who had not yet connected could complete NO walks whatsoever,
+// which is the very first thing a new operator does. It is called at the
+// moment of charge, so "not connected" becomes a billing failure on the walks
+// that actually needed money, not a wall in front of all of them.
+function makeDeps(resolveAccount: () => { stripeAccount: string }): CompleteWalkDeps {
   const db = adminClient();
   return {
     async getWalk(id) {
@@ -62,7 +66,7 @@ function makeDeps(account: { stripeAccount: string }): CompleteWalkDeps {
     async chargeOverage(walkId) {
       const result = await chargeOverageForWalk(
         walkId,
-        makeOverageDeps(db, stripeClient(), account),
+        makeOverageDeps(db, stripeClient(), resolveAccount),
       );
       return { payment: result.payment };
     },
@@ -109,9 +113,10 @@ function makeDeps(account: { stripeAccount: string }): CompleteWalkDeps {
 serveFunction(async (req) => {
   const operator = await requireOperator(req);
   const body = await readJson<CompleteWalkBody>(req);
-  // Resolved BEFORE the walk is touched. completeWalk bills before marking
-  // complete (qc fix), so discovering "not connected" halfway would leave a
-  // walk that is finished, unbilled, and not obviously either.
-  const result = await completeWalk(operator.id, body, makeDeps(requireAccount(operator)));
+  const result = await completeWalk(
+    operator.id,
+    body,
+    makeDeps(() => requireAccount(operator)),
+  );
   return jsonOk(result);
 });

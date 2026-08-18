@@ -1,6 +1,6 @@
 // credential-vault handler: rate limit, re-auth gate, purpose requirement,
 // soft revoke; plus overage idempotency (mocked deps).
-import { assert, assertEquals, assertRejects } from "./asserts.ts";
+import { assert, assertEquals, assertFalse, assertRejects } from "./asserts.ts";
 import { handleVault, makeRateLimiter, type VaultDeps, type CredentialMeta } from "../credential-vault/handler.ts";
 import type { VaultBinding } from "../_lib/crypto.ts";
 import { chargeOverageForWalk, type OverageDeps } from "../_lib/overage.ts";
@@ -179,6 +179,12 @@ interface OverageOpts {
   piLiveStatus?: string; // what retrievePaymentIntent reports
   declines?: boolean;
   infraFails?: boolean;
+  /** null plan → no overage rate to charge (operator has configured nothing). */
+  noPlan?: boolean;
+  /** null customer → checkout never completed for this client. */
+  noCustomer?: boolean;
+  /** resolveAccount throws → operator has not connected Stripe. */
+  notConnected?: boolean;
 }
 
 function makeODeps(opts: OverageOpts = {}) {
@@ -215,10 +221,14 @@ function makeODeps(opts: OverageOpts = {}) {
     },
     getClientBilling: () =>
       Promise.resolve({
-        stripe_customer_id: "cus_1",
-        plan: { overage_rate_pence: 2200 },
+        stripe_customer_id: opts.noCustomer ? null : "cus_1",
+        plan: opts.noPlan ? null : { overage_rate_pence: 2200 },
         full_name: "Amelia Hart",
       }),
+    resolveAccount: () => {
+      if (opts.notConnected) throw new Error("stripe_not_connected");
+      return { stripeAccount: "acct_1" };
+    },
     createOffSessionPaymentIntent: (args) => {
       calls.push("createPI");
       attemptKey = args.attemptKey;
@@ -378,4 +388,47 @@ Deno.test("a create binding is never reused across two credentials", async () =>
     a.seen.encryptBinding?.credentialId !== b.seen.encryptBinding?.credentialId,
     "two creates must not share a credential id",
   );
+});
+
+// ── Whose fault is it? (review B6) ─────────────────────────────────────────
+// An un-configured operator used to dun their own customers: every walk sent
+// the pet owner "we couldn't charge for your walk, please update your payment
+// method" when the real cause was that the operator had never made a plan.
+
+Deno.test("no plan on file tells the OPERATOR only", async () => {
+  const { deps, calls } = makeODeps({ noPlan: true });
+  const result = await chargeOverageForWalk("walk-1", deps);
+  assertEquals(result.payment.status, "failed");
+  assert(calls.includes("notify:operator"), "the operator must hear about it");
+  assert(
+    !calls.includes("notify:client"),
+    "the client cannot fix a missing plan and must not be blamed for it",
+  );
+});
+
+Deno.test("no billing profile tells the OPERATOR only", async () => {
+  // No Stripe customer means checkout never completed, so the client has no
+  // payment method to update and no unaided way to add one.
+  const { deps, calls } = makeODeps({ noCustomer: true });
+  await chargeOverageForWalk("walk-1", deps);
+  assert(calls.includes("notify:operator"));
+  assertFalse(calls.includes("notify:client"));
+});
+
+Deno.test("an unconnected Stripe account tells the OPERATOR only, and records the walk", async () => {
+  const { deps, calls } = makeODeps({ notConnected: true });
+  const result = await chargeOverageForWalk("walk-1", deps);
+  // The walk happened; the record of it survives as a failed charge rather
+  // than the whole completion throwing.
+  assertEquals(result.payment.status, "failed");
+  assert(calls.includes("notify:operator"));
+  assertFalse(calls.includes("notify:client"));
+  assertFalse(calls.includes("createPI"), "must not attempt a charge it cannot route");
+});
+
+Deno.test("a declined CARD still tells both — that one is the client's to fix", async () => {
+  const { deps, calls } = makeODeps({ declines: true });
+  await chargeOverageForWalk("walk-1", deps);
+  assert(calls.includes("notify:client"), "a card decline is the client's to act on");
+  assert(calls.includes("notify:operator"));
 });

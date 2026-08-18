@@ -33,7 +33,7 @@ serveFunction(async (req) => {
   try {
     const result = await chargeOverageForWalk(
       body.walk_id,
-      makeOverageDeps(db, stripeClient(), requireAccount(operator)),
+      makeOverageDeps(db, stripeClient(), () => requireAccount(operator)),
     );
     return jsonOk({ payment: result.payment, already_charged: result.already_charged });
   } catch (e) {

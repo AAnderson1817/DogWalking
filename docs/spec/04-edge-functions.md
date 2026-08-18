@@ -12,6 +12,25 @@ Idempotent: re-POST on a completed walk returns the stored result, no re-billing
 Body: `{ client_id, plan_id }` → assert ownership → get/create Stripe customer (persist `stripe_customer_id`) → Checkout Session `mode=subscription`, `price = plans.stripe_price_id`, `payment_method_collection=always`, `subscription_data.metadata = { client_id, operator_id, plan_id }`, success/cancel URLs from `APP_BASE_URL`.
 Response: `{ url }`.
 
+## create-plan — POST, operator JWT (review B6)
+Body `{ name, credits_per_cycle, price_pence, cycle, rollover_policy,
+rollover_cap?, rollover_expiry_days?, overage_rate_pence }` → validates,
+creates a Stripe Product + recurring Price **on the operator's connected
+account**, inserts the `plans` row with the resulting `price_…`, returns
+`{ plan }`.
+
+An edge function rather than a plain insert because a plan without a
+`stripe_price_id` cannot be checked out, and the alternative — asking the
+operator to paste a `price_…` from the Stripe dashboard — was the activation
+path the review called "a consulting engagement, not a product".
+
+Refuses with `stripe_not_connected` **before** creating anything: a plan whose
+Price does not exist is worse than no plan, because it appears in the list and
+gives no clue why checkout fails. If the DB insert fails after the Price is
+created, the Price is left in place — an orphan Price nothing references is
+inert and free, whereas archiving it would strand a retry into creating a
+second one.
+
 ## connect-onboarding — POST, operator JWT (review B5)
 Body `{ action: 'start' | 'status' }`. `status` reports `{ connected,
 charges_enabled, payouts_enabled, details_submitted }` from the local mirror;
