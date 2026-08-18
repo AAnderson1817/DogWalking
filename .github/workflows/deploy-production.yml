@@ -82,9 +82,14 @@ jobs:
       - name: Push migrations
         run: supabase db push
 
+  # Runs AFTER sync-secrets, never alongside it — see the long note on the same
+  # job in deploy-staging.yml. This is the workflow where it actually bites:
+  # production has never run, so its first execution IS the runbook's
+  # sync_secrets-ticked first deploy, against real customer data (review B3).
   deploy-functions:
     name: Deploy edge functions
-    needs: migrate
+    needs: [migrate, sync-secrets]
+    if: ${{ !cancelled() && needs.migrate.result == 'success' && needs.sync-secrets.result != 'failure' }}
     runs-on: ubuntu-latest
     environment: production
     env:

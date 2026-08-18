@@ -198,7 +198,13 @@ Run the whole loop once as a real customer before inviting anyone:
 ## 10. Ongoing operations
 
 - **Backups**: Supabase Pro does daily backups; check Settings → Backups
-  shows them running after 24 h.
+  shows them running after 24 h. Daily is a **24-hour RPO on the money
+  tables** — a bad write at 4pm costs a full day of walk debits, cycle grants
+  and overage charges, reconcilable against Stripe only by hand. Storage
+  objects are not covered at any tier. `docs/dev/disaster-recovery.md` has
+  what to do when the database is wrong, what each tier actually protects,
+  and the rehearsal that turns the recovery estimates into measurements.
+  Read it before the first paying client, not after.
 - **Money watch**: Stripe → Payments and the in-app Billing Console are
   your two views of the same truth; the `payments` table reconciles them.
 - **Deploys**: frontend ships on every green main push (Vercel); the

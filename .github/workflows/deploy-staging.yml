@@ -97,9 +97,24 @@ jobs:
       - name: Push migrations
         run: supabase db push
 
+  # Runs AFTER sync-secrets, never alongside it. Both jobs used to declare
+  # `needs: migrate`, so on the one run that matters most — the first deploy of
+  # a project, which the runbook tells you to do with sync_secrets ticked —
+  # they started together and raced. A function that wins that race is live
+  # without VAULT_MASTER_KEY, and the vault is the part of this system where
+  # "live but misconfigured" is worst: it fails on a real door code, in the
+  # dark, at a client's front door (review B3).
+  #
+  # The explicit `if` is required, not decoration. Adding `sync-secrets` to
+  # `needs` would otherwise skip this job on every ordinary push, because
+  # sync-secrets is opt-in and a skipped dependency skips its dependents by
+  # default. Overriding `if` drops that default entirely, which is why
+  # migrate's success is re-asserted here by hand: 'skipped' and 'success' both
+  # proceed, only 'failure' stops us.
   deploy-functions:
     name: Deploy edge functions
-    needs: migrate
+    needs: [migrate, sync-secrets]
+    if: ${{ !cancelled() && needs.migrate.result == 'success' && needs.sync-secrets.result != 'failure' }}
     runs-on: ubuntu-latest
     environment: staging
     env:
