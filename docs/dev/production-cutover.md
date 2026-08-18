@@ -79,6 +79,8 @@ Staging stays exactly as it is — it remains your test bed. Production is a
    | `STRIPE_SECRET_KEY` | **live** key `sk_live_…` (step 4) |
    | `STRIPE_WEBHOOK_SECRET` | **live** `whsec_…` (step 4) |
    | `VAULT_MASTER_KEY` | the fresh key from step 2 |
+   | `VAULT_MASTER_KEY_PREVIOUS` | the literal `none` (see step 2) |
+   | `SUPABASE_SERVICE_ROLE_KEY` | prod Settings → API → `service_role`; required for the deploy's vault-key check |
    | `APP_BASE_URL` | `https://app.yourdomain.com` |
    | `RESEND_API_KEY` | from step 5 |
    | `NOTIFY_FROM_EMAIL` | e.g. `Sanpo <notifications@sanpocare.com>` |

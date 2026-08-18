@@ -22,8 +22,17 @@ dashboards) — no local tooling required. Do the steps in order; ~30–45 min.
    | `STRIPE_SECRET_KEY` | Stripe → Developers → API keys (TEST mode `sk_test_…`) |
    | `STRIPE_WEBHOOK_SECRET` | step 4 below (`whsec_…`) |
    | `VAULT_MASTER_KEY` | step 3 below |
+   | `VAULT_MASTER_KEY_PREVIOUS` | the literal `none` until you first rotate (step 3) |
+   | `SUPABASE_SERVICE_ROLE_KEY` | project Settings → API → `service_role` |
    | `APP_BASE_URL` | your Vercel URL (step 6; set a placeholder first) |
    | `RESEND_API_KEY` (optional) | resend.com — skip for now; email silently no-ops |
+
+   `SUPABASE_SERVICE_ROLE_KEY` is what lets the deploy verify that the vault
+   key can actually read this project's credentials before anyone stands at a
+   door with it. Without it the deploy still succeeds but prints a warning and
+   skips the check — which is the state this repo was in before the key had
+   any identity at all. Treat it like the vault key: it bypasses every RLS
+   policy in the database.
 
 ## 2. Supabase: create the project
 
