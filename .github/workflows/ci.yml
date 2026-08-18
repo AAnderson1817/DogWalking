@@ -304,6 +304,15 @@ jobs:
         working-directory: app
         run: npx playwright test --config playwright.config.mjs e2e/today-contrast.spec.ts
 
+      # The rendered half of review H24. role-contrast.test.ts proves the token
+      # arithmetic; this proves the browser agrees — it found a label reading a
+      # legacy `--ink-500` alias that resolved past the role layer, so the
+      # escalation inherited around it and the prefers-contrast override never
+      # reached it either. No model check could have seen that.
+      - name: Tint contrast (rendered component gallery)
+        working-directory: app
+        run: npx playwright test --config playwright.config.mjs e2e/tint-contrast.spec.ts
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (node24)
         if: failure()
         with:
