@@ -73,7 +73,12 @@ or `scripts/db-reset.sh` on the no-Docker local stack.
 ```
 psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/smoke.sql
 psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/materializer.sql
+./supabase/tests/concurrency.sh
 ```
+`concurrency.sh` is the only suite that COMMITS — it runs two real backends
+against each other, because the row lock behind invariant 1 cannot be
+exercised inside a single transaction. It clears its own namespace on the way
+in and out.
 `smoke.sql` must end with `SMOKE PASS`. Run every `supabase/tests/*.sql`, not
 just these two — later work adds files here.
 

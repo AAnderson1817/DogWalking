@@ -2471,6 +2471,116 @@ begin
   raise notice 'vault write functions are service-role only (0030): OK';
 end $$;
 
+-- ═══ Storage policies (review H20) ════════════════════════════════════════
+-- Nine policies govern who reads and writes photographs of customers' homes
+-- and pets, and this file contained zero occurrences of "storage" until now.
+-- A cross-tenant write hole has already shipped here once and been fixed in
+-- 0012; a regression reopening it is a data breach with CI fully green and a
+-- staging deploy firing automatically on merge.
+--
+-- Path convention: {operator_id}/{entity_id}/{uuid}.jpg. Segment 1 is the
+-- tenant, segment 2 is the walk or the pet. The shim's storage.foldername has
+-- the same semantics as the platform's, so what these assert is the policy
+-- rather than the stand-in.
+do $$
+declare
+  v_op_a  text := '99999999-0000-4000-a000-000000000001';
+  v_op_b  text := '99999999-0000-4000-a000-000000000002';
+  v_pet_a text := '99999999-0000-4000-e000-00000000000a';
+  v_pet_f text := '99999999-0000-4000-e000-0000000000f2';
+  v_walk_a text := '99999999-0000-4000-2000-000000000001';
+  v_walk_b text := '99999999-0000-4000-2000-000000000002';
+  v_client_user text := '99999999-0000-4000-a000-000000000003';
+  v_seen int;
+begin
+  -- Fixtures written as service_role, which bypasses RLS: one object per
+  -- tenant so the SELECT assertions below have something to fail on.
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  insert into storage.objects (bucket_id, name) values
+    ('walk-photos', v_op_a || '/' || v_walk_a || '/aaa.jpg'),
+    ('walk-photos', v_op_a || '/' || v_walk_b || '/bbb.jpg'),
+    ('pet-photos',  v_op_a || '/' || v_pet_a  || '/ccc.jpg'),
+    ('pet-photos',  v_op_b || '/' || v_pet_f  || '/ddd.jpg');
+
+  -- ── Operator A ─────────────────────────────────────────────────────────
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op_a), true);
+  set local session authorization authenticated;
+
+  insert into storage.objects (bucket_id, name)
+    values ('walk-photos', v_op_a || '/' || v_walk_a || '/own.jpg');
+
+  begin
+    insert into storage.objects (bucket_id, name)
+      values ('walk-photos', v_op_b || '/' || v_walk_a || '/stolen.jpg');
+    raise exception 'FAIL: operator A wrote into operator B''s storage folder';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  select count(*) into v_seen from storage.objects
+   where (storage.foldername(name))[1] = v_op_b;
+  if v_seen <> 0 then
+    raise exception 'FAIL: operator A can read % of operator B''s objects', v_seen;
+  end if;
+
+  select count(*) into v_seen from storage.objects;
+  if v_seen = 0 then
+    raise exception 'FAIL: operator A can read none of their own objects — the SELECT policy denies everything, so the assertion above proves nothing';
+  end if;
+
+  reset role;
+
+  -- ── Client A (bound to operator A, owns walk A and pet A) ──────────────
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_client_user), true);
+  set local session authorization authenticated;
+
+  -- Sees their own walk's photos, and only those. walk B belongs to client A2
+  -- under the same operator, which is the case a tenant-only check would miss.
+  select count(*) into v_seen from storage.objects
+   where bucket_id = 'walk-photos'
+     and (storage.foldername(name))[2] = v_walk_b;
+  if v_seen <> 0 then
+    raise exception 'FAIL: client A read % photo(s) of another client''s walk', v_seen;
+  end if;
+
+  select count(*) into v_seen from storage.objects
+   where bucket_id = 'walk-photos'
+     and (storage.foldername(name))[2] = v_walk_a;
+  if v_seen = 0 then
+    raise exception 'FAIL: client A cannot see their own walk photos';
+  end if;
+
+  -- THE 0012 regression. The INSERT policy once checked only the pet (segment
+  -- 2) and not the operator (segment 1), so a client could write into another
+  -- tenant's folder. Both halves are asserted: the legitimate path must work,
+  -- or a policy that denies everything would pass the negative case.
+  insert into storage.objects (bucket_id, name)
+    values ('pet-photos', v_op_a || '/' || v_pet_a || '/mine.jpg');
+
+  begin
+    insert into storage.objects (bucket_id, name)
+      values ('pet-photos', v_op_b || '/' || v_pet_a || '/crosstenant.jpg');
+    raise exception 'FAIL: client wrote a pet photo into another operator''s folder (0012 regression)';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  -- A pet they do not own, in its own operator's folder.
+  begin
+    insert into storage.objects (bucket_id, name)
+      values ('pet-photos', v_op_b || '/' || v_pet_f || '/notmine.jpg');
+    raise exception 'FAIL: client wrote a photo for a pet belonging to someone else';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  raise notice 'storage policies: tenant folder + per-walk + per-pet scoping OK';
+end $$;
+
 
 rollback;
 
