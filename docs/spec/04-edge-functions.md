@@ -82,8 +82,12 @@ Verify `stripe-signature` with `STRIPE_WEBHOOK_SECRET`. Idempotency: `INSERT INT
 
   **Rollover runs on renewals only.** `fn_apply_invoice_paid` takes `p_is_renewal`, true for `subscription_cycle` and false for `subscription_create`. Rollover carries what is left of the cycle that just ended; a first invoice has no prior cycle, and on `rollover_policy='none'` running it books an expiry for the entire balance — destroying credit the operator granted before billing started.
 
-- `invoice.paid` (subscription): resolve client by customer id → `fn_apply_rollover` → `fn_grant_credits(credits_per_cycle, 'cycle grant {invoice.id}')` → payments row (`type='subscription'`, succeeded).
-- `invoice.payment_failed`: `subscription_status='past_due'` + `payment_failed` notifications (client + operator) + payments row (failed).
+  Non-cycle invoices (a one-off charge on the same customer) take the plain
+  path: record the payment if one is not already recorded. "Already recorded"
+  means a row whose status is in `SUBSCRIPTION_INVOICE_STATUSES` — see
+  *Status sets* below.
+
+- `invoice.payment_failed`: `subscription_status='past_due'` + `payment_failed` notifications (client + operator) + payments row (failed). The status write happens on **every** delivery; the payments row and the notifications only on the first. Stripe retries a failed invoice on its own dunning schedule and each redelivery carries a *fresh event id*, so `stripe_events` cannot dedupe it — without a `failed`-row check the Money screen accrues one "Needs attention" entry per retry for a single unpaid invoice.
 - `invoice.upcoming`: `renewal_upcoming` notification (client).
 - `customer.subscription.updated`: map Stripe status/pause_collection → `subscription_status` (`paused` when pause_collection set).
 - `customer.subscription.deleted`: `subscription_status='cancelled'`, **and clears `stripe_subscription_id` and `current_period_end`**, and raises a `subscription_cancelled` notification to the operator. Clearing the binding matters: a dead subscription id left in place makes `change-plan` take the Stripe path and fail *after* `fn_record_plan_change_intent` has already committed a pending intent, and a stale `current_period_end` prints a confident renewal date on the Money screen for a subscription that will never renew. The notification matters because after 0026 the walks actually stop.
@@ -113,9 +117,52 @@ notification.
 
 Always 200 on handled/ignored types; 400 only on bad signature.
 
+### Status sets — the code and the partial indexes must agree
+
+`payments` carries two **partial** unique indexes, each filtered on `status`
+(0023). A row participates in its own uniqueness guarantee only while its
+status is in that set, so every "has this already been paid or claimed?" read
+is re-asking a question the index has already decided. The two sets have to be
+identical:
+
+| Index | Statuses | Read that must match |
+| --- | --- | --- |
+| `uq_overage_payment_per_walk` | succeeded, pending, refunded, disputed | `getLiveOveragePayment` |
+| `uq_payments_subscription_invoice` | succeeded, refunded, disputed | `hasPaymentForInvoice` |
+
+Too **narrow** in code and the read misses a row, the caller falls through to
+an insert, the index raises, and the operator sees an unexplained internal
+error instead of "already charged". Too **wide** and the caller declines to
+act on a row the database would happily let it duplicate.
+
+`'failed'` is in neither set, and that is a product decision rather than a
+mechanical one: a declined card must leave the walk re-chargeable, and
+`invoice.payment_failed` must be able to write a row beside a later success on
+the same invoice.
+
+The sets live in `_lib/payment_status.ts` and `payment_status_test.ts` parses
+the *last* definition of each index out of `supabase/migrations/` and compares.
+Changing either side alone fails CI. (Parsing the last definition is
+load-bearing: 0012 created `uq_overage_payment_per_walk` with the narrow list
+the code was still using, so a first-match parser would have confirmed the bug.)
+
 ## charge-overage — POST, operator JWT (also invoked in-process by complete-walk)
-Body: `{ walk_id }` → assert walk `is_overage=true` and no succeeded overage payment exists (idempotency) → PaymentIntent `off_session=true, confirm=true`, amount = client's `plans.overage_rate_pence`, customer default payment method → payments row (`type='overage'`, walk_id, status from PI). On card failure: payments row failed + `payment_failed` notification; walk stays completed (debt visible in billing console).
+Body: `{ walk_id }` → assert walk `is_overage=true` and no live overage payment exists (idempotency, per *Status sets* above) → PaymentIntent `off_session=true, confirm=true`, amount = client's `plans.overage_rate_pence`, customer default payment method → payments row (`type='overage'`, walk_id, status from PI). The walk stays completed in every failure case; the debt is visible in the billing console.
 Response: `{ payment }`.
+
+**Failures are three classes, not two.** Which one a failure falls into decides
+both whether the claim is resolved and who gets told.
+
+| Class | Claim | Notified | Why |
+| --- | --- | --- | --- |
+| Card declined | → `failed` | client **and** operator | The client can fix it by updating their card. |
+| Permanent | → `failed` | operator only | A malformed request, or a customer that does not exist on this connected account. Retrying changes nothing, and there is nothing the client can do — telling them to update a payment method would be false. |
+| Transient | stays `pending` | nobody | Stripe unreachable, DB write failed. The charge may yet have landed, so the claim must keep blocking; the caller 500s and the retry replays the *same* idempotency key. |
+
+Before this split, everything non-card was treated as transient. A permanent
+failure therefore left the claim pending forever: the walk never completed at
+all, and every retry hit the same wall. The operator-facing message names the
+setting to fix rather than repeating Stripe's developer-facing text.
 
 ## credential-vault — POST, operator JWT
 Body: `{ action: 'put'|'get'|'delete', credential_id?, property_id?, entry_method?, label?, secret?, key_location_hint?, purpose?, password }`

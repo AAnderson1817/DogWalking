@@ -185,6 +185,8 @@ interface OverageOpts {
   noCustomer?: boolean;
   /** resolveAccount throws → operator has not connected Stripe. */
   notConnected?: boolean;
+  /** Stripe rejects the request itself — retrying cannot fix it. */
+  permanentFails?: boolean;
 }
 
 function makeODeps(opts: OverageOpts = {}) {
@@ -235,6 +237,9 @@ function makeODeps(opts: OverageOpts = {}) {
       if (opts.declines) {
         return Promise.reject({ type: "StripeCardError", message: "declined" });
       }
+      if (opts.permanentFails) {
+        return Promise.reject({ type: "StripeInvalidRequestError", code: "resource_missing" });
+      }
       if (opts.infraFails) return Promise.reject(new Error("stripe unreachable"));
       return Promise.resolve({ id: "pi_2", status: "succeeded", receipt_url: null });
     },
@@ -260,6 +265,12 @@ function makeODeps(opts: OverageOpts = {}) {
       return Promise.resolve();
     },
     isCardError: (err) => (err as { type?: string })?.type === "StripeCardError",
+    isPermanentError: (err) => {
+      const e = err as { type?: string; code?: string; message?: string } | null;
+      return e?.type === "StripeInvalidRequestError" ||
+        e?.code === "resource_missing" ||
+        e?.message === "no payment method on file";
+    },
     now: () => NOW,
   };
   return { deps, calls, updates, attemptKey: () => attemptKey };
@@ -431,4 +442,47 @@ Deno.test("a declined CARD still tells both — that one is the client's to fix"
   await chargeOverageForWalk("walk-1", deps);
   assert(calls.includes("notify:client"), "a card decline is the client's to act on");
   assert(calls.includes("notify:operator"));
+});
+
+// ── Three-way error taxonomy (review H13) ──────────────────────────────────
+// Every non-card failure used to be treated as transient: rethrown, leaving
+// the claim pending. So a PERMANENT failure — a customer that does not exist
+// on this account, a malformed request — left the walk uncompletable and every
+// retry hit the same wall forever.
+
+Deno.test("a permanent failure resolves the claim instead of wedging the walk", async () => {
+  const { deps, calls } = makeODeps({ permanentFails: true });
+  const result = await chargeOverageForWalk("walk-1", deps);
+  assertEquals(result.payment.status, "failed");
+  assert(
+    calls.includes("updatePayment:failed"),
+    "the claim must be resolved so the walk can complete and the debt is visible",
+  );
+});
+
+Deno.test("a permanent failure is the OPERATOR's to fix, not the client's", async () => {
+  // Nothing the client can do about a customer missing from the operator's
+  // Stripe account — telling them to update a payment method is wrong.
+  const { deps, calls } = makeODeps({ permanentFails: true });
+  await chargeOverageForWalk("walk-1", deps);
+  assert(calls.includes("notify:operator"));
+  assertFalse(calls.includes("notify:client"));
+});
+
+Deno.test("a TRANSIENT failure still keeps the claim pending and rethrows", async () => {
+  // The distinction is the whole point: Stripe being briefly unreachable must
+  // NOT resolve the claim, because the charge may yet have gone through.
+  const { deps, calls } = makeODeps({ infraFails: true });
+  await assertRejects(() => chargeOverageForWalk("walk-1", deps));
+  assertFalse(
+    calls.includes("updatePayment:failed"),
+    "a transient fault must leave the claim pending — the charge may have landed",
+  );
+});
+
+Deno.test("a card decline is still its own class — client told, claim failed", async () => {
+  const { deps, calls } = makeODeps({ declines: true });
+  const result = await chargeOverageForWalk("walk-1", deps);
+  assertEquals(result.payment.status, "failed");
+  assert(calls.includes("notify:client"));
 });

@@ -3,6 +3,7 @@
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import type Stripe from "npm:stripe@17";
 import type { OverageDeps, OveragePayment } from "./overage.ts";
+import { OVERAGE_CLAIM_STATUSES } from "./payment_status.ts";
 
 const PAYMENT_COLS =
   "id, walk_id, type, amount_pence, status, stripe_payment_intent_id, receipt_url, created_at";
@@ -34,14 +35,19 @@ export function makeOverageDeps(
     },
 
     async getLiveOveragePayment(walkId) {
-      // A succeeded OR in-flight (pending) charge blocks new attempts; only
-      // 'failed' rows leave the walk chargeable again.
+      // Whatever uq_overage_payment_per_walk covers, and nothing else. This
+      // read filtered on succeeded/pending only, while 0023 widened the index
+      // to include refunded/disputed — so a walk whose overage had been
+      // refunded returned null here, fell through to the claim insert, hit the
+      // index, and surfaced to the operator as the literal words "internal
+      // error". A declined card still leaves the walk re-chargeable, because
+      // 'failed' is in neither set.
       const { data, error } = await db
         .from("payments")
         .select(PAYMENT_COLS)
         .eq("walk_id", walkId)
         .eq("type", "overage")
-        .in("status", ["succeeded", "pending"])
+        .in("status", [...OVERAGE_CLAIM_STATUSES])
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle();
@@ -155,6 +161,13 @@ export function makeOverageDeps(
     async insertNotification(row) {
       const { error } = await db.from("notifications").insert(row);
       if (error) throw new Error("notification insert failed");
+    },
+
+    isPermanentError(err) {
+      const e = err as { type?: string; code?: string; message?: string } | null;
+      return e?.type === "StripeInvalidRequestError" ||
+        e?.code === "resource_missing" ||
+        e?.message === "no payment method on file";
     },
 
     isCardError(err) {
