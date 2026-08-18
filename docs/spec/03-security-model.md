@@ -71,6 +71,42 @@ there is no such key in `config.toml`, and neither deploy workflow runs
 hardens our own client and leaves the old door open for everyone else.
 `docs/dev/realtime-authorization.md` has the steps and how to verify them.
 
+## Re-auth assurance (review H2)
+
+Every vault action re-verifies the operator's password. That alone was
+defeatable by a **session-only** attacker: with `secure_password_change` off
+(the Supabase default, and never deployed — see below),
+`supabase.auth.updateUser({ password })` succeeds from a live session with no
+knowledge of the current password, and the vault check is then satisfied by the
+password the attacker just set. The re-auth was ceremony.
+
+The vault now reads the request token's `aal` claim and resolves three cases:
+
+| Outcome | Condition | Result |
+| --- | --- | --- |
+| `aal2` | a second factor was presented in this session | allowed |
+| `aal1_no_factor` | the account has no verified factor | allowed, at reduced assurance |
+| `insufficient` | a verified factor exists but this session did not use it | **refused** |
+
+Graduated deliberately: requiring `aal2` unconditionally would make the vault
+unusable, because MFA needs the Supabase Pro plan. So **enrolling a factor is
+what closes the exploit**, with no further code change — and an attacker cannot
+manufacture `aal2`, since it needs the factor itself. A *missing* claim counts as
+`aal1`, never as strong; reading strength from an absent claim would be the gate
+failing open.
+
+The claim read is unverified, and safe for the same reason `isServiceAuth`'s is:
+every function using it deploys with `verify_jwt` on, so the gateway has already
+rejected forged tokens. Never pair either with `verify_jwt = false`.
+
+**`config.toml` is not the deployed auth config.** Neither workflow runs
+`supabase config push`, so the file governs `supabase start` only, and the real
+settings live in a dashboard. `staging-smoke.yml`'s `auth-posture` job now reads
+them back through the Management API and fails on the two that decide whether
+the re-auth means anything. `docs/dev/auth-posture.md` records the intended
+values, why `config push` is deliberately not wired up yet, and the open
+billing decision.
+
 ## Column privileges (beyond RLS)
 - `REVOKE UPDATE (credit_balance, plan_id, subscription_status, stripe_customer_id, stripe_subscription_id, invite_token) ON clients FROM authenticated;` — balance unforgeable even by the operator's own JWT (invariant 1); plan/subscription fields move only via definer fns/webhook.
 - `REVOKE INSERT, UPDATE, DELETE ON credit_ledger FROM authenticated;` grant SELECT only. Sole write path = definer functions.

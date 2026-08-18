@@ -99,18 +99,48 @@ export function isServiceAuth(authHeader: string | null, injectedKey: string): b
   return jwtClaimRole(token) === "service_role";
 }
 
-/** Unverified read of a JWT payload's `role` claim; null on any malformation. */
-function jwtClaimRole(token: string): string | null {
+/** Unverified read of a JWT payload; null on any malformation. */
+function jwtClaims(token: string): Record<string, unknown> | null {
   const parts = token.split(".");
   if (parts.length !== 3) return null;
   try {
     const b64 = parts[1].replaceAll("-", "+").replaceAll("_", "/");
     const padded = b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), "=");
-    const claims = JSON.parse(atob(padded)) as { role?: unknown };
-    return typeof claims.role === "string" ? claims.role : null;
+    return JSON.parse(atob(padded)) as Record<string, unknown>;
   } catch {
     return null;
   }
+}
+
+function jwtClaimRole(token: string): string | null {
+  const role = jwtClaims(token)?.role;
+  return typeof role === "string" ? role : null;
+}
+
+/**
+ * The session's authenticator assurance level, from the `aal` claim.
+ *
+ * `aal1` = one factor (a password). `aal2` = a second factor was presented in
+ * THIS session. The distinction is what makes a re-auth mean anything: an
+ * attacker holding only a stolen session can change the account password
+ * without knowing the old one (Supabase `secure_password_change`, off by
+ * default and never deployed — review H2) and then satisfy a password check
+ * with the password they just set. They cannot manufacture aal2.
+ *
+ * Unverified, like the role read above, and safe for the same reason: every
+ * function using this deploys with `verify_jwt` enabled, so the platform
+ * gateway has already rejected a forged token. Never pair either with
+ * `verify_jwt = false`.
+ *
+ * Returns null when the claim is absent, which is what a project with no MFA
+ * configured looks like — the caller decides what to do about that rather than
+ * having a default guessed here.
+ */
+export function sessionAssurance(authHeader: string | null): "aal1" | "aal2" | null {
+  const header = authHeader ?? "";
+  if (!header.startsWith("Bearer ")) return null;
+  const aal = jwtClaims(header.slice(7).trim())?.aal;
+  return aal === "aal1" || aal === "aal2" ? aal : null;
 }
 
 /** Verified JWT user from the Authorization header. */

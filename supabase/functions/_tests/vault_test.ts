@@ -1,7 +1,14 @@
 // credential-vault handler: rate limit, re-auth gate, purpose requirement,
 // soft revoke; plus overage idempotency (mocked deps).
 import { assert, assertEquals, assertFalse, assertRejects } from "./asserts.ts";
-import { handleVault, makeRateLimiter, type VaultDeps, type CredentialMeta } from "../credential-vault/handler.ts";
+import {
+  type CredentialMeta,
+  handleVault,
+  makeRateLimiter,
+  resolveAssurance,
+  type VaultDeps,
+} from "../credential-vault/handler.ts";
+import { sessionAssurance } from "../_lib/http.ts";
 import type { VaultBinding } from "../_lib/crypto.ts";
 import { chargeOverageForWalk, type OverageDeps } from "../_lib/overage.ts";
 
@@ -34,6 +41,8 @@ function makeVaultDeps(opts: {
   passwordOk?: boolean;
   allow?: boolean;
   credential?: CredentialMeta | null;
+  /** Verified MFA factors on the account (review H2). */
+  factors?: number;
 } = {}): { deps: VaultDeps; calls: string[]; seen: Seen } {
   const calls: string[] = [];
   const seen: Seen = {};
@@ -57,6 +66,10 @@ function makeVaultDeps(opts: {
       calls.push("decrypt");
       seen.decryptBinding = binding;
       return Promise.resolve("s3cret");
+    },
+    verifiedFactorCount: (_id) => {
+      calls.push("verifiedFactorCount");
+      return Promise.resolve(opts.factors ?? 0);
     },
     logReauthFailure: (_op, credentialId) => {
       calls.push("logReauthFailure");
@@ -577,4 +590,95 @@ Deno.test("the credential metadata no longer carries a key location hint", async
   );
   const meta = (res as { credential: Record<string, unknown> }).credential;
   assert(!("key_location_hint" in meta), "the hint is back in the vault response");
+});
+
+// ── Assurance: a password alone is not enough when better exists (H2) ──────
+// An attacker holding only a live session can call updateUser({password}) with
+// NO knowledge of the current password (Supabase secure_password_change is off
+// by default and was never deployed to any project), then satisfy the vault's
+// password check with the password they just set. They cannot manufacture aal2.
+
+Deno.test("an aal1 session is REFUSED when the account has a verified factor", async () => {
+  const { deps } = makeVaultDeps({ factors: 1 });
+  const err = await assertRejects(() =>
+    handleVault(
+      { ...OP, aal: "aal1" },
+      { action: "get", credential_id: "cred-1", purpose: "walk", password: "pw" },
+      deps,
+    )
+  );
+  assertEquals((err as { code?: string }).code, "second_factor_required");
+});
+
+Deno.test("an aal2 session is allowed and never has to count factors", async () => {
+  // The strongest case short-circuits: no reason to ask the auth API anything.
+  const { deps, calls } = makeVaultDeps({ factors: 1 });
+  await handleVault(
+    { ...OP, aal: "aal2" },
+    { action: "get", credential_id: "cred-1", purpose: "walk", password: "pw" },
+    deps,
+  );
+  assert(calls.includes("readCredential"));
+  assertFalse(calls.includes("verifiedFactorCount"), "aal2 needs no factor lookup");
+});
+
+Deno.test("an operator with NO factor still gets in — the gate is graduated", async () => {
+  // Requiring aal2 unconditionally would lock every operator out of the vault,
+  // because MFA needs the Supabase Pro plan and TOTP enrolment is off. The
+  // product would be unusable pending a billing decision.
+  const { deps, calls } = makeVaultDeps({ factors: 0 });
+  await handleVault(
+    { ...OP, aal: "aal1" },
+    { action: "get", credential_id: "cred-1", purpose: "walk", password: "pw" },
+    deps,
+  );
+  assert(calls.includes("readCredential"));
+});
+
+Deno.test("a MISSING aal claim is treated as aal1, not assumed strong", async () => {
+  // This is what a project with no MFA configured emits. Reading strength from
+  // an ABSENT claim would be the whole gate failing open.
+  const { deps } = makeVaultDeps({ factors: 1 });
+  const err = await assertRejects(() =>
+    handleVault(
+      { ...OP, aal: null },
+      { action: "get", credential_id: "cred-1", purpose: "walk", password: "pw" },
+      deps,
+    )
+  );
+  assertEquals((err as { code?: string }).code, "second_factor_required");
+});
+
+Deno.test("the assurance gate applies to WRITES too, not just reveals", async () => {
+  // Rotating a credential with a stolen session is as damaging as reading one:
+  // it locks the operator out of their own client's door.
+  const { deps } = makeVaultDeps({ factors: 1 });
+  await assertRejects(() =>
+    handleVault(
+      { ...OP, aal: "aal1" },
+      { action: "put", credential_id: "cred-1", secret: "9999", password: "pw" },
+      deps,
+    )
+  );
+});
+
+Deno.test("resolveAssurance reports the three cases distinctly", async () => {
+  const { deps } = makeVaultDeps({ factors: 0 });
+  assertEquals(await resolveAssurance({ id: "op-1", aal: "aal2" }, deps), "aal2");
+  assertEquals(await resolveAssurance({ id: "op-1", aal: "aal1" }, deps), "aal1_no_factor");
+  const withFactor = makeVaultDeps({ factors: 2 }).deps;
+  assertEquals(await resolveAssurance({ id: "op-1", aal: "aal1" }, withFactor), "insufficient");
+});
+
+Deno.test("sessionAssurance reads the claim, and refuses to guess", () => {
+  // Unverified read, safe because verify_jwt is on at the gateway — the same
+  // justification the role read has carried since phase 01.
+  const tok = (payload: Record<string, unknown>) =>
+    `h.${btoa(JSON.stringify(payload)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "")}.s`;
+  assertEquals(sessionAssurance(`Bearer ${tok({ aal: "aal2" })}`), "aal2");
+  assertEquals(sessionAssurance(`Bearer ${tok({ aal: "aal1" })}`), "aal1");
+  assertEquals(sessionAssurance(`Bearer ${tok({})}`), null, "absent means unknown, not aal1");
+  assertEquals(sessionAssurance(`Bearer ${tok({ aal: "aal3" })}`), null, "an unknown value is not accepted");
+  assertEquals(sessionAssurance("Bearer not-a-jwt"), null);
+  assertEquals(sessionAssurance(null), null);
 });
