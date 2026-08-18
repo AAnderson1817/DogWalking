@@ -409,6 +409,27 @@ export function chargeOverage(walkId: string): Promise<{ payment: Payments }> {
   return invokeEdge("charge-overage", { walk_id: walkId });
 }
 
+// ── Stripe Connect (review B5) ─────────────────────────────────────────────
+// Clients pay the operator directly: the operator is the merchant of record,
+// so nothing can be charged until they have connected an account Stripe has
+// enabled.
+export interface ConnectStatus {
+  connected: boolean;
+  charges_enabled: boolean;
+  payouts_enabled: boolean;
+  details_submitted: boolean;
+}
+
+export function connectStatus(): Promise<ConnectStatus> {
+  return invokeEdge("connect-onboarding", { action: "status" });
+}
+
+/** Mints a single-use Stripe onboarding link. Short-lived, so it is fetched
+ * at click time rather than held in state. */
+export function connectStart(): Promise<{ url: string; account_id: string }> {
+  return invokeEdge("connect-onboarding", { action: "start" });
+}
+
 export interface VaultGetResult {
   secret: string;
   label: string | null;

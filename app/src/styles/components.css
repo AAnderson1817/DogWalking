@@ -2013,3 +2013,36 @@ body:has(.today-emaki-page) .bottom-nav[data-navigation-persona="operator"] {
   }
   body:has(.bottom-nav--rail) .page { margin-left: calc(88px + (100% - 88px - 640px) / 2); }
 }
+
+
+/* ── Stripe Connect onboarding (review B5) ───────────────────────────────
+   Sits above the Money rail because until it is done there is no money to
+   show. Uses the CT-1 *attention* role pair rather than an error role:
+   nothing is broken, something is unfinished. surface-attention and
+   text-attention are designed as a pair and carry their own contrast and
+   prefers-contrast overrides — which is the whole reason for not reaching for
+   a colour by hand here. The left rule is decorative and carries no state on
+   its own, so the heading says what the colour would otherwise have to. */
+.connect-panel {
+  margin-top: var(--s-4);
+  padding: var(--s-4);
+  border-radius: var(--r-md);
+  border-left: 3px solid var(--sanpo-color-border-attention);
+  background: var(--sanpo-color-surface-attention);
+  color: var(--sanpo-color-text-primary);
+}
+
+.connect-panel__title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--fs-16);
+  font-weight: 700;
+  color: var(--sanpo-color-text-primary);
+}
+
+.connect-panel__body {
+  margin: 0 0 var(--s-3);
+  color: var(--sanpo-color-text-primary);
+  font-size: var(--fs-14);
+  line-height: 1.5;
+  max-width: 60ch;
+}

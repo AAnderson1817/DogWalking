@@ -4,7 +4,14 @@
 // customer.subscription.updated webhook finalizes the local plan/credit effect.
 // For clients without a live Stripe subscription (manual/local billing), an
 // explicit body.fraction drives the credit proration directly.
-import { jsonOk, readJson, requireOperator, serveFunction, HttpError } from "../_lib/http.ts";
+import {
+  HttpError,
+  jsonOk,
+  readJson,
+  requireAccount,
+  requireOperator,
+  serveFunction,
+} from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
 import { stripeClient } from "../_lib/stripe.ts";
 
@@ -57,7 +64,11 @@ serveFunction(async (req) => {
       throw new HttpError(409, "plan_unpriced", "plan has no stripe_price_id configured");
     }
     const stripe = stripeClient();
-    const sub = await stripe.subscriptions.retrieve(client.stripe_subscription_id);
+    // The subscription lives on the operator's connected account (review B5).
+    // Retrieving it from the platform account would 404 on an id that reads
+    // as perfectly valid, so the account travels with every call below.
+    const account = requireAccount(operator);
+    const sub = await stripe.subscriptions.retrieve(client.stripe_subscription_id, account);
     const item = sub.items.data[0];
     if (!item) throw new HttpError(409, "no_subscription_item", "subscription has no items");
 
@@ -104,7 +115,9 @@ serveFunction(async (req) => {
           pawtrail_plan_id: plan.id,
         },
       },
-      { idempotencyKey },
+      // The idempotency key is scoped per account by Stripe, so it keeps its
+      // meaning on the connected account.
+      { idempotencyKey, ...account },
     );
 
     await db.from("clients")

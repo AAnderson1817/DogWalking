@@ -26,6 +26,8 @@ function makeMockDeps(
     failApply?: boolean;
     hasInvoicePayment?: boolean;
     noPayment?: boolean;
+    knownAccount?: string;
+    clientNotOwned?: boolean;
     paymentType?: string;
     knownChargeId?: string | null;
     reversal?: ReversalResult;
@@ -50,9 +52,17 @@ function makeMockDeps(
       calls.push({ fn: "markProcessed", args: [id] });
       return Promise.resolve();
     },
-    findClientByCustomer(customerId) {
-      calls.push({ fn: "findClientByCustomer", args: [customerId] });
+    findClientByCustomer(customerId, operatorId) {
+      calls.push({ fn: "findClientByCustomer", args: [customerId, operatorId] });
       return Promise.resolve(customerId === "cus_1" ? client : null);
+    },
+    resolveOperatorByAccount(accountId) {
+      calls.push({ fn: "resolveOperatorByAccount", args: [accountId] });
+      return Promise.resolve(accountId === (opts.knownAccount ?? "acct_1") ? "op-1" : null);
+    },
+    updateConnectState(accountId, fields) {
+      calls.push({ fn: "updateConnectState", args: [accountId, fields] });
+      return Promise.resolve();
     },
     getPlan(planId) {
       calls.push({ fn: "getPlan", args: [planId] });
@@ -62,9 +72,9 @@ function makeMockDeps(
       calls.push({ fn: "findPlanByPriceId", args: [operatorId, priceId] });
       return Promise.resolve(priceId === "price_1" ? plan : null);
     },
-    updateClient(id, fields) {
-      calls.push({ fn: "updateClient", args: [id, fields] });
-      return Promise.resolve();
+    updateClient(id, fields, operatorId) {
+      calls.push({ fn: "updateClient", args: [id, fields, operatorId] });
+      return Promise.resolve(opts.clientNotOwned ? 0 : 1);
     },
     findPendingPlanChangeIntent(args) {
       calls.push({ fn: "findPendingPlanChangeIntent", args: [args] });
@@ -124,8 +134,16 @@ function makeMockDeps(
   return { deps, calls };
 }
 
-function event(type: string, object: Record<string, unknown>): StripeEventLike {
-  return { id: `evt_${type}`, type, data: { object } };
+// `null` means "omit the field entirely" — a platform-account event. It has
+// to be null rather than undefined: a JS default parameter fires on an
+// explicit `undefined`, so `event(t, o, undefined)` would silently get
+// "acct_1" and the no-account test would assert nothing.
+function event(
+  type: string,
+  object: Record<string, unknown>,
+  account: string | null = "acct_1",
+): StripeEventLike {
+  return { id: `evt_${type}`, type, data: { object }, ...(account ? { account } : {}) };
 }
 
 const PAID_CYCLE = {
@@ -617,4 +635,111 @@ Deno.test("an overage reversal reports no credits, not zero reclaimed", async ()
   });
   assert(body.includes("No credits were involved"), body);
   assert(body.includes("disputed"), body);
+});
+
+// ── Connect tenancy boundary (review B5) ───────────────────────────────────
+// A Connect endpoint receives events for EVERY account connected to the
+// platform. event.account is therefore an authorization input, not a routing
+// hint, and these are the tests that say so.
+
+Deno.test("an event from an account we do not know is ignored", async () => {
+  const { deps, calls } = makeMockDeps();
+  const res = await handleStripeEvent(
+    event("invoice.paid", { ...PAID_CYCLE }, "acct_someone_else"),
+    deps,
+  );
+  assertEquals(res.status, "ignored");
+  assertFalse(calls.some((c) => c.fn === "applyInvoicePaid"), "no effects for a foreign account");
+});
+
+Deno.test("an event with NO account is ignored", async () => {
+  // A platform-account event. Sanpo takes no money on the platform account —
+  // operators are the merchant of record — so there is nothing legitimate to
+  // do with one, and acting would mean guessing whose it was.
+  const { deps, calls } = makeMockDeps();
+  const res = await handleStripeEvent(
+    event("invoice.paid", { ...PAID_CYCLE }, null),
+    deps,
+  );
+  assertEquals(res.status, "ignored");
+  assertFalse(calls.some((c) => c.fn === "applyInvoicePaid"));
+});
+
+Deno.test("the client lookup is scoped to the operator the account resolved to", async () => {
+  const { deps, calls } = makeMockDeps();
+  await handleStripeEvent(event("invoice.paid", { ...PAID_CYCLE }), deps);
+  const look = calls.find((c) => c.fn === "findClientByCustomer");
+  assertEquals(look!.args, ["cus_1", "op-1"]);
+});
+
+Deno.test("checkout metadata naming another operator's client changes nothing", async () => {
+  // Session metadata is attacker-controlled here: any connected operator can
+  // craft a Checkout Session in their own Stripe dashboard carrying someone
+  // else's client_id. The id alone is not an authorization, so the update is
+  // scoped and a zero-row result is ignored rather than treated as success.
+  const { deps, calls } = makeMockDeps({ clientNotOwned: true });
+  const res = await handleStripeEvent(
+    event("checkout.session.completed", {
+      mode: "subscription",
+      customer: "cus_victim",
+      subscription: "sub_evil",
+      metadata: { client_id: "client-belonging-to-someone-else" },
+    }),
+    deps,
+  );
+  assertEquals(res.status, "ignored");
+  const upd = calls.find((c) => c.fn === "updateClient");
+  assertEquals(upd!.args[2], "op-1", "the operator must come from event.account");
+});
+
+Deno.test("a reversal is scoped to the operator too", async () => {
+  const { deps, calls } = makeMockDeps();
+  await handleStripeEvent(
+    event("charge.refunded", { id: "ch_t", payment_intent: "pi_t", amount_refunded: 100 }),
+    deps,
+  );
+  const look = calls.find((c) => c.fn === "findPaymentForReversal");
+  assertEquals((look!.args[0] as { operatorId: string }).operatorId, "op-1");
+});
+
+Deno.test("account.updated mirrors Stripe's view of the connected account", async () => {
+  const { deps, calls } = makeMockDeps();
+  const res = await handleStripeEvent(
+    event("account.updated", {
+      id: "acct_1",
+      charges_enabled: true,
+      payouts_enabled: false,
+      details_submitted: true,
+    }),
+    deps,
+  );
+  assertEquals(res.status, "processed");
+  const upd = calls.find((c) => c.fn === "updateConnectState");
+  assertEquals(upd!.args[0], "acct_1");
+  assertEquals(upd!.args[1], {
+    stripe_charges_enabled: true,
+    stripe_payouts_enabled: false,
+    stripe_details_submitted: true,
+  });
+});
+
+Deno.test("charges_enabled going false is mirrored, not just the happy path", async () => {
+  // Stripe disables charges when a requirement comes due. If only the
+  // enabling direction were mirrored, the operator would keep taking payments
+  // Stripe was already rejecting.
+  const { deps, calls } = makeMockDeps();
+  await handleStripeEvent(
+    event("account.updated", {
+      id: "acct_1",
+      charges_enabled: false,
+      payouts_enabled: false,
+      details_submitted: true,
+    }),
+    deps,
+  );
+  const upd = calls.find((c) => c.fn === "updateConnectState");
+  assertEquals(
+    (upd!.args[1] as { stripe_charges_enabled: boolean }).stripe_charges_enabled,
+    false,
+  );
 });

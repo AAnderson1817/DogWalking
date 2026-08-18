@@ -24,7 +24,6 @@ dashboards) — no local tooling required. Do the steps in order; ~30–45 min.
    | `STRIPE_WEBHOOK_SECRET` | step 4 below (`whsec_…`) |
    | `VAULT_MASTER_KEY` | step 3 below |
    | `VAULT_MASTER_KEY_PREVIOUS` | the literal `none` until you first rotate (step 3) |
-   | `SUPABASE_SERVICE_ROLE_KEY` | project Settings → API → `service_role` |
    | `APP_BASE_URL` | your Vercel URL (step 6; set a placeholder first) |
    | `RESEND_API_KEY` (optional) | resend.com — skip for now; email silently no-ops |
 
@@ -76,13 +75,33 @@ at once.
 ## 4. Stripe (test mode)
 
 1. Stripe dashboard, toggle **Test mode**.
+1a. **Connect → Get started**, and choose **Standard** accounts. Operators are
+   the merchant of record (review B5) — client payments are direct charges on
+   the operator's own account, never the platform's. Without this, nothing in
+   the app can take a payment at all.
 2. Product catalogue → create one Product per plan with a recurring Price
    (USD, weekly/monthly to match). Note each `price_…` id.
+
+   Create these **on the connected account**, not the platform account.
+   Prices are per-account objects, so a platform `price_…` does not exist from
+   the connected account's point of view and checkout fails on an id that
+   looks entirely valid.
 3. Developers → Webhooks → Add endpoint:
    `https://<PROJECT_REF>.supabase.co/functions/v1/stripe-webhook`
-   with events: `checkout.session.completed`, `invoice.paid`,
+   and set **Listen to events on: Connected accounts**.
+
+   > This is the easy one to get wrong. An *account* endpoint receives none of
+   > the events that matter, because every payment happens on a connected
+   > account — and the handler ignores any event without an `account`, so a
+   > misconfigured endpoint fails silently and completely: nothing is billed
+   > and nothing errors.
+
+   Events: `checkout.session.completed`, `invoice.paid`,
    `invoice.payment_failed`, `invoice.upcoming`,
-   `customer.subscription.updated`, `customer.subscription.deleted`.
+   `customer.subscription.updated`, `customer.subscription.deleted`,
+   `account.updated`, `charge.refunded`, `charge.dispute.created`,
+   `charge.dispute.funds_withdrawn`, `credit_note.created`, `invoice.voided`.
+
    Copy the signing secret (`whsec_…`) into the `STRIPE_WEBHOOK_SECRET`
    GitHub secret.
 4. Settings → Billing → Customer portal → activate it (used by
@@ -128,6 +147,11 @@ at once.
 
 1. Sign up → Onboard → Dashboard loads; `operators` row + two seeded
    service types in the Table editor.
+1a. **Money → Connect Stripe** → complete Stripe's onboarding → return to the
+   app. The panel should disappear on its own once `account.updated` lands
+   (the panel re-checks on window focus). Until it does, no checkout and no
+   overage can be taken — that is the intended behaviour, not a bug: clients
+   pay the operator directly, so the money needs somewhere to land.
 2. Roster → add a client → open the invite link in a private window →
    claim → portal loads.
 3. ClientDetail → Plan & credits → Launch Stripe checkout → card

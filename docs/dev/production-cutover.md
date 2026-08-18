@@ -81,26 +81,56 @@ Staging stays exactly as it is — it remains your test bed. Production is a
    | `STRIPE_WEBHOOK_SECRET` | **live** `whsec_…` (step 4) |
    | `VAULT_MASTER_KEY` | the fresh key from step 2 |
    | `VAULT_MASTER_KEY_PREVIOUS` | the literal `none` (see step 2) |
-   | `SUPABASE_SERVICE_ROLE_KEY` | prod Settings → API → `service_role`; required for the deploy's vault-key check |
    | `APP_BASE_URL` | `https://app.yourdomain.com` |
    | `RESEND_API_KEY` | from step 5 |
    | `NOTIFY_FROM_EMAIL` | e.g. `Sanpo <notifications@sanpocare.com>` |
 
 ## 4. Stripe: live mode (this is the income switch)
 
+> **Read this first — who takes the money changed (review B5).**
+> Operators are the **merchant of record**, not Sanpo. Every client payment is
+> a direct charge on the *operator's own* Stripe account via Connect Standard:
+> their business on the client's card statement, their bank account, their
+> chargeback liability, their Stripe fees. Sanpo is never in the flow of
+> funds, which is also why none of this is money transmission.
+>
+> So the platform account below is **not** where client money lands. It exists
+> to create connected accounts, mint onboarding links, and verify webhooks.
+> As the founder you are also operator #1: you will connect your own account
+> through the app (Money → Connect Stripe) exactly as any other operator does.
+
 1. **Activate the account** (Stripe dashboard banner): business details,
-   your identity, and the **bank account payouts land in**. Stripe may take
-   minutes to a day to verify. Requirements to have ready: legal
-   name/address, SSN or EIN, bank routing + account number, and a business
-   website URL (your Vercel domain works; see the legal note in step 8).
+   your identity, and the bank account. Stripe may take minutes to a day to
+   verify. Requirements to have ready: legal name/address, SSN or EIN, bank
+   routing + account number, and a business website URL (your Vercel domain
+   works; see the legal note in step 8).
+1a. **Enable Connect**: Stripe dashboard → Connect → Get started → platform
+   profile. Choose **Standard** accounts. This is the setting that makes
+   operators the merchant of record; Express and Custom would make Sanpo one.
 2. Toggle **out of Test mode**. Product catalogue → recreate each plan as a
    Product with a recurring USD Price. Live mode does NOT copy test-mode
    products. Note every live `price_…` id.
+
+   **Create these on the operator's connected account, not the platform
+   account.** Prices are per-account objects: a `price_…` from the platform
+   account simply does not exist from the connected account's point of view,
+   and checkout would fail on an id that looks perfectly valid.
+   `plans.stripe_price_id` is already per-operator (`plans.operator_id`), so
+   the schema needs nothing — only the ids must come from the right account.
 3. Developers → Webhooks → Add endpoint:
    `https://<PROD_PROJECT_REF>.supabase.co/functions/v1/stripe-webhook`
-   with the same six events as staging (`checkout.session.completed`,
-   `invoice.paid`, `invoice.payment_failed`, `invoice.upcoming`,
-   `customer.subscription.updated`, `customer.subscription.deleted`).
+   — and set **Listen to events on: Connected accounts**. This is the part
+   that is easy to get wrong: an account endpoint receives none of the events
+   that matter, because every payment happens on a connected account. The
+   handler ignores any event without an `account`, so a misconfigured endpoint
+   fails *silently and completely* — nothing is billed and nothing errors.
+
+   Events: `checkout.session.completed`, `invoice.paid`,
+   `invoice.payment_failed`, `invoice.upcoming`,
+   `customer.subscription.updated`, `customer.subscription.deleted`,
+   `account.updated`, `charge.refunded`, `charge.dispute.created`,
+   `charge.dispute.funds_withdrawn`, `credit_note.created`, `invoice.voided`.
+
    Copy the live signing secret into the `STRIPE_WEBHOOK_SECRET`
    environment secret.
 4. Settings → Billing → **Customer portal → activate** (live mode has its

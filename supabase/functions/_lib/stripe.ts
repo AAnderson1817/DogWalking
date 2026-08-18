@@ -3,6 +3,14 @@ import Stripe from "npm:stripe@17";
 
 let cached: Stripe | null = null;
 
+/**
+ * The platform client. Use this ONLY for platform-level work: creating a
+ * connected account, minting an AccountLink, and verifying webhooks.
+ *
+ * Money never moves here. Operators are the merchant of record (review B5),
+ * so every customer, subscription, PaymentIntent and portal session belongs
+ * to the operator's own Standard connected account — see `connectedStripe`.
+ */
 export function stripeClient(): Stripe {
   if (!cached) {
     const key = Deno.env.get("STRIPE_SECRET_KEY");
@@ -10,6 +18,44 @@ export function stripeClient(): Stripe {
     cached = new Stripe(key); // SDK-pinned API version
   }
   return cached;
+}
+
+/** Thrown when a money path is reached before the operator can take money. */
+export class NotConnectedError extends Error {
+  constructor(readonly reason: "no_account" | "charges_disabled") {
+    super(
+      reason === "no_account"
+        ? "operator has not connected a Stripe account"
+        : "the operator's Stripe account cannot accept charges yet",
+    );
+  }
+}
+
+export interface ConnectState {
+  stripe_account_id: string | null;
+  stripe_charges_enabled: boolean;
+}
+
+/**
+ * The per-request options every money call must carry, so the charge is
+ * created ON the operator's account: their business on the client's
+ * statement, their chargeback liability, their Stripe fees, their bank
+ * account.
+ *
+ * Passed explicitly at each call site rather than hidden inside a wrapper
+ * client. `{ stripeAccount }` is the single most consequential argument in
+ * this codebase — a reader checking whether a charge lands on the right
+ * account should see it in the same expression as the charge, and a call site
+ * that forgets it should read as obviously wrong rather than as a default.
+ *
+ * It REFUSES rather than falling back to the platform account. A fallback is
+ * exactly how the original defect would come back: silently, and visible only
+ * to whoever eventually reconciled a bank statement.
+ */
+export function onAccount(operator: ConnectState): { stripeAccount: string } {
+  if (!operator.stripe_account_id) throw new NotConnectedError("no_account");
+  if (!operator.stripe_charges_enabled) throw new NotConnectedError("charges_disabled");
+  return { stripeAccount: operator.stripe_account_id };
 }
 
 /**

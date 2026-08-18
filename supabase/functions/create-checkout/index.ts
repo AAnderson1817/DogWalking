@@ -1,6 +1,13 @@
 // create-checkout — POST, operator JWT (spec 04). Creates a subscription-mode
 // Checkout Session for a client on one of the operator's plans.
-import { jsonOk, readJson, requireOperator, serveFunction, HttpError } from "../_lib/http.ts";
+import {
+  HttpError,
+  jsonOk,
+  readJson,
+  requireAccount,
+  requireOperator,
+  serveFunction,
+} from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
 import { stripeClient } from "../_lib/stripe.ts";
 
@@ -38,14 +45,22 @@ serveFunction(async (req) => {
   }
 
   const stripe = stripeClient();
+  // Every call below carries this. The operator is the merchant of record
+  // (review B5): the customer, the subscription and the charge all live on
+  // THEIR Stripe account, their business appears on the client's statement,
+  // and the money lands in their bank — Sanpo is never in the flow of funds.
+  const account = requireAccount(operator);
 
   let customerId = client.stripe_customer_id as string | null;
   if (!customerId) {
+    // A customer created on the platform account is invisible from the
+    // connected one — the id would look valid and every later call with it
+    // would 404. Customers are per-account objects.
     const customer = await stripe.customers.create({
       email: client.email ?? undefined,
       name: client.full_name,
       metadata: { client_id: client.id, operator_id: operator.id },
-    });
+    }, account);
     customerId = customer.id;
     const { error: uErr } = await db
       .from("clients")
@@ -71,7 +86,7 @@ serveFunction(async (req) => {
     subscription_data: { metadata },
     success_url: `${base}/clients/${client.id}?checkout=success`,
     cancel_url: `${base}/clients/${client.id}?checkout=cancelled`,
-  });
+  }, account);
 
   return jsonOk({ url: session.url });
 });
