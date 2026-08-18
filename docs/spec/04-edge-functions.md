@@ -320,7 +320,45 @@ client mark their own `payment_failed` email as sent.
 
 ## credential-vault — POST, operator JWT
 Body: `{ action: 'put'|'get'|'delete', credential_id?, property_id?, entry_method?, label?, secret?, purpose?, walk_id?, password }`
-Every action re-verifies `password` against the caller's account (Auth admin check); rate-limit 5/min/user (Postgres-backed, 0016 + 429).
+Every action re-verifies `password` against the caller's account (Auth admin
+check); rate-limit 5/min/user (Postgres-backed, 0016 + 429).
+
+**Order of checks, and why it is not arbitrary (review M2).** The limiter used
+to run FIRST, so every request burned a slot in the window — including requests
+that could never have succeeded. An operator who signed up with a magic link
+has no password to type (`signInWithOtp` creates the account and no operator
+path anywhere sets one), so five attempts at a password that cannot exist
+returned 429 and locked them out of the vault entirely, on a doorstep, with no
+way to fix it inside the product. The message they got was "password
+verification failed", which reads as a typo to somebody with nothing to
+mistype.
+
+The limiter exists to bound password GUESSING, so it now sits directly in
+front of the guess:
+
+1. `password` present, and the account has an email — 401, no slot consumed.
+2. **`fn_account_has_password` (0035)** — if not, `409 password_not_set` with a
+   message naming the fix. No slot consumed, and deliberately NOT audited: no
+   password was checked, so recording it as a failed re-auth would fill the
+   trail with configuration noise in the one log that has to make a real attack
+   visible. It is not a blind spot either — to read a credential an attacker
+   must first set a password, after which the reveal writes an ordinary audit
+   row carrying their IP.
+3. `allowAttempt` — the guess is about to happen.
+4. `verifyPassword`; a failure is audited and refused.
+
+GoTrue cannot make this distinction for us: it returns the same
+`invalid_credentials` for "wrong password" and "no password set", deliberately,
+so that sign-in is not an account-existence oracle. `auth.users
+.encrypted_password` is the only honest signal, and it is not reachable through
+PostgREST — hence the definer function, whose body check lets the service role
+ask about anyone and a signed-in user ask only about themselves, so it does not
+become the oracle GoTrue avoids being.
+
+The client resolves this before the doomed request is ever made: `ReauthSheet`
+checks on open and offers to SET a password, then continues straight to the
+action the operator was taking. That lives in the sheet rather than at each
+`reauth()` call site because there are four of them and a fifth will exist.
 - `put`: encrypt `secret` → `fn_write_credential` (new) or `fn_rotate_credential` (existing).
 - `get`: `fn_read_credential` → decrypt → `{ secret, label, entry_method }`. `purpose` required, non-empty; `walk_id` optional.
 - `delete`: `fn_revoke_credential` — a soft revoke setting `revoked_at`. The audit log is immortal.

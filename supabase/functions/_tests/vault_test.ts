@@ -43,12 +43,24 @@ function makeVaultDeps(opts: {
   credential?: CredentialMeta | null;
   /** Verified MFA factors on the account (review H2). */
   factors?: number;
+  /** Whether the account has a password at all (review M2). */
+  hasPassword?: boolean;
 } = {}): { deps: VaultDeps; calls: string[]; seen: Seen } {
   const calls: string[] = [];
   const seen: Seen = {};
   const blob = new Uint8Array(40);
   const deps: VaultDeps = {
-    allowAttempt: () => opts.allow ?? true,
+    allowAttempt: () => {
+      // Recorded, because M2 is as much about WHEN this runs as whether it
+      // allows: it used to run first, so a request that could never succeed
+      // still burned a slot in the 5/min window.
+      calls.push("allowAttempt");
+      return opts.allow ?? true;
+    },
+    accountHasPassword: (_id) => {
+      calls.push("accountHasPassword");
+      return Promise.resolve(opts.hasPassword ?? true);
+    },
     verifyPassword: (_e, _p) => {
       calls.push("verifyPassword");
       return Promise.resolve(opts.passwordOk ?? true);
@@ -106,7 +118,14 @@ Deno.test("rate limit rejects before any password attempt", async () => {
   await assertRejects(() =>
     handleVault(OP, { action: "get", credential_id: "cred-1", purpose: "walk", password: "pw" }, deps)
   );
-  assertEquals(calls.length, 0);
+  // This asserted `calls.length === 0`, which was true only incidentally: the
+  // limiter ran first and the fixture did not record it. M2 moved the limiter
+  // to sit directly in front of the guess, so an account-state check now
+  // legitimately precedes it. The INTENT — nothing is guessed and nothing is
+  // read — is unchanged, and is now what the test says.
+  assertFalse(calls.includes("verifyPassword"));
+  assertFalse(calls.includes("readCredential"));
+  assertFalse(calls.includes("decrypt"));
 });
 
 Deno.test("wrong password rejects every action", async () => {
@@ -681,4 +700,50 @@ Deno.test("sessionAssurance reads the claim, and refuses to guess", () => {
   assertEquals(sessionAssurance(`Bearer ${tok({ aal: "aal3" })}`), null, "an unknown value is not accepted");
   assertEquals(sessionAssurance("Bearer not-a-jwt"), null);
   assertEquals(sessionAssurance(null), null);
+});
+
+// ── A magic-link operator is told what is wrong, not locked out (review M2) ──
+
+const GET = { action: "get" as const, credential_id: "cred-1", purpose: "walk", password: "pw" };
+
+/** The refusal's `code`, which is the whole point of the finding. */
+async function refusalCode(deps: VaultDeps, body = GET): Promise<string> {
+  const err = await assertRejects(() => handleVault(OP, body, deps));
+  return (err as { code?: string }).code ?? "(no code)";
+}
+
+Deno.test("an account with no password gets a distinct, actionable refusal", async () => {
+  const { deps } = makeVaultDeps({ hasPassword: false });
+  // Not `reauth_failed`. "Password verification failed" reads as a typo to
+  // someone who has no password to mistype, and is what left magic-link
+  // operators stuck with no way forward inside the product.
+  assertEquals(await refusalCode(deps), "password_not_set");
+});
+
+Deno.test("a passwordless account does NOT burn a rate-limit slot", async () => {
+  const { deps, calls } = makeVaultDeps({ hasPassword: false });
+  await assertRejects(() => handleVault(OP, GET, deps));
+  // The second half of M2: five attempts at a password that cannot exist
+  // returned 429 and locked the operator out for a minute at a time.
+  assertFalse(calls.includes("allowAttempt"));
+  // Nothing was guessed, so nothing should have been checked.
+  assertFalse(calls.includes("verifyPassword"));
+});
+
+Deno.test("the limiter still guards an actual password guess", async () => {
+  // The other direction. Moving the limiter must not remove it: a wrong
+  // password on a real account is exactly what it exists to bound.
+  const { deps, calls } = makeVaultDeps({ hasPassword: true, allow: false });
+  assertEquals(await refusalCode(deps), "rate_limited");
+  assert(calls.includes("allowAttempt"));
+  // Refused before the guess was tried, not after.
+  assertFalse(calls.includes("verifyPassword"));
+});
+
+Deno.test("a malformed request is refused before it costs a slot", async () => {
+  const { deps, calls } = makeVaultDeps();
+  await assertRejects(() =>
+    handleVault(OP, { action: "get", credential_id: "cred-1", purpose: "walk" }, deps)
+  );
+  assertFalse(calls.includes("allowAttempt"));
 });

@@ -500,6 +500,24 @@ export function createCheckout(clientId: string, planId: string): Promise<{ url:
  * existing succeeded row — and BillingConsole announced "Recovered $22.00" for
  * money it had not moved (review M3).
  */
+/**
+ * Whether the signed-in account has a password at all (review M2, 0035).
+ *
+ * `SignIn` offers a magic link and no operator path ever sets a password, so
+ * an operator can hold a perfectly good session and still have nothing to type
+ * into the vault's re-auth. GoTrue cannot tell us — it returns the same
+ * `invalid_credentials` for "wrong password" and "no password", deliberately,
+ * so that sign-in is not an account oracle. The definer function reads
+ * `auth.users.encrypted_password` and refuses to answer about anyone but you.
+ */
+export async function accountHasPassword(): Promise<boolean> {
+  const { data, error } = await supabase.rpc("fn_account_has_password", {
+    p_user: (await supabase.auth.getUser()).data.user?.id ?? "",
+  });
+  if (error) throw error;
+  return data === true;
+}
+
 export function chargeOverage(
   walkId: string,
 ): Promise<{ payment: Payments; already_charged?: boolean }> {

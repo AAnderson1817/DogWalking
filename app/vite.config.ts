@@ -125,6 +125,13 @@ export default defineConfig({
             "src/screens/**/*.test.tsx",
             "src/hooks/**/*.test.ts",
             "src/hooks/**/*.test.tsx",
+            // `lib/` is the node project's territory, EXCEPT for `.tsx`:
+            // `auth-context.tsx` genuinely contains components (the reauth
+            // sheet), so a behavioural test for it belongs here. Without this
+            // line `src/lib/*.test.tsx` matched no project at all and ran
+            // nowhere — silently, which is the failure mode H18 was about.
+            // The CI orphan check fails any test file no project claims.
+            "src/lib/**/*.test.tsx",
           ],
         },
       },

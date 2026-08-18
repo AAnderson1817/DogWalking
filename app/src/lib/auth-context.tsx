@@ -17,7 +17,9 @@ import {
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "./supabase";
 import { Sheet } from "@/components/Sheet";
-import { Input } from "@/components/fields";
+import { FormError, Input } from "@/components/fields";
+import { LoadingState } from "@/components/StateField";
+import { accountHasPassword } from "./api";
 import { Button } from "@/components/Button";
 
 export type Role = "operator" | "client" | null;
@@ -189,6 +191,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 }
 
+/**
+ * Confirm-it's-you, and — since review M2 — set-a-password-first when there is
+ * no password to confirm with.
+ *
+ * `SignIn` offers a magic link, `signInWithOtp` creates the account, and no
+ * operator path anywhere sets a password. So an operator could hold a
+ * perfectly valid session and be unable to open the vault at all: every
+ * attempt answered "password verification failed", which reads as a typo to
+ * somebody who has nothing to mistype, and five of them returned 429.
+ *
+ * The check lives HERE rather than in each `reauth()` caller for two reasons.
+ * There are four call sites and a fifth will exist; and this way the operator
+ * never makes the doomed request at all — they are asked for the thing that
+ * will actually work, once, before anything is attempted.
+ */
 function ReauthSheet({
   open,
   onSettle,
@@ -197,41 +214,109 @@ function ReauthSheet({
   onSettle: (password: string | null) => void;
 }) {
   const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [hasPassword, setHasPassword] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  function submit(e: FormEvent) {
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setHasPassword(null);
+    setError(null);
+    accountHasPassword()
+      .then((has) => { if (!cancelled) setHasPassword(has); })
+      // Failing OPEN to the password form is the right default: the vault
+      // still refuses safely on the server, and assuming "no password" on a
+      // lookup failure would push every operator through a password reset.
+      .catch(() => { if (!cancelled) setHasPassword(true); });
+    return () => { cancelled = true; };
+  }, [open]);
+
+  function reset() {
+    setPassword("");
+    setConfirm("");
+    setError(null);
+    setBusy(false);
+  }
+
+  function submitExisting(e: FormEvent) {
     e.preventDefault();
     if (!password) return;
     onSettle(password);
-    setPassword("");
+    reset();
+  }
+
+  async function submitNew(e: FormEvent) {
+    e.preventDefault();
+    if (password !== confirm) {
+      setError("Those don't match.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const { error: err } = await supabase.auth.updateUser({ password });
+    setBusy(false);
+    if (err) {
+      // Surfaced, not swallowed. `secure_password_change` can require a recent
+      // sign-in, and an operator who has been idle needs to be told that
+      // rather than left staring at a form that does nothing.
+      setError(err.message);
+      return;
+    }
+    // Straight through to the action they were trying to take — setting the
+    // password IS the re-auth, and making them type it again would be ceremony.
+    onSettle(password);
+    reset();
   }
 
   function cancel() {
     onSettle(null);
-    setPassword("");
+    reset();
   }
 
+  const settingUp = hasPassword === false;
+
   return (
-    <Sheet open={open} onClose={cancel} title="Confirm it's you">
-      <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: "var(--s-3)" }}>
-        <p style={{ color: "var(--text-2)", fontSize: "var(--fs-14)" }}>
-          Access credentials are protected. Re-enter your password to continue;
-          every reveal is recorded in the audit trail.
-        </p>
-        <Input
-          label="Password"
-          type="password"
-          autoComplete="current-password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          autoFocus
-        />
-        <Button type="submit" full disabled={!password}>
-          Confirm
-        </Button>
-        <Button type="button" variant="ghost" full onClick={cancel}>
-          Cancel
-        </Button>
-      </form>
+    <Sheet open={open} onClose={cancel} title={settingUp ? "Set a password" : "Confirm it's you"}>
+      {hasPassword === null
+        ? <LoadingState label="Checking your account" />
+        : (
+          <form
+            onSubmit={settingUp ? submitNew : submitExisting}
+            style={{ display: "flex", flexDirection: "column", gap: "var(--s-3)" }}
+          >
+            <p style={{ color: "var(--text-2)", fontSize: "var(--fs-14)" }}>
+              {settingUp
+                ? "You sign in with a magic link, so there's no password on this account yet. Set one now — it's what protects your clients' entry codes, and every reveal is recorded against it."
+                : "Access credentials are protected. Re-enter your password to continue; every reveal is recorded in the audit trail."}
+            </p>
+            <Input
+              label={settingUp ? "New password" : "Password"}
+              type="password"
+              autoComplete={settingUp ? "new-password" : "current-password"}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoFocus
+            />
+            {settingUp && (
+              <Input
+                label="Confirm password"
+                type="password"
+                autoComplete="new-password"
+                value={confirm}
+                onChange={(e) => setConfirm(e.target.value)}
+              />
+            )}
+            <FormError message={error} />
+            <Button type="submit" full disabled={!password || busy || (settingUp && !confirm)}>
+              {busy ? "Saving…" : settingUp ? "Set password and continue" : "Confirm"}
+            </Button>
+            <Button type="button" variant="ghost" full onClick={cancel}>
+              Cancel
+            </Button>
+          </form>
+        )}
     </Sheet>
   );
 }

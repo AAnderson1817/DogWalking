@@ -59,6 +59,15 @@ export interface VaultDeps {
    * without any further code change.
    */
   verifiedFactorCount(userId: string): Promise<number>;
+  /**
+   * Whether this account has a password at all (review M2, migration 0035).
+   *
+   * GoTrue returns the same `invalid_credentials` for "wrong password" and
+   * "no password set" — deliberately, so sign-in is not an account oracle —
+   * so `verifyPassword` genuinely cannot tell them apart. Only
+   * `auth.users.encrypted_password` can.
+   */
+  accountHasPassword(userId: string): Promise<boolean>;
   verifyPassword(email: string, password: string): Promise<boolean>;
   /** The binding is authenticated (AES-GCM additionalData), so a ciphertext
    *  cannot be moved to another row or another tenant (review B2). */
@@ -129,15 +138,46 @@ export async function handleVault(
   body: VaultBody,
   deps: VaultDeps,
 ): Promise<Record<string, unknown>> {
-  if (!(await deps.allowAttempt(operator.id))) {
-    throw new HttpError(429, "rate_limited", "too many vault attempts; wait a minute");
-  }
+  // ── Order matters, and it was wrong (review M2) ─────────────────────────
+  //
+  // `allowAttempt` used to run FIRST, so every request burned a slot in the
+  // 5/min window — including requests that could never have succeeded. An
+  // operator who signed up with a magic link has no password to type, and
+  // five attempts at a password that cannot exist locked them out of the
+  // vault entirely, on a doorstep, with no way to fix it in the product.
+  //
+  // The limiter exists to bound password GUESSING. So it now sits directly in
+  // front of the guess, and the checks that are about the shape of the
+  // request or the state of the account come first and cost nothing.
   if (!body?.password) {
     throw new HttpError(401, "password_required", "password re-verification is required");
   }
   if (!operator.email) {
     throw new HttpError(401, "reauth_failed", "account has no email to verify against");
   }
+
+  if (!(await deps.accountHasPassword(operator.id))) {
+    // Deliberately NOT a `reauth_failed`, and deliberately not audited.
+    //
+    // No password was checked, so nothing was tried — recording this as a
+    // failed re-auth would fill the trail with configuration noise in exactly
+    // the log that has to make a real attack visible (review H3). Nor is it a
+    // blind spot: an attacker holding a stolen session on a passwordless
+    // account learns nothing here, and to actually read a credential they must
+    // first set a password, after which the reveal writes an ordinary audit
+    // row carrying their IP.
+    throw new HttpError(
+      409,
+      "password_not_set",
+      "This account signs in with a magic link and has no password yet. Set one to unlock the vault — every reveal is recorded against it.",
+    );
+  }
+
+  // Now, and only now, is a password about to be guessed.
+  if (!(await deps.allowAttempt(operator.id))) {
+    throw new HttpError(429, "rate_limited", "too many vault attempts; wait a minute");
+  }
+
   const passwordOk = await deps.verifyPassword(operator.email, body.password);
   if (!passwordOk) {
     // Recorded BEFORE the throw. This is the event an attacker most wants
