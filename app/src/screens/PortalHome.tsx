@@ -6,6 +6,7 @@ import { Card } from "@/components/Card";
 import { CreditMeter } from "@/components/CreditMeter";
 import { EmptyState } from "@/components/EmptyState";
 import { LoadError, loadErrorMessage } from "@/components/LoadError";
+import { AccessTrail } from "@/components/AccessTrail";
 import { NotificationBell, NotificationList } from "@/components/NotificationInbox";
 import { LoadingState } from "@/components/StateField";
 import { WalkCard } from "@/components/WalkCard";
@@ -14,8 +15,10 @@ import {
   getMyOperatorView,
   getPlan,
   listNotifications,
+  listMyCredentialLog,
   listWalksDetailed,
   markNotificationRead,
+  type CredentialLogRow,
   walkPetNames,
   type MyOperatorView,
   type WalkDetailed,
@@ -33,23 +36,29 @@ export default function PortalHome() {
   const [plan, setPlan] = useState<Plans | null>(null);
   const [walks, setWalks] = useState<WalkDetailed[]>([]);
   const [notifications, setNotifications] = useState<Notifications[]>([]);
+  const [accessTrail, setAccessTrail] = useState<CredentialLogRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const me = await getMyClient();
     if (!me) throw new Error("We couldn't load your account. Please try again.");
-    const [op, ws, ns, p] = await Promise.all([
+    const [op, ws, ns, p, trail] = await Promise.all([
       getMyOperatorView(),
       listWalksDetailed({}),
       listNotifications(true),
       me.plan_id ? getPlan(me.plan_id) : Promise.resolve(null),
+      // Advisory. A client with no credential on file has an empty trail, and
+      // a failure to read it must not cost them their whole portal — the
+      // walks and the credit balance are what they came for.
+      listMyCredentialLog(20).catch(() => []),
     ]);
     setClient(me);
     setOperator(op);
     setWalks(ws);
     setNotifications(ns);
     setPlan(p);
+    setAccessTrail(trail);
   }, []);
 
   useEffect(() => {
@@ -155,6 +164,20 @@ export default function PortalHome() {
               onMarkRead={(notification) => void markNotificationRead(notification.id).then(load)}
             />
           </div>
+        </section>
+      )}
+
+      {accessTrail.length > 0 && (
+        <section style={{ marginTop: "var(--s-6)" }}>
+          <span className="section-label">Entry code activity</span>
+          <p style={{ color: "var(--text-2)", fontSize: "var(--fs-12)", marginTop: "var(--s-1)" }}>
+            Every time your walker views or changes an entry code for your home,
+            it is recorded here. You cannot see the codes themselves — nor can
+            anyone without a fresh password check.
+          </p>
+          <Card style={{ marginTop: "var(--s-2)" }}>
+            <AccessTrail rows={accessTrail} />
+          </Card>
         </section>
       )}
 

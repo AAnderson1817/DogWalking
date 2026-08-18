@@ -64,13 +64,17 @@ values
    'Gentle, hates rain.', null, false, true);
 
 -- One credential row with dummy ciphertext (12-byte iv + 16-byte tag + ct).
+-- No key_location_hint: 0030 dropped the column. The fixture used to carry
+-- "Left of the porch, behind the planter" in plaintext, which is the exact
+-- content review H3 objected to — a means of entry in an unencrypted,
+-- client-readable column.
 insert into access_credentials (id, operator_id, property_id, entry_method, ciphertext,
-                                label, key_location_hint)
+                                label)
 values
   ('00000000-0000-4000-f000-000000000001', '00000000-0000-4000-a000-000000000001',
    '00000000-0000-4000-d000-000000000001', 'lockbox',
    decode('000102030405060708090a0b101112131415161718191a1b1c1d1e1fdeadbeef', 'hex'),
-   'Front door lockbox', 'Left of the porch, behind the planter');
+   'Front door lockbox');
 
 -- Recurring schedule: Biscuit & Pickle, Mon/Wed/Fri lunchtime.
 insert into recurring_schedules (id, operator_id, client_id, property_id, service_type_id,

@@ -20,7 +20,7 @@ import {
 } from "./handler.ts";
 
 const CRED_META_COLUMNS =
-  "id, operator_id, property_id, entry_method, label, key_location_hint, rotated_at, revoked_at";
+  "id, operator_id, property_id, entry_method, label, rotated_at, revoked_at";
 
 /**
  * The key ring. Two keys can be loaded at once — the current one, which
@@ -74,7 +74,17 @@ async function getRing(): Promise<KeyRing> {
   return ring;
 }
 
-function makeDeps(clientIp: string | null): VaultDeps {
+/**
+ * `operatorId` is a constructor argument, not a per-call one, because every
+ * definer function in 0030 scopes its write on it — an id passed per call is an
+ * id a future call site can forget or get wrong, and here that would mean
+ * rotating another operator's credential.
+ */
+function makeDeps(
+  operatorId: string,
+  clientIp: string | null,
+  userAgent: string | null,
+): VaultDeps {
   const db = adminClient();
   return {
     async allowAttempt(userId) {
@@ -172,40 +182,57 @@ function makeDeps(clientIp: string | null): VaultDeps {
       return data as CredentialMeta | null;
     },
 
+    // Through fn_write_credential (0030), not a bare INSERT: the row and its
+    // 'create' audit entry land in one transaction. Two statements from here
+    // could half-succeed, and the half that survives would be the one that
+    // changes the door.
     async insertCredential(row) {
-      const { data, error } = await db
-        .from("access_credentials")
-        .insert({ ...row, ciphertext: bytesToPgHex(row.ciphertext) })
-        .select(CRED_META_COLUMNS)
-        .single();
+      const { error } = await db.rpc("fn_write_credential", {
+        p_id: row.id,
+        p_operator: row.operator_id,
+        p_property: row.property_id,
+        p_entry_method: row.entry_method,
+        p_ciphertext: bytesToPgHex(row.ciphertext),
+        p_label: row.label,
+        p_ip: clientIp,
+        p_user_agent: userAgent,
+      });
       // causeCode, not the whole error: this statement carries the ciphertext,
       // so a syntax or constraint failure could quote part of the payload back
       // in its own message. A SQLSTATE is enough to diagnose from, and
       // invariant 2 is not worth a better log line.
       if (error) {
         throw new HttpError(500, "db_error", "credential insert failed", causeCode(error), {
-          property_id: (row as { property_id?: string }).property_id,
+          property_id: row.property_id,
+        });
+      }
+      const { data, error: readErr } = await db
+        .from("access_credentials")
+        .select(CRED_META_COLUMNS)
+        .eq("id", row.id)
+        .single();
+      if (readErr) {
+        throw new HttpError(500, "db_error", "credential read-back failed", readErr, {
+          credential_id: row.id,
         });
       }
       return data as CredentialMeta;
     },
 
+    // Through fn_rotate_credential (0030). The 'rotate' audit row is what
+    // answers "who changed my garage code on the 14th" — before it, a rotation
+    // left only `rotated_at`, which the NEXT rotation overwrote, so a door's
+    // code history was exactly one entry long.
     async rotateCredential(id, fields) {
-      const update: Record<string, unknown> = {
-        ciphertext: bytesToPgHex(fields.ciphertext),
-        rotated_at: new Date().toISOString(),
-      };
-      if (fields.entry_method !== undefined) update.entry_method = fields.entry_method;
-      if (fields.label !== undefined) update.label = fields.label;
-      if (fields.key_location_hint !== undefined) {
-        update.key_location_hint = fields.key_location_hint;
-      }
-      const { data, error } = await db
-        .from("access_credentials")
-        .update(update)
-        .eq("id", id)
-        .select(CRED_META_COLUMNS)
-        .single();
+      const { error } = await db.rpc("fn_rotate_credential", {
+        p_id: id,
+        p_operator: operatorId,
+        p_ciphertext: bytesToPgHex(fields.ciphertext),
+        p_entry_method: fields.entry_method ?? null,
+        p_label: fields.label ?? null,
+        p_ip: clientIp,
+        p_user_agent: userAgent,
+      });
       // causeCode for the same reason as the insert above: the statement
       // carries the new ciphertext.
       if (error) {
@@ -213,14 +240,29 @@ function makeDeps(clientIp: string | null): VaultDeps {
           credential_id: id,
         });
       }
+      const { data, error: readErr } = await db
+        .from("access_credentials")
+        .select(CRED_META_COLUMNS)
+        .eq("id", id)
+        .single();
+      if (readErr) {
+        throw new HttpError(500, "db_error", "credential read-back failed", readErr, {
+          credential_id: id,
+        });
+      }
       return data as CredentialMeta;
     },
 
+    // Through fn_revoke_credential (0030). A revoke is the event a client most
+    // wants a record of — it is the moment the walker's access to their home
+    // ended, and before this it wrote no audit row at all.
     async revokeCredential(id) {
-      const { error } = await db
-        .from("access_credentials")
-        .update({ revoked_at: new Date().toISOString() })
-        .eq("id", id);
+      const { error } = await db.rpc("fn_revoke_credential", {
+        p_id: id,
+        p_operator: operatorId,
+        p_ip: clientIp,
+        p_user_agent: userAgent,
+      });
       if (error) {
         throw new HttpError(500, "db_error", "credential revoke failed", error, {
           credential_id: id,
@@ -228,11 +270,30 @@ function makeDeps(clientIp: string | null): VaultDeps {
       }
     },
 
-    async readCredential(credentialId, purpose, operatorId) {
+    async logReauthFailure(operator, credentialId) {
+      const { error } = await db.rpc("fn_log_credential_action", {
+        p_credential: credentialId,
+        p_operator: operator,
+        p_action: "reauth_failed",
+        p_purpose: null,
+        p_ip: clientIp,
+        p_user_agent: userAgent,
+        p_walk: null,
+      });
+      // Thrown, and swallowed by the handler. The caller must be refused either
+      // way; a 500 here would tell an attacker they had found a way to turn the
+      // audit trail off.
+      if (error) throw new HttpError(500, "db_error", "audit write failed", error);
+    },
+
+    async readCredential(credentialId, purpose, forOperator, walkId) {
       const { data, error } = await db.rpc("fn_read_credential", {
         p_credential: credentialId,
         p_purpose: purpose,
-        p_operator: operatorId,
+        p_operator: forOperator,
+        p_ip: clientIp,
+        p_user_agent: userAgent,
+        p_walk: walkId ?? null,
       });
       if (error) {
         // The definer function raises on tenancy/revocation violations;
@@ -255,6 +316,13 @@ serveFunction(async (req) => {
   const body = await readJson<VaultBody>(req);
   // First hop of x-forwarded-for = the caller as seen by the edge gateway.
   const clientIp = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null;
-  const result = await handleVault(operator, body, makeDeps(clientIp));
+  // Truncated here as well as in the SQL: a caller controls this header, and a
+  // multi-kilobyte user agent should not reach the database at all.
+  const userAgent = req.headers.get("user-agent")?.slice(0, 400) || null;
+  const result = await handleVault(
+    operator,
+    body,
+    makeDeps(operator.id, clientIp, userAgent),
+  );
   return jsonOk(result);
 });

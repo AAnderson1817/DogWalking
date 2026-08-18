@@ -2124,3 +2124,59 @@ body:has(.today-emaki-page) .bottom-nav[data-navigation-persona="operator"] {
   color: var(--text-2);
   font-size: var(--fs-12);
 }
+
+/* ── Access trail (review H3) ──────────────────────────────────────────────
+   The client's read-only record of who touched their entry codes. Tokens only,
+   per the CT-1 rule: a raw hex here would bypass the palette's
+   prefers-contrast overrides, which is the defect a11y(emaki) came from. */
+.access-trail {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: var(--bw-xs) solid var(--sanpo-color-border-subtle);
+}
+.access-trail__row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-3) 0;
+  border-bottom: var(--bw-xs) solid var(--sanpo-color-border-subtle);
+}
+/* Only the failed check is marked. A reveal is the walker doing the job the
+   vault exists for, and colouring every row would train the reader to skim
+   past the one that matters. */
+.access-trail__row--attention {
+  border-left: 3px solid var(--sanpo-color-border-attention);
+  padding-left: var(--s-2);
+  background: var(--sanpo-color-surface-attention);
+}
+.access-trail__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--s-2);
+}
+.access-trail__action {
+  color: var(--sanpo-color-text-primary);
+  font-weight: 700;
+  font-size: var(--fs-14);
+}
+.access-trail__when {
+  color: var(--sanpo-color-text-secondary);
+  font-size: var(--fs-12);
+  flex-shrink: 0;
+}
+.access-trail__purpose {
+  color: var(--sanpo-color-text-secondary);
+  font-size: var(--fs-12);
+}
+/* Neutral Muted is 5.07:1 on white and only 3.71:1 on the Kaki tint, so the
+   secondary text on an attention row falls under the 4.5:1 floor. MEASURED,
+   after resolving the tokens to hex — not read off the token name, which is
+   how a11y(emaki) shipped a 1.92:1 stroke and #34 shipped a 3.85:1 heading.
+   Indigo on the same tint is 7.08:1, matching the figure #34 recorded for the
+   identical pair. */
+.access-trail__row--attention .access-trail__when,
+.access-trail__row--attention .access-trail__purpose {
+  color: var(--sanpo-color-text-primary);
+}

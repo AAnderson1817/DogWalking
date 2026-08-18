@@ -8,8 +8,8 @@ Two authenticated personas share the `authenticated` Postgres role, distinguishe
 | operators | select/update own row | select `display_name,business_name` of own operator only (view `v_my_operator`) | — |
 | clients | full CRUD | select own row; update own contact fields only (column grants) | — |
 | properties | full CRUD | select own; update `access_notes_public` only | — |
-| access_credentials | insert/update/delete metadata; **no select on `ciphertext`** | **no access at all** | — |
-| credential_access_log | select own | — | — |
+| access_credentials | insert/update/delete metadata; **no select on `ciphertext`** | select own property's METADATA only (0030); **never `ciphertext`** | — |
+| credential_access_log | select own; **no insert/update/delete at all** (0030) | select own property's trail (0030) | — |
 | pets | full CRUD | select own; update care fields (temperament, feeding, medical, vet, photo) | — |
 | service_types | full CRUD | select (for booking UI) | — |
 | plans | full CRUD | select own plan | — |
@@ -75,7 +75,10 @@ hardens our own client and leaves the old door open for everyone else.
 - `REVOKE UPDATE (credit_balance, plan_id, subscription_status, stripe_customer_id, stripe_subscription_id, invite_token) ON clients FROM authenticated;` — balance unforgeable even by the operator's own JWT (invariant 1); plan/subscription fields move only via definer fns/webhook.
 - `REVOKE INSERT, UPDATE, DELETE ON credit_ledger FROM authenticated;` grant SELECT only. Sole write path = definer functions.
 - `REVOKE SELECT (ciphertext) ON access_credentials FROM authenticated, anon;` — metadata visible to operator, secret bytes never (invariant 2).
-- `REVOKE UPDATE, DELETE ON credential_access_log FROM authenticated;` append via definer fn only.
+- `REVOKE INSERT, UPDATE, DELETE ON credential_access_log FROM authenticated;` plus a
+  `BEFORE UPDATE OR DELETE` block trigger (0030). Append via definer fn only — and INSERT is
+  revoked too, because an operator forging a `read` row would attribute an entry to a time,
+  which is worse than a missing trail.
 - `REVOKE ALL ON stripe_events, payments FROM authenticated` except `GRANT SELECT ON payments`.
 - `walks.credits_debited`, `walks.is_overage`: no UPDATE grant to authenticated — set only inside `fn_debit_walk`.
 
@@ -109,8 +112,36 @@ Body-level tenancy check is mandatory in every definer fn (RLS does not apply in
 - **The canary** (`vault_canary`) is the per-environment key pin: a known plaintext under the current key, decrypted through the live function by the deploy. A wrong key therefore fails at deploy time rather than at a client's front door. It is per-environment by construction, so staging and production pin different keys with nothing to keep in sync.
 - **Rotation** is `fn_vault_rewrap_batch` → decrypt/re-encrypt in the edge function → `fn_vault_rewrap_apply`, a compare-and-swap on the exact ciphertext read. The work queue is the data (`key_id <> current`), so a rewrap is idempotent, resumable and needs no journal. Retirement is gated on `fn_vault_census`, which returns four numbers rather than one: `on_other = 0` alone is also true when nothing is visible, so the parts must add up to the whole. Runbook: `docs/dev/vault-key-rotation.md`.
 - Write path: operator submits plaintext over TLS to credential-vault (action `put`) → encrypt → insert/update row. Plaintext never persisted, never logged.
-- Read path: credential-vault (action `get`) → verifies fresh re-auth (operator supplies password; function verifies via Auth admin sign-in check; reject if fail; rate-limit 5/min/user) → calls `fn_read_credential` which (a) asserts operator owns the credential, (b) INSERTs `credential_access_log` row with purpose, (c) returns ciphertext to service role → decrypt → return plaintext fields in response body only.
-- Client persona: zero read/write on `access_credentials`. Clients communicate new codes out-of-band or via `properties.access_notes_public` for non-secrets; secrets are operator-entered (documented product boundary).
+- Read path: credential-vault (action `get`) → verifies fresh re-auth (operator supplies password; function verifies via Auth admin sign-in check; reject if fail; rate-limit 5/min/user) → calls `fn_read_credential` which (a) asserts operator owns the credential, (b) validates any `walk_id` against operator AND property, (c) logs a `read` row with purpose, IP and user agent, (d) returns ciphertext to service role → decrypt → return plaintext fields in response body only.
+- Client persona: **selects their own property's credential metadata and its audit trail** (0030), and never `ciphertext`. Secrets remain operator-entered; new codes still travel out-of-band or via `properties.access_notes_public`.
+
+### The audit trail (revised — review H3)
+
+This spec used to authorise a log written in **one** place, on a successful
+reveal. That was the wrong decision for a product whose trust mechanism *is* the
+audit trail, and it is what an insurance underwriter examines hardest.
+
+- **Five actions**, all logged: `read`, `create`, `rotate`, `revoke`,
+  `reauth_failed`. Before 0030 only the first wrote a row, so a rotation left
+  nothing but a `rotated_at` that the next rotation overwrote, and a password
+  attack against the vault left no trace at all.
+- **Every row carries IP and user agent.** The only IP previously captured lived
+  in `vault_rate_limit_attempts` and was deleted by the next attempt past the
+  60-second window.
+- **`walk_id` is optional and validated.** The purpose is typed by whoever is
+  reading; the walk is the half the system can vouch for. A reference to a walk
+  that was not this operator visiting this property is refused, because it would
+  make the trail worse than empty.
+- **Append-only, enforced twice**: `INSERT`/`UPDATE`/`DELETE` revoked from
+  `authenticated`, and a `BEFORE UPDATE OR DELETE` trigger that raises — the
+  same shape as `credit_ledger`. The log had neither before, so the operator
+  whose reads it records could edit them.
+- **The client reads their own.** They had no read path at all, which is what
+  made the trail unable to answer the question it exists for.
+- **There is no unencrypted `key_location_hint`.** See spec 04; the column is
+  dropped, and key locations belong inside the encrypted secret.
+- `accessed_by` equals `operator_id` by construction and carries no information
+  today. Kept for the moment a second persona can read a credential at all.
 
 ## Smoke-test security assertions (phase 00 suite must prove)
 1. As client A JWT: select on client B's rows across clients/pets/walks/ledger → 0 rows.

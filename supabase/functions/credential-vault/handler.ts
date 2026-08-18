@@ -1,9 +1,15 @@
 // credential-vault core logic (spec 03/04), dependency-injected for tests.
+//
 // Every action re-verifies the caller's password; 5/min/user shared rate limit;
-// get writes exactly one audit row (via fn_read_credential); delete is a
-// soft revoke (revoked_at — audit log immortal). Plaintext secrets never
-// appear in logs or errors; the only place a secret leaves this function is
-// the `secret` field of a successful `get` response.
+// delete is a soft revoke (revoked_at — the audit log is immortal). Plaintext
+// secrets never appear in logs or errors; the only place a secret leaves this
+// function is the `secret` field of a successful `get` response.
+//
+// EVERY action writes an audit row now (review H3), not just a successful
+// reveal: create, rotate, revoke and a FAILED RE-AUTH all leave a record, with
+// the caller's IP and user agent. Before this the log held one event out of
+// four, so it could not answer either of the questions it exists for — "who
+// changed my garage code" or "who tried and failed to open my door".
 
 import type { VaultBinding } from "../_lib/crypto.ts";
 import { HttpError } from "../_lib/http.ts";
@@ -15,9 +21,15 @@ export interface VaultBody {
   entry_method?: string;
   label?: string;
   secret?: string;
-  key_location_hint?: string;
   purpose?: string;
   password?: string;
+  /**
+   * The visit this reveal is for. Optional, and validated server-side against
+   * the operator AND the property (0030) — a walk reference pointing somewhere
+   * else would make the trail worse than empty. The purpose is still required;
+   * this is the half of it the system can vouch for.
+   */
+  walk_id?: string;
 }
 
 export interface CredentialMeta {
@@ -26,7 +38,6 @@ export interface CredentialMeta {
   property_id: string;
   entry_method: string;
   label: string | null;
-  key_location_hint: string | null;
   rotated_at: string | null;
   revoked_at: string | null;
 }
@@ -50,7 +61,6 @@ export interface VaultDeps {
     entry_method: string;
     ciphertext: Uint8Array;
     label: string | null;
-    key_location_hint: string | null;
   }): Promise<CredentialMeta>;
   rotateCredential(
     id: string,
@@ -58,7 +68,7 @@ export interface VaultDeps {
       ciphertext: Uint8Array;
       entry_method?: string;
       label?: string | null;
-      key_location_hint?: string | null;
+
     },
   ): Promise<CredentialMeta>;
   revokeCredential(id: string): Promise<void>;
@@ -67,7 +77,18 @@ export interface VaultDeps {
     credentialId: string,
     purpose: string,
     operatorId: string,
+    walkId?: string,
   ): Promise<{ ciphertext: Uint8Array; label: string | null; entry_method: string }>;
+  /**
+   * Record a failed password check.
+   *
+   * The one audit event with no successful operation behind it, and the one an
+   * attacker most wants missing: before this, somebody could try passwords
+   * against the vault until the rate limiter stopped them and leave no trace at
+   * all. `credentialId` is whatever they were reaching for, which may be null
+   * when they named nothing.
+   */
+  logReauthFailure(operatorId: string, credentialId: string | null): Promise<void>;
 }
 
 export async function handleVault(
@@ -86,6 +107,19 @@ export async function handleVault(
   }
   const passwordOk = await deps.verifyPassword(operator.email, body.password);
   if (!passwordOk) {
+    // Recorded BEFORE the throw. This is the event an attacker most wants
+    // missing: previously somebody could try passwords against the vault until
+    // the rate limiter stopped them and leave no trace whatsoever, so a client
+    // asking "did anyone try to open my door" had no answer either way.
+    //
+    // Best-effort on purpose: if the log write fails, the caller must still be
+    // refused. Turning a rejected password into a 500 would tell an attacker
+    // they had found a way to disable the audit trail.
+    try {
+      await deps.logReauthFailure(operator.id, body.credential_id ?? null);
+    } catch {
+      // swallowed deliberately — see above
+    }
     throw new HttpError(401, "reauth_failed", "password verification failed");
   }
 
@@ -111,7 +145,6 @@ export async function handleVault(
           ciphertext: blob,
           entry_method: body.entry_method ?? undefined,
           label: body.label ?? undefined,
-          key_location_hint: body.key_location_hint ?? undefined,
         });
         return { credential: publicMeta(updated) };
       }
@@ -137,7 +170,6 @@ export async function handleVault(
         entry_method: body.entry_method,
         ciphertext: blob,
         label: body.label ?? null,
-        key_location_hint: body.key_location_hint ?? null,
       });
       return { credential: publicMeta(created) };
     }
@@ -153,6 +185,7 @@ export async function handleVault(
         body.credential_id,
         body.purpose.trim(),
         operator.id,
+        body.walk_id,
       );
       const secret = await deps.decrypt(ciphertext, {
         credentialId: body.credential_id,
@@ -184,7 +217,6 @@ function publicMeta(c: CredentialMeta): Omit<CredentialMeta, "operator_id"> {
     property_id: c.property_id,
     entry_method: c.entry_method,
     label: c.label,
-    key_location_hint: c.key_location_hint,
     rotated_at: c.rotated_at,
     revoked_at: c.revoked_at,
   };
