@@ -24,6 +24,37 @@ Two authenticated personas share the `authenticated` Postgres role, distinguishe
 
 `anon` gets nothing except `EXECUTE` on `fn_claim_invite(token uuid)` (looks up client by invite_token, binds `auth_user_id`, flips status → active; called post-signup so effectively authenticated) — implement as authenticated-only; anon truly gets zero.
 
+## Storage matrix (`storage.objects`)
+
+Nine policies govern photographs of customers' homes and pets, and this
+document did not mention them until review H20 — which also found the tests
+did not either: `smoke.sql` contained zero occurrences of "storage".
+
+Path convention: **`{operator_id}/{entity_id}/{uuid}.jpg`**. Segment 1 is the
+tenant; segment 2 is the walk (in `walk-photos`) or the pet (in `pet-photos`).
+
+| Bucket | Operator | Client |
+|---|---|---|
+| `walk-photos` | insert/select/update/delete where segment 1 = `auth.uid()` | select where segment 2 is a walk of `my_client_id()` |
+| `pet-photos` | insert/select/update/delete where segment 1 = `auth.uid()` | select **and** insert where segment 2 is a pet of `my_client_id()` **and** segment 1 is that pet's operator |
+
+Two rules, both learned the hard way:
+
+- **The client write path checks segment 1 as well as segment 2.** Checking
+  only the pet let a client write into another tenant's folder; closed in 0012.
+- **Every reference to the object's path is qualified `storage.objects.name`.**
+  A bare `name` inside `exists (select 1 from pets p …)` binds to `pets.name`,
+  because that table has a `name` column — so the predicate asked whether the
+  second path segment of the string "Luna" was a pet id, and both client
+  pet-photo policies were dead from 0008 until 0031. The sibling walk-photo
+  policy is identical in form and correct only because `walks` has no `name`
+  column to capture it. Confirmed by reading `pg_policies`, which renders the
+  two as `foldername(p.name)` and `foldername(objects.name)` respectively.
+
+`smoke.sql` now asserts the matrix from both personas, in both directions:
+each denial is paired with the corresponding grant, because a policy that
+denies everything satisfies every negative test on its own.
+
 ## Realtime authorization matrix (`realtime.messages`, migration 0020)
 
 The RLS matrix above governs durable rows. It does **not** govern the live

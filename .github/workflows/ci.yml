@@ -439,6 +439,17 @@ jobs:
             | tee /tmp/mat.out
           grep -q "MATERIALIZER PASS" /tmp/mat.out
 
+      # The only test in this repository where two backends contend. Every
+      # other SQL suite is a single begin/rollback, so `SELECT … FOR UPDATE`
+      # was never exercised as a lock and invariant 1's mechanism had no test
+      # that could fail if it were deleted (review H20). Needs a database it
+      # can COMMIT to, hence a bash harness rather than another .sql file; it
+      # namespaces and tears down its own fixtures.
+      - name: Concurrency suite (the row lock behind invariant 1)
+        run: |
+          ./supabase/tests/concurrency.sh 2>&1 | tee /tmp/cc.out
+          grep -q "CONCURRENCY PASS" /tmp/cc.out
+
       # Asserted against the catalogue, not the migration text. The grep this
       # replaces matched `update +clients +set +credit_balance`, so a newline,
       # a tab, or a second space between any two words walked straight past it
