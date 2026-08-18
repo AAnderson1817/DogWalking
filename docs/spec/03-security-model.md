@@ -58,13 +58,20 @@ tenant; segment 2 is the walk (in `walk-photos`) or the pet (in `pet-photos`).
 
 | Bucket | Operator | Client |
 |---|---|---|
-| `walk-photos` | insert/select/update/delete where segment 1 = `auth.uid()` | select where segment 2 is a walk of `my_client_id()` |
+| `walk-photos` | insert/select/update/delete where segment 1 = `auth.uid()` | select where segment 2 is a walk of `my_client_id()` **and** segment 1 is that walk's operator |
 | `pet-photos` | insert/select/update/delete where segment 1 = `auth.uid()` | select **and** insert where segment 2 is a pet of `my_client_id()` **and** segment 1 is that pet's operator |
 
 Two rules, both learned the hard way:
 
-- **The client write path checks segment 1 as well as segment 2.** Checking
-  only the pet let a client write into another tenant's folder; closed in 0012.
+- **Every client policy checks segment 1 as well as segment 2**, read and
+  write alike. Checking only the entity let a client write into another
+  tenant's folder (closed in 0012) and — the read direction, closed in 0033 —
+  let operator B upload `{B}/{walk_of_A}/x.jpg` into their own folder, which
+  `storage_operator_insert` permits because segment 1 is B's own uid, and have
+  operator A's client read it as part of their walk report. Nothing of A's
+  leaks out; B injects images INTO the proof of service A's client receives,
+  which is why it reads as a trust failure rather than a breach and why it sat
+  unnoticed while two of the three sibling policies were fixed.
 - **Every reference to the object's path is qualified `storage.objects.name`.**
   A bare `name` inside `exists (select 1 from pets p …)` binds to `pets.name`,
   because that table has a `name` column — so the predicate asked whether the

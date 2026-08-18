@@ -2569,7 +2569,11 @@ begin
     ('walk-photos', v_op_a || '/' || v_walk_a || '/aaa.jpg'),
     ('walk-photos', v_op_a || '/' || v_walk_b || '/bbb.jpg'),
     ('pet-photos',  v_op_a || '/' || v_pet_a  || '/ccc.jpg'),
-    ('pet-photos',  v_op_b || '/' || v_pet_f  || '/ddd.jpg');
+    ('pet-photos',  v_op_b || '/' || v_pet_f  || '/ddd.jpg'),
+    -- Operator B's folder, operator A's walk id: the L1 shape. Written as
+    -- service_role, but operator B could write it themselves — segment 1 is
+    -- their own uid, which is all storage_operator_insert asks.
+    ('walk-photos', v_op_b || '/' || v_walk_a || '/planted.jpg');
 
   -- ── Operator A ─────────────────────────────────────────────────────────
   perform set_config('request.jwt.claims',
@@ -2619,6 +2623,19 @@ begin
      and (storage.foldername(name))[2] = v_walk_a;
   if v_seen = 0 then
     raise exception 'FAIL: client A cannot see their own walk photos';
+  end if;
+
+  -- Review L1: a foreign operator planting evidence. Operator B may legally
+  -- write into their OWN folder, and `storage_operator_insert` allows it
+  -- because segment 1 is B's uid — so the only thing that can refuse the READ
+  -- is the client policy checking segment 1 against the walk's own operator.
+  -- Nothing leaks out of A here; B injects an image INTO the proof of service
+  -- A's client receives, which is why it does not look like a breach.
+  if (select count(*) from storage.objects
+       where bucket_id = 'walk-photos'
+         and (storage.foldername(name))[1] = v_op_b
+         and (storage.foldername(name))[2] = v_walk_a) <> 0 then
+    raise exception 'FAIL: client A read a walk photo planted in another operator''s folder';
   end if;
 
   -- THE 0012 regression. The INSERT policy once checked only the pet (segment
