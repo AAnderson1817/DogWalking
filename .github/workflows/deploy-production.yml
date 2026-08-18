@@ -99,6 +99,37 @@ jobs:
       - name: Deploy all functions
         run: supabase functions deploy --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
 
+      # The vault key must be able to read THIS project's data, and the place
+      # to discover otherwise is here, not at a client's front door (B2).
+      # Verifies the property rather than the bytes: it calls the function that
+      # just deployed, which decrypts the canary with the key actually loaded
+      # in the running isolate. A digest comparison of the secret would only
+      # prove two strings match — not that the key was applied, not that the
+      # function can reach it, and not that it opens this project's rows.
+      #
+      # On a project that has never stored a credential this installs the pin,
+      # which can only ever bless the key the deployment is already using.
+      - name: Verify the vault key opens this project
+        env:
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [ -z "$SERVICE_KEY" ]; then
+            echo "::warning title=Vault key not verified::SUPABASE_SERVICE_ROLE_KEY is not set for this environment, so the deployed vault key was not checked against the canary. See docs/dev/vault-key-rotation.md."
+            exit 0
+          fi
+          body=$(curl -sS --fail-with-body -X POST \
+            "https://$PROJECT_REF.supabase.co/functions/v1/vault-rekey" \
+            -H "Authorization: Bearer $SERVICE_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"action":"verify"}' 2>&1) || {
+              echo "$body"
+              echo "::error title=The deployed vault key cannot read this project::vault-rekey/verify failed. If this says key_mismatch, VAULT_MASTER_KEY is not the key these credentials were encrypted with — do NOT re-run with a new key, and do not rewrap. Put the previous key back, or supply it as VAULT_MASTER_KEY_PREVIOUS. See docs/dev/vault-key-rotation.md."
+              exit 1
+            }
+          # No secret is printed: the response carries a key id and counts only.
+          echo "$body"
+
   sync-secrets:
     name: Sync edge secrets (opt-in)
     if: ${{ inputs.sync_secrets }}

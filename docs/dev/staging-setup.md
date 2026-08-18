@@ -34,17 +34,34 @@ dashboards) — no local tooling required. Do the steps in order; ~30–45 min.
    (step 6). For first testing, Auth → Providers → Email → consider turning
    OFF "Confirm email" so operator/client signups complete instantly.
 
-## 3. Generate the vault key (no terminal needed)
+## 3. Generate the vault key (browser only)
 
-Project → SQL Editor → run:
+**Not in the SQL Editor.** The key is supposed to be independent of the
+database; generating it there sends it over the network into that database and
+leaves it in query history and saved snippets. This page promises a
+browser-only setup, so use the browser's own CSPRNG — devtools console (F12) on
+any page:
 
-```sql
-select encode(gen_random_bytes(32), 'base64');
+```js
+btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
 ```
 
-Copy the output into the `VAULT_MASTER_KEY` GitHub secret. Never store it
-anywhere else; rotating it later makes existing vault blobs unreadable
-(re-encryption tooling is on the backlog).
+If you have a terminal, `openssl rand -base64 32` is equivalent. Either way it
+never leaves your machine. Not on a shared or kiosk machine; clear the console
+afterwards.
+
+Then, in this order:
+
+1. **Escrow it first** — put it in your password manager, labelled `staging`.
+   GitHub will not show it to you again, and the outgoing key is required to
+   rotate.
+2. Set it as the `VAULT_MASTER_KEY` GitHub secret.
+3. Set `VAULT_MASTER_KEY_PREVIOUS` to the literal string `none`.
+
+Rotation is now supported — `docs/dev/vault-key-rotation.md`. The old warning
+here ("rotating it later makes existing vault blobs unreadable") is no longer
+true, because every blob records which key wrote it and two keys can be loaded
+at once.
 
 ## 4. Stripe (test mode)
 

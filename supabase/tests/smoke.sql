@@ -1111,6 +1111,187 @@ begin
   raise notice 'realtime walk-channel authorization (0020): OK';
 end $$;
 
+-- ── Vault key identity and rewrap (0021) ─────────────────────────────────
+-- The rotation's whole safety argument rests on these four functions, and on
+-- key_id being underivable-from-anything-but-the-blob. The edge function holds
+-- the key, so nothing here decrypts; this asserts the parts SQL is responsible
+-- for.
+do $$
+declare
+  v_op      uuid := '99999999-0000-4000-a000-000000000001';
+  v_prop    uuid := '99999999-0000-4000-d000-00000000000a';
+  v_cred    uuid := '99999999-0000-4000-f000-0000000000c1';
+  v_kid_a   text := 'a1a2a3a4a5a6a7a8';
+  v_kid_b   text := 'b1b2b3b4b5b6b7b8';
+  v_blob_a  bytea;
+  v_blob_b  bytea;
+  v_before  bigint;
+  v_ok      boolean;
+  r         record;
+begin
+  -- A well-formed v2 blob under key A, and its replacement under key B.
+  v_blob_a := '\x02'::bytea || decode(v_kid_a, 'hex') || decode(repeat('11', 12), 'hex')
+              || decode(repeat('22', 16), 'hex');
+  v_blob_b := '\x02'::bytea || decode(v_kid_b, 'hex') || decode(repeat('33', 12), 'hex')
+              || decode(repeat('44', 16), 'hex');
+
+  select total into v_before from fn_vault_census(v_kid_a);
+
+  insert into access_credentials (id, operator_id, property_id, entry_method, ciphertext, label)
+  values (v_cred, v_op, v_prop, 'door_code', v_blob_a, 'Smoke v2 credential');
+
+  -- 1. key_id is derived from the bytes, not asserted by the writer.
+  if (select key_id from access_credentials where id = v_cred) <> v_kid_a then
+    raise exception 'FAIL: key_id was not derived from the ciphertext';
+  end if;
+
+  -- 2. It cannot be forged. Postgres refuses generated columns outright, which
+  --    is a stronger guarantee than any grant or trigger, so the census can be
+  --    trusted without trusting every writer.
+  begin
+    update access_credentials set key_id = 'deadbeefdeadbeef' where id = v_cred;
+    raise exception 'FAIL: key_id was writable';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    -- Postgres puts "is a generated column" in DETAIL, not the message.
+    if sqlerrm not like '%can only be updated to DEFAULT%' then
+      raise exception 'FAIL: key_id rejected for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- 3. A pre-v2 blob reports NULL rather than a plausible-looking id, so the
+  --    census counts it as unreadable instead of silently claiming it is fine.
+  --    (smoke's own fixture at the top of this file is exactly such a row.)
+  if (select key_id from access_credentials
+       where id = '99999999-0000-4000-f000-000000000001') is not null then
+    raise exception 'FAIL: a pre-v2 blob was given a key id';
+  end if;
+
+  -- 4. The census adds up. This is the assertion that stops a rotation gate
+  --    failing open: "on_other = 0" is also true when nothing is visible, so
+  --    the parts must equal the whole.
+  select * into r from fn_vault_census(v_kid_a);
+  if r.total <> r.on_primary + r.on_other + r.unreadable then
+    raise exception 'FAIL: census does not add up (% <> %+%+%)',
+      r.total, r.on_primary, r.on_other, r.unreadable;
+  end if;
+  if r.on_primary < 1 then
+    raise exception 'FAIL: census did not see the row it should have';
+  end if;
+
+  -- 5. The work queue selects rows not on the current key, and excludes them
+  --    once they are.
+  if not exists (select 1 from fn_vault_rewrap_batch(v_kid_b, 50) where id = v_cred) then
+    raise exception 'FAIL: a row on the old key was not queued for rewrap';
+  end if;
+  if exists (select 1 from fn_vault_rewrap_batch(v_kid_a, 50) where id = v_cred) then
+    raise exception 'FAIL: a row already on the current key was queued';
+  end if;
+
+  -- 6. Compare-and-swap: the happy path, then the same call replayed.
+  select fn_vault_rewrap_apply(v_cred, v_blob_a, v_blob_b, v_kid_b) into v_ok;
+  if not v_ok then raise exception 'FAIL: a correct rewrap was refused'; end if;
+  if (select key_id from access_credentials where id = v_cred) <> v_kid_b then
+    raise exception 'FAIL: key_id did not follow the rewrapped ciphertext';
+  end if;
+
+  select fn_vault_rewrap_apply(v_cred, v_blob_a, v_blob_b, v_kid_b) into v_ok;
+  if v_ok then
+    raise exception 'FAIL: a stale expectation was accepted — a concurrent rotation would be clobbered';
+  end if;
+
+  -- 7. A replacement under a different key than promised is refused, so a bug
+  --    in the caller cannot store something nothing can read.
+  begin
+    perform fn_vault_rewrap_apply(v_cred, v_blob_b, v_blob_a, v_kid_b);
+    raise exception 'FAIL: a replacement under the wrong key was accepted';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%expected%' then
+      raise exception 'FAIL: wrong-key replacement rejected for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- 8. And a non-v2 replacement.
+  begin
+    perform fn_vault_rewrap_apply(v_cred, v_blob_b, '\x0001'::bytea, v_kid_b);
+    raise exception 'FAIL: a non-v2 replacement was accepted';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%not a v2 blob%' then
+      raise exception 'FAIL: non-v2 replacement rejected for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- 9. The canary is the per-environment key pin.
+  if fn_vault_set_canary(v_blob_b) <> v_kid_b then
+    raise exception 'FAIL: set_canary did not report the key it stored';
+  end if;
+  if (select key_id from vault_canary) <> v_kid_b then
+    raise exception 'FAIL: canary key_id was not derived';
+  end if;
+  begin
+    perform fn_vault_set_canary('\x00'::bytea);
+    raise exception 'FAIL: a non-v2 canary was accepted — an unreadable pin is not a pin';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  delete from access_credentials where id = v_cred;
+  raise notice 'vault key identity + rewrap (0021): OK';
+end $$;
+
+-- The vault machinery is service-role only: an operator JWT must not be able
+-- to census every tenant's credentials, queue a rewrap, or move a pin.
+do $$
+declare
+  v_kid text := 'a1a2a3a4a5a6a7a8';
+begin
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000000001","role":"authenticated"}', true);
+  set local session authorization authenticated;
+
+  begin
+    perform * from fn_vault_census(v_kid);
+    raise exception 'FAIL: an operator could run the vault census';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  begin
+    perform * from fn_vault_rewrap_batch(v_kid, 1);
+    raise exception 'FAIL: an operator could queue a vault rewrap';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  begin
+    perform fn_vault_set_canary('\x02'::bytea);
+    raise exception 'FAIL: an operator could move the vault key pin';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  -- key_id is not in the operator's column grant either: knowing which key
+  -- wrote a row is operational metadata, not tenant data.
+  begin
+    perform key_id from access_credentials limit 1;
+    raise exception 'FAIL: an operator could read key_id';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  begin
+    perform * from vault_canary;
+    raise exception 'FAIL: an operator could read the vault canary';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  reset session authorization;
+  raise notice 'vault machinery is service-role only (0021): OK';
+end $$;
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;
