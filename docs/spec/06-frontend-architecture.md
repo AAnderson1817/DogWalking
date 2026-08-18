@@ -210,4 +210,35 @@ Rules that follow from it:
   exactly like a suite with nothing to say.
 
 ## Env
-`app/.env.local`: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_MAPBOX_TOKEN` (optional → SVG fallback). Access via typed `lib/env.ts`; build fails on missing required keys.
+`app/.env.local`: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_MAPBOX_TOKEN`
+(optional → SVG fallback). Access via typed `lib/env.ts`.
+
+**A production build without the two required keys fails, and now actually
+does.** This section has claimed that since phase 02 and it was not true
+(review H22): `env.ts` threw at first *access*, not at build time, and because
+it read `import.meta.env[name]` through a variable key Vite could not
+statically replace it, so there was no build-time warning either. Reproduced
+end to end — build with no env vars, serve `dist/`, and `#root.innerHTML.length`
+is **0** with one uncaught page error. CI's frontend job built exactly that way
+and was green on `main`.
+
+Two mechanisms now, and the order matters:
+
+1. **`scripts/verify-env.mjs`**, run from `prebuild` beside
+   `verify:brand-assets`, refuses a production build with either key unset. It
+   reads `process.env` *and* Vite's own `.env*` files, because a key set in
+   `.env.production` is genuinely present at build time and failing that build
+   would be the false-positive direction — which is how a gate gets disabled.
+   An empty value (`FOO=`) counts as unset; that is the shape a half-finished
+   deployment leaves behind. CI sets placeholders so the gate is exercised, and
+   asserts separately that it *refuses* when they are absent.
+2. **`ConfigError`**, the safety net for a bundle the gate never saw — a host
+   building outside `npm run build`, or a variable present but wrong. Nothing
+   in `env.ts` throws any more, so `main.tsx` can branch: missing configuration
+   is data (`missingEnvKeys()`), and the panel renders instead of the app. It
+   carries its own inline styles and imports nothing beyond React, because it
+   has to render when the app's own module graph may be what is broken.
+
+The panel replaces the app rather than sitting inside `ErrorBoundary`: a client
+pointed at the unroutable placeholder would otherwise spend the whole session
+failing one request at a time instead of saying what is wrong once.

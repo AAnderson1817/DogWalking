@@ -61,9 +61,35 @@ jobs:
         working-directory: app
         run: npm run test -- --run
 
+      # Placeholders on purpose (review H22). This job used to build with NO
+      # VITE_* set at all, which is exactly the state that produces a bundle
+      # serving a blank page — and it was green on main. Setting them here
+      # means the `verify:env` prebuild gate is EXERCISED on every run rather
+      # than merely present; a build that reached `vite build` without them
+      # would now fail before emitting anything.
+      #
+      # These are not secrets and are not the deployed values: the real ones
+      # live in Vercel's environment settings, and `VITE_*` is compiled into
+      # the client bundle regardless, so there is nothing here to protect.
+      # `.invalid` is RFC 2606 reserved and can never resolve.
       - name: Build
         working-directory: app
+        env:
+          VITE_SUPABASE_URL: https://ci-placeholder.invalid
+          VITE_SUPABASE_ANON_KEY: ci-placeholder-anon-key
         run: npm run build
+
+      # The gate refuses in the other direction. Without this the step above
+      # only proves that a build with variables set succeeds, which was never
+      # in doubt — the defect was a build WITHOUT them succeeding.
+      - name: A production build without Supabase config is refused
+        working-directory: app
+        run: |
+          if npm run verify:env; then
+            echo "::error::verify:env passed with no VITE_SUPABASE_* set — the gate does not gate."
+            exit 1
+          fi
+          echo "PASS: the build gate refuses an unconfigured production build"
 
       - name: Secret-leak grep (validate gate 7)
         run: |
