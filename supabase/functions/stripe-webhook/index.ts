@@ -64,12 +64,13 @@ function makeDeps(): WebhookDeps {
       if (error) throw new Error("stripe_events mark-processed failed");
     },
 
-    async findClientByCustomer(customerId) {
+    async findClientByCustomer(customerId, operatorId) {
       if (!customerId) return null;
       const { data, error } = await db
         .from("clients")
         .select("id, operator_id, full_name, plan_id, subscription_status, stripe_subscription_id")
         .eq("stripe_customer_id", customerId)
+        .eq("operator_id", operatorId)
         .maybeSingle();
       if (error) throw new Error("client lookup failed");
       return data;
@@ -96,9 +97,18 @@ function makeDeps(): WebhookDeps {
       return data;
     },
 
-    async updateClient(id, fields) {
-      const { error } = await db.from("clients").update(fields).eq("id", id);
+    async updateClient(id, fields, operatorId) {
+      // Both predicates. The operator id comes from event.account, which
+      // Stripe sets; the client id comes from session metadata, which the
+      // connected account controls. Only the first is an authorization.
+      const { data, error } = await db
+        .from("clients")
+        .update(fields)
+        .eq("id", id)
+        .eq("operator_id", operatorId)
+        .select("id");
       if (error) throw new Error("client update failed");
+      return data?.length ?? 0;
     },
 
     async findPendingPlanChangeIntent({ clientId, subscriptionId, planId, metadataIntentId }) {
@@ -160,12 +170,30 @@ function makeDeps(): WebhookDeps {
       if (error) throw new Error("payment insert failed");
     },
 
+    async resolveOperatorByAccount(accountId) {
+      const { data, error } = await db
+        .from("operators")
+        .select("id")
+        .eq("stripe_account_id", accountId)
+        .maybeSingle();
+      if (error) throw new Error("operator lookup failed");
+      return data?.id ?? null;
+    },
+
+    async updateConnectState(accountId, fields) {
+      const { error } = await db
+        .from("operators")
+        .update(fields)
+        .eq("stripe_account_id", accountId);
+      if (error) throw new Error("connect state update failed");
+    },
+
     async insertNotification(row) {
       const { error } = await db.from("notifications").insert(row);
       if (error) throw new Error("notification insert failed");
     },
 
-    async findPaymentForReversal({ paymentIntentId, invoiceId, chargeId }) {
+    async findPaymentForReversal({ paymentIntentId, invoiceId, chargeId, operatorId }) {
       const cols = "id, operator_id, client_id, type, amount_pence, status, stripe_charge_id";
       // Ordered by how specific the identifier is. The payment intent points
       // at one charge; the invoice can carry a failed row alongside the paid
@@ -182,6 +210,7 @@ function makeDeps(): WebhookDeps {
           .from("payments")
           .select(cols)
           .eq(col, val)
+          .eq("operator_id", operatorId)
           .neq("status", "failed")
           .limit(1);
         if (error) throw new Error("payment lookup failed");

@@ -1,5 +1,12 @@
 // complete-walk — POST, operator JWT (spec 04).
-import { jsonOk, readJson, requireOperator, serveFunction, HttpError } from "../_lib/http.ts";
+import {
+  HttpError,
+  jsonOk,
+  readJson,
+  requireAccount,
+  requireOperator,
+  serveFunction,
+} from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
 import { stripeClient } from "../_lib/stripe.ts";
 import { chargeOverageForWalk } from "../_lib/overage.ts";
@@ -7,7 +14,10 @@ import { makeOverageDeps } from "../_lib/overage_deps.ts";
 import { broadcast } from "../_lib/broadcast.ts";
 import { completeWalk, type CompleteWalkBody, type CompleteWalkDeps, type WalkRow } from "./handler.ts";
 
-function makeDeps(): CompleteWalkDeps {
+// `account` threads through to the overage charge — the operator is the
+// merchant of record (review B5), so an overage taken here lands on their
+// Stripe account, not the platform's.
+function makeDeps(account: { stripeAccount: string }): CompleteWalkDeps {
   const db = adminClient();
   return {
     async getWalk(id) {
@@ -50,7 +60,10 @@ function makeDeps(): CompleteWalkDeps {
     },
 
     async chargeOverage(walkId) {
-      const result = await chargeOverageForWalk(walkId, makeOverageDeps(db, stripeClient()));
+      const result = await chargeOverageForWalk(
+        walkId,
+        makeOverageDeps(db, stripeClient(), account),
+      );
       return { payment: result.payment };
     },
 
@@ -96,6 +109,9 @@ function makeDeps(): CompleteWalkDeps {
 serveFunction(async (req) => {
   const operator = await requireOperator(req);
   const body = await readJson<CompleteWalkBody>(req);
-  const result = await completeWalk(operator.id, body, makeDeps());
+  // Resolved BEFORE the walk is touched. completeWalk bills before marking
+  // complete (qc fix), so discovering "not connected" halfway would leave a
+  // walk that is finished, unbilled, and not obviously either.
+  const result = await completeWalk(operator.id, body, makeDeps(requireAccount(operator)));
   return jsonOk(result);
 });

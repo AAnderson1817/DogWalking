@@ -1,7 +1,14 @@
 // charge-overage — POST, operator JWT (spec 04). Also invoked in-process by
 // complete-walk via _lib/overage.ts; this endpoint exists for manual
 // re-charge from the billing console.
-import { jsonOk, readJson, requireOperator, serveFunction, HttpError } from "../_lib/http.ts";
+import {
+  HttpError,
+  jsonOk,
+  readJson,
+  requireAccount,
+  requireOperator,
+  serveFunction,
+} from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
 import { stripeClient } from "../_lib/stripe.ts";
 import { chargeOverageForWalk, OverageError } from "../_lib/overage.ts";
@@ -24,7 +31,10 @@ serveFunction(async (req) => {
   }
 
   try {
-    const result = await chargeOverageForWalk(body.walk_id, makeOverageDeps(db, stripeClient()));
+    const result = await chargeOverageForWalk(
+      body.walk_id,
+      makeOverageDeps(db, stripeClient(), requireAccount(operator)),
+    );
     return jsonOk({ payment: result.payment, already_charged: result.already_charged });
   } catch (e) {
     if (e instanceof OverageError) throw new HttpError(e.status, e.code, e.message);

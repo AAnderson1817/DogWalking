@@ -90,16 +90,86 @@ export async function requireUser(req: Request): Promise<{ id: string; email?: s
 }
 
 /** requireUser + the caller must own an operators row. Returns the operator id. */
-export async function requireOperator(req: Request): Promise<{ id: string; email?: string }> {
+export interface OperatorPrincipal {
+  id: string;
+  email?: string;
+  /** Standard connected account; null until the operator finishes onboarding. */
+  stripe_account_id: string | null;
+  stripe_charges_enabled: boolean;
+}
+
+/**
+ * The Connect fields come back here rather than being looked up per call site
+ * (review B5). Operators are the merchant of record, so every money path needs
+ * them — and a path that forgets to fetch them is a path that charges the
+ * platform account instead, which is the defect Connect exists to remove.
+ * Making them part of the principal means the only way to reach Stripe is
+ * already holding the account the charge belongs on.
+ */
+export async function requireOperator(req: Request): Promise<OperatorPrincipal> {
   const user = await requireUser(req);
   const { data, error } = await adminClient()
     .from("operators")
-    .select("id")
+    .select("id, stripe_account_id, stripe_charges_enabled")
     .eq("id", user.id)
     .maybeSingle();
   if (error) throw new HttpError(500, "db_error", "operator lookup failed");
   if (!data) throw new HttpError(403, "not_operator", "caller is not an operator");
-  return user;
+  return {
+    ...user,
+    stripe_account_id: data.stripe_account_id,
+    stripe_charges_enabled: data.stripe_charges_enabled,
+  };
+}
+
+/**
+ * Turn a Connect refusal into an envelope the client can act on. The two
+ * cases need different words: one is "finish onboarding", the other is
+ * "Stripe is still reviewing you", and collapsing them would send an operator
+ * back through an onboarding flow they have already completed.
+ */
+/** Just enough of an operator to say which Stripe account their money is on. */
+export interface ConnectFields {
+  stripe_account_id: string | null;
+  stripe_charges_enabled: boolean;
+}
+
+/**
+ * For paths that TAKE money. Requires a connected account that Stripe has
+ * actually enabled for charges. Returns Stripe's per-request options so the
+ * account travels in the same expression as the charge.
+ */
+export function requireAccount(op: ConnectFields): { stripeAccount: string } {
+  if (!op.stripe_account_id) throw connectError("no_account");
+  if (!op.stripe_charges_enabled) throw connectError("charges_disabled");
+  return { stripeAccount: op.stripe_account_id };
+}
+
+/**
+ * For paths that only need to REACH an existing object on the operator's
+ * account — the billing portal being the case that matters. Deliberately does
+ * NOT require charges_enabled: a client updating a card or cancelling a
+ * subscription should not be blocked because Stripe is still reviewing their
+ * walker, and refusing there would strand them with a subscription they
+ * cannot stop.
+ */
+export function accountOf(op: ConnectFields): { stripeAccount: string } {
+  if (!op.stripe_account_id) throw connectError("no_account");
+  return { stripeAccount: op.stripe_account_id };
+}
+
+export function connectError(reason: "no_account" | "charges_disabled"): HttpError {
+  return reason === "no_account"
+    ? new HttpError(
+      409,
+      "stripe_not_connected",
+      "Connect a Stripe account before taking payments — clients pay you directly, so the money needs somewhere to land.",
+    )
+    : new HttpError(
+      409,
+      "stripe_charges_disabled",
+      "Stripe has not enabled charges on your account yet. This usually clears once they finish reviewing the details you submitted.",
+    );
 }
 
 /** Deno.serve wrapper: OPTIONS preflight, envelope errors, no internals leaked. */

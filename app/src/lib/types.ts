@@ -234,6 +234,11 @@ export type Database = {
           created_at: string;
           updated_at: string;
           cancellation_cutoff_hours: number;
+          stripe_account_id: string | null;
+          stripe_charges_enabled: boolean;
+          stripe_payouts_enabled: boolean;
+          stripe_details_submitted: boolean;
+          stripe_account_connected_at: string | null;
         };
         Insert: {
           id: string;
@@ -247,6 +252,11 @@ export type Database = {
           created_at?: string;
           updated_at?: string;
           cancellation_cutoff_hours?: number;
+          stripe_account_id?: string | null;
+          stripe_charges_enabled?: boolean;
+          stripe_payouts_enabled?: boolean;
+          stripe_details_submitted?: boolean;
+          stripe_account_connected_at?: string | null;
         };
         Update: {
           id?: string;
@@ -260,6 +270,11 @@ export type Database = {
           created_at?: string;
           updated_at?: string;
           cancellation_cutoff_hours?: number;
+          stripe_account_id?: string | null;
+          stripe_charges_enabled?: boolean;
+          stripe_payouts_enabled?: boolean;
+          stripe_details_submitted?: boolean;
+          stripe_account_connected_at?: string | null;
         };
         Relationships: [];
       };
@@ -1057,6 +1072,12 @@ export type Database = {
       fn_notify_walk_changes: {
         Args: Record<string, never>;
         Returns: unknown;
+      };
+      fn_operator_can_charge: {
+        Args: {
+          p_operator: string;
+        };
+        Returns: boolean;
       };
       fn_preview_invite: {
         Args: {

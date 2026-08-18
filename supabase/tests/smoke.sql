@@ -1535,6 +1535,86 @@ begin
 end $$;
 
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Stripe Connect: the operator is the merchant of record (0024, review B5)
+-- ═══════════════════════════════════════════════════════════════════════════
+do $$
+declare
+  v_op1 uuid := '99999999-0000-4000-a000-000000000001';
+  v_op2 uuid := '99999999-0000-4000-a000-000000000002';
+begin
+  -- Not connected by default. The money paths read this predicate, so the
+  -- default must be "cannot charge" rather than "unknown".
+  if fn_operator_can_charge(v_op1) then
+    raise exception 'FAIL: a brand-new operator could take payments';
+  end if;
+
+  update operators set stripe_account_id = 'acct_smoke_1' where id = v_op1;
+
+  -- An account alone is not enough: Stripe can hold charges while it reviews.
+  if fn_operator_can_charge(v_op1) then
+    raise exception 'FAIL: could charge before Stripe enabled charges';
+  end if;
+
+  update operators set stripe_charges_enabled = true where id = v_op1;
+  if not fn_operator_can_charge(v_op1) then
+    raise exception 'FAIL: a connected, charges-enabled operator cannot charge';
+  end if;
+
+  -- payouts_enabled being false is a payout hold, not a charge hold. Refusing
+  -- service then would punish the operator for a review they cannot hurry.
+  update operators set stripe_payouts_enabled = false where id = v_op1;
+  if not fn_operator_can_charge(v_op1) then
+    raise exception 'FAIL: a payout hold stopped charges';
+  end if;
+
+  -- Two operators must never share a connected account: that would pool their
+  -- revenue into one bank account, which is the defect Connect removes.
+  begin
+    update operators set stripe_account_id = 'acct_smoke_1' where id = v_op2;
+    raise exception 'FAIL: two operators shared one Stripe account';
+  exception when unique_violation then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  raise notice 'connect account state (0024): OK';
+end $$;
+
+-- The operator may READ their Connect state but never WRITE it. These columns
+-- are assertions about what Stripe believes; an operator who could set
+-- stripe_charges_enabled by hand could route a client's money to an account
+-- Stripe had suspended.
+do $$
+begin
+  set local role authenticated;
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000000001","role":"authenticated"}', true);
+
+  -- readable
+  perform stripe_account_id, stripe_charges_enabled from operators
+   where id = '99999999-0000-4000-a000-000000000001';
+
+  begin
+    update operators set stripe_charges_enabled = true
+     where id = '99999999-0000-4000-a000-000000000001';
+    raise exception 'FAIL: an operator could enable their own charges';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  begin
+    update operators set stripe_account_id = 'acct_theirs'
+     where id = '99999999-0000-4000-a000-000000000001';
+    raise exception 'FAIL: an operator could repoint their Stripe account';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  reset role;
+  raise notice 'connect state is read-only to operators (0024): OK';
+end $$;
+
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;

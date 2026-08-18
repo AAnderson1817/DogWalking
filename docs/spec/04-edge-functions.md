@@ -12,7 +12,51 @@ Idempotent: re-POST on a completed walk returns the stored result, no re-billing
 Body: `{ client_id, plan_id }` → assert ownership → get/create Stripe customer (persist `stripe_customer_id`) → Checkout Session `mode=subscription`, `price = plans.stripe_price_id`, `payment_method_collection=always`, `subscription_data.metadata = { client_id, operator_id, plan_id }`, success/cancel URLs from `APP_BASE_URL`.
 Response: `{ url }`.
 
+## connect-onboarding — POST, operator JWT (review B5)
+Body `{ action: 'start' | 'status' }`. `status` reports `{ connected,
+charges_enabled, payouts_enabled, details_submitted }` from the local mirror;
+`start` creates the operator's **Standard** connected account if absent and
+returns a single-use `AccountLink` onboarding URL.
+
+Standard, not Express or Custom, because **the operator is the merchant of
+record**: they own the Stripe account, their business is on the client's card
+statement, and they carry chargeback liability and Stripe's fees. Express and
+Custom put the platform in that position instead.
+
+The account id is persisted **before** the AccountLink is minted, under a
+`WHERE stripe_account_id IS NULL` guard. Losing the link is recoverable (mint
+another); losing the id is not — the next `start` would create a *second*
+Stripe account and the money would land in whichever one Stripe finished
+first, with the other left half-onboarded and invisible.
+
+This is the only function that reaches Stripe on the platform account for
+anything but signature verification. Money never moves there.
+
 ## stripe-webhook — POST from Stripe
+**Register it as a Connect endpoint**, not an account endpoint — connected
+accounts are where every payment now happens, and an account-level endpoint
+would receive none of them.
+
+`event.account` is an **authorization input, not a routing hint**. A Connect
+endpoint receives events for every account connected to the platform, so:
+- an event with no `account` is **ignored** (a platform-account event; Sanpo
+  takes no money there),
+- an `account` matching no operator is **ignored**,
+- every lookup below is **scoped to the operator it resolves to** — the client
+  lookup, the client update, and the reversal lookup.
+
+That last point is load-bearing. Checkout session metadata is written by
+whoever creates the session, so on a Connect endpoint any operator can craft
+one in their own Stripe dashboard carrying another operator's `client_id`. The
+id alone is not an authorization: the update matches on client id **and**
+operator id, and a zero-row result is ignored.
+
+Also handled: `account.updated` mirrors `charges_enabled` / `payouts_enabled` /
+`details_submitted` onto `operators`, in both directions — Stripe disables
+charges when a requirement comes due, and mirroring only the enabling
+direction would leave an operator taking payments Stripe was already
+rejecting.
+
 Verify `stripe-signature` with `STRIPE_WEBHOOK_SECRET`. Idempotency: `INSERT INTO stripe_events … ON CONFLICT (id) DO NOTHING`; if conflict → 200 immediately.
 - `checkout.session.completed`: bind `stripe_subscription_id`, `subscription_status='active'`, `plan_id` from metadata.
 - `invoice.paid` (subscription): resolve client by customer id → `fn_apply_rollover` → `fn_grant_credits(credits_per_cycle, 'cycle grant {invoice.id}')` → payments row (`type='subscription'`, succeeded).

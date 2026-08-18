@@ -14,6 +14,10 @@ export interface StripeEventLike {
   id: string;
   type: string;
   data: { object: Record<string, unknown> };
+  /** Set on every Connect event: the acct_… the event happened on. Absent on
+   * platform-account events, which Sanpo has none of — operators are the
+   * merchant of record (review B5). */
+  account?: string;
 }
 
 export interface ClientRow {
@@ -40,10 +44,23 @@ export interface WebhookDeps {
   claimEvent(id: string, type: string, payload: unknown): Promise<ClaimResult>;
   /** Mark the claim durable after all effects succeeded. */
   markProcessed(id: string): Promise<void>;
-  findClientByCustomer(customerId: string): Promise<ClientRow | null>;
+  /** Scoped to the operator resolved from `event.account`. A Connect endpoint
+   * receives events for EVERY connected account, so an unscoped lookup would
+   * let one operator's Stripe account drive effects on another operator's
+   * client — the tenancy boundary that `event.account` exists to draw. */
+  findClientByCustomer(customerId: string, operatorId: string): Promise<ClientRow | null>;
+  /** acct_… → operator id, or null when the account belongs to nobody here. */
+  resolveOperatorByAccount(accountId: string): Promise<string | null>;
+  /** Mirror Stripe's view of the connected account onto operators.*. */
+  updateConnectState(accountId: string, fields: Record<string, unknown>): Promise<void>;
   getPlan(planId: string): Promise<PlanRow | null>;
   findPlanByPriceId(operatorId: string, priceId: string): Promise<PlanRow | null>;
-  updateClient(id: string, fields: Record<string, unknown>): Promise<void>;
+  /** Scoped: the update must match BOTH the client id and the operator the
+   * event's account resolved to. Session metadata is attacker-controlled on a
+   * Connect endpoint — an operator can craft a Checkout Session in their own
+   * dashboard carrying another operator's client_id — so the id alone is not
+   * an authorization. Returns the number of rows actually changed. */
+  updateClient(id: string, fields: Record<string, unknown>, operatorId: string): Promise<number>;
   findPendingPlanChangeIntent(args: {
     clientId: string;
     subscriptionId: string | null;
@@ -75,6 +92,9 @@ export interface WebhookDeps {
     paymentIntentId?: string | null;
     invoiceId?: string | null;
     chargeId?: string | null;
+    /** Same boundary: only this operator's payments are reversible by this
+     * account's events, whatever Stripe id the event carries. */
+    operatorId: string;
   }): Promise<PaymentRow | null>;
   /** fn_reverse_payment: definer, per-client row lock, ledger-only balance
    * movement. p_amount_pence is the CUMULATIVE reversed total. */
@@ -139,7 +159,35 @@ async function applyEvent(
 ): Promise<{ status: "processed" | "ignored" }> {
   const obj = event.data.object;
 
+  // ── The Connect tenancy boundary (review B5) ──────────────────────────
+  // A Connect endpoint receives events for EVERY account connected to the
+  // platform, not just ours. `event.account` is therefore an authorization
+  // input, not a routing hint: everything below is scoped to the operator it
+  // resolves to, so one operator's Stripe account can never drive an effect
+  // on another operator's client.
+  //
+  // No account at all means a platform-account event. Sanpo takes no money on
+  // the platform account — operators are the merchant of record — so there is
+  // nothing legitimate to do with one, and processing it would mean guessing
+  // which operator it belonged to.
+  if (!event.account) return { status: "ignored" };
+  const operatorId = await deps.resolveOperatorByAccount(event.account);
+  if (!operatorId) return { status: "ignored" };
+
   switch (event.type) {
+    // Stripe's view of the connected account changed — onboarding finished,
+    // a requirement came due, or charges were disabled. Mirrored locally
+    // because otherwise every checkout would need a synchronous round-trip
+    // to Stripe to learn whether the operator can be paid.
+    case "account.updated": {
+      await deps.updateConnectState(event.account, {
+        stripe_charges_enabled: Boolean(obj.charges_enabled),
+        stripe_payouts_enabled: Boolean(obj.payouts_enabled),
+        stripe_details_submitted: Boolean(obj.details_submitted),
+      });
+      return { status: "processed" };
+    }
+
     case "checkout.session.completed": {
       const meta = (obj.metadata ?? {}) as Record<string, string>;
       const clientId = meta.client_id;
@@ -152,13 +200,17 @@ async function applyEvent(
       };
       if (meta.plan_id) fields.plan_id = meta.plan_id;
       if (obj.customer) fields.stripe_customer_id = obj.customer;
-      await deps.updateClient(clientId, fields);
+      const changed = await deps.updateClient(clientId, fields, operatorId);
+      // Zero rows means the metadata named a client this account does not
+      // own. Ignored rather than 500'd: it is a well-formed event that simply
+      // is not ours to act on, and retrying it forever would not change that.
+      if (changed === 0) return { status: "ignored" };
       return { status: "processed" };
     }
 
     case "invoice.paid": {
       if (!invoiceSubscriptionId(obj)) return { status: "ignored" };
-      const client = await deps.findClientByCustomer(String(obj.customer ?? ""));
+      const client = await deps.findClientByCustomer(String(obj.customer ?? ""), operatorId);
       if (!client) return { status: "ignored" };
       const invoiceId = typeof obj.id === "string" ? obj.id : event.id;
       const currency = String(obj.currency ?? "usd");
@@ -187,7 +239,7 @@ async function applyEvent(
       const plan = await resolvePlan(client, obj, deps);
       if (!plan) return { status: "ignored" };
       if (client.plan_id !== plan.id) {
-        await deps.updateClient(client.id, { plan_id: plan.id });
+        await deps.updateClient(client.id, { plan_id: plan.id }, operatorId);
       }
 
       await deps.applyInvoicePaid({
@@ -202,9 +254,9 @@ async function applyEvent(
     }
 
     case "invoice.payment_failed": {
-      const client = await deps.findClientByCustomer(String(obj.customer ?? ""));
+      const client = await deps.findClientByCustomer(String(obj.customer ?? ""), operatorId);
       if (!client) return { status: "ignored" };
-      await deps.updateClient(client.id, { subscription_status: "past_due" });
+      await deps.updateClient(client.id, { subscription_status: "past_due" }, operatorId);
       await deps.insertPayment({
         operator_id: client.operator_id,
         client_id: client.id,
@@ -235,7 +287,7 @@ async function applyEvent(
     }
 
     case "invoice.upcoming": {
-      const client = await deps.findClientByCustomer(String(obj.customer ?? ""));
+      const client = await deps.findClientByCustomer(String(obj.customer ?? ""), operatorId);
       if (!client) return { status: "ignored" };
       await deps.insertNotification({
         operator_id: client.operator_id,
@@ -249,7 +301,7 @@ async function applyEvent(
     }
 
     case "customer.subscription.updated": {
-      const client = await deps.findClientByCustomer(String(obj.customer ?? ""));
+      const client = await deps.findClientByCustomer(String(obj.customer ?? ""), operatorId);
       if (!client) return { status: "ignored" };
       const subId = typeof obj.id === "string" ? obj.id : null;
       const mapped = mapSubscriptionStatus(obj);
@@ -297,12 +349,12 @@ async function applyEvent(
         fields.plan_id = intent.new_plan_id;
       }
 
-      await deps.updateClient(client.id, fields);
+      await deps.updateClient(client.id, fields, operatorId);
       return { status: "processed" };
     }
 
     case "customer.subscription.deleted": {
-      const client = await deps.findClientByCustomer(String(obj.customer ?? ""));
+      const client = await deps.findClientByCustomer(String(obj.customer ?? ""), operatorId);
       if (!client) return { status: "ignored" };
       const subId = typeof obj.id === "string" ? obj.id : null;
       // Never let a deletion of a sub that isn't the client's current one
@@ -311,7 +363,7 @@ async function applyEvent(
       if (subId && client.stripe_subscription_id !== subId) {
         return { status: "ignored" };
       }
-      await deps.updateClient(client.id, { subscription_status: "cancelled" });
+      await deps.updateClient(client.id, { subscription_status: "cancelled" }, operatorId);
       return { status: "processed" };
     }
 
@@ -332,6 +384,7 @@ async function applyEvent(
         paymentIntentId: asString(obj.payment_intent),
         invoiceId: asString(obj.invoice),
         chargeId: asString(obj.id),
+        operatorId,
       }, "refund", numberOr(obj.amount_refunded, 0), "refunded in Stripe");
     }
 
@@ -341,6 +394,7 @@ async function applyEvent(
       return await reverse(deps, {
         paymentIntentId: asString(obj.payment_intent),
         chargeId: asString(obj.charge),
+        operatorId,
       }, "dispute", numberOr(obj.amount, 0), `dispute: ${reason}`);
     }
 
@@ -359,13 +413,13 @@ async function applyEvent(
         ? numberOr(inv.post_payment_credit_notes_amount, NaN)
         : NaN;
       const amount = Number.isFinite(cumulative) ? cumulative : numberOr(obj.amount, 0);
-      return await reverse(deps, { invoiceId }, "refund", amount, "credit note issued");
+      return await reverse(deps, { invoiceId, operatorId }, "refund", amount, "credit note issued");
     }
 
     case "invoice.voided": {
       const invoiceId = asString(obj.id);
       if (!invoiceId) return { status: "ignored" };
-      return await reverse(deps, { invoiceId }, "refund",
+      return await reverse(deps, { invoiceId, operatorId }, "refund",
         numberOr(obj.amount_paid, 0), "invoice voided");
     }
 
@@ -381,7 +435,12 @@ async function applyEvent(
  */
 async function reverse(
   deps: WebhookDeps,
-  ref: { paymentIntentId?: string | null; invoiceId?: string | null; chargeId?: string | null },
+  ref: {
+    paymentIntentId?: string | null;
+    invoiceId?: string | null;
+    chargeId?: string | null;
+    operatorId: string;
+  },
   kind: "refund" | "dispute",
   amountPence: number,
   reason: string,

@@ -7,6 +7,7 @@ import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
 import { LoadError, loadErrorMessage } from "@/components/LoadError";
+import { ConnectPanel } from "@/components/ConnectPanel";
 import { MoneyValueRail } from "@/components/MoneyValueRail";
 import { PaymentRow } from "@/components/PaymentRow";
 import { FormError, Select } from "@/components/fields";
@@ -113,6 +114,10 @@ export default function BillingConsole() {
       <p role="status" style={{ marginTop: "var(--s-2)", color: "var(--text-2)", fontSize: "var(--fs-14)" }}>
         {notice || null}
       </p>
+
+      {/* Above the money, because until this is done there is no money:
+          no subscription can be created and no overage taken (review B5). */}
+      <ConnectPanel />
 
       <MoneyValueRail payments={payments} />
 

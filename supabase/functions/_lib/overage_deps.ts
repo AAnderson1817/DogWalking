@@ -7,7 +7,20 @@ import type { OverageDeps, OveragePayment } from "./overage.ts";
 const PAYMENT_COLS =
   "id, walk_id, type, amount_pence, status, stripe_payment_intent_id, receipt_url, created_at";
 
-export function makeOverageDeps(db: SupabaseClient, stripe: Stripe): OverageDeps {
+/**
+ * `account` is required, not optional (review B5). The operator is the
+ * merchant of record, so the customer, the saved card and the PaymentIntent
+ * all live on THEIR connected account — a call without it reaches the
+ * platform account, where the customer id does not exist, and the failure
+ * would read as "no payment method on file" rather than as a misrouted
+ * charge. Making it a required parameter means a caller cannot omit it by
+ * accident, which a default of `undefined` would have allowed.
+ */
+export function makeOverageDeps(
+  db: SupabaseClient,
+  stripe: Stripe,
+  account: { stripeAccount: string },
+): OverageDeps {
   return {
     async getWalk(id) {
       const { data, error } = await db
@@ -36,7 +49,11 @@ export function makeOverageDeps(db: SupabaseClient, stripe: Stripe): OverageDeps
     },
 
     async retrievePaymentIntent(piId) {
-      const pi = await stripe.paymentIntents.retrieve(piId, { expand: ["latest_charge"] });
+      const pi = await stripe.paymentIntents.retrieve(
+        piId,
+        { expand: ["latest_charge"] },
+        account,
+      );
       const charge = pi.latest_charge as Stripe.Charge | null;
       return {
         status: pi.status,
@@ -73,7 +90,7 @@ export function makeOverageDeps(db: SupabaseClient, stripe: Stripe): OverageDeps
           customer: customerId,
           type: "card",
           limit: 1,
-        });
+        }, account);
         paymentMethod = methods.data[0]?.id ?? null;
       }
       if (!paymentMethod) throw new Error("no payment method on file");
@@ -93,7 +110,9 @@ export function makeOverageDeps(db: SupabaseClient, stripe: Stripe): OverageDeps
         // Per-attempt key: a crash-retry of THIS attempt replays; a new
         // attempt (fresh claim row) gets a new key. A fixed per-walk key
         // would replay a stored decline for ~24h and brick the re-charge.
-        { idempotencyKey: attemptKey },
+        // Stripe scopes idempotency keys per account, so the key keeps its
+        // meaning on the connected account.
+        { idempotencyKey: attemptKey, ...account },
       );
       const charge = pi.latest_charge as Stripe.Charge | null;
       return {
