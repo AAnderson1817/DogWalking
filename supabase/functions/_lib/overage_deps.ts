@@ -81,7 +81,15 @@ export function makeOverageDeps(
     async createOffSessionPaymentIntent({ customerId, amountPence, walkId, clientId, attemptKey }) {
       // Resolve a chargeable payment method: the customer default, else the
       // first card on file.
-      const customer = await stripe.customers.retrieve(customerId);
+      //
+      // On the connected account, like every other call here. The customer was
+      // created there (create-checkout), so a platform lookup raises
+      // resource_missing — which isCardError does not match, so it rethrows,
+      // complete-walk 500s, and the pending claim inserted moments earlier
+      // makes the operator's retry return already_charged for money never
+      // taken. This shipped unrouted in #34 while the paymentMethods.list four
+      // lines below it was routed.
+      const customer = await stripe.customers.retrieve(customerId, resolveAccount());
       let paymentMethod =
         (customer as Stripe.Customer).invoice_settings?.default_payment_method as
           | string
