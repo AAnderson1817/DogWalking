@@ -157,10 +157,12 @@ jobs:
   e2e-today:
     name: E2E — Today composition
     runs-on: ubuntu-latest
-    # Fail fast rather than hang. This job wedged on the Chromium download
-    # three times in one evening; at GitHub's default six-hour timeout each
-    # stall blocked a merge, and one of them blocked the staging deploy,
-    # because the deploy gate waits on this workflow completing.
+    # Fail fast rather than hang. This job has wedged on the browser install
+    # five times in two evenings; at GitHub's default six-hour timeout each
+    # stall blocked a merge, and two of them blocked the staging deploy,
+    # because the deploy gate waits on this workflow completing. This ceiling
+    # is the backstop, not the fix — the per-attempt timeouts below are what
+    # let a stalled run recover instead of merely failing on schedule.
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
@@ -174,11 +176,10 @@ jobs:
       - name: Install
         run: npm ci --prefix app
 
-      # Cache the browser: the download is the step that actually stalls, and
-      # it is pure network. Keyed on the resolved Playwright version so a
-      # dependency bump fetches a fresh browser instead of reusing a mismatched
-      # one — the version skew that already needs a local escape hatch in
-      # playwright.config.mjs.
+      # Cache the browser so the common case makes no network call at all.
+      # Keyed on the resolved Playwright version so a dependency bump fetches a
+      # fresh browser instead of reusing a mismatched one — the version skew
+      # that already needs a local escape hatch in playwright.config.mjs.
       - name: Resolve the Playwright version
         id: pw
         working-directory: app
@@ -190,9 +191,44 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
 
-      - name: Install Chromium
+      # These two were one step, `playwright install --with-deps chromium`,
+      # which has now stalled five times against a 33 s median. That command
+      # does two unrelated network things — apt-get, then the browser CDN — so
+      # as a single step its timings cannot say which half hung, and five
+      # stalls produced no evidence. Split, the step boundary IS the diagnosis:
+      # the next stall names its own cause. Delete `install-deps` when it is
+      # the guilty one and the runner image proves to ship the libraries
+      # anyway, but delete it on evidence, not on the assumption that got us a
+      # cache keyed to the wrong hypothesis.
+      #
+      # Both halves are bounded and retried. `timeout` turns a stall into a
+      # failed attempt instead of a hang to the job ceiling, and a stall is
+      # precisely the failure a retry fixes; `-k` kills the process group after
+      # SIGTERM so a wedged apt child cannot survive to hold the dpkg lock
+      # against the next attempt. 90 s is ~3x the median: past it the step is
+      # not slow, it is stuck. Worst case is 3 attempts x 90 s x 2 halves plus
+      # the run itself, which stays inside timeout-minutes.
+      - name: Chromium system dependencies (apt)
         working-directory: app
-        run: npx playwright install --with-deps chromium
+        run: |
+          for attempt in 1 2 3; do
+            if timeout -k 10s 90s npx playwright install-deps chromium; then exit 0; fi
+            echo "::warning::install-deps attempt $attempt stalled or failed; retrying"
+            sleep $((attempt * 5))
+          done
+          echo "::error::Chromium system dependencies failed three times"
+          exit 1
+
+      - name: Chromium browser
+        working-directory: app
+        run: |
+          for attempt in 1 2 3; do
+            if timeout -k 10s 90s npx playwright install chromium; then exit 0; fi
+            echo "::warning::browser download attempt $attempt stalled or failed; retrying"
+            sleep $((attempt * 5))
+          done
+          echo "::error::Chromium download failed three times"
+          exit 1
 
       - name: Today composition (4 viewports)
         working-directory: app
