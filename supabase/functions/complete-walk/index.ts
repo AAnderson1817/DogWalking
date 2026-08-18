@@ -26,7 +26,9 @@ function makeDeps(resolveAccount: () => { stripeAccount: string }): CompleteWalk
   return {
     async getWalk(id) {
       const { data, error } = await db.from("walks").select("*").eq("id", id).maybeSingle();
-      if (error) throw new HttpError(500, "db_error", "walk lookup failed");
+      if (error) {
+        throw new HttpError(500, "db_error", "walk lookup failed", error, { walk_id: id });
+      }
       return data as WalkRow | null;
     },
 
@@ -37,7 +39,9 @@ function makeDeps(resolveAccount: () => { stripeAccount: string }): CompleteWalk
         .eq("id", id)
         .select("*")
         .single();
-      if (error) throw new HttpError(500, "db_error", "walk update failed");
+      if (error) {
+        throw new HttpError(500, "db_error", "walk update failed", error, { walk_id: id });
+      }
       return data as WalkRow;
     },
 
@@ -52,14 +56,32 @@ function makeDeps(resolveAccount: () => { stripeAccount: string }): CompleteWalk
       const { error } = await db
         .from("walk_photos")
         .upsert(rows, { onConflict: "walk_id,storage_path", ignoreDuplicates: true });
-      if (error) throw new HttpError(500, "db_error", "photo insert failed");
+      if (error) {
+        throw new HttpError(500, "db_error", "photo insert failed", error, {
+          walk_id: walk.id,
+          photos: paths.length,
+        });
+      }
     },
 
     async debitWalk(walkId) {
       const { data, error } = await db.rpc("fn_debit_walk", { p_walk: walkId });
-      if (error) throw new HttpError(500, "billing_error", "credit debit failed");
+      if (error) {
+        throw new HttpError(500, "billing_error", "credit debit failed", error, { walk_id: walkId });
+      }
       const row = Array.isArray(data) ? data[0] : data;
-      if (!row) throw new HttpError(500, "billing_error", "credit debit returned nothing");
+      if (!row) {
+        // No error object to attach: fn_debit_walk returned successfully and
+        // returned nothing, which should be impossible. Say so, since the
+        // absence is the finding.
+        throw new HttpError(
+          500,
+          "billing_error",
+          "credit debit returned nothing",
+          "fn_debit_walk succeeded but returned no row",
+          { walk_id: walkId },
+        );
+      }
       return row as { outcome: string; cost: number; new_balance: number };
     },
 
@@ -80,13 +102,20 @@ function makeDeps(resolveAccount: () => { stripeAccount: string }): CompleteWalk
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle();
-      if (error) throw new HttpError(500, "db_error", "payment lookup failed");
+      if (error) {
+        throw new HttpError(500, "db_error", "payment lookup failed", error, { walk_id: walkId });
+      }
       return data;
     },
 
     async insertNotification(row) {
       const { error } = await db.from("notifications").insert(row);
-      if (error) throw new HttpError(500, "db_error", "notification insert failed");
+      if (error) {
+        throw new HttpError(500, "db_error", "notification insert failed", error, {
+          walk_id: (row as { walk_id?: string }).walk_id,
+          type: (row as { type?: string }).type,
+        });
+      }
     },
 
     async hasCompleteNotification(walkId) {
@@ -96,7 +125,9 @@ function makeDeps(resolveAccount: () => { stripeAccount: string }): CompleteWalk
         .eq("walk_id", walkId)
         .eq("type", "walk_complete")
         .limit(1);
-      if (error) throw new HttpError(500, "db_error", "notification lookup failed");
+      if (error) {
+        throw new HttpError(500, "db_error", "notification lookup failed", error, { walk_id: walkId });
+      }
       return (data?.length ?? 0) > 0;
     },
 

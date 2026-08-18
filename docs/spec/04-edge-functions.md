@@ -1,6 +1,58 @@
 # 04 — Edge function contracts (Deno, `supabase/functions/`)
 
-Shared `_lib/`: `admin.ts` (service-role client), `http.ts` (CORS, JSON helpers, `requireUser(req)` → verified JWT user id, `requireOperator`), `crypto.ts` (AES-256-GCM per spec 03 blob layout), `stripe.ts` (SDK init, signature verify). All responses `{ ok: true, data } | { ok: false, error: { code, message } }`. All functions `verify_jwt = true` except `stripe-webhook` (`verify_jwt = false`, signature-verified instead).
+Shared `_lib/`: `admin.ts` (service-role client), `http.ts` (CORS, JSON helpers, `requireUser(req)` → verified JWT user id, `requireOperator`), `crypto.ts` (AES-256-GCM per spec 03 blob layout), `stripe.ts` (SDK init, signature verify), `observe.ts` (structured error logging). All responses `{ ok: true, data } | { ok: false, error: { code, message, request_id } }`. All functions `verify_jwt = true` except `stripe-webhook` (`verify_jwt = false`, signature-verified instead).
+
+## Every server-side failure leaves exactly one log line (review H14)
+
+All 43 deliberate `HttpError(5xx)` throws used to drop the underlying
+Postgres/Stripe error at the throw site — `HttpError` had nowhere to put one —
+and `serveFunction`'s catch returned the envelope with **no logging at all**. So
+when an operator said "completing the walk failed yesterday", there was nothing
+to look at: no line was written, and the specific error had never been captured.
+On the money paths, "we cannot reconstruct what happened" is not an answer.
+
+**`HttpError(status, code, message, cause?, context?)`.**
+
+| | Who reads it |
+| --- | --- |
+| `message` | the client. Ours, a sentence a person can act on. |
+| `cause` | us. The Postgres/Stripe error. **Never** sent to the client. |
+| `context` | us. `walk_id`, `client_id` — what makes the line findable later. |
+
+`handleRequest` (extracted from `serveFunction` so it is testable at all) logs
+one JSON line for every status **≥ 500** and echoes an `x-request-id` header on
+every response, success included. The id is also in the error envelope, so a
+failure a person is looking at can be tied to the line that recorded it.
+
+A **4xx logs nothing**: that is the caller being told something true about
+their own request, and burying our failures under theirs is the same as not
+logging.
+
+### What must never reach a log line
+
+Invariant 2 says plaintext secrets are never logged; `safeCause` is the
+mechanism. It projects a thrown value down to `name`, `code`, `message` — and
+**drops `details` and `hint`**, because that is where Postgres puts the
+offending values (`Key (col)=(…) already exists`). No unique constraint on a
+ciphertext column exists today, which is precisely why the rule lives in code
+with a test rather than in a reviewer's memory.
+
+It follows `.cause` up to three levels, because our own wrappers say "client
+lookup failed" and the error underneath says why — stopping at the first level
+would record the label and drop the finding.
+
+`causeCode()` is the stricter setting, giving up the message entirely and
+keeping only the SQLSTATE. Used at the four vault statements that carry
+ciphertext in the statement itself, where a syntax or constraint error could
+quote part of the payload back. Deliberately not the default: everywhere else
+the message is the most useful thing in the line.
+
+### Not done here
+
+A **log drain** and an **error monitor** are dashboard steps no file in this
+repository can perform, so retention is still the platform default and nobody
+is paged. Both runbooks list them. Until they exist, this makes an incident
+*reconstructable*, not *noticed*.
 
 ## complete-walk — POST, operator JWT
 Body: `{ walk_id, ended_at, distance_m, notes?, potty_pee?, potty_poo?, fed?, watered?, photo_paths?: string[] }`

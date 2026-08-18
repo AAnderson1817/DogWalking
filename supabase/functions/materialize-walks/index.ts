@@ -32,7 +32,9 @@ serveFunction(async (req) => {
 
   const db = adminClient();
   const { data, error } = await db.rpc("fn_run_nightly_jobs", { p_horizon_days: 14 });
-  if (error) throw new HttpError(500, "materialize_failed", "walk materialization failed");
+  if (error) {
+    throw new HttpError(500, "materialize_failed", "walk materialization failed", error);
+  }
 
   const result = data as unknown as NightlyResult;
 

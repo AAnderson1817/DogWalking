@@ -2,6 +2,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { jsonOk, readJson, requireOperator, serveFunction, HttpError } from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
+import { causeCode } from "../_lib/observe.ts";
 import {
   bytesToPgHex,
   decryptSecret,
@@ -44,7 +45,12 @@ async function getRing(): Promise<KeyRing> {
   if (ring) return ring;
   const primaryRaw = Deno.env.get("VAULT_MASTER_KEY");
   if (!primaryRaw) {
-    throw new HttpError(500, "vault_key_missing", "the vault key is not configured");
+    throw new HttpError(
+      500,
+      "vault_key_missing",
+      "the vault key is not configured",
+      "VAULT_MASTER_KEY is unset in this deployment",
+    );
   }
   const primary = await importVaultKey(primaryRaw);
   const byId = new Map<string, VaultKey>([[primary.id, primary]]);
@@ -78,7 +84,11 @@ function makeDeps(clientIp: string | null): VaultDeps {
         p_limit: 5,
         p_window_seconds: 60,
       });
-      if (error) throw new HttpError(500, "rate_limit_failed", "vault rate limit check failed");
+      if (error) {
+        throw new HttpError(500, "rate_limit_failed", "vault rate limit check failed", error, {
+          user_id: userId,
+        });
+      }
       return Boolean(data);
     },
 
@@ -87,7 +97,14 @@ function makeDeps(clientIp: string | null): VaultDeps {
       // discarded — only the boolean outcome is used.
       const url = Deno.env.get("SUPABASE_URL");
       const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
-      if (!url || !anonKey) throw new HttpError(500, "misconfigured", "auth is not configured");
+      if (!url || !anonKey) {
+        throw new HttpError(
+          500,
+          "misconfigured",
+          "auth is not configured",
+          `missing ${!url ? "SUPABASE_URL" : "SUPABASE_ANON_KEY"}`,
+        );
+      }
       const probe = createClient(url, anonKey, {
         auth: { persistSession: false, autoRefreshToken: false },
       });
@@ -113,7 +130,17 @@ function makeDeps(clientIp: string | null): VaultDeps {
           const status = e.code === "key_unknown" ? 409 : 500;
           throw new HttpError(status, e.code, e.message);
         }
-        throw new HttpError(500, "decrypt_failed", "credential could not be decrypted");
+        // The thrown value is NOT passed as the cause. A decryption failure
+        // on an unrecognised error shape is the one place where whatever went
+        // wrong may have handled plaintext, and the code already distinguishes
+        // the diagnosable cases (VaultBlobError) above.
+        throw new HttpError(
+          500,
+          "decrypt_failed",
+          "credential could not be decrypted",
+          "a non-VaultBlobError escaped decryptSecret",
+          { credential_id: binding.credentialId },
+        );
       }
     },
 
@@ -123,7 +150,11 @@ function makeDeps(clientIp: string | null): VaultDeps {
         .select("id, operator_id")
         .eq("id", id)
         .maybeSingle();
-      if (error) throw new HttpError(500, "db_error", "property lookup failed");
+      if (error) {
+        throw new HttpError(500, "db_error", "property lookup failed", error, {
+          property_id: id,
+        });
+      }
       return data;
     },
 
@@ -133,7 +164,11 @@ function makeDeps(clientIp: string | null): VaultDeps {
         .select(CRED_META_COLUMNS)
         .eq("id", id)
         .maybeSingle();
-      if (error) throw new HttpError(500, "db_error", "credential lookup failed");
+      if (error) {
+        throw new HttpError(500, "db_error", "credential lookup failed", error, {
+          credential_id: id,
+        });
+      }
       return data as CredentialMeta | null;
     },
 
@@ -143,7 +178,15 @@ function makeDeps(clientIp: string | null): VaultDeps {
         .insert({ ...row, ciphertext: bytesToPgHex(row.ciphertext) })
         .select(CRED_META_COLUMNS)
         .single();
-      if (error) throw new HttpError(500, "db_error", "credential insert failed");
+      // causeCode, not the whole error: this statement carries the ciphertext,
+      // so a syntax or constraint failure could quote part of the payload back
+      // in its own message. A SQLSTATE is enough to diagnose from, and
+      // invariant 2 is not worth a better log line.
+      if (error) {
+        throw new HttpError(500, "db_error", "credential insert failed", causeCode(error), {
+          property_id: (row as { property_id?: string }).property_id,
+        });
+      }
       return data as CredentialMeta;
     },
 
@@ -163,7 +206,13 @@ function makeDeps(clientIp: string | null): VaultDeps {
         .eq("id", id)
         .select(CRED_META_COLUMNS)
         .single();
-      if (error) throw new HttpError(500, "db_error", "credential rotation failed");
+      // causeCode for the same reason as the insert above: the statement
+      // carries the new ciphertext.
+      if (error) {
+        throw new HttpError(500, "db_error", "credential rotation failed", causeCode(error), {
+          credential_id: id,
+        });
+      }
       return data as CredentialMeta;
     },
 
@@ -172,7 +221,11 @@ function makeDeps(clientIp: string | null): VaultDeps {
         .from("access_credentials")
         .update({ revoked_at: new Date().toISOString() })
         .eq("id", id);
-      if (error) throw new HttpError(500, "db_error", "credential revoke failed");
+      if (error) {
+        throw new HttpError(500, "db_error", "credential revoke failed", error, {
+          credential_id: id,
+        });
+      }
     },
 
     async readCredential(credentialId, purpose, operatorId) {

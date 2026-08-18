@@ -84,7 +84,15 @@ export async function handleRekey(
         if (plaintext !== CANARY_PLAINTEXT) {
           // Decrypted, but not to what we wrote. The blob is authentic under
           // a key we hold and still wrong, so this is corruption, not custody.
-          throw new HttpError(500, "canary_mismatch", "the vault canary decrypted to the wrong value");
+          // No cause, and no plaintext: the decrypted value is the thing that
+          // is wrong, and logging it would log a secret to prove a secret
+          // leaked. The key id in context is what identifies the blob.
+          throw new HttpError(
+            500,
+            "canary_mismatch",
+            "the vault canary decrypted to the wrong value",
+            "authentic under a held key but not the expected plaintext",
+          );
         }
       } catch (e) {
         if (e instanceof HttpError) throw e;
@@ -97,7 +105,12 @@ export async function handleRekey(
             "the deployed vault key cannot read this project's data",
           );
         }
-        throw new HttpError(500, "canary_unreadable", "the vault canary could not be decrypted");
+        throw new HttpError(
+          500,
+          "canary_unreadable",
+          "the vault canary could not be decrypted",
+          "decrypt threw something other than a VaultBlobError",
+        );
       }
       const census = await deps.census(primary);
       // The pin may legitimately be on a retired key mid-rotation; report it

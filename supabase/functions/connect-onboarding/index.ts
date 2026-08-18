@@ -40,7 +40,11 @@ serveFunction(async (req) => {
     .select("id, email, business_name, stripe_account_id, stripe_charges_enabled, stripe_payouts_enabled, stripe_details_submitted")
     .eq("id", operator.id)
     .maybeSingle();
-  if (error) throw new HttpError(500, "db_error", "operator lookup failed");
+  if (error) {
+    throw new HttpError(500, "db_error", "operator lookup failed", error, {
+      operator_id: operator.id,
+    });
+  }
   if (!row) throw new HttpError(403, "not_operator", "caller is not an operator");
 
   if (action === "status") {
@@ -79,7 +83,12 @@ serveFunction(async (req) => {
       // calls would otherwise each create an account and the loser would
       // overwrite the winner.
       .is("stripe_account_id", null);
-    if (uErr) throw new HttpError(500, "db_error", "failed to persist the Stripe account");
+    if (uErr) {
+      throw new HttpError(500, "db_error", "failed to persist the Stripe account", uErr, {
+        operator_id: operator.id,
+        stripe_account_id: account.id,
+      });
+    }
 
     // Re-read: if the conditional update matched nothing, another request won
     // the race and its account is the real one. Ours is an orphan — harmless,

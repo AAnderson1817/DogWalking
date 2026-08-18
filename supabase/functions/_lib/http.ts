@@ -1,6 +1,12 @@
 // CORS + JSON helpers + JWT verification (spec 04 shared _lib).
 // Response envelope everywhere: { ok: true, data } | { ok: false, error: { code, message } }.
 import { adminClient } from "./admin.ts";
+import {
+  type ErrorContext,
+  functionName,
+  logServerError,
+  requestId,
+} from "./observe.ts";
 
 export const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
@@ -8,13 +14,28 @@ export const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
+/**
+ * `cause` and `context` are the whole of review H14.
+ *
+ * `message` is OURS — the sentence the client is allowed to read. `cause` is
+ * the underlying Postgres/Stripe error, which never reaches the client and is
+ * the only thing that can answer "why did this actually fail". Before this
+ * there was nowhere to put it, so all 41 deliberate 5xx throws discarded it at
+ * the throw site.
+ *
+ * `context` is what makes the log line findable later: an operator reports
+ * "completing the walk failed yesterday", and the question is answerable only
+ * if the line carries the walk id.
+ */
 export class HttpError extends Error {
   constructor(
     public status: number,
     public code: string,
     message: string,
+    cause?: unknown,
+    public context?: ErrorContext,
   ) {
-    super(message);
+    super(message, cause == null ? undefined : { cause });
   }
 }
 
@@ -25,10 +46,25 @@ export function jsonOk(data: unknown, status = 200): Response {
   });
 }
 
-export function jsonErr(code: string, message: string, status: number): Response {
-  return new Response(JSON.stringify({ ok: false, error: { code, message } }), {
+export function jsonErr(
+  code: string,
+  message: string,
+  status: number,
+  reqId?: string,
+): Response {
+  // request_id in the envelope AND the header. A person looking at a failure
+  // can quote the id, and the line that recorded it carries the same one —
+  // which is the difference between "completing the walk failed yesterday" and
+  // a searchable incident.
+  const error: Record<string, string> = { code, message };
+  if (reqId) error.request_id = reqId;
+  return new Response(JSON.stringify({ ok: false, error }), {
     status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    headers: {
+      ...corsHeaders,
+      "Content-Type": "application/json",
+      ...(reqId ? { "x-request-id": reqId } : {}),
+    },
   });
 }
 
@@ -113,7 +149,11 @@ export async function requireOperator(req: Request): Promise<OperatorPrincipal> 
     .select("id, stripe_account_id, stripe_charges_enabled")
     .eq("id", user.id)
     .maybeSingle();
-  if (error) throw new HttpError(500, "db_error", "operator lookup failed");
+  if (error) {
+    throw new HttpError(500, "db_error", "operator lookup failed", error, {
+      auth_user_id: user.id,
+    });
+  }
   if (!data) throw new HttpError(403, "not_operator", "caller is not an operator");
   return {
     ...user,
@@ -172,21 +212,72 @@ export function connectError(reason: "no_account" | "charges_disabled"): HttpErr
     );
 }
 
-/** Deno.serve wrapper: OPTIONS preflight, envelope errors, no internals leaked. */
+/**
+ * Deno.serve wrapper: OPTIONS preflight, envelope errors, no internals leaked
+ * to the client — and, since review H14, exactly one structured log line for
+ * every failure the server is responsible for.
+ *
+ * The threshold is status >= 500. A 4xx is the caller being told something
+ * true about their own request (not an operator, bad JSON, cutoff passed);
+ * logging those would bury the failures that are ours in a pile of ones that
+ * are not. Anything that is not an HttpError at all is a bug and is logged as
+ * a 500 regardless.
+ */
 export function serveFunction(handler: (req: Request) => Promise<Response>): void {
-  Deno.serve(async (req) => {
-    if (req.method === "OPTIONS") {
-      return new Response("ok", { headers: corsHeaders });
+  Deno.serve((req) => handleRequest(req, handler));
+}
+
+/**
+ * The whole of serveFunction's behaviour, outside `Deno.serve` so it can be
+ * tested. Inside the serve callback none of this was reachable from a test —
+ * which is why the "no logging at all" defect could exist unnoticed in the one
+ * place every function's failures pass through.
+ */
+export async function handleRequest(
+  req: Request,
+  handler: (req: Request) => Promise<Response>,
+): Promise<Response> {
+  if (req.method === "OPTIONS") {
+    return new Response("ok", { headers: corsHeaders });
+  }
+  const reqId = requestId(req);
+  if (req.method !== "POST") {
+    return jsonErr("method_not_allowed", "POST only", 405, reqId);
+  }
+  const fn = functionName(req.url);
+  try {
+    const res = await handler(req);
+    // Echoed on success too, so a support conversation can start from any
+    // response rather than only from a failed one.
+    res.headers.set("x-request-id", reqId);
+    return res;
+  } catch (e) {
+    if (e instanceof HttpError) {
+      if (e.status >= 500) {
+        logServerError({
+          fn,
+          request_id: reqId,
+          status: e.status,
+          code: e.code,
+          message: e.message,
+          cause: e.cause,
+          context: e.context,
+        });
+      }
+      return jsonErr(e.code, e.message, e.status, reqId);
     }
-    if (req.method !== "POST") {
-      return jsonErr("method_not_allowed", "POST only", 405);
-    }
-    try {
-      return await handler(req);
-    } catch (e) {
-      if (e instanceof HttpError) return jsonErr(e.code, e.message, e.status);
-      console.error("unhandled error:", e instanceof Error ? e.message : "unknown");
-      return jsonErr("internal", "internal error", 500);
-    }
-  });
+    // Not an HttpError: nobody decided this would happen. The thrown value
+    // IS the cause here — there is no envelope message to distinguish it
+    // from — so it is passed as such rather than flattened to `.message`,
+    // which is all the old line recorded.
+    logServerError({
+      fn,
+      request_id: reqId,
+      status: 500,
+      code: "internal",
+      message: "unhandled error",
+      cause: e,
+    });
+    return jsonErr("internal", "internal error", 500, reqId);
+  }
 }
