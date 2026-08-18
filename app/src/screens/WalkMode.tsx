@@ -21,6 +21,7 @@ import {
   completeWalk,
   getWalk,
   insertWalkPhoto,
+  listServiceTypes,
   listWalkGpsPoints,
   listWalkPets,
   listWalkPhotos,
@@ -47,6 +48,7 @@ import {
   saveWalkSnapshot,
   shouldPersistProgress,
 } from "@/lib/walk-snapshot";
+import { walkSessionBound } from "@/lib/walk-session";
 import type { Pets, Walks } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
 
@@ -81,6 +83,16 @@ function WalkModeInner({ walkId }: { walkId: string }) {
   const [reportPhotoUrls, setReportPhotoUrls] = useState<string[]>([]);
   const [offlineResumed, setOfflineResumed] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  // The booked length of THIS walk's service, so the overrun bound scales with
+  // it (review M28). Null until loaded, and permanently null on the offline
+  // resume path, which has no way to read `service_types` — `walkSessionBound`
+  // owns what that means.
+  const [durationMinutes, setDurationMinutes] = useState<number | null>(null);
+  // Epoch ms of the operator's last "still walking". Deliberately NOT
+  // persisted: a snooze is an answer to a question asked on this screen, and
+  // restoring one from before a reload would silence the prompt for a walk
+  // nobody has looked at since.
+  const [snoozedAt, setSnoozedAt] = useState<number | null>(null);
   // Until the initial load has put photos/toggles/notes back, the snapshot
   // writer below must not run — it would persist this component's empty
   // starting state over the very record it is about to read. State rather than
@@ -88,9 +100,27 @@ function WalkModeInner({ walkId }: { walkId: string }) {
   const [hydrated, setHydrated] = useState(false);
 
   const active = walk?.status === "in_progress" && !result;
-  const geo = useGeolocation(active ?? false);
+
+  // Review M28. A walk had no time bound at all, so a forgotten END WALK kept
+  // recording for as long as the app stayed open and the route grew while the
+  // operator drove home — on the distance sold to the client as proof of
+  // service. `prompting` asks; `capped` stops emitting, and only after the
+  // question has gone unanswered. Neither completes the walk: completing means
+  // billing, and a duration invented by a timer is not something to charge for.
+  const session = walkSessionBound({
+    startedAt: walk?.started_at ?? null,
+    durationMinutes,
+    now,
+    snoozedAt,
+  });
+  const overrunPrompt = (active && session?.prompting) ?? false;
+  const recording = active === true && session?.capped !== true;
+
+  const geo = useGeolocation(recording);
   // Best effort against the OS suspending the watch when the screen locks.
-  const wakeLock = useWakeLock(active ?? false);
+  // Released with recording: holding the screen awake for a walk nobody is
+  // answering for is the battery cost with none of the benefit.
+  const wakeLock = useWakeLock(recording);
   const channel = useWalkChannel(walkId, "broadcast", auth.operatorId ?? "");
   const pendingPoints = channel.pendingPoints;
   const online = useOnline();
@@ -101,6 +131,16 @@ function WalkModeInner({ walkId }: { walkId: string }) {
       .then(async (w) => {
         setWalk(w);
         setPets(await listWalkPets(walkId));
+        // Tolerated failure: without it the overrun bound falls back to a
+        // fixed duration, which is a slightly blunter prompt — not a reason to
+        // fail the screen an operator is standing on a doorstep holding.
+        void listServiceTypes()
+          .then((types) =>
+            setDurationMinutes(
+              types.find((t) => t.id === w.service_type_id)?.duration_minutes ?? null,
+            ),
+          )
+          .catch(() => setDurationMinutes(null));
         setNotes(w.notes ?? "");
         // Resuming an in-progress walk after a reload: seed the route and
         // distance baseline from points already saved AND any still queued in
@@ -217,13 +257,13 @@ function WalkModeInner({ walkId }: { walkId: string }) {
 
   // Broadcast every newly emitted point.
   useEffect(() => {
-    if (!active) return;
+    if (!recording) return;
     while (sentCount.current < geo.points.length) {
       const p = geo.points[sentCount.current];
       if (p) channel.sendPoint(p);
       sentCount.current += 1;
     }
-  }, [geo.points, active, channel]);
+  }, [geo.points, recording, channel]);
 
   // Elapsed ticker.
   useEffect(() => {
@@ -304,7 +344,10 @@ function WalkModeInner({ walkId }: { walkId: string }) {
   // `now` already ticks once a second for the elapsed timer, so staleness is
   // free. Before the first fix there is nothing to be stale about — that is
   // the ordinary "acquiring GPS" moment, not a suspension.
-  const gpsStalled = active && geo.lastFixAt != null && now - geo.lastFixAt > GPS_GAP_MS;
+  // `recording`, not `active`: once the overrun cap has stopped emission the
+  // fixes stop too, and "Recording paused — reopen this screen to resume"
+  // would be the wrong explanation for a stop the product chose on purpose.
+  const gpsStalled = recording && geo.lastFixAt != null && now - geo.lastFixAt > GPS_GAP_MS;
 
   async function start() {
     setBusy(true);
@@ -554,6 +597,48 @@ function WalkModeInner({ walkId }: { walkId: string }) {
         </div>
 
         <MapView points={routePoints} live />
+
+        {/* Review M28. First, and above the GPS banners, because it is the
+            only one asking the operator a question. */}
+        {overrunPrompt && !session?.capped && (
+          <StateField
+            compact
+            tone="attention"
+            label="Still walking?"
+            title={`This walk has been running for ${walk.started_at ? elapsed(walk.started_at, now) : "a while"}`}
+            detail={
+              "If it's finished, end it now so the client gets their report and it's "
+              + "billed. If you're still out, say so and recording carries on."
+            }
+            role="status"
+            action={
+              <Button variant="ghost" onClick={() => setSnoozedAt(Date.now())}>
+                Yes, still walking
+              </Button>
+            }
+          />
+        )}
+
+        {session?.capped && active && (
+          <StateField
+            compact
+            tone="attention"
+            label="Recording stopped"
+            title="GPS recording has stopped for this walk"
+            detail={
+              "Nobody answered, so the route stops where the evidence for it does — "
+              + "everything recorded up to that point is kept. End the walk to send the "
+              + "report, or resume if you're still out."
+            }
+            role="status"
+            action={
+              <Button variant="ghost" onClick={() => setSnoozedAt(Date.now())}>
+                Resume recording
+              </Button>
+            }
+          />
+        )}
+
         {geo.error && (
           <StateField
             compact

@@ -16,6 +16,8 @@ interface NightlyResult {
   created: number;
   expired_clients: number;
   expiry_error: string | null;
+  walks_flagged_abandoned: number;
+  stale_walk_error: string | null;
 }
 
 serveFunction(async (req) => {
@@ -48,9 +50,20 @@ serveFunction(async (req) => {
     console.error("credit expiry sweep failed:", result.expiry_error);
   }
 
+  // Same contract for the abandoned-walk sweep (review M28). Returning only
+  // the fields that existed before would rebuild the swallow one level up: the
+  // interactive run is what a human uses to check whether the automatic run is
+  // healthy, so a sweep failing silently HERE is the same defect in the same
+  // place, reported through a different pipe.
+  if (result?.stale_walk_error) {
+    console.error("abandoned-walk sweep failed:", result.stale_walk_error);
+  }
+
   return jsonOk({
     created: result?.created ?? 0,
     expired_clients: result?.expired_clients ?? 0,
     expiry_error: result?.expiry_error ?? null,
+    walks_flagged_abandoned: result?.walks_flagged_abandoned ?? 0,
+    stale_walk_error: result?.stale_walk_error ?? null,
   });
 });

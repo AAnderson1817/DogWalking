@@ -33,11 +33,22 @@ export function useGeolocation(active: boolean): GeolocationState {
   const [lastFixAt, setLastFixAt] = useState<number | null>(null);
   const lastEmitted = useRef<GeoPoint | null>(null);
   const lastFix = useRef<number | null>(null);
+  // Set when a run is deactivated after it had produced at least one fix, so
+  // the first fix of the NEXT run is marked as a gap (review M28).
+  const resumeGap = useRef(false);
 
   useEffect(() => {
     if (!active) {
       // Deactivating ends the run. Leaving the timestamp behind would make a
       // resumed walk look like it had been recording all along.
+      //
+      // But clearing it alone loses the break: `isGapFix(null, t)` is false,
+      // so the first fix after a resume would join straight onto the last fix
+      // before the stop and `pathDistanceM` would measure the whole
+      // un-recorded stretch. That is exactly the H7 defect, and until the
+      // overrun cap (M28) there was no code path that ever deactivated a live
+      // walk and reactivated it — so this had never been reachable.
+      if (lastFix.current != null) resumeGap.current = true;
       lastFix.current = null;
       setLastFixAt(null);
       return;
@@ -54,7 +65,8 @@ export function useGeolocation(active: boolean): GeolocationState {
         // of movement, so a silence really is the watch stopping — whereas
         // emitted points can legitimately be minutes apart when the operator
         // is standing still, because the throttle also requires ≥10 m.
-        const gapBefore = isGapFix(lastFix.current, pos.timestamp);
+        const gapBefore = resumeGap.current || isGapFix(lastFix.current, pos.timestamp);
+        resumeGap.current = false;
         lastFix.current = pos.timestamp;
         setLastFixAt(pos.timestamp);
 
