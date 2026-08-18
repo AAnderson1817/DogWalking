@@ -116,15 +116,28 @@ at once.
      objects"), create just those policies via the SQL Editor (copy them
      from `0004_security.sql` / `0008_portal.sql`) and re-run.
 2. Post-deploy dashboard wiring (one-time):
-   - **Cron**: Integrations → Cron → New job → schedule `0 3 * * *` →
-     type "Supabase Edge Function" → `materialize-walks` (this also runs
-     the daily credit-expiry sweep). Method POST, timeout `8000` ms (cold
-     starts exceed the 1000 default), one HTTP header:
-     `Authorization` = `Bearer <service_role key>` (Settings → API).
-     Cron marks a run "successful" once the HTTP call is *dispatched* —
-     verify the actual response in SQL Editor:
-     `select status_code, content::text from net._http_response order by id desc limit 3;`
-     — expect `200` and `{"ok":true,...}`.
+   - **Cron**: nothing to do. Migration `0028` schedules it
+     (`sanpo-nightly`, `0 3 * * *`, calling `fn_run_nightly_jobs()`).
+     This used to be a hand-typed dashboard entry with a pasted service-role
+     header, which no restore recreated and nothing asserted the existence of
+     (review H15).
+
+     If `db push` fails on `0028` with *"pg_cron is not installed"*, enable it
+     once at Database → Extensions → `pg_cron`, then re-run the deploy. The
+     migration asserts rather than skipping, so a deploy cannot report success
+     having scheduled nothing.
+
+     Verify in the SQL Editor:
+     ```sql
+     select jobname, schedule, command, active from cron.job;
+     select job_name, ok, detail, error from job_runs order by started_at desc limit 5;
+     select * from fn_job_health();          -- stale = false
+     ```
+     There is no `net._http_response` to check any more, because there is no
+     HTTP hop: the job calls the SQL directly and either commits or does not.
+     `cron.job_run_details` carries the real outcome, which the dashboard
+     cron never did — it marked a run "successful" once the call was
+     *dispatched*, so a 500 looked exactly like a good night.
    - **Email webhook** (only when Resend is configured): Database →
      Webhooks → new webhook on `notifications` INSERT → Edge Function
      `send-notification`, auth header with the service role key.

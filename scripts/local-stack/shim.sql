@@ -166,3 +166,63 @@ alter default privileges in schema public
   grant all on functions to anon, authenticated, service_role;
 alter default privileges in schema public
   grant all on sequences to anon, authenticated, service_role;
+
+-- ── cron schema (pg_cron stand-in) ───────────────────────────────────────
+-- 0028 schedules the nightly job with cron.schedule, so the platform's
+-- pg_cron extension has to exist for the migration to apply at all. It is not
+-- available on a bare cluster and `create extension pg_cron` fails there, so
+-- this provides the two functions and the one table 0028 touches.
+--
+-- Faithful to the interface, NOT an implementation: nothing here ever runs a
+-- job. That is the honest boundary — a local stack cannot prove the schedule
+-- fires, only that the migration installs it and that the SQL it would run is
+-- correct. The latter is what smoke.sql tests, by calling the entry point
+-- directly the way the job does.
+create schema if not exists cron;
+
+create table if not exists cron.job (
+  jobid bigint generated always as identity primary key,
+  schedule text not null,
+  command text not null,
+  nodename text not null default 'localhost',
+  nodeport int not null default 5432,
+  database text not null default current_database(),
+  username text not null default current_user,
+  active boolean not null default true,
+  jobname text unique
+);
+
+create or replace function cron.schedule(job_name text, schedule text, command text)
+returns bigint
+language plpgsql
+as $shim$
+declare
+  v_id bigint;
+begin
+  insert into cron.job (jobname, schedule, command)
+  values (job_name, schedule, command)
+  on conflict (jobname) do update
+    set schedule = excluded.schedule, command = excluded.command
+  returning jobid into v_id;
+  return v_id;
+end;
+$shim$;
+
+create or replace function cron.unschedule(job_name text)
+returns boolean
+language plpgsql
+as $shim$
+begin
+  delete from cron.job where jobname = job_name;
+  if not found then
+    -- pg_cron raises here rather than returning false; 0028 relies on that to
+    -- tell "was not scheduled" apart from a real failure.
+    raise exception 'could not find valid entry for job "%"', job_name;
+  end if;
+  return true;
+end;
+$shim$;
+
+-- pg_cron's own objects are postgres-owned and unreachable by the API roles.
+revoke all on schema cron from public;
+revoke all on all tables in schema cron from public;

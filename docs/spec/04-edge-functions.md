@@ -181,5 +181,55 @@ For each active schedule: generate `walks` rows for the next 14 days for matchin
 
 **Subscription state is an allow-list, not a deny-list (0026).** Walks are generated only for `subscription_status in ('active','none')`. It read `<> 'paused'`, which was the sole subscription predicate — so a client who had cancelled, or whose card had failed, kept having walks generated nightly that the operator performed and could not bill. An allow-list also fails *closed*: a value added to the enum later stops generating work until somebody decides what it means, rather than silently producing unbillable walks.
 
-`'none'` is deliberately included — that is a client who never subscribed, whom the operator may bill outside Sanpo. `past_due` is excluded by owner decision: service halts until payment clears. `fn_book_walk` carries the identical predicate, so client self-booking and nightly materialization cannot disagree. Idempotent via the `(schedule_id, scheduled_date)` unique index (`ON CONFLICT DO NOTHING`). Also invokes `fn_expire_credits()` daily (phase 08 wiring).
-Response: `{ created: n }`.
+`'none'` is deliberately included — that is a client who never subscribed, whom the operator may bill outside Sanpo. `past_due` is excluded by owner decision: service halts until payment clears. `fn_book_walk` carries the identical predicate, so client self-booking and nightly materialization cannot disagree. Idempotent via the `(schedule_id, scheduled_date)` unique index (`ON CONFLICT DO NOTHING`).
+Response: `{ created, expired_clients, expiry_error }`.
+
+### The schedule lives in a migration, not a dashboard (0028)
+
+`cron.schedule('sanpo-nightly', '0 3 * * *', 'select fn_run_nightly_jobs()')`.
+It was a hand-typed Supabase dashboard entry carrying a pasted service-role
+bearer header — in no migration, no workflow and no restorable form. Nothing
+asserted it existed, a project restore did not recreate it, and because the
+horizon is 14 days a stopped cron was invisible for a fortnight (review H15).
+
+**No credential is involved, and that is not a shortcut.** `fn_is_service_session()`
+accepts `session_user = 'postgres'`, and a pg_cron job runs as the role that
+scheduled it — postgres, since migrations are applied as postgres. So the job
+calls the SQL directly: no key, no Vault secret, no HTTP hop, no `pg_net`.
+This also fixes detection rather than working around it, because the dashboard
+cron marked a run "successful" once the HTTP call was **dispatched** — a 500
+from the function was indistinguishable from a good night, which is why the
+old runbook told you to go and read `net._http_response` by hand.
+
+The **edge function remains** as the manual path (Calendar → "Run
+materializer") and is what the staging smoke suite exercises. It calls the
+same `fn_run_nightly_jobs()`, so the two cannot drift.
+
+### The expiry sweep is advisory, not silent
+
+`fn_run_nightly_jobs` runs materialization first and lets it propagate: if
+walk generation is broken the run must fail loudly. The credit-expiry sweep is
+wrapped, so its failure does not cost the operator a calendar — but the error
+is **recorded and returned** as `expiry_error`, and the run is marked not-ok.
+
+The old code had this exactly backwards: `if (!sweep.error) expired = …` meant
+a permanently failing sweep read identically to a quiet night. Clients kept
+credits they had already been billed for and stopped paying overage — a
+revenue leak with no symptom anywhere.
+
+### Did it run?
+
+Every run writes a `job_runs` row (job name, start, finish, ok, detail,
+error). `fn_job_health(p_stale_after default 26 hours)` reports the last
+success per job and whether it is stale, and **fails closed**: a job that has
+never succeeded reads `stale = true`, not unknown, because a fresh or restored
+project is exactly the case the check exists to catch. `.github/workflows/job-health.yml`
+asks daily at 06:00 UTC and goes red otherwise.
+
+That workflow is a heartbeat check, not monitoring — one cron watching
+another, sharing their failure modes. Real alerting is review H14 and does not
+exist yet.
+
+`job_runs` is deliberately **not** a tenant table (invariant 7 does not apply):
+the materializer runs across every operator at once, so no `operator_id` would
+be true of a run. RLS on, no policies, no grants to `anon`/`authenticated`.

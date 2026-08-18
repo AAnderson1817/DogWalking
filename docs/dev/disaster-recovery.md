@@ -28,6 +28,7 @@ them means reconciling against Stripe by hand.
 | Migrations | Append-only, forward-only | — | Invariant 6. There are no down migrations, by design. |
 | Edge functions | Redeployable from git | — | Stateless; `supabase functions deploy` restores them. |
 | Edge secrets | GitHub environment secrets | — | Re-pushable via the deploy workflow's `sync_secrets`. |
+| Nightly job schedule | Migration `0028` | — | Was a hand-typed dashboard entry that no restore recreated (H15). `db push` now restores it, and `fn_job_health()` says whether it is running. |
 | Vault master key | **one copy** unless escrowed | — | See `vault-key-rotation.md`. A lost key is unrecoverable data. |
 
 The two rows that read **none** are the ones to fix first, and both are
@@ -125,14 +126,25 @@ item and not the last.
    deploy's `Verify the vault key opens this project` step is what tells you
    so before a client does.
 5. Redo the dashboard wiring that no file in this repository can set: the
-   `materialize-walks` cron, the `send-notification` database webhook, the
-   Realtime **"Allow public access"** toggle (issue #24), and the Stripe
-   webhook endpoint URL, which now points at the old project ref.
+   `send-notification` database webhook, the Realtime **"Allow public
+   access"** toggle (issue #24), and the Stripe webhook endpoint URL, which
+   now points at the old project ref.
+
+   The nightly cron is **no longer on this list** — step 2 restores it, because
+   migration `0028` owns the schedule. That is the point of moving it there:
+   this list used to include it, and it is a list whose every item fails
+   silently. If `db push` reports *"pg_cron is not installed"*, enable the
+   extension and re-run; the migration asserts rather than skipping, so it
+   cannot leave you with a project that deployed cleanly and schedules nothing.
 6. Re-point `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` in Vercel.
+7. Confirm the nightly job actually runs: `select * from fn_job_health();`
+   reads `stale = true` immediately after a rebuild and must read `false`
+   after the next 03:00 UTC. The `Nightly job health` workflow asks the same
+   question daily and goes red when the answer is wrong.
 
 Step 5 is the one that gets forgotten, and every item in it fails silently:
-walks stop materialising, emails stop sending, and the Realtime stream goes
-back to being world-readable.
+emails stop sending, and the Realtime stream goes back to being
+world-readable.
 
 ## 5. Storage divergence
 

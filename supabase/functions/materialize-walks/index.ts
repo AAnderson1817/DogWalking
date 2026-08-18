@@ -1,12 +1,25 @@
-// materialize-walks — scheduled (cron 03:00 UTC, supabase/config.toml) +
-// POST with an operator JWT for a manual run (spec 04). The generation
-// itself is fn_materialize_walks (0007): set-based, idempotent via the
-// (schedule_id, scheduled_date) unique index.
+// materialize-walks — the MANUAL path for the nightly work (spec 04).
+//
+// The schedule itself is no longer here: `cron.schedule('sanpo-nightly', …)`
+// in migration 0028 calls fn_run_nightly_jobs() directly, so it is version
+// controlled, recreated by any restore, and needs no credential (review H15).
+// This function stays for the interactive run — the Calendar screen's "Run
+// materializer" — and is what the staging smoke suite exercises.
+//
+// It calls the SAME entry point the cron does. Two implementations of "the
+// night's work" would drift, and the manual path is the one a human uses to
+// check whether the automatic path is healthy.
 import { isServiceAuth, jsonOk, requireOperator, serveFunction, HttpError } from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
 
+interface NightlyResult {
+  created: number;
+  expired_clients: number;
+  expiry_error: string | null;
+}
+
 serveFunction(async (req) => {
-  // Cron/scheduled invocations authenticate with the service-role key
+  // Scheduled/service invocations authenticate with the service-role key
   // (gateway-verified — verify_jwt stays on in config.toml); interactive
   // runs must be an operator.
   const isService = isServiceAuth(
@@ -18,16 +31,24 @@ serveFunction(async (req) => {
   }
 
   const db = adminClient();
-  const { data, error } = await db.rpc("fn_materialize_walks", {
-    p_horizon_days: 14,
-  });
+  const { data, error } = await db.rpc("fn_run_nightly_jobs", { p_horizon_days: 14 });
   if (error) throw new HttpError(500, "materialize_failed", "walk materialization failed");
 
-  // Daily rollover-lot expiry sweep rides on the same cron (spec 04 /
-  // phase 08 wiring). Advisory: a sweep failure must not block the walks.
-  let expired = 0;
-  const sweep = await db.rpc("fn_expire_credits");
-  if (!sweep.error) expired = (sweep.data as number) ?? 0;
+  const result = data as unknown as NightlyResult;
 
-  return jsonOk({ created: (data as number) ?? 0, expired_clients: expired });
+  // The expiry sweep is advisory — it must not block walk generation, since an
+  // operator with an empty calendar is a worse day than one whose rollover
+  // lots expire late. But it used to be SWALLOWED (`if (!sweep.error) …`), so
+  // a permanently failing sweep was byte-identical in the response to a quiet
+  // night: clients kept credits they had been billed for and stopped paying
+  // overage, with no symptom anywhere. It is now returned AND logged.
+  if (result?.expiry_error) {
+    console.error("credit expiry sweep failed:", result.expiry_error);
+  }
+
+  return jsonOk({
+    created: result?.created ?? 0,
+    expired_clients: result?.expired_clients ?? 0,
+    expiry_error: result?.expiry_error ?? null,
+  });
 });
