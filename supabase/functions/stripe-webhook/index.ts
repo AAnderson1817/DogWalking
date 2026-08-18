@@ -142,7 +142,9 @@ function makeDeps(): WebhookDeps {
       return Number(data);
     },
 
-    async applyInvoicePaid({ clientId, credits, invoiceId, amountPence, currency, receiptUrl }) {
+    async applyInvoicePaid(
+      { clientId, credits, invoiceId, amountPence, currency, receiptUrl, isRenewal },
+    ) {
       const { data, error } = await db.rpc("fn_apply_invoice_paid", {
         p_client: clientId,
         p_credits: credits,
@@ -150,6 +152,7 @@ function makeDeps(): WebhookDeps {
         p_amount_pence: amountPence,
         p_currency: currency,
         p_receipt_url: receiptUrl,
+        p_is_renewal: isRenewal,
       });
       if (error) throw new Error("invoice effects failed");
       return Boolean(data);

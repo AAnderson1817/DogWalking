@@ -185,6 +185,10 @@ Deno.test("invoice.paid (cycle) applies atomically and marks the claim processed
     amountPence: 9000,
     currency: "usd",
     receiptUrl: "https://stripe.test/inv",
+    // PAID_CYCLE carries billing_reason 'subscription_cycle', so this is a
+    // renewal and rollover runs. A first invoice would be false — see
+    // "a first invoice is NOT a renewal".
+    isRenewal: true,
   });
   const order = calls.map((c) => c.fn);
   assert(order.indexOf("applyInvoicePaid") < order.indexOf("markProcessed"),
@@ -417,7 +421,11 @@ Deno.test("subscription.deleted for the current sub cancels", async () => {
   );
   assertEquals(result.status, "processed");
   const update = calls.find((c) => c.fn === "updateClient")!;
-  assertEquals(update.args[1], { subscription_status: "cancelled" });
+  assertEquals(update.args[1], {
+    subscription_status: "cancelled",
+    stripe_subscription_id: null,
+    current_period_end: null,
+  });
 });
 
 Deno.test("subscription status mapping", () => {
@@ -742,4 +750,85 @@ Deno.test("charges_enabled going false is mirrored, not just the happy path", as
     (upd!.args[1] as { stripe_charges_enabled: boolean }).stripe_charges_enabled,
     false,
   );
+});
+
+// ── Subscription correctness (review H9/H10 + revalidation finds) ──────────
+
+Deno.test("invoice.paid for a DIFFERENT subscription than the client's is ignored", async () => {
+  // A customer can carry more than one live subscription, and their invoices
+  // have different ids — so uq_payments_subscription_invoice does not catch
+  // it and the client is charged twice and granted two cycles. Both sibling
+  // subscription arms scoped this; invoice.paid did not.
+  const { deps, calls } = makeMockDeps({ subId: "sub_1" });
+  const res = await handleStripeEvent(
+    event("invoice.paid", { ...PAID_CYCLE, subscription: "sub_ROGUE" }),
+    deps,
+  );
+  assertEquals(res.status, "ignored");
+  assertFalse(
+    calls.some((c) => c.fn === "applyInvoicePaid"),
+    "a second subscription must not grant a cycle",
+  );
+});
+
+Deno.test("invoice.paid for an UNBOUND client is still applied", async () => {
+  // checkout.session.completed and invoice.paid race. Refusing here would drop
+  // the first cycle of every new subscription.
+  const { deps, calls } = makeMockDeps({ subId: null });
+  const res = await handleStripeEvent(event("invoice.paid", { ...PAID_CYCLE }), deps);
+  assertEquals(res.status, "processed");
+  assert(calls.some((c) => c.fn === "applyInvoicePaid"));
+});
+
+Deno.test("a first invoice is NOT a renewal — rollover must not run", async () => {
+  // On rollover 'none', fn_apply_rollover expires the whole balance. Running
+  // it on subscription_create destroys credit granted before billing started.
+  const { deps, calls } = makeMockDeps();
+  await handleStripeEvent(
+    event("invoice.paid", { ...PAID_CYCLE, billing_reason: "subscription_create" }),
+    deps,
+  );
+  const applied = calls.find((c) => c.fn === "applyInvoicePaid");
+  assertEquals((applied!.args[0] as { isRenewal: boolean }).isRenewal, false);
+});
+
+Deno.test("a renewal IS a renewal — rollover runs", async () => {
+  const { deps, calls } = makeMockDeps();
+  await handleStripeEvent(
+    event("invoice.paid", { ...PAID_CYCLE, billing_reason: "subscription_cycle" }),
+    deps,
+  );
+  const applied = calls.find((c) => c.fn === "applyInvoicePaid");
+  assertEquals((applied!.args[0] as { isRenewal: boolean }).isRenewal, true);
+});
+
+Deno.test("cancelling clears the subscription binding, not just the status", async () => {
+  // Leaving stripe_subscription_id set means change-plan still takes the
+  // Stripe path on a dead subscription — after committing a pending intent.
+  // current_period_end goes too, or Money prints a renewal date for a
+  // subscription that will never renew.
+  const { deps, calls } = makeMockDeps({ subId: "sub_1" });
+  await handleStripeEvent(
+    event("customer.subscription.deleted", { id: "sub_1", customer: "cus_1" }),
+    deps,
+  );
+  const upd = calls.find((c) => c.fn === "updateClient");
+  assertEquals(upd!.args[1], {
+    subscription_status: "cancelled",
+    stripe_subscription_id: null,
+    current_period_end: null,
+  });
+});
+
+Deno.test("cancelling tells the operator — walks stop, and they must know why", async () => {
+  const { deps, calls } = makeMockDeps({ subId: "sub_1" });
+  await handleStripeEvent(
+    event("customer.subscription.deleted", { id: "sub_1", customer: "cus_1" }),
+    deps,
+  );
+  const note = calls.find((c) => c.fn === "insertNotification");
+  assert(note, "no notification raised");
+  const row = note.args[0] as { type: string; client_id: string | null };
+  assertEquals(row.type, "subscription_cancelled");
+  assertEquals(row.client_id, null, "this is the operator's problem, not the client's");
 });

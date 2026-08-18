@@ -340,7 +340,14 @@ function PlanTab({
   }, [load]);
 
   const plan = plans.find((p) => p.id === client.plan_id) ?? null;
-  const subscribed = client.subscription_status === "active" || client.subscription_status === "paused";
+  // past_due counts as subscribed. It was excluded, which meant a client whose
+  // card had merely failed was offered "Launch Stripe checkout" — starting a
+  // SECOND live subscription on the same customer, two invoice.paid events
+  // with different invoice ids, and two cycle grants. The subscription still
+  // exists; it is the payment that failed.
+  const subscribed = client.subscription_status === "active"
+    || client.subscription_status === "paused"
+    || client.subscription_status === "past_due";
   const subscriptionTreatment = subscriptionStatusTreatment(client.subscription_status);
 
   async function submitAdjust(e: FormEvent) {
