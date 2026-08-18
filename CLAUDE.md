@@ -85,6 +85,30 @@ accidental churn; it does not freeze the files. When an asset changes on
 purpose, update its hash in `app/scripts/verify-sanpo-assets.mjs` in the
 same commit and say why in the message.
 
+### Commits and attribution
+
+Commits are authored **`AAnderson1817 <andyanderson1818@gmail.com>`** and carry
+a `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>` trailer. The owner
+owns the repository and the contribution history; Claude is the co-author, and
+the trailer is where that is recorded.
+
+This was wrong until now: the author was `Claude <noreply@anthropic.com>`,
+which is not a GitHub account and therefore credits nobody. Squash merging
+hid the problem, because GitHub re-authors the squashed commit to the pull
+request's author — so `main` looked correct while every commit on every
+working branch was uncredited.
+
+**Merge with rebase, not squash.** Squash collapses a branch to one commit and
+throws the rest away: the per-commit reasoning survives only in the pull
+request, and a PR that took four commits to get right reads on `main` as
+though it arrived whole. Rebase lands each commit individually, keeps the
+history linear, and — now that authorship is right — credits each one.
+
+Squash is still correct for one case: a branch whose intermediate commits are
+noise rather than reasoning (a fix-up, a typo, a "wire it up" that only makes
+sense with the commit after it). Judge by whether a reader a year from now
+would want the steps or the summary.
+
 ### How work reaches `main`
 
 `main` is a deploy trigger, not just a branch: `deploy-staging.yml` fires on
