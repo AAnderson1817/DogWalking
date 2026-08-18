@@ -31,7 +31,7 @@
    role x surface matrix from these files on every run, so the numbers above
    are checked rather than believed.
 
-   Defined in terms of `var(--role)` rather than as literals so the
+   Defined in terms of each role's own variable rather than as literals so the
    `prefers-contrast: more` overrides in the vendor file carry through: when
    text-secondary becomes Indigo there, its on-tint variant becomes darkened
    Indigo rather than a stale blue-grey. */
@@ -937,7 +937,11 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
 
 /* ── Approved Indigo Emaki Today composition ─────────────────────────── */
 .page.today-emaki-page {
-  max-width: 640px;
+  /* How much vertical room the field actually has. The bottom bar takes 72px
+     from it; the ≥1024px left rail takes none, and reserving for it anyway is
+     72px of the composition given away for nothing. */
+  --today-nav-reserve: calc(72px + env(safe-area-inset-bottom, 0px));
+  --page-max: 640px;
   /* No `overflow: hidden` — that clipped the schedule to the artwork box with
      no scrollbar to recover it (review B8). Padding stays 0 here: the nav
      clearance `.page` normally provides is applied to whichever section is
@@ -945,6 +949,44 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
      rather than a strip of a different cream (review M22).  */
   padding: 0;
   background: var(--sanpo-color-brand-cream);
+}
+
+/* Review H27: Today broke at both viewports spec 07 names for testing.
+   At 1440x900 the field was 640x1387, so the current visit straddled the fold,
+   `END WALK` was cut in half at 853-914 and the next visit sat entirely
+   off-screen at 935-1035. At 768x1024 the last row ran to 1035 against a nav
+   whose top edge is 967, so the third visit was behind the bar at first paint.
+
+   The plate is 875x1798. Pinned to a 640px field it is 1315px tall, which is
+   taller than a laptop viewport before the schedule has started — so on the
+   two form factors where an operator actually schedules and bills, the screen
+   opened on artwork and hid the work.
+
+   The fix spends horizontal slack to buy vertical fit. Every dimension in this
+   composition is `cqw` against the field, so narrowing the field scales the
+   whole thing proportionally: the approved composition is preserved exactly,
+   at a smaller size, rather than being re-laid-out. Nothing here reflows, and
+   a phone is untouched — below 768px there is no slack to spend, and scrolling
+   the field is what the phone was designed to do.
+
+   The 420px floor is where that proportionality stops being true: the type is
+   `clamp()`ed and the floors engage around there (h1 at 28px / 6.15cqw = 455px,
+   rows at 11px / 2.15cqw = 512px), so below it the text stops shrinking with
+   the artwork and begins to look oversized against it. Where the floor binds,
+   the page scrolls again — a short viewport genuinely cannot hold this
+   composition, and pretending otherwise by shrinking further would trade one
+   visible defect for a subtler one. */
+@media (min-width: 768px) {
+  .page.today-emaki-page {
+    --page-max: clamp(
+      420px,
+      calc((100dvh - var(--today-nav-reserve)) * 875 / 1798),
+      640px
+    );
+  }
+}
+@media (min-width: 1024px) {
+  .page.today-emaki-page { --today-nav-reserve: 0px; }
 }
 .today-emaki {
   position: relative;
@@ -973,8 +1015,8 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   width: 100%;
-  min-height: calc(100dvh - 72px - env(safe-area-inset-bottom, 0px));
-  padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+  min-height: calc(100dvh - var(--today-nav-reserve));
+  padding-bottom: var(--today-nav-reserve);
   /* The field IS the screen, and the operator nav floats on it. Where the
      field is taller than the illustration — a tall viewport, or a long day —
      the illustration's own paper continues beneath it, so there is no seam
@@ -2192,7 +2234,9 @@ body:has(.today-emaki-page) .bottom-nav[data-navigation-persona="operator"] {
     height: 24px;
     transform: translateY(-50%);
   }
-  body:has(.bottom-nav--rail) .page { margin-left: calc(88px + (100% - 88px - 640px) / 2); }
+  body:has(.bottom-nav--rail) .page {
+    margin-left: calc(88px + (100% - 88px - min(var(--page-max, 640px), 100% - 88px)) / 2);
+  }
 }
 
 

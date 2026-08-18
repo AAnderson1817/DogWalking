@@ -288,6 +288,43 @@ The locked fixture order is Juniper (complete), Mochi (current), and Luna
 (upcoming). The responsive contract and test protocol live in
 `docs/spec/07-indigo-emaki-visual-migration.md`.
 
+### Where Today is allowed to differ, and why
+
+Review **H29** measured Today against the rest of the product and found two
+different design systems: `h1` at 28/900/−0.035em against 24/800/normal
+everywhere else, a 999px uppercase pill against an 8px sentence-case `.btn`, a
+type scale entirely in `clamp(…cqw…)` touching no `--fs-*` token, and a cream
+that renders at `#EEE2D4` against a `--sanpo-color-brand-cream` of `#FEF6EA`.
+The observation is correct. What follows is the decision about it, so that it
+stops reading as drift.
+
+**Today is an illustrated surface and the only one.** Its dimensions are
+container-relative because they are registered to a painting: the schedule
+begins where the painted field opens up, and since H27 the field's own width
+varies with the viewport height, so a fixed `--fs-*` step would break
+registration at every size but one. The pill and the display heading belong to
+that surface for the same reason. These are permitted divergences:
+
+| Divergence | Scope |
+| --- | --- |
+| `clamp(…cqw…)` type | Inside `.today-emaki` only |
+| Display heading (28–46px, 900, −0.035em) | The Today `h1` only |
+| 999px uppercase pill | `.today-emaki-current-action` only |
+| Warmer paper (`--emaki-paper`) | The field; Cream remains the mount around it |
+| On-artwork state colours | `--emaki-current` / `--emaki-complete`, see above |
+
+Everything else on Today — the colour roles, the contrast floors, the focus
+ring, the icon set, the navigation — comes from this document, and the CI
+checks that enforce those apply to Today identically.
+
+**What is NOT decided here** is the larger question H29 raises: whether the
+product should move *toward* the illustrated surface — a paper ground on
+`body`, a display step in the shared scale, one button radius. That would
+change every screen, and `CLAUDE.md` is explicit that changing the design
+system is a deliberate act recorded in a commit rather than a drive-by edit.
+It is real work with a real payoff for the premium positioning the artwork was
+bought to create, and it is not remediation. It stays open.
+
 ## Accessibility contract
 
 These are product rules, not review notes: a change that breaks one of them is
