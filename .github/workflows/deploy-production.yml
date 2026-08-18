@@ -119,9 +119,15 @@ jobs:
           PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
           SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
+          # Hard failure, not a warning. On the first staging run of this step
+          # the secret was unset, so it printed a warning and passed — a green
+          # deploy that verified nothing, indistinguishable from a verified one
+          # unless somebody reads the annotations. That is the same false
+          # assurance as the typecheck that checked zero files. In production
+          # an unverifiable vault key is not a nice-to-have: refuse.
           if [ -z "$SERVICE_KEY" ]; then
-            echo "::warning title=Vault key not verified::SUPABASE_SERVICE_ROLE_KEY is not set for this environment, so the deployed vault key was not checked against the canary. See docs/dev/vault-key-rotation.md."
-            exit 0
+            echo "::error title=Cannot verify the vault key::SUPABASE_SERVICE_ROLE_KEY is not set for the production environment, so there is no way to confirm VAULT_MASTER_KEY opens this project's credentials. Add it under Settings -> Environments -> production (Supabase dashboard -> Settings -> API -> service_role). See docs/dev/vault-key-rotation.md."
+            exit 1
           fi
           body=$(curl -sS --fail-with-body -X POST \
             "https://$PROJECT_REF.supabase.co/functions/v1/vault-rekey" \

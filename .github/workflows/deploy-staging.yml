@@ -148,8 +148,15 @@ jobs:
           PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
           SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
+          # A warning here and a hard failure in deploy-production.yml, on
+          # purpose. This step's first real run (5193e69) found the secret
+          # unset and passed, verifying nothing — so on staging it is currently
+          # decoration, and issue #31 tracks setting the secret. Staging stays
+          # non-fatal because blocking every deploy on a secret only the owner
+          # can add would be worse than the gap; production does not get that
+          # latitude, because there the gap reaches a real door code.
           if [ -z "$SERVICE_KEY" ]; then
-            echo "::warning title=Vault key not verified::SUPABASE_SERVICE_ROLE_KEY is not set for this environment, so the deployed vault key was not checked against the canary. See docs/dev/vault-key-rotation.md."
+            echo "::warning title=Vault key NOT verified::SUPABASE_SERVICE_ROLE_KEY is not set for the staging environment, so the deployed vault key was not checked against the canary and this deploy proves nothing about it. Add it under Settings -> Environments -> staging (Supabase dashboard -> Settings -> API -> service_role). See docs/dev/vault-key-rotation.md and issue #31."
             exit 0
           fi
           body=$(curl -sS --fail-with-body -X POST \

@@ -76,6 +76,7 @@ Staging stays exactly as it is — it remains your test bed. Production is a
    | `SUPABASE_ACCESS_TOKEN` | same personal token as staging (account-level) |
    | `SUPABASE_PROJECT_REF` | the **prod** project ref (step 2) |
    | `SUPABASE_DB_PASSWORD` | the **prod** DB password |
+   | `SUPABASE_SERVICE_ROLE_KEY` | the **prod** service_role key (Settings → API). **Required** — the production deploy refuses to run without it, because it is the only way to confirm `VAULT_MASTER_KEY` actually opens this project's door codes. |
    | `STRIPE_SECRET_KEY` | **live** key `sk_live_…` (step 4) |
    | `STRIPE_WEBHOOK_SECRET` | **live** `whsec_…` (step 4) |
    | `VAULT_MASTER_KEY` | the fresh key from step 2 |
