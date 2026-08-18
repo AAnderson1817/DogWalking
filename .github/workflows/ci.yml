@@ -1,8 +1,24 @@
 name: CI
 
 on:
+  # `push` is scoped to main. Previously it was unscoped, so every commit on a
+  # branch with an open PR ran the ENTIRE suite twice on identical code —
+  # double the runner minutes for zero extra coverage, and double the exposure
+  # to a wedged runner. main still needs its push run: deploy-staging.yml gates
+  # on `workflow_run` for branches: [main] and would otherwise never fire.
   push:
+    branches: [main]
   pull_request:
+
+# A superseded run cannot outlive the commit it was testing. Without this, a
+# job stuck on a network step leaves a permanently in-progress check that
+# nothing in this repository can clear — the token 403s on Actions writes, and
+# GitHub's own job timeout is six hours. Deliberately NOT applied to the deploy
+# workflows: cancelling a `db push` halfway is how an environment ends up in a
+# state nobody can describe.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -141,6 +157,11 @@ jobs:
   e2e-today:
     name: E2E — Today composition
     runs-on: ubuntu-latest
+    # Fail fast rather than hang. This job wedged on the Chromium download
+    # three times in one evening; at GitHub's default six-hour timeout each
+    # stall blocked a merge, and one of them blocked the staging deploy,
+    # because the deploy gate waits on this workflow completing.
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
 
@@ -152,6 +173,22 @@ jobs:
 
       - name: Install
         run: npm ci --prefix app
+
+      # Cache the browser: the download is the step that actually stalls, and
+      # it is pure network. Keyed on the resolved Playwright version so a
+      # dependency bump fetches a fresh browser instead of reusing a mismatched
+      # one — the version skew that already needs a local escape hatch in
+      # playwright.config.mjs.
+      - name: Resolve the Playwright version
+        id: pw
+        working-directory: app
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0 (node24; SHA resolved via git ls-remote this session)
+        id: pw-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
 
       - name: Install Chromium
         working-directory: app
