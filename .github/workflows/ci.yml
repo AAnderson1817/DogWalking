@@ -502,6 +502,20 @@ jobs:
           fi
           echo "PASS: types.ts matches the migrated schema"
 
+      # Spec 03 presents its definer catalogue as the complete grant-audit
+      # checklist. Hand-maintained, it listed 11 of 48 (review H21) — an
+      # engineer checking their grants against it had no idea 37 peers
+      # existed. Generated now, so the same rot fails the build instead.
+      - name: Spec 03's definer catalogue matches the migrations
+        run: |
+          python3 scripts/gen-definer-catalog.py
+          if ! git diff --exit-code -- docs/spec/03-security-model.md; then
+            echo "FAIL: docs/spec/03-security-model.md is stale — run"
+            echo "python3 scripts/gen-definer-catalog.py and commit the result."
+            exit 1
+          fi
+          echo "PASS: the definer catalogue matches the migrations"
+
   # CLAUDE.md invariant 6 says migrations are append-only once applied. That
   # rule has been enforced only by a local PreToolUse hook and by whoever is
   # paying attention — nothing a reviewer or CI could see. An edit to an

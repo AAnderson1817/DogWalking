@@ -128,7 +128,33 @@ charges when a requirement comes due, and mirroring only the enabling
 direction would leave an operator taking payments Stripe was already
 rejecting.
 
-Verify `stripe-signature` with `STRIPE_WEBHOOK_SECRET`. Idempotency: `INSERT INTO stripe_events … ON CONFLICT (id) DO NOTHING`; if conflict → 200 immediately.
+Verify `stripe-signature` with `STRIPE_WEBHOOK_SECRET`.
+
+**Idempotency is a stateful claim ledger, not `ON CONFLICT DO NOTHING` (0013).**
+This spec described the latter until the H21 reconciliation, and the difference
+is the whole correctness argument: insert-and-ignore marks an event handled
+*before* it is handled, so a handler that then fails leaves the event
+permanently claimed and never processed — Stripe's redelivery is refused by the
+very row that recorded the failure, and a cycle grant is silently lost.
+
+`stripe_events` therefore carries state and its rows are never deleted:
+
+- `claimEvent` inserts `status='processing'` and returns `claimed`,
+  `duplicate` (already `processed` — ack with 200), or `in_flight` (another
+  attempt holds a live claim).
+- `markProcessed` flips the row only after every effect has succeeded.
+- `in_flight` returns **409, not 200** — Stripe keeps retrying. Acking while
+  the claimant could still fail is exactly how grants got lost.
+- A claim stuck in `processing` past its **lease** is taken over by the next
+  retry. That, not a release-on-failure, is what makes a crashed handler
+  recoverable: a process that dies cannot run its own cleanup, so recovery
+  cannot depend on it doing so.
+
+`qc(1–4)` first added a release-on-failure; `rereview(money)` replaced it with
+the lease, closing the race where two deliveries both saw an unclaimed row.
+
+Setting `payment_status` to `refunded` interacts with this — see *Status sets*
+below, and spec 02 on why `uq_payments_subscription_invoice` had to widen.
 - `checkout.session.completed`: bind `stripe_subscription_id`, `subscription_status='active'`, `plan_id` from metadata.
 - `invoice.paid` (subscription): **scoped to the client's bound subscription** — an invoice for any other subscription on the same customer is ignored, exactly as the two `customer.subscription.*` arms already did. A customer can carry more than one live subscription and their invoices have *different* ids, so `uq_payments_subscription_invoice` does not catch it: the result was two cycle grants and two rollovers. An *unbound* client is still applied, because `checkout.session.completed` and `invoice.paid` race and refusing would drop the first cycle of every new subscription. `create-checkout` now also refuses to start a second subscription for a client who has one.
 
@@ -371,9 +397,69 @@ read-only on the portal home as *Entry code activity*, showing no IP or user
 agent — those describe the operator's device, and a client does not need their
 walker's IP to know their door was opened.
 
-## change-plan — POST, operator JWT (built in phase 07)
-Body: `{ client_id, new_plan_id }` → Stripe: update subscription item to new price, `proration_behavior='create_prorations'` → compute `remaining_fraction` from current period bounds → `fn_change_plan(client, new_plan, fraction)`.
-Response: `{ new_balance, plan }`.
+## billing-portal — POST, client JWT (phase 07)
+Body: none. Returns `{ url }` — a Stripe customer-portal session for
+payment-method, pause and cancel self-service.
+
+Resolves the client from `auth_user_id`, then creates the session **on the
+operator's connected account**: the Stripe customer lives there (review B5), so
+a session created on the platform account 404s on a customer id that looks
+perfectly valid.
+
+Uses `accountOf`, deliberately **not** `requireAccount`. This path does not take
+money, and blocking a client from updating a card or cancelling because Stripe
+has charges paused on their walker would strand them with a subscription they
+cannot stop. A client with no `stripe_customer_id` gets `409 no_billing`.
+
+## vault-rekey — POST, service-role only (review B2)
+Body: `{ action: 'verify'|'status'|'rekey', batch? }`. **Never returns a
+plaintext or any key material**; the only secrets it touches are in memory for
+the length of one re-encryption.
+
+A separate function from credential-vault on purpose: that one is the
+operator-facing path and requires an operator JWT plus a fresh password
+re-auth on every action. These are machine paths called by CI with the
+service-role key, and adding a non-operator auth path to the most sensitive
+function in the product to save a directory would be a bad trade.
+
+- `verify` — can the deployed key read this project's data? Decrypts the
+  `vault_canary`, installing one if there is none. **This is the deploy gate**:
+  a wrong key fails here rather than at a client's front door.
+- `status` — `fn_vault_census`, for the rotation report. Four numbers, not one,
+  because `on_other = 0` is also true when nothing is visible.
+- `rekey` — re-encrypt one batch onto the current key via
+  `fn_vault_rewrap_batch` → `fn_vault_rewrap_apply` (a compare-and-swap on the
+  exact ciphertext read). Idempotent and resumable; the work queue is the data,
+  so run it until nothing is left. Runbook: `docs/dev/vault-key-rotation.md`.
+
+## change-plan — POST, operator JWT (built in phase 07; durable since 0015)
+Body: `{ client_id, new_plan_id }` → Stripe: update the subscription item to the
+new price with `proration_behavior='create_prorations'`.
+
+**The local effect is applied by the webhook, not by this function (0015).**
+This spec described the direct `fn_change_plan` call until the H21
+reconciliation; that design moves the Stripe subscription and then applies the
+credit side in the same request, so a failure between the two leaves Stripe on
+the new plan and Sanpo's database on the old one — a client billed at one rate
+and credited at another, with nothing to reconcile from.
+
+The order is therefore intent-first:
+
+1. `fn_record_plan_change_intent` writes a `pending` row in
+   `plan_change_intents` carrying `remaining_fraction` (computed from the
+   current period bounds) and a `stripe_update_idempotency_key`, **before**
+   Stripe is touched. `0018` enforces at most one pending intent per client, so
+   a double-submit cannot queue two conflicting changes.
+2. The Stripe update is sent under that idempotency key, so a retried request
+   cannot move the subscription twice.
+3. `customer.subscription.updated` arrives and calls
+   `fn_apply_plan_change_intent(intent, event_id)`, which applies
+   `fn_change_plan` and flips the intent to `applied`. `stripe_event_id` is
+   `unique`, so a redelivered event applies the proration exactly once.
+
+Response: `{ new_balance, plan }` reflects the intent as recorded; the durable
+plan change lands when the webhook does. `plan_change_intents` is service-role
+only — `revoke all … from public, anon, authenticated`.
 
 ## materialize-walks — scheduled (cron, phase 06) + POST operator JWT for manual run
 For each active schedule: generate `walks` rows for the next 14 days for matching `days_of_week`, skipping dates inside pause windows, client `status='paused'`/`'archived'`, and dates < `start_date` / > `end_date`.

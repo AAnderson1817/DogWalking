@@ -147,6 +147,11 @@ So:
   deploy, destructive or irreversible operations against live data, spending
   money, and anything that leaves the repository and reaches real users. A
   staging deploy is not one of these; it is what every merge already does.
+- **`docs/dev/owner-actions.md` is the one list of things no file here can do**
+  — dashboard settings, secrets only the owner holds, spending decisions. When
+  a PR creates one, add it there in the same commit rather than only in the
+  status log below; when one is done, delete it. Several of them are gaps the
+  rest of the system currently papers over, and the log is not a to-do list.
 
 ## Phase status
 - [x] 00 foundations-and-database
@@ -161,8 +166,10 @@ So:
 - [x] 09 v2 "Biscuit" reskin (no phase file — since superseded by the Sanpo Indigo Emaki rebrand)
 
 v1 is feature-complete. Everything below `phase(09)` in the log is post-v1:
-hardening, ops, and brand. Migrations run through `0019`; there are 11 edge
-functions.
+hardening, ops, and brand. Migrations run through `0030`; there are 12 edge
+functions. (Both numbers were stale — review H21. If you change either, change
+them here too; nothing enforces these two counts, unlike the definer catalogue
+in spec 03, which CI regenerates and diffs.)
 
 ## Status log
 - phase(00): schema + credit engine + RLS + seed + smoke all green on the no-Docker local stack (scripts/db-reset.sh; docs/dev/local-stack.md). Ledger chain ordered by seq (documented in 0002); pre-commit adversarial review caught and fixed a TOCTOU in fn_expire_credits.
