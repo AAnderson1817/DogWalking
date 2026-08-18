@@ -91,6 +91,38 @@ jobs:
           fi
           echo "PASS: the build gate refuses an unconfigured production build"
 
+      # A test file that matches no vitest project runs NOWHERE, silently, and
+      # counts as coverage to anyone reading the file list. Found by writing
+      # `src/lib/reauth-sheet.test.tsx` (review M2): `node` includes
+      # `src/lib/**/*.test.ts` and `dom` covered only components/screens/hooks,
+      # so a .tsx under lib/ was claimed by neither and vitest simply reported
+      # "No test files found" for the filter. The existing check asserts the
+      # dom project matched SOMETHING; this asserts nothing is orphaned.
+      - name: Every test file is claimed by a vitest project
+        working-directory: app
+        run: |
+          python3 - <<'PY'
+          import json, subprocess, sys, pathlib
+          out = subprocess.run(
+              ["npx", "vitest", "list", "--filesOnly", "--json"],
+              capture_output=True, text=True, check=True).stdout
+          # `vitest list --json` emits {file, projectName} objects, not paths.
+          # The first draft treated them as strings and crashed — which is the
+          # only reason this check was run before being committed.
+          claimed = {pathlib.Path(e["file"]).resolve() for e in json.loads(out)}
+          root = pathlib.Path(".").resolve()
+          on_disk = {
+              p.resolve() for d in ("src", "scripts")
+              for p in pathlib.Path(d).rglob("*.test.ts*")
+          }
+          orphans = sorted(str(p.relative_to(root)) for p in on_disk - claimed)
+          if orphans:
+              for o in orphans:
+                  print(f"::error file=app/{o}::matches no vitest project, so it never runs")
+              sys.exit(1)
+          print(f"PASS: all {len(on_disk)} test files are claimed by a project")
+          PY
+
       # The deployed frontend had NO security headers at all: vercel.json was a
       # single rewrites array (review M30). The session token lives in
       # localStorage, so one XSS in the dependency tree read it and then every

@@ -717,6 +717,61 @@ begin
   raise notice 'settled failures superseded (0034): OK';
 end $$;
 
+-- ═══ fn_account_has_password is not an oracle (0035, review M2) ═══════════
+do $$
+declare
+  v_op1 uuid := '99999999-0000-4000-a000-000000000001';
+  v_op2 uuid := '99999999-0000-4000-a000-000000000002';
+begin
+  reset session authorization;
+
+  -- Service role may ask about anyone: the vault edge function needs it for
+  -- the caller, and it runs as service_role with no auth.uid().
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  perform fn_account_has_password(v_op1);
+
+  -- A signed-in user may ask about THEMSELVES.
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op1)::text, true);
+  set local session authorization authenticated;
+  perform fn_account_has_password(v_op1);
+
+  -- ...and about nobody else. Without this the function is an account oracle:
+  -- any operator could probe an arbitrary uuid for whether an account exists
+  -- and how it signs in, which is precisely the property GoTrue protects by
+  -- returning the same error for "wrong password" and "no password".
+  begin
+    perform fn_account_has_password(v_op2);
+    raise exception 'FAIL: fn_account_has_password answered about another account';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%only ask about your own account%' then
+      raise exception 'FAIL: cross-account probe rejected for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  reset session authorization;
+
+  -- And it reports the truth in both directions.
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  update auth.users set encrypted_password = null where id = v_op1;
+  if fn_account_has_password(v_op1) then
+    raise exception 'FAIL: a passwordless account reported a password';
+  end if;
+  update auth.users set encrypted_password = '$2a$10$fake' where id = v_op1;
+  if not fn_account_has_password(v_op1) then
+    raise exception 'FAIL: an account with a password reported none';
+  end if;
+  -- An empty string is not a password either; GoTrue leaves '' behind in some
+  -- flows, and treating it as set would put the operator right back in the
+  -- loop this migration exists to break.
+  update auth.users set encrypted_password = '' where id = v_op1;
+  if fn_account_has_password(v_op1) then
+    raise exception 'FAIL: an empty encrypted_password reported as set';
+  end if;
+
+  raise notice 'fn_account_has_password (0035): OK';
+end $$;
+
 -- ═══ Extra guards: claim invite + client partial-column updates ═══════════
 do $$
 declare

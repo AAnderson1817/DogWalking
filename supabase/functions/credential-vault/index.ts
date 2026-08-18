@@ -109,6 +109,16 @@ function makeDeps(
       return Boolean(data);
     },
 
+    async accountHasPassword(userId) {
+      const { data, error } = await db.rpc("fn_account_has_password", { p_user: userId });
+      if (error) {
+        throw new HttpError(500, "db_error", "could not check the account", error, {
+          auth_user_id: userId,
+        });
+      }
+      return data === true;
+    },
+
     async verifyPassword(email, password) {
       // Fresh re-auth check against GoTrue with the anon key; the session is
       // discarded — only the boolean outcome is used.

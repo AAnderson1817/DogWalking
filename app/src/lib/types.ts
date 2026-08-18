@@ -979,6 +979,12 @@ export type Database = {
       };
     };
     Functions: {
+      fn_account_has_password: {
+        Args: {
+          p_user: string;
+        };
+        Returns: boolean;
+      };
       fn_adjust_credits: {
         Args: {
           p_client: string;
