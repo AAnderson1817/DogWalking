@@ -20,6 +20,7 @@ import {
 import {
   completeWalk,
   getWalk,
+  insertWalkPhoto,
   listWalkGpsPoints,
   listWalkPets,
   listWalkPhotos,
@@ -39,7 +40,11 @@ import {
   clearWalkSnapshot,
   isNetworkError,
   loadWalkSnapshot,
+  mergeResumedPhotos,
+  readWalkProgress,
+  resumeNotes,
   saveWalkSnapshot,
+  shouldPersistProgress,
 } from "@/lib/walk-snapshot";
 import type { Pets, Walks } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
@@ -68,6 +73,11 @@ function WalkModeInner({ walkId }: { walkId: string }) {
   const [reportPhotoUrls, setReportPhotoUrls] = useState<string[]>([]);
   const [offlineResumed, setOfflineResumed] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  // Until the initial load has put photos/toggles/notes back, the snapshot
+  // writer below must not run — it would persist this component's empty
+  // starting state over the very record it is about to read. State rather than
+  // a ref so setting it re-runs that effect.
+  const [hydrated, setHydrated] = useState(false);
 
   const active = walk?.status === "in_progress" && !result;
   const geo = useGeolocation(active ?? false);
@@ -88,9 +98,13 @@ function WalkModeInner({ walkId }: { walkId: string }) {
         // walked before the reload (especially after an offline stretch, when
         // most of the trail is still in the outbox, not the DB yet).
         if (w.status === "in_progress") {
-          const [saved, queued] = await Promise.all([
+          const [saved, queued, photos] = await Promise.all([
             listWalkGpsPoints(walkId),
             pendingPoints(),
+            // Photos are durable from the moment they upload (review H8), so
+            // the server is the primary source here — this survives a reload
+            // on a different device, which localStorage cannot.
+            listWalkPhotos(walkId).catch(() => []),
           ]);
           const seen = new Set<string>();
           const merged: Array<{ lat: number; lng: number }> = [];
@@ -102,6 +116,21 @@ function WalkModeInner({ walkId }: { walkId: string }) {
             }
           }
           setResumedPoints(merged);
+
+          // Care toggles and notes have no column until completion, so the
+          // local snapshot is the only place they exist. Photos union the two:
+          // a photo uploaded while offline reached Storage but its row insert
+          // did not, and dropping it would strand the file in the bucket.
+          const progress = readWalkProgress(loadWalkSnapshot(walkId));
+          const paths = mergeResumedPhotos(photos.map((p) => p.storage_path), progress.photo_paths);
+          setToggles(progress.toggles);
+          setNotes(resumeNotes(progress.notes, w.notes));
+          setPhotoPaths(paths);
+          if (paths.length > 0) {
+            setPhotoPreviews(
+              await Promise.all(paths.map((p) => signedPhotoUrl(p).catch(() => ""))),
+            );
+          }
         }
         // Re-entering a completed walk: show its report.
         if (w.status === "completed") {
@@ -120,6 +149,7 @@ function WalkModeInner({ walkId }: { walkId: string }) {
           });
           setStaticPoints(points.map((p) => ({ lat: p.lat, lng: p.lng })));
         }
+        setHydrated(true);
       })
       .catch((e: unknown) => {
         // Offline mid-walk reload: the SW keeps REST network-only, so getWalk
@@ -127,8 +157,16 @@ function WalkModeInner({ walkId }: { walkId: string }) {
         // dead-ending (which would stop GPS for the rest of the walk).
         const snap = loadWalkSnapshot(walkId);
         if (snap && isNetworkError(e)) {
+          const progress = readWalkProgress(snap);
           setWalk(snap as unknown as Walks);
           setOfflineResumed(true);
+          // No server to ask, so the snapshot is everything. Photo previews
+          // stay empty — signing a URL needs the network too — but the paths
+          // are carried, so completing the walk still records every photo.
+          setToggles(progress.toggles);
+          setNotes(progress.notes);
+          setPhotoPaths(progress.photo_paths);
+          setHydrated(true);
           void pendingPoints().then((queued) =>
             setResumedPoints(queued.map((p) => ({ lat: p.lat, lng: p.lng }))),
           );
@@ -137,6 +175,16 @@ function WalkModeInner({ walkId }: { walkId: string }) {
         setError(e instanceof Error ? e.message : "walk not found");
       });
   }, [walkId, pendingPoints]);
+
+  // Persist progress on every change, once the load above has put back what
+  // was already there. Photos are durable server-side from upload; this is the
+  // only home the toggles and notes have until the walk completes, and the
+  // fallback for a photo whose row insert was offline.
+  useEffect(() => {
+    if (!walk) return;
+    if (!shouldPersistProgress({ hydrated, status: walk.status, completed: !!result })) return;
+    saveWalkSnapshot(walk, { photo_paths: photoPaths, toggles, notes });
+  }, [hydrated, walk, photoPaths, toggles, notes, result]);
 
   const [staticPoints, setStaticPoints] = useState<Array<{ lat: number; lng: number }>>([]);
   // Points saved before a mid-walk reload; prepended to live points for the
@@ -160,7 +208,7 @@ function WalkModeInner({ walkId }: { walkId: string }) {
     return () => clearInterval(t);
   }, [active]);
 
-  // Exit guard while in progress.
+  // Exit guard while in progress — reload, tab close, app switch.
   useEffect(() => {
     if (!active) return;
     const guard = (e: BeforeUnloadEvent) => {
@@ -169,6 +217,53 @@ function WalkModeInner({ walkId }: { walkId: string }) {
     window.addEventListener("beforeunload", guard);
     return () => window.removeEventListener("beforeunload", guard);
   }, [active]);
+
+  // …and the other way out, which `beforeunload` does not cover: the browser
+  // back button or an edge-swipe back gesture. That is a same-document history
+  // navigation, so no unload fires — Walk Mode simply unmounted and recording
+  // stopped, with no confirmation at all (review H8).
+  //
+  // A sentinel entry rather than react-router's `useBlocker`, which needs a
+  // data router (`createBrowserRouter`); this app mounts `<BrowserRouter>`, and
+  // migrating the whole router to add one prompt would be a far larger change
+  // than the bug warrants. The sentinel is the same URL, so popping it
+  // re-renders this route instead of unmounting it, and the confirm happens
+  // while the walk is still on screen and still recording.
+  useEffect(() => {
+    if (!active) return;
+    const sentinel = { sanpoWalkGuard: walkId };
+    window.history.pushState(sentinel, "");
+    const onPop = () => {
+      const leave = window.confirm(
+        "This walk is still recording. Leave now and GPS recording stops — the walk stays in progress.",
+      );
+      if (leave) {
+        // The sentinel is already gone; one more step actually leaves.
+        window.history.back();
+      } else {
+        window.history.pushState(sentinel, "");
+      }
+    };
+    window.addEventListener("popstate", onPop);
+    // The sentinel entry is deliberately left behind on a normal end-of-walk
+    // exit. It points at this same URL, so the only effect is that Back from
+    // the report card shows the report card once more; calling history.back()
+    // from a cleanup would race whatever navigation triggered the cleanup.
+    return () => window.removeEventListener("popstate", onPop);
+  }, [active, walkId]);
+
+  // Object URLs for the photo strip are never revoked otherwise, and the
+  // memory pressure that causes is one of the things that gets a tab reclaimed
+  // mid-walk — the exact event the rest of this file is defending against.
+  const previewsRef = useRef<string[]>([]);
+  useEffect(() => {
+    previewsRef.current = photoPreviews;
+  }, [photoPreviews]);
+  useEffect(() => () => {
+    for (const url of previewsRef.current) {
+      if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+    }
+  }, []);
 
   const routePoints = useMemo(
     () => [...resumedPoints, ...geo.points],
@@ -184,10 +279,10 @@ function WalkModeInner({ walkId }: { walkId: string }) {
         started_at: new Date().toISOString(),
       });
       setWalk(updated);
-      // Snapshot the in-progress walk locally so a mid-walk reload while
-      // offline (dead zone) can re-enter recording mode without a network
-      // getWalk — REST is network-only in the SW.
-      saveWalkSnapshot(updated);
+      // The snapshot is written by the effect above, not here. One writer:
+      // a second call site would have to remember to pass the current progress
+      // and, passing none, would silently erase the photos, toggles and notes
+      // it did not know about.
     } catch (e) {
       setError(e instanceof Error ? e.message : "could not start walk");
     } finally {
@@ -202,6 +297,17 @@ function WalkModeInner({ walkId }: { walkId: string }) {
       for (const file of Array.from(files)) {
         const compressed = await compressImage(file);
         const path = await uploadWalkPhoto(walk.operator_id, walk.id, compressed);
+        // Record the row now rather than at completion (review H8): until this
+        // existed, the only pointer to an uploaded photo was React state, so a
+        // remount stranded every photo in the bucket with nothing referencing
+        // it. Best-effort because the upload has already succeeded — offline,
+        // the path is still held in state and the snapshot, and complete-walk
+        // writes the row with the same conflict target.
+        try {
+          await insertWalkPhoto(walk.operator_id, walk.id, path);
+        } catch {
+          // no-op: the photo is in Storage and the path is carried forward.
+        }
         setPhotoPaths((prev) => [...prev, path]);
         setPhotoPreviews((prev) => [...prev, URL.createObjectURL(compressed)]);
       }

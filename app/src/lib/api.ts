@@ -241,6 +241,37 @@ export async function listWalkPhotos(walkId: string): Promise<WalkPhotos[]> {
   return must(data, error);
 }
 
+/**
+ * Record a photo the moment it lands in Storage, rather than waiting for
+ * complete-walk to write every row from the completion request (review H8).
+ *
+ * Before this, the only pointer to an uploaded photo was React state. Any
+ * remount — a reload, a back-swipe, the OS reclaiming the tab — stranded every
+ * photo taken so far in the bucket with no row referencing it, and the operator
+ * got no error and no list of what had already been uploaded.
+ *
+ * `ignoreDuplicates` against `uq_walk_photos_path` (0013) makes this safe to
+ * repeat, and complete-walk's own upsert uses the same conflict target, so a
+ * path written here and sent again at completion is a no-op rather than a
+ * second row.
+ */
+export async function insertWalkPhoto(
+  operatorId: string,
+  walkId: string,
+  storagePath: string,
+): Promise<void> {
+  const { error } = await supabase.from("walk_photos").upsert(
+    {
+      walk_id: walkId,
+      operator_id: operatorId,
+      storage_path: storagePath,
+      taken_at: new Date().toISOString(),
+    },
+    { onConflict: "walk_id,storage_path", ignoreDuplicates: true },
+  );
+  if (error) throw new Error(error.message);
+}
+
 export async function listWalkGpsPoints(walkId: string): Promise<WalkGpsPoints[]> {
   const { data, error } = await supabase
     .from("walk_gps_points").select("*").eq("walk_id", walkId).order("recorded_at");
