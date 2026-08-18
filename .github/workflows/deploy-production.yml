@@ -141,27 +141,114 @@ jobs:
           # No secret is printed: the response carries a key id and counts only.
           echo "$body"
 
-  # Guards the job above against its own `if` — see the note on the same job in
-  # deploy-staging.yml. A green production deploy that deployed nothing is a
-  # worse outcome than a red one.
-  assert-functions-deployed:
-    name: Functions actually deployed
+  # ── The frontend, LAST ────────────────────────────────────────────────────
+  # Vercel's Git integration used to deploy `main` to production on push, with
+  # no knowledge of GitHub Actions (review H16). Two problems in one:
+  #
+  #   * ungated — the change that reaches every user in ninety seconds was the
+  #     one nothing checked, while the database half needed a typed phrase and
+  #     an environment approval;
+  #   * out of ORDER — api.ts is a direct PostgREST/RPC client, so "stateless"
+  #     does not mean "schema-independent". A frontend ahead of its migrations
+  #     means a client opening the portal to a screen that errors because the
+  #     RPC it calls does not exist yet.
+  #
+  # Database-first is the safe direction and this job encodes it. Migrations are
+  # append-only and additive, so a new schema under an old frontend keeps
+  # working; the reverse does not.
+  #
+  # Vercel's production branch is `release/production`, a ref only this job
+  # advances. That is a git fact plus one dashboard field — no Vercel behaviour
+  # to trust, unlike an "Ignored Build Step" or a deploy hook whose interaction
+  # with auto-deploy has to be taken on faith.
+  frontend:
+    name: Release the frontend
     needs: [migrate, deploy-functions]
+    # Gated on deploy-functions DIRECTLY, not on assert-deployed:
+    # that job exits 0 when migrate failed (it defers the report to migrate's
+    # own job), so keying off its result would ship a frontend on top of a
+    # database that never migrated — the exact bug, rebuilt.
+    if: ${{ needs.migrate.result == 'success' && needs.deploy-functions.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+
+      - name: Advance release/production to the deployed commit
+        run: |
+          # Deliberately NOT --force. A non-fast-forward push means the commit
+          # being deployed is not a descendant of what is already live, i.e.
+          # somebody is rolling back by re-dispatching an older commit. That
+          # should not happen by accident: roll the frontend back with Vercel's
+          # instant rollback (Deployments -> ... -> Promote), which is one click
+          # and does not need a build.
+          if git push origin "${{ github.sha }}:refs/heads/release/production"; then
+            echo "release/production -> ${{ github.sha }}"
+          else
+            echo "::error title=Could not advance release/production::The push was rejected, which almost always means ${{ github.sha }} is not a descendant of the commit currently released. If you are intentionally rolling back, use Vercel's instant rollback instead of forcing this ref. See docs/dev/production-cutover.md."
+            exit 1
+          fi
+
+      # Pushing a ref is fire-and-forget: without this the job would report
+      # success having no idea whether Vercel built anything at all. This
+      # repository has found that shape three times now (a typecheck that
+      # checked zero files, a vault verification that verified nothing, a
+      # deploy that could skip its own function job) — so assert the outcome,
+      # not the mechanism. `version.json` is stamped with the commit at build
+      # time by vite.config.ts.
+      - name: Confirm production is serving this commit
+        env:
+          BASE: ${{ secrets.APP_BASE_URL }}
+          SHA: ${{ github.sha }}
+        run: |
+          if [ -z "$BASE" ]; then
+            echo "::error title=Cannot confirm the frontend::APP_BASE_URL is not set for the production environment, so there is no way to check which build is live. Add it under Settings -> Environments -> production."
+            exit 1
+          fi
+          deadline=$(( $(date +%s) + 600 ))
+          served=""
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            served=$(curl -sS -H 'Cache-Control: no-cache' \
+              "${BASE%/}/version.json?t=$(date +%s)" 2>/dev/null \
+              | jq -r '.commit // empty' 2>/dev/null || true)
+            if [ "$served" = "$SHA" ]; then
+              echo "production is serving $SHA"
+              exit 0
+            fi
+            echo "serving '${served:-<nothing>}', waiting for $SHA"
+            sleep 15
+          done
+          echo "::error title=Production is not serving the deployed commit::After 10 minutes ${BASE%/}/version.json still reports '${served:-<nothing>}' rather than $SHA. The database and edge functions ARE deployed; only the frontend is behind. Check that the Vercel production project's Git branch is release/production (Settings -> Git) and that its last deployment succeeded."
+          exit 1
+
+  # Guards the jobs above against their own `if` — see the note on the same job
+  # in deploy-staging.yml. A green production deploy that deployed nothing is a
+  # worse outcome than a red one.
+  assert-deployed:
+    name: Everything actually deployed
+    needs: [migrate, deploy-functions, frontend]
     if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
-      - name: deploy-functions must have run, not merely not-failed
+      - name: Each stage must have run, not merely not-failed
         env:
           MIGRATE: ${{ needs.migrate.result }}
           FUNCTIONS: ${{ needs.deploy-functions.result }}
+          FRONTEND: ${{ needs.frontend.result }}
         run: |
-          echo "migrate=$MIGRATE deploy-functions=$FUNCTIONS"
+          echo "migrate=$MIGRATE deploy-functions=$FUNCTIONS frontend=$FRONTEND"
           if [ "$MIGRATE" != "success" ]; then
             echo "migrations did not succeed — that failure is reported by its own job"
             exit 0
           fi
           if [ "$FUNCTIONS" != "success" ]; then
             echo "::error title=No functions were deployed::migrate succeeded but deploy-functions ended '$FUNCTIONS'. A skipped job does not fail a workflow, so without this check the run would have reported success having deployed nothing."
+            exit 1
+          fi
+          if [ "$FRONTEND" != "success" ]; then
+            echo "::error title=The frontend was not released::migrate and deploy-functions succeeded but frontend ended '$FRONTEND'. Production is now running new database schema behind an OLD frontend. That direction is safe (migrations are additive) but it is not what was asked for — re-run this workflow."
             exit 1
           fi
           echo "ok"

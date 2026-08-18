@@ -173,10 +173,42 @@ and will silently strand client invites) and **notifications** (the
      feature.
 4. Settings → Domains → add `app.yourdomain.com` → create the DNS records
    it shows. Wait for the cert to issue.
-5. Settings → Git: set the production branch to `main`. Every push to main
-   now updates the production **frontend** automatically — that's safe,
-   because the frontend is stateless; the DATABASE only changes via the
-   approval-gated workflow.
+5. Settings → Git: set the production branch to **`release/production`** —
+   **not** `main`.
+
+   This one field is the whole of the frontend gate, so it is worth being
+   precise about why. `release/production` is a ref that nothing but the
+   `frontend` job in `deploy-production.yml` ever advances, and that job runs
+   only after the migrations and edge functions for the same commit have
+   deployed successfully. So:
+
+   - a red commit cannot reach users, because the workflow refuses to start;
+   - the frontend cannot get **ahead of its database**, which is the failure
+     that actually matters. `app/src/lib/api.ts` is a direct PostgREST/RPC
+     client, so "the frontend is stateless" does not mean
+     "schema-independent" — a frontend shipped before its migrations means a
+     client opening the portal to a screen that errors because the RPC it
+     calls does not exist yet.
+
+   The reverse order is safe: migrations are append-only and additive, so new
+   schema under an old frontend keeps working. That asymmetry is why
+   database-first is a rule rather than a preference.
+
+   Until this field is changed the production frontend still deploys on every
+   push to `main`, ungated — which is what review H16 was about. The
+   workflow's last step polls `APP_BASE_URL/version.json` and **fails the
+   deploy** if the commit it just released is not the one being served, so a
+   forgotten setting here surfaces as a red deploy rather than a silent
+   divergence.
+
+   `main` still gets Vercel preview deployments, which is useful in itself: a
+   build of the tip that nobody is relying on.
+
+   **To roll the frontend back**, use Vercel's instant rollback (Deployments →
+   ⋯ → Promote to Production) rather than forcing the ref backwards. It needs
+   no rebuild, and the workflow deliberately does not force-push — a rejected
+   push means the commit is not a descendant of what is live, which should
+   never happen by accident.
 
 ## 7. Deploy the backend
 
@@ -249,9 +281,20 @@ Run the whole loop once as a real customer before inviting anyone:
   Read it before the first paying client, not after.
 - **Money watch**: Stripe → Payments and the in-app Billing Console are
   your two views of the same truth; the `payments` table reconciles them.
-- **Deploys**: frontend ships on every green main push (Vercel); the
-  database/functions ship only when you run the production workflow and
-  approve it. Migrations stay append-only — same discipline as ever.
+- **Deploys**: one workflow ships all three halves, in this order —
+  migrations → edge functions → frontend. Nothing reaches production until
+  you dispatch that workflow, type the confirmation phrase and approve the
+  environment gate. Migrations stay append-only — same discipline as ever.
+
+  This line used to read *"frontend ships on every green main push
+  (Vercel)"*, and two things about that were wrong (review H16): Vercel has
+  no knowledge of GitHub Actions, so nothing consulted CI and there was no
+  "green" about it; and shipping the frontend independently of the database
+  let it get ahead of the schema it calls. Both are fixed by the Vercel
+  production branch being `release/production` — see §6.
 - **Staging first**: every future change follows the path it followed
-  today — main → CI → staging deploy → staging smoke → then, when you
-  choose, the production workflow.
+  today — main → CI → staging deploy (migrations → functions → frontend) →
+  staging smoke → then, when you choose, the production workflow, which
+  ships the same three in the same order. Staging rehearses production's
+  ordering because both frontends are released from a `release/*` ref rather
+  than from `main`.
