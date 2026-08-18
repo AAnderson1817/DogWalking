@@ -7,6 +7,7 @@
 import { corsHeaders } from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
 import { verifyStripeSignature } from "../_lib/stripe.ts";
+import { SUBSCRIPTION_INVOICE_STATUSES } from "../_lib/payment_status.ts";
 import {
   handleStripeEvent,
   InFlightError,
@@ -159,10 +160,29 @@ function makeDeps(): WebhookDeps {
     },
 
     async hasPaymentForInvoice(invoiceId) {
+      // Only rows that represent money actually taken. Without the status
+      // predicate a 'failed' row from invoice.payment_failed made this true,
+      // so the succeeded row for the SAME invoice was never written — and a
+      // later refund then found nothing (findPaymentForReversal excludes
+      // 'failed') and landed in reversal_needs_review instead of clawing back.
+      // fn_apply_invoice_paid has always filtered this way (0023); this is the
+      // non-cycle branch catching up to the same index.
       const { data, error } = await db
         .from("payments")
         .select("id")
         .eq("stripe_invoice_id", invoiceId)
+        .in("status", [...SUBSCRIPTION_INVOICE_STATUSES])
+        .limit(1);
+      if (error) throw new Error("payment lookup failed");
+      return (data?.length ?? 0) > 0;
+    },
+
+    async hasFailedPaymentForInvoice(invoiceId) {
+      const { data, error } = await db
+        .from("payments")
+        .select("id")
+        .eq("stripe_invoice_id", invoiceId)
+        .eq("status", "failed")
         .limit(1);
       if (error) throw new Error("payment lookup failed");
       return (data?.length ?? 0) > 0;

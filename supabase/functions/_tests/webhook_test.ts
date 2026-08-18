@@ -25,6 +25,7 @@ function makeMockDeps(
     subId?: string | null;
     failApply?: boolean;
     hasInvoicePayment?: boolean;
+    hasFailedInvoicePayment?: boolean;
     noPayment?: boolean;
     knownAccount?: string;
     clientNotOwned?: boolean;
@@ -93,6 +94,10 @@ function makeMockDeps(
     hasPaymentForInvoice(invoiceId) {
       calls.push({ fn: "hasPaymentForInvoice", args: [invoiceId] });
       return Promise.resolve(opts.hasInvoicePayment ?? false);
+    },
+    hasFailedPaymentForInvoice(invoiceId) {
+      calls.push({ fn: "hasFailedPaymentForInvoice", args: [invoiceId] });
+      return Promise.resolve(opts.hasFailedInvoicePayment ?? false);
     },
     insertPayment(row) {
       calls.push({ fn: "insertPayment", args: [row] });
@@ -831,4 +836,57 @@ Deno.test("cancelling tells the operator — walks stop, and they must know why"
   const row = note.args[0] as { type: string; client_id: string | null };
   assertEquals(row.type, "subscription_cancelled");
   assertEquals(row.client_id, null, "this is the operator's problem, not the client's");
+});
+
+// ── Payment-row hygiene (review M3, L5) ────────────────────────────────────
+
+Deno.test("a redelivered invoice.payment_failed does not add a second failed row", async () => {
+  // Stripe retries a failed invoice on its own dunning schedule and redelivers
+  // the event with a FRESH event id, so the stripe_events claim ledger cannot
+  // dedupe it. Without this guard the Money screen accrues one "Needs
+  // attention" row per retry for a single unpaid invoice.
+  const { deps, calls } = makeMockDeps({ hasFailedInvoicePayment: true });
+  const res = await handleStripeEvent(
+    event("invoice.payment_failed", {
+      id: "in_dunning",
+      customer: "cus_1",
+      amount_due: 9000,
+      currency: "usd",
+    }),
+    deps,
+  );
+  assertEquals(res.status, "processed");
+  assertFalse(
+    calls.some((c) => c.fn === "insertPayment"),
+    "a second failed row for one invoice is noise, not information",
+  );
+});
+
+Deno.test("the FIRST invoice.payment_failed still records and notifies", async () => {
+  const { deps, calls } = makeMockDeps({ hasFailedInvoicePayment: false });
+  await handleStripeEvent(
+    event("invoice.payment_failed", {
+      id: "in_first_fail",
+      customer: "cus_1",
+      amount_due: 9000,
+      currency: "usd",
+    }),
+    deps,
+  );
+  assert(calls.some((c) => c.fn === "insertPayment"), "the debt must be recorded");
+  // A card decline is the client's to fix, so both personas hear about it.
+  const notes = calls.filter((c) => c.fn === "insertNotification");
+  assertEquals(notes.length, 2);
+});
+
+Deno.test("past_due is still set even when the failed row is deduped", async () => {
+  // The dedupe must not swallow the state change: Stripe's later retries are
+  // exactly when the account is most past due.
+  const { deps, calls } = makeMockDeps({ hasFailedInvoicePayment: true });
+  await handleStripeEvent(
+    event("invoice.payment_failed", { id: "in_d", customer: "cus_1", amount_due: 9000 }),
+    deps,
+  );
+  const upd = calls.find((c) => c.fn === "updateClient");
+  assertEquals((upd!.args[1] as { subscription_status: string }).subscription_status, "past_due");
 });

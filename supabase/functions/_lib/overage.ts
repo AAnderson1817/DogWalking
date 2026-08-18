@@ -72,6 +72,13 @@ export interface OverageDeps {
   }): Promise<void>;
   /** True for card/payment failures (decline etc.) vs infra/DB errors. */
   isCardError(err: unknown): boolean;
+  /** True for a failure that RETRYING CANNOT FIX — a malformed request, a
+   * customer that does not exist on this account, no saved card. Distinct from
+   * a card decline (the client can fix it) and from a transient fault (time
+   * can fix it). Without this third class every permanent failure was treated
+   * as transient: rethrown, leaving the claim pending, so the walk never
+   * completed and the operator's retry hit the same wall forever. */
+  isPermanentError?(err: unknown): boolean;
   /** Throws when the operator cannot take money yet. Optional so the pure
    * tests can omit it; the real deps always supply it. */
   resolveAccount?(): { stripeAccount: string };
@@ -86,6 +93,23 @@ export class OverageError extends Error {
   ) {
     super(message);
   }
+}
+
+/**
+ * Turn a permanent Stripe failure into something an operator can act on.
+ * Stripe's own message is written for a developer ("No such customer:
+ * cus_123"), and the operator needs to know which of their own settings is
+ * wrong.
+ */
+function permanentReason(err: unknown): string {
+  const e = err as { code?: string; message?: string } | null;
+  if (e?.code === "resource_missing") {
+    return "This client's payment details are not on your Stripe account — they may need to subscribe again";
+  }
+  if (e?.message?.includes("no payment method on file")) {
+    return "This client has no card saved, so there is nothing to charge";
+  }
+  return "Stripe rejected the charge as invalid, so retrying will not help";
 }
 
 /** Stripe PI states that mean the attempt is dead and re-chargeable. */
@@ -237,7 +261,17 @@ export async function chargeOverageForWalk(
         await notifyFailure("card declined", "card");
         return { payment, already_charged: false };
       }
-      // Infra error (Stripe unreachable, DB write failed): keep the pending
+      // Permanent: retrying changes nothing. Resolve the claim to 'failed'
+      // so the walk can complete and the debt is visible, and tell the
+      // operator — this is theirs to fix, not the client's. Leaving it pending
+      // (the old behaviour for everything non-card) meant the walk never
+      // completed at all and every retry hit the same wall.
+      if (deps.isPermanentError?.(err)) {
+        const payment = await deps.updatePayment(claim.id!, { status: "failed" });
+        await notifyFailure(permanentReason(err), "configuration");
+        return { payment, already_charged: false };
+      }
+      // Transient (Stripe unreachable, DB write failed): keep the pending
       // claim (it blocks double-charging) and rethrow — the caller 500s and a
       // retry reuses this claim's idempotency key instead of creating a new
       // Stripe attempt.

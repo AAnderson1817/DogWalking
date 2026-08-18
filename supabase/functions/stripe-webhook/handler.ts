@@ -84,8 +84,12 @@ export interface WebhookDeps {
      * destroying credit granted before billing started. */
     isRenewal: boolean;
   }): Promise<boolean>;
-  /** True when a payments row already exists for this invoice id. */
+  /** True when a SUCCEEDED (or reversed) payments row exists for this invoice. */
   hasPaymentForInvoice(invoiceId: string): Promise<boolean>;
+  /** True when a failed row already exists for this invoice — Stripe redelivers
+   * invoice.payment_failed on every dunning retry, each with a fresh event id
+   * the claim ledger cannot dedupe. */
+  hasFailedPaymentForInvoice(invoiceId: string): Promise<boolean>;
   insertPayment(row: Record<string, unknown>): Promise<void>;
   insertNotification(row: Record<string, unknown>): Promise<void>;
 
@@ -279,6 +283,16 @@ async function applyEvent(
       const client = await deps.findClientByCustomer(String(obj.customer ?? ""), operatorId);
       if (!client) return { status: "ignored" };
       await deps.updateClient(client.id, { subscription_status: "past_due" }, operatorId);
+      // Stripe retries a failed invoice on its own dunning schedule and
+      // redelivers the event, and each delivery is a distinct event id — so
+      // the stripe_events claim ledger does not dedupe them. Without this the
+      // Money screen accrues one "Needs attention" row per retry for a single
+      // unpaid invoice. The invoice.paid non-cycle branch has always guarded
+      // this way; this arm never did.
+      const failedInvoiceId = asString(obj.id);
+      if (failedInvoiceId && await deps.hasFailedPaymentForInvoice(failedInvoiceId)) {
+        return { status: "processed" };
+      }
       await deps.insertPayment({
         operator_id: client.operator_id,
         client_id: client.id,
