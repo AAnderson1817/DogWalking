@@ -41,7 +41,7 @@ async function getRing(): Promise<KeyRing> {
       500,
       "vault_key_missing",
       "the vault key is not configured",
-      "VAULT_MASTER_KEY is unset in this deployment",
+      "the vault master key env var is unset in this deployment",
     );
   }
   const primary = await importVaultKey(primaryRaw);
