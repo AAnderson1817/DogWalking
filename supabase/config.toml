@@ -418,11 +418,16 @@ enabled = true
 [functions.stripe-webhook]
 verify_jwt = false
 
-# Nightly walk materializer (phase 06): 14-day horizon, 03:00 UTC.
-# NOTE: the hosted CLI config rejects a `schedule` key here — on hosted
-# Supabase the cron is a dashboard step (Integrations → Cron → daily
-# "0 3 * * *" invoking the materialize-walks edge function; see
-# docs/dev/staging-setup.md §5). Local stacks can invoke it manually or
-# from the Calendar screen's "Run materializer" button.
+# Manual/interactive run of the nightly work (phase 06): 14-day horizon.
+#
+# The SCHEDULE is no longer a dashboard step. Migration 0028 owns it —
+# `cron.schedule('sanpo-nightly', '0 3 * * *', 'select fn_run_nightly_jobs()')`
+# — so it is version controlled, recreated by any restore, and needs no
+# service-role header, because a pg_cron job already runs as postgres and
+# fn_is_service_session() accepts that (review H15).
+#
+# This function remains the manual path: the Calendar screen's "Run
+# materializer" button, and the staging smoke suite. It calls the same
+# fn_run_nightly_jobs() the cron does, so the two cannot drift.
 [functions.materialize-walks]
 verify_jwt = true

@@ -185,11 +185,22 @@ and will silently strand client invites) and **notifications** (the
    run → approve the environment gate when it pauses.
    The gate refuses to run unless CI is green on that exact commit.
 2. Post-deploy dashboard wiring (one-time, same as staging):
-   - **Cron**: Integrations → Cron → New job → `0 3 * * *` → Edge Function
-     `materialize-walks`, method POST, timeout `8000` ms, header
-     `Authorization: Bearer <prod service_role key>`. Verify with
-     `select status_code from net._http_response order by id desc limit 3;`
-     after it first fires (expect 200).
+   - **Cron**: nothing to create — migration `0028` schedules it. If `db push`
+     fails with *"pg_cron is not installed"*, enable it once at Database →
+     Extensions → `pg_cron` and re-run.
+
+     Confirm before you go further, because this job generates every walk on
+     every calendar and a silent failure is invisible for 14 days:
+     ```sql
+     select jobname, schedule, active from cron.job;   -- sanpo-nightly, 0 3 * * *
+     select * from fn_job_health();                     -- stale = true until it first runs
+     ```
+     Then, after 03:00 UTC the following morning, `fn_job_health()` must read
+     `stale = false`. Until it does, nothing is generating walks.
+   - **Health check**: add `production` to the `schedule:` block of
+     `.github/workflows/job-health.yml` (it currently only runs against
+     staging, because production did not exist when it was written). Without
+     this the production job is unwatched.
    - **Email webhook**: Database → Webhooks → on `notifications` INSERT →
      Edge Function `send-notification`, service-role auth header.
 3. Seed the business: Table editor → `plans` → create your real plans with

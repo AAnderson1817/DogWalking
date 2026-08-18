@@ -363,6 +363,31 @@ jobs:
           end $$;
           SQL
 
+      # The nightly job generates every walk on every calendar and runs the
+      # credit-expiry sweep. It used to be scheduled by a hand-typed dashboard
+      # entry that no restore recreated and nothing asserted (review H15), and
+      # the horizon is 14 days — so its absence was invisible for a fortnight.
+      # Asserted against cron.job, not against the migration text: what matters
+      # is what a fresh database ends up with after every migration has run.
+      - name: The nightly schedule is in a migration
+        run: |
+          psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          do $$
+          declare v record;
+          begin
+            select schedule, command into v from cron.job where jobname = 'sanpo-nightly';
+            if not found then
+              raise exception
+                'H15 FAIL: no sanpo-nightly cron job after all migrations. The '
+                'schedule has gone back to being an unversioned dashboard step.';
+            end if;
+            if v.command not like '%fn_run_nightly_jobs%' then
+              raise exception 'H15 FAIL: sanpo-nightly runs "%", not the nightly entry point', v.command;
+            end if;
+            raise notice 'H15 PASS: nightly job scheduled by migration (% / %)', v.schedule, v.command;
+          end $$;
+          SQL
+
       # types.ts is generated from the live schema by scripts/gen-types.py. It
       # is committed, so it silently rots whenever a migration lands without a
       # regeneration — and a stale Database type makes tsc agree with code that

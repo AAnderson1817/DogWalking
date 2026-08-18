@@ -1854,6 +1854,194 @@ begin
 end $$;
 
 
+-- ═══ Nightly job schedule + heartbeat (0028) ═════════════════════════════
+-- The job that generates every walk on every calendar, and runs the daily
+-- credit-expiry sweep, used to exist only as a hand-typed dashboard entry.
+do $$
+declare
+  v_job record;
+begin
+  select jobname, schedule, command into v_job
+    from cron.job where jobname = 'sanpo-nightly';
+  if not found then
+    raise exception 'FAIL: no sanpo-nightly cron job — the schedule is unversioned again';
+  end if;
+  if v_job.schedule <> '0 3 * * *' then
+    raise exception 'FAIL: sanpo-nightly runs on % rather than 0 3 * * *', v_job.schedule;
+  end if;
+  if v_job.command not like '%fn_run_nightly_jobs%' then
+    raise exception 'FAIL: sanpo-nightly runs "%" — not the nightly entry point', v_job.command;
+  end if;
+  raise notice 'nightly cron job is scheduled (0028): OK';
+end $$;
+
+-- The run leaves a row behind, which is the only way anything can answer
+-- "did it run last night?".
+do $$
+declare
+  v_before int;
+  v_result jsonb;
+  v_row record;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  select count(*) into v_before from job_runs where job_name = 'nightly';
+
+  v_result := fn_run_nightly_jobs(14);
+
+  if (select count(*) from job_runs where job_name = 'nightly') <> v_before + 1 then
+    raise exception 'FAIL: the run recorded no heartbeat row';
+  end if;
+
+  -- By id, never by timestamp: started_at defaults to now(), which is the
+  -- TRANSACTION start, so every row written in this smoke run carries the
+  -- same one and `order by started_at desc` picks an arbitrary row. That is
+  -- how the first version of the block below passed against the bug.
+  select * into v_row from job_runs where id = (v_result ->> 'run_id')::uuid;
+  if not found then
+    raise exception 'FAIL: the result run_id does not match any heartbeat row';
+  end if;
+  if not v_row.ok then
+    raise exception 'FAIL: a clean run was recorded as not ok (%)', v_row.error;
+  end if;
+  if v_row.finished_at is null then
+    raise exception 'FAIL: a completed run has no finished_at';
+  end if;
+  if (v_row.detail ->> 'horizon_days')::int <> 14 then
+    raise exception 'FAIL: the heartbeat did not record the horizon it used';
+  end if;
+  if v_result ? 'expiry_error' is false then
+    raise exception 'FAIL: the result does not carry expiry_error';
+  end if;
+
+  raise notice 'nightly run records a heartbeat (0028): OK';
+end $$;
+
+-- The fix, stated as a test: a failing expiry sweep must NOT stop walks being
+-- generated, and must NOT be silent. The old code did the first and got the
+-- second exactly backwards — `if (!sweep.error) expired = …` meant a
+-- permanently failing sweep read identically to a quiet night, so clients kept
+-- credits they had been billed for and stopped paying overage.
+do $$
+declare
+  v_result jsonb;
+  v_row record;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+
+  -- Break the sweep for the duration of this transaction. The outer rollback
+  -- puts the real one back.
+  create or replace function fn_expire_credits() returns int
+  language plpgsql security definer set search_path = public as $broken$
+  begin
+    raise exception 'simulated expiry failure';
+  end;
+  $broken$;
+
+  -- A different horizon, so this run generates walks the earlier ones did not
+  -- already create: "created > 0" has to mean work happened, not that an
+  -- idempotent no-op returned zero.
+  v_result := fn_run_nightly_jobs(21);
+
+  if (v_result ->> 'expiry_error') is null then
+    raise exception 'FAIL: the sweep failure was swallowed — expiry_error is null';
+  end if;
+  if (v_result ->> 'expiry_error') not like '%simulated expiry failure%' then
+    raise exception 'FAIL: expiry_error does not name the failure: %', v_result ->> 'expiry_error';
+  end if;
+  if (v_result ->> 'created')::int = 0 then
+    raise exception 'FAIL: a failing sweep stopped walk generation';
+  end if;
+
+  select * into v_row from job_runs where id = (v_result ->> 'run_id')::uuid;
+  if v_row.ok then
+    raise exception 'FAIL: a run whose sweep failed was recorded as ok';
+  end if;
+  if v_row.error is null then
+    raise exception 'FAIL: the heartbeat row did not record the error';
+  end if;
+
+  raise notice 'a failing expiry sweep is loud, not fatal (0028): OK';
+end $$;
+
+-- Staleness has to fail CLOSED. A project where the job has never run is
+-- precisely the state this check exists to catch, so "no successful run" must
+-- read as stale rather than as unknown.
+do $$
+declare
+  v_stale boolean;
+  v_last timestamptz;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+
+  select stale into v_stale from fn_job_health() where job_name = 'nightly';
+  if v_stale then
+    raise exception 'FAIL: a run seconds ago was reported stale';
+  end if;
+
+  -- Older than the window: what a cron that stopped firing looks like.
+  update job_runs set started_at = now() - interval '30 hours' where job_name = 'nightly';
+  select stale, last_success into v_stale, v_last
+    from fn_job_health() where job_name = 'nightly';
+  if not v_stale then
+    raise exception 'FAIL: a 30-hour-old last success was not reported stale';
+  end if;
+
+  -- Never run at all: a fresh project, or one restored without the schedule.
+  delete from job_runs;
+  select stale, last_success into v_stale, v_last
+    from fn_job_health() where job_name = 'nightly';
+  if not v_stale then
+    raise exception 'FAIL: a job that has NEVER succeeded was not reported stale';
+  end if;
+  if v_last is not null then
+    raise exception 'FAIL: last_success should be null when nothing has ever succeeded';
+  end if;
+
+  raise notice 'job health fails closed (0028): OK';
+end $$;
+
+-- Same rule as every other cross-tenant function (invariant 5).
+--
+-- `set local role` is load-bearing, not decoration. fn_is_service_session()
+-- also returns true for `session_user = 'postgres'`, which is what psql
+-- connects as — so setting request.jwt.claims alone leaves the guard
+-- satisfied and the block passes without testing anything.
+do $$
+begin
+  set local role authenticated;
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000000001","role":"authenticated"}', true);
+  begin
+    perform fn_run_nightly_jobs(14);
+    raise exception 'FAIL: an operator ran the nightly job';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  set local role anon;
+  begin
+    perform fn_run_nightly_jobs(14);
+    raise exception 'FAIL: anon ran the nightly job';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  -- The heartbeat is not readable by the API roles either: it is a
+  -- cross-tenant table, and every row names how much work every operator
+  -- had generated for them.
+  begin
+    perform count(*) from job_runs;
+    raise exception 'FAIL: anon read the job_runs heartbeat';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  raise notice 'nightly job is service-role only (0028): OK';
+end $$;
+
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;

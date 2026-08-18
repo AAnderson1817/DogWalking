@@ -182,6 +182,36 @@ export type Database = {
         };
         Relationships: [];
       };
+      job_runs: {
+        Row: {
+          id: string;
+          job_name: string;
+          started_at: string;
+          finished_at: string | null;
+          ok: boolean;
+          detail: Json;
+          error: string | null;
+        };
+        Insert: {
+          id?: string;
+          job_name: string;
+          started_at?: string;
+          finished_at?: string | null;
+          ok?: boolean;
+          detail?: Json;
+          error?: string | null;
+        };
+        Update: {
+          id?: string;
+          job_name?: string;
+          started_at?: string;
+          finished_at?: string | null;
+          ok?: boolean;
+          detail?: Json;
+          error?: string | null;
+        };
+        Relationships: [];
+      };
       notifications: {
         Row: {
           id: string;
@@ -1053,6 +1083,12 @@ export type Database = {
         Args: Record<string, never>;
         Returns: boolean;
       };
+      fn_job_health: {
+        Args: {
+          p_stale_after: unknown;
+        };
+        Returns: Array<{ job_name: string; last_success: string; age: unknown; stale: boolean }>;
+      };
       fn_ledger_apply: {
         Args: Record<string, never>;
         Returns: unknown;
@@ -1121,6 +1157,12 @@ export type Database = {
           p_reason: string;
         };
         Returns: Array<{ outcome: string; credits_reversed: number; credits_unrecovered: number; needs_review: boolean }>;
+      };
+      fn_run_nightly_jobs: {
+        Args: {
+          p_horizon_days: number;
+        };
+        Returns: Json;
       };
       fn_seed_operator_defaults: {
         Args: Record<string, never>;
@@ -1218,6 +1260,7 @@ export type AccessCredentials = Database["public"]["Tables"]["access_credentials
 export type Clients = Database["public"]["Tables"]["clients"]["Row"];
 export type CredentialAccessLog = Database["public"]["Tables"]["credential_access_log"]["Row"];
 export type CreditLedger = Database["public"]["Tables"]["credit_ledger"]["Row"];
+export type JobRuns = Database["public"]["Tables"]["job_runs"]["Row"];
 export type Notifications = Database["public"]["Tables"]["notifications"]["Row"];
 export type Operators = Database["public"]["Tables"]["operators"]["Row"];
 export type Payments = Database["public"]["Tables"]["payments"]["Row"];
