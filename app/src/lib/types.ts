@@ -909,6 +909,7 @@ export type Database = {
           updated_at: string;
           origin_date: string | null;
           cancel_reason: string | null;
+          abandoned_at: string | null;
         };
         Insert: {
           id?: string;
@@ -936,6 +937,7 @@ export type Database = {
           updated_at?: string;
           origin_date?: string | null;
           cancel_reason?: string | null;
+          abandoned_at?: string | null;
         };
         Update: {
           id?: string;
@@ -963,6 +965,7 @@ export type Database = {
           updated_at?: string;
           origin_date?: string | null;
           cancel_reason?: string | null;
+          abandoned_at?: string | null;
         };
         Relationships: [];
       };
@@ -1262,6 +1265,12 @@ export type Database = {
       fn_supersede_settled_failures: {
         Args: Record<string, never>;
         Returns: unknown;
+      };
+      fn_sweep_abandoned_walks: {
+        Args: {
+          p_hours: number;
+        };
+        Returns: number;
       };
       fn_touch_updated_at: {
         Args: Record<string, never>;

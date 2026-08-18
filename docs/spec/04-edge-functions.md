@@ -505,7 +505,7 @@ For each active schedule: generate `walks` rows for the next 14 days for matchin
 **Subscription state is an allow-list, not a deny-list (0026).** Walks are generated only for `subscription_status in ('active','none')`. It read `<> 'paused'`, which was the sole subscription predicate — so a client who had cancelled, or whose card had failed, kept having walks generated nightly that the operator performed and could not bill. An allow-list also fails *closed*: a value added to the enum later stops generating work until somebody decides what it means, rather than silently producing unbillable walks.
 
 `'none'` is deliberately included — that is a client who never subscribed, whom the operator may bill outside Sanpo. `past_due` is excluded by owner decision: service halts until payment clears. `fn_book_walk` carries the identical predicate, so client self-booking and nightly materialization cannot disagree. Idempotent via the `(schedule_id, scheduled_date)` unique index (`ON CONFLICT DO NOTHING`).
-Response: `{ created, expired_clients, expiry_error }`.
+Response: `{ created, expired_clients, expiry_error, walks_flagged_abandoned, stale_walk_error }`.
 
 ### The schedule lives in a migration, not a dashboard (0028)
 
@@ -528,17 +528,44 @@ The **edge function remains** as the manual path (Calendar → "Run
 materializer") and is what the staging smoke suite exercises. It calls the
 same `fn_run_nightly_jobs()`, so the two cannot drift.
 
-### The expiry sweep is advisory, not silent
+### The advisory sweeps are advisory, not silent
 
 `fn_run_nightly_jobs` runs materialization first and lets it propagate: if
-walk generation is broken the run must fail loudly. The credit-expiry sweep is
-wrapped, so its failure does not cost the operator a calendar — but the error
-is **recorded and returned** as `expiry_error`, and the run is marked not-ok.
+walk generation is broken the run must fail loudly. The credit-expiry sweep
+and the abandoned-walk sweep are each wrapped, so a failure does not cost the
+operator a calendar — but the error is **recorded and returned**
+(`expiry_error`, `stale_walk_error`) and the run is marked not-ok.
 
 The old code had this exactly backwards: `if (!sweep.error) expired = …` meant
 a permanently failing sweep read identically to a quiet night. Clients kept
 credits they had already been billed for and stopped paying overage — a
 revenue leak with no symptom anywhere.
+
+`job_runs.error` therefore carries **both**, joined with ` | `, rather than
+`coalesce(first, second)`. Coalescing looks harmless and rebuilds the same
+swallow one level up: a permanently failing sweep stays invisible for as long
+as any other sweep is also failing.
+
+### fn_sweep_abandoned_walks — the walk that never ended (0036)
+
+`complete-walk` is the only exit from `in_progress`, and there was no maximum
+duration and no stale sweep. An operator who forgot to press END WALK — or
+whose phone died — left a walk that never billed, never sent the client their
+report, and was **invisible**, because Today fetches `{ date: today }` and
+yesterday's abandoned walk is not today's (review M28).
+
+The sweep stamps `walks.abandoned_at` on `in_progress` walks whose
+`started_at` is more than six hours old. It deliberately does **not**
+auto-complete them and does not invent an end time or a distance: completing
+means BILLING, and a duration produced by a cron job is not something to
+charge a client for. Silently charging is a worse failure than silently not
+charging, because the client sees it and the operator does not. The walk stays
+`in_progress` so `complete-walk` can still finish it properly.
+
+`started_at`, not `scheduled_date` — a walk started at 23:50 is barely an hour
+old at midnight, and sweeping by calendar day would flag it while the operator
+is still on the doorstep. `abandoned_at is null` keeps the sweep idempotent, so
+"how long has this been sitting there" survives the second night.
 
 ### Did it run?
 

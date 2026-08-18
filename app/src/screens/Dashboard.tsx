@@ -14,6 +14,7 @@ import {
 } from "@/components/TodayIllustratedSchedule";
 import {
   getMyOperator,
+  listAbandonedWalks,
   listClients,
   listPayments,
   listWalksDetailed,
@@ -65,6 +66,7 @@ export default function Dashboard() {
   const auth = useAuth();
   const [operator, setOperator] = useState<Operators | null>(null);
   const [walks, setWalks] = useState<WalkDetailed[] | null>(null);
+  const [stale, setStale] = useState<WalkDetailed[]>([]);
   const [clients, setClients] = useState<Clients[]>([]);
   const [payments, setPayments] = useState<Payments[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -77,14 +79,16 @@ export default function Dashboard() {
     if (!background) setError(null);
     const today = todayLocal();
     try {
-      const [op, todayWalks, allClients, pays] = await Promise.all([
+      const [op, todayWalks, abandoned, allClients, pays] = await Promise.all([
         getMyOperator(),
         listWalksDetailed({ date: today }),
+        listAbandonedWalks(),
         listClients(),
         listPayments(),
       ]);
       setOperator(op);
       setWalks(todayWalks);
+      setStale(abandoned);
       setClients(allClients);
       setPayments(pays);
       setError(null);
@@ -181,8 +185,45 @@ export default function Dashboard() {
         }
       />
 
-      {(low.length > 0 || failed.length > 0) && (
+      {(stale.length > 0 || low.length > 0 || failed.length > 0) && (
         <aside className="today-emaki-followups" aria-label="Items needing attention">
+          {/*
+            Review M28. First in the list because it is the only entry that is
+            costing money right now: an unfinished walk has never debited a
+            credit, never charged an overage and never sent the client their
+            report. It is listed here rather than in the schedule because the
+            schedule is today's, and the whole failure was that a walk started
+            yesterday appeared nowhere at all.
+
+            The link goes to Walk Mode, not the client record — the operator
+            needs to END WALK with the real numbers, which is the one action
+            that finishes it. The sweep deliberately did not do that for them.
+          */}
+          {stale.length > 0 && (
+            <section>
+              <span className="section-label">Unfinished walks</span>
+              <div className="today-emaki-followups__list">
+                {stale.map((walk) => (
+                  <Link
+                    key={walk.id}
+                    to={`/walks/${walk.id}/live`}
+                    className="today-emaki-followups__link"
+                  >
+                    <Card className="today-emaki-followups__item">
+                      <span>
+                        {walkPetNames(walk).join(" & ") || "Walk"} ·{" "}
+                        {dateLocal(walk.scheduled_date)}
+                      </span>
+                      <span className="today-emaki-followups__value">
+                        <Badge status="attention">Never ended</Badge>
+                      </span>
+                    </Card>
+                  </Link>
+                ))}
+              </div>
+            </section>
+          )}
+
           {low.length > 0 && (
             <section>
               <span className="section-label">Low credits</span>

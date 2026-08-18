@@ -766,6 +766,24 @@ export async function listWalksDetailed(filters: WalkFilters = {}): Promise<Walk
   return must(data as unknown as WalkDetailed[] | null, error);
 }
 
+/**
+ * Walks the nightly sweep flagged as abandoned (review M28).
+ *
+ * Deliberately unfiltered by date. That is the whole point: Today asks for
+ * `{ date: today }`, so a walk started yesterday and never ended was invisible
+ * on every screen in the product — never billed, never reported, and with
+ * nothing anywhere to tell the operator it had happened.
+ */
+export async function listAbandonedWalks(): Promise<WalkDetailed[]> {
+  const { data, error } = await supabase
+    .from("walks")
+    .select("*, walk_pets(pets(name)), property:properties(label), client:clients(full_name)")
+    .eq("status", "in_progress")
+    .not("abandoned_at", "is", null)
+    .order("started_at");
+  return must(data as unknown as WalkDetailed[] | null, error);
+}
+
 export function walkPetNames(walk: WalkDetailed): string[] {
   return walk.walk_pets.flatMap((wp) => (wp.pets ? [wp.pets.name] : []));
 }

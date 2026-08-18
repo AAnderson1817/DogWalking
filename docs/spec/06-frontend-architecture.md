@@ -134,6 +134,55 @@ exit — it points at the same URL, so the only effect is one extra Back from
 the report card, and calling `history.back()` from a cleanup would race
 whatever navigation triggered it.
 
+### A walk is bounded in time, and neither bound bills it
+
+A walk had no maximum duration of any kind, and `complete-walk` is the only
+exit from `in_progress` — so a forgotten END WALK kept recording for as long as
+the app stayed open, and the route grew while the operator drove home. That
+distance is what the client sees as proof of service (review M28).
+
+`walkSessionBound` (`lib/walk-session.ts`) is the rule, in two stages:
+
+1. **`prompting`** at `duration_minutes + 30 min` — the operator is *asked*
+   ("Still walking?"). This stage stops nothing. A genuinely long walk is a
+   normal thing, and taking the GPS away from someone still on it would be a
+   new defect wearing the old one's clothes.
+2. **`capped`** a further 30 minutes later, with the question unanswered —
+   GPS emission stops. The walk stays `in_progress`, every point already
+   recorded is kept, and the trail ends where the evidence for it ended.
+   Under-reporting, the same direction the gap rule above commits to.
+
+Answering restarts the clock **from the answer**, not from `started_at`; a
+walk already past its bound would otherwise re-prompt on the next tick and the
+button would visibly do nothing. `duration_minutes` is unavailable on the
+offline resume path, which restores from a local snapshot, so an unknown or
+non-positive duration falls back to 60 minutes — the only wrong answer that
+costs anything here is the one that prompts too early.
+
+**Neither stage completes the walk**, and neither does the nightly sweep.
+Completing means billing, and a duration invented by a timer is not something
+to charge a client for.
+
+The cap is also the first thing that ever deactivates a *live* watch and can
+reactivate it — `active` in Walk Mode used to be one-way, since a walk with a
+`result` is over. So `useGeolocation` now remembers that a run ended and marks
+the first fix of the next one `gapBefore`. Without it the resumed trail joins
+straight onto the fix before the stop and `pathDistanceM` measures the whole
+un-recorded stretch: H7's defect, rebuilt by the fix for M28. The mark is set
+only if the ended run had produced a fix (otherwise the trail opens with a
+break) and is cleared as soon as it is used (otherwise every later point is a
+new subpath and the rest of the walk's distance disappears).
+
+### Today shows unfinished walks regardless of their date
+
+The sweep is only half the fix. Today loads `{ date: today }`, so a walk
+started yesterday and never ended appeared on no screen in the product.
+`listAbandonedWalks()` is deliberately unfiltered by date and feeds an
+"Unfinished walks" section at the top of the follow-ups list — first, because
+it is the only entry actively costing money. The rows link to **Walk Mode**,
+not the client record: finishing the walk is what bills it and sends the
+report, and END WALK is the one action that does that.
+
 ## PWA (phase 08)
 `manifest.webmanifest` (name Sanpo, theme `#FEF6EA`, display standalone,
 byte-approved Sanpo icons at 192/512 including maskable entries), service

@@ -2122,6 +2122,38 @@ begin
   raise notice 'nightly run records a heartbeat (0028): OK';
 end $$;
 
+-- 0036 · a clean nightly run records NO error.
+--
+-- This sits HERE, above the block that breaks `fn_expire_credits` for the rest
+-- of the transaction, because a clean run is the only place `error is null`
+-- can be asserted — and that assertion is load-bearing: 0036 changed
+-- `error = v_expiry_error` to `nullif(concat_ws(' | ', …), '')` so two failing
+-- sweeps cannot hide behind each other, and without the `nullif` a quiet night
+-- would record the empty string instead of null.
+--
+-- That the sweep is actually CALLED is proved with the 0036 fixtures further
+-- down, by a stale walk the nightly run has to flag. Asserting the reporting
+-- key here would not prove it: `v_stale_walks` initialises to 0, so a
+-- nightly run with the sweep deleted outright still reports the key.
+do $$
+declare
+  v_result jsonb;
+  v_row record;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  v_result := fn_run_nightly_jobs(14);
+
+  select * into v_row from job_runs where id = (v_result ->> 'run_id')::uuid;
+  if not v_row.ok then
+    raise exception 'FAIL: the nightly run went not-ok with the sweep wired in (%)', v_row.error;
+  end if;
+  if v_row.error is not null then
+    raise exception 'FAIL: a clean run recorded "%" instead of no error', v_row.error;
+  end if;
+
+  raise notice 'a clean nightly run records no error (0036): OK';
+end $$;
+
 -- The fix, stated as a test: a failing expiry sweep must NOT stop walks being
 -- generated, and must NOT be silent. The old code did the first and got the
 -- second exactly backwards — `if (!sweep.error) expired = …` meant a
@@ -2394,6 +2426,255 @@ begin
     raise exception 'FAIL: the nightly job does not report what it gave up on';
   end if;
   raise notice 'nightly job reports the email backlog (0029): OK';
+end $$;
+
+-- ── 0036 · abandoned walks ───────────────────────────────────────────────
+-- Review M28. `complete-walk` is the only exit from `in_progress`, so a walk
+-- the operator never ended sits there forever: never billed, never reported,
+-- and invisible because Today fetches only today's date.
+--
+-- Every assertion here is about the SWEEP'S BOUNDARIES rather than about it
+-- doing something. A sweep that flags everything would satisfy "it flagged the
+-- old walk" and would be far worse than the bug: it would put fresh, correct,
+-- in-progress walks — the one the operator is on right now — into the
+-- needs-attention list on every nightly run.
+do $$
+declare
+  v_service uuid;
+  v_fresh uuid;
+  v_stale uuid;
+  v_done uuid;
+  v_flagged int;
+  v_first timestamptz;
+  v_second timestamptz;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  select id into v_service from service_types
+   where operator_id = '99999999-0000-4000-a000-000000000001' and is_default;
+
+  -- Started ten minutes ago: the operator is on the doorstep.
+  insert into walks (operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status, started_at)
+  values ('99999999-0000-4000-a000-000000000001',
+          '99999999-0000-4000-c000-00000000000a',
+          '99999999-0000-4000-d000-00000000000a',
+          v_service, current_date, '10:00', '11:00', 'in_progress',
+          now() - interval '10 minutes')
+  returning id into v_fresh;
+
+  -- Started yesterday morning and never ended.
+  insert into walks (operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status, started_at)
+  values ('99999999-0000-4000-a000-000000000001',
+          '99999999-0000-4000-c000-00000000000a',
+          '99999999-0000-4000-d000-00000000000a',
+          v_service, current_date - 1, '10:00', '11:00', 'in_progress',
+          now() - interval '26 hours')
+  returning id into v_stale;
+
+  -- Long-running but FINISHED. `status`, not age, is what makes a walk stale;
+  -- a sweep keyed on `started_at` alone would mark completed history.
+  insert into walks (operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status,
+                     started_at, ended_at)
+  values ('99999999-0000-4000-a000-000000000001',
+          '99999999-0000-4000-c000-00000000000a',
+          '99999999-0000-4000-d000-00000000000a',
+          v_service, current_date - 1, '10:00', '11:00', 'completed',
+          now() - interval '26 hours', now() - interval '25 hours')
+  returning id into v_done;
+
+  v_flagged := fn_sweep_abandoned_walks(6);
+  if v_flagged < 1 then
+    raise exception 'FAIL: the sweep flagged nothing when a 26-hour walk is open';
+  end if;
+
+  select abandoned_at into v_first from walks where id = v_stale;
+  if v_first is null then
+    raise exception 'FAIL: a walk open for 26 hours was not flagged';
+  end if;
+  if (select abandoned_at from walks where id = v_fresh) is not null then
+    raise exception 'FAIL: a walk started ten minutes ago was flagged as abandoned';
+  end if;
+  if (select abandoned_at from walks where id = v_done) is not null then
+    raise exception 'FAIL: a completed walk was flagged as abandoned';
+  end if;
+
+  -- Idempotent, and specifically NOT re-stamping. `abandoned_at` answers "how
+  -- long has this been sitting there"; a sweep that refreshed it every night
+  -- would answer "since yesterday" forever, and the walk would look new.
+  perform pg_sleep(0.01);
+  if fn_sweep_abandoned_walks(6) <> 0 then
+    raise exception 'FAIL: the second sweep re-flagged an already-flagged walk';
+  end if;
+  select abandoned_at into v_second from walks where id = v_stale;
+  if v_second <> v_first then
+    raise exception 'FAIL: the second sweep moved abandoned_at from % to %', v_first, v_second;
+  end if;
+
+  -- The status is deliberately untouched: completing means billing, and the
+  -- operator must still be able to finish this walk with the real numbers.
+  if (select status from walks where id = v_stale) <> 'in_progress' then
+    raise exception 'FAIL: the sweep changed the walk status — it must stay completable';
+  end if;
+
+  -- A walk with no `started_at` never began, so there is nothing to abandon.
+  update walks set abandoned_at = null, started_at = null where id = v_stale;
+  if fn_sweep_abandoned_walks(6) <> 0 then
+    raise exception 'FAIL: a walk that never started was flagged as abandoned';
+  end if;
+
+  update walks set started_at = now() - interval '26 hours' where id = v_stale;
+  perform fn_sweep_abandoned_walks(6);
+
+  raise notice 'abandoned-walk sweep marks only stale open walks (0036): OK';
+end $$;
+
+-- The threshold is an argument, and a nonsense one must refuse rather than
+-- quietly sweep the whole table. `p_hours <= 0` makes `now() - interval` land
+-- in the future, which would flag every open walk including the current one.
+do $$
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  begin
+    perform fn_sweep_abandoned_walks(0);
+    raise exception 'FAIL: the sweep accepted a zero-hour threshold';
+  exception when raise_exception then
+    if sqlerrm not like 'fn_sweep_abandoned_walks: hours must be positive%' then raise; end if;
+  end;
+
+  set local role authenticated;
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000000001","role":"authenticated"}', true);
+  begin
+    perform fn_sweep_abandoned_walks(6);
+    raise exception 'FAIL: an operator ran the abandoned-walk sweep';
+  exception when insufficient_privilege then null;
+       when raise_exception then
+         if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  raise notice 'abandoned-walk sweep validates its threshold and its caller (0036): OK';
+end $$;
+
+-- A walk that has been flagged is REACHABLE by its operator, and not by
+-- anyone else. The sweep is only half the fix: `abandoned_at` exists so the
+-- Today screen can show the walk regardless of its date, and a column the
+-- operator's own role cannot read would leave the walk exactly as invisible
+-- as it was before.
+do $$
+declare
+  v_seen int;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+
+  set local role authenticated;
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000000001","role":"authenticated"}', true);
+  select count(*) into v_seen from walks where abandoned_at is not null;
+  if v_seen = 0 then
+    raise exception 'FAIL: the operator cannot see their own abandoned walk';
+  end if;
+
+  -- Operator 2's session. Nothing about a flagged walk crosses the tenant.
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000000002","role":"authenticated"}', true);
+  if (select count(*) from walks where abandoned_at is not null) <> 0 then
+    raise exception 'FAIL: a foreign operator sees another tenant''s abandoned walk';
+  end if;
+
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  raise notice 'abandoned walks are visible to their own operator only (0036): OK';
+end $$;
+
+-- The nightly run actually CALLS the sweep. A function nothing calls is the
+-- same as no function, and this is asserted on the OUTCOME — a stale walk that
+-- comes back flagged — rather than on the reporting key, because
+-- `v_stale_walks` initialises to 0 and so the key survives deleting the call.
+do $$
+declare
+  v_service uuid;
+  v_walk uuid;
+  v_result jsonb;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  select id into v_service from service_types
+   where operator_id = '99999999-0000-4000-a000-000000000001' and is_default;
+
+  insert into walks (operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status, started_at)
+  values ('99999999-0000-4000-a000-000000000001',
+          '99999999-0000-4000-c000-00000000000a',
+          '99999999-0000-4000-d000-00000000000a',
+          v_service, current_date - 2, '10:00', '11:00', 'in_progress',
+          now() - interval '50 hours')
+  returning id into v_walk;
+
+  v_result := fn_run_nightly_jobs(14);
+
+  if (select abandoned_at from walks where id = v_walk) is null then
+    raise exception 'FAIL: the nightly run left a 50-hour-old open walk unflagged';
+  end if;
+  if (v_result ->> 'walks_flagged_abandoned')::int < 1 then
+    raise exception 'FAIL: the nightly run does not report what the sweep flagged';
+  end if;
+  if (select detail ->> 'walks_flagged_abandoned' from job_runs
+       where id = (v_result ->> 'run_id')::uuid) is null then
+    raise exception 'FAIL: the heartbeat row does not record the abandoned-walk sweep';
+  end if;
+
+  raise notice 'nightly run sweeps abandoned walks (0036): OK';
+end $$;
+
+-- BOTH advisory sweeps fail at once. `fn_expire_credits` has been broken since
+-- the 0028 block far above (the outer rollback is what restores it), so
+-- breaking the abandoned-walk sweep here produces exactly the case that
+-- `error = coalesce(v_expiry_error, v_stale_error)` gets wrong: it records the
+-- first and drops the second, so a permanently failing sweep stays invisible
+-- for as long as any other sweep is also failing. That is the 0028 swallow
+-- rebuilt one level up, which is why it is asserted rather than reasoned
+-- about. This block is deliberately LAST — it leaves the sweep broken.
+do $$
+declare
+  v_result jsonb;
+  v_row record;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+
+  create or replace function fn_sweep_abandoned_walks(p_hours int default 6)
+  returns int
+  language plpgsql security definer set search_path = public as $broken$
+  begin
+    raise exception 'simulated stale-walk failure';
+  end;
+  $broken$;
+
+  -- A horizon no earlier run used, so `created > 0` means work happened
+  -- rather than an idempotent no-op returning zero.
+  v_result := fn_run_nightly_jobs(28);
+
+  if (v_result ->> 'stale_walk_error') not like '%simulated stale-walk failure%' then
+    raise exception 'FAIL: the stale-walk failure was swallowed: %', v_result ->> 'stale_walk_error';
+  end if;
+  if (v_result ->> 'created')::int = 0 then
+    raise exception 'FAIL: a failing stale-walk sweep stopped walk generation';
+  end if;
+
+  select * into v_row from job_runs where id = (v_result ->> 'run_id')::uuid;
+  if v_row.ok then
+    raise exception 'FAIL: a run whose stale-walk sweep failed was recorded as ok';
+  end if;
+  if v_row.error not like '%simulated expiry failure%' then
+    raise exception 'FAIL: the expiry failure vanished when a second sweep also failed: %', v_row.error;
+  end if;
+  if v_row.error not like '%simulated stale-walk failure%' then
+    raise exception 'FAIL: the stale-walk failure hid behind the expiry failure: %', v_row.error;
+  end if;
+
+  raise notice 'two failing sweeps both reach the heartbeat row (0036): OK';
 end $$;
 
 -- A client must not be able to mark their own payment_failed email as sent.
