@@ -27,6 +27,8 @@ export interface NotificationRow {
   body: string | null;
   walk_id: string | null;
   email_attempts: number;
+  /** 0029. `sent` is terminal — see the send-once guard in deliverNotification. */
+  email_delivery_status?: string | null;
 }
 
 /** The outcome recorded against the row. */
@@ -76,6 +78,19 @@ export async function deliverNotification(
   row: NotificationRow,
   deps: SendDeps,
 ): Promise<Outcome> {
+  // Send-once (review M1). Nothing else stopped the same notification being
+  // delivered repeatedly: the DB webhook fires on INSERT, but the endpoint
+  // also accepts a `notification_id` directly, so an operator could POST the
+  // same id in a loop and mail-bomb their own client — and, before the tenant
+  // scoping added alongside this, somebody else's.
+  //
+  // Deliberately not `email_attempts > 0`: an attempt that FAILED must stay
+  // retryable, which is the whole point of the backlog 0029 added. Only a
+  // recorded `sent` is terminal.
+  if (row.email_delivery_status === "sent") {
+    return { kind: "skipped", reason: "already sent" };
+  }
+
   // Terminal, not a failure: an operator-only notification has no client to
   // email, and nothing about that will change. A sweep that treated this as
   // "not yet sent" would retry it every night forever.

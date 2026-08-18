@@ -33,13 +33,33 @@ interface Body {
   action?: "drain";
 }
 
-const COLS = "id, operator_id, client_id, type, title, body, walk_id, email_attempts";
+const COLS =
+  "id, operator_id, client_id, type, title, body, walk_id, email_attempts, email_delivery_status";
 
-function makeDeps(apiKey: string): SendDeps {
+/**
+ * `operatorId` scopes every lookup to one tenant. Null means the service role,
+ * which legitimately sends for everybody (the DB webhook and the nightly
+ * drain).
+ *
+ * Review M1: this function verified the caller was AN operator and then
+ * discarded the result, fetching the row by id alone through the service-role
+ * client — so any registered operator, and signup is open, could force an
+ * email to another tenant's client. The four differentiated responses also
+ * formed an existence-and-type oracle. The only thing standing in the way was
+ * uuid unguessability, which is not an authorization control.
+ *
+ * The scope goes into the QUERY rather than into a check after it. A
+ * post-fetch comparison is the version that leaks: it has already read the row
+ * and must then be careful about every path out, and every other edge function
+ * here gets this right by construction.
+ */
+function makeDeps(apiKey: string, operatorId: string | null): SendDeps {
   const db = adminClient();
   return {
     async getNotification(id) {
-      const { data, error } = await db.from("notifications").select(COLS).eq("id", id).maybeSingle();
+      let q = db.from("notifications").select(COLS).eq("id", id);
+      if (operatorId) q = q.eq("operator_id", operatorId);
+      const { data, error } = await q.maybeSingle();
       if (error) {
         throw new HttpError(500, "db_error", "notification lookup failed", error, {
           notification_id: id,
@@ -106,7 +126,8 @@ serveFunction(async (req) => {
     req.headers.get("Authorization"),
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
   );
-  if (!isService) await requireOperator(req);
+  // The RESULT is used, not just the check. Discarding it is what M1 was.
+  const operator = isService ? null : await requireOperator(req);
 
   const body = await readJson<Body>(req);
 
@@ -128,7 +149,7 @@ serveFunction(async (req) => {
     );
   }
 
-  const deps = makeDeps(apiKey);
+  const deps = makeDeps(apiKey, operator?.id ?? null);
 
   if (body?.action === "drain") {
     if (!isService) {
@@ -144,6 +165,9 @@ serveFunction(async (req) => {
   if (!id) throw new HttpError(400, "bad_request", "notification_id is required");
 
   const row = await deps.getNotification(id);
+  // One response for "no such notification" and for "not yours". Two distinct
+  // answers would let an operator probe another tenant's id space, and the
+  // caller can do nothing differently with the distinction anyway.
   if (!row) throw new HttpError(404, "not_found", "notification not found");
 
   const outcome = await deliverNotification(row, deps);
