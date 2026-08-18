@@ -751,6 +751,7 @@ export type Database = {
           lng: number;
           accuracy_m: number | null;
           created_at: string;
+          gap_before: boolean;
         };
         Insert: {
           id?: string;
@@ -761,6 +762,7 @@ export type Database = {
           lng: number;
           accuracy_m?: number | null;
           created_at?: string;
+          gap_before?: boolean;
         };
         Update: {
           id?: string;
@@ -771,6 +773,7 @@ export type Database = {
           lng?: number;
           accuracy_m?: number | null;
           created_at?: string;
+          gap_before?: boolean;
         };
         Relationships: [];
       };

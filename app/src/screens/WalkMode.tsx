@@ -32,8 +32,9 @@ import {
 import { useAuth } from "@/lib/auth-context";
 import { useGeolocation } from "@/hooks/useGeolocation";
 import { useOnline } from "@/hooks/useOnline";
+import { useWakeLock } from "@/hooks/useWakeLock";
 import { useWalkChannel } from "@/hooks/useWalkChannel";
-import { pathDistanceM } from "@/lib/geo";
+import { GPS_GAP_MS, pathDistanceM } from "@/lib/geo";
 import { distanceKm, elapsed, money, time12 } from "@/lib/format";
 import { compressImage } from "@/lib/image";
 import {
@@ -48,6 +49,13 @@ import {
 } from "@/lib/walk-snapshot";
 import type { Pets, Walks } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
+
+/** A trail point read back from the DB or the outbox, gap mark included. */
+interface ResumedPoint {
+  lat: number;
+  lng: number;
+  gapBefore?: boolean;
+}
 
 export default function WalkMode() {
   useDocumentTitle("Walk in progress");
@@ -81,6 +89,8 @@ function WalkModeInner({ walkId }: { walkId: string }) {
 
   const active = walk?.status === "in_progress" && !result;
   const geo = useGeolocation(active ?? false);
+  // Best effort against the OS suspending the watch when the screen locks.
+  const wakeLock = useWakeLock(active ?? false);
   const channel = useWalkChannel(walkId, "broadcast", auth.operatorId ?? "");
   const pendingPoints = channel.pendingPoints;
   const online = useOnline();
@@ -107,13 +117,21 @@ function WalkModeInner({ walkId }: { walkId: string }) {
             listWalkPhotos(walkId).catch(() => []),
           ]);
           const seen = new Set<string>();
-          const merged: Array<{ lat: number; lng: number }> = [];
-          for (const p of [...saved.map((x) => ({ lat: x.lat, lng: x.lng })), ...queued]) {
+          const merged: ResumedPoint[] = [];
+          const before = [
+            // `gap_before` (0027) rides along, so a walk resumed after a screen
+            // lock still shows the break and still excludes it from distance.
+            ...saved.map((x) => ({ lat: x.lat, lng: x.lng, gapBefore: x.gap_before })),
+            ...queued.map((p) => ({ lat: p.lat, lng: p.lng, gapBefore: p.gapBefore })),
+          ];
+          for (const p of before) {
             const key = `${p.lat},${p.lng}`;
-            if (!seen.has(key)) {
-              seen.add(key);
-              merged.push({ lat: p.lat, lng: p.lng });
-            }
+            if (seen.has(key)) continue;
+            seen.add(key);
+            // The first point of the trail cannot carry a gap: there is no
+            // preceding segment for it to break.
+            const isGap = p.gapBefore === true && merged.length > 0;
+            merged.push({ lat: p.lat, lng: p.lng, ...(isGap ? { gapBefore: true } : {}) });
           }
           setResumedPoints(merged);
 
@@ -147,7 +165,13 @@ function WalkModeInner({ walkId }: { walkId: string }) {
               ? { outcome: "debited", cost_credits: w.credits_debited }
               : { outcome: w.is_overage ? "overage" : "debited" },
           });
-          setStaticPoints(points.map((p) => ({ lat: p.lat, lng: p.lng })));
+          setStaticPoints(points.map((p, i) => ({
+            lat: p.lat,
+            lng: p.lng,
+            // Same rule as the resume path: the first point has nothing behind
+            // it to break away from.
+            ...(p.gap_before && i > 0 ? { gapBefore: true } : {}),
+          })));
         }
         setHydrated(true);
       })
@@ -186,10 +210,10 @@ function WalkModeInner({ walkId }: { walkId: string }) {
     saveWalkSnapshot(walk, { photo_paths: photoPaths, toggles, notes });
   }, [hydrated, walk, photoPaths, toggles, notes, result]);
 
-  const [staticPoints, setStaticPoints] = useState<Array<{ lat: number; lng: number }>>([]);
+  const [staticPoints, setStaticPoints] = useState<ResumedPoint[]>([]);
   // Points saved before a mid-walk reload; prepended to live points for the
   // distance total and the route map.
-  const [resumedPoints, setResumedPoints] = useState<Array<{ lat: number; lng: number }>>([]);
+  const [resumedPoints, setResumedPoints] = useState<ResumedPoint[]>([]);
 
   // Broadcast every newly emitted point.
   useEffect(() => {
@@ -265,11 +289,22 @@ function WalkModeInner({ walkId }: { walkId: string }) {
     }
   }, []);
 
-  const routePoints = useMemo(
-    () => [...resumedPoints, ...geo.points],
-    [resumedPoints, geo.points],
-  );
+  const routePoints = useMemo(() => {
+    // The remount itself is a gap: the walk carried on while the page was
+    // reloading and nothing was watching. Marking the join breaks the line
+    // there and leaves that stretch out of the distance, which under-reports
+    // rather than inventing a straight line across it — the safe direction for
+    // a number printed on the client's report card as proof of service.
+    const [first, ...rest] = geo.points;
+    if (resumedPoints.length === 0 || !first) return [...resumedPoints, ...geo.points];
+    return [...resumedPoints, { ...first, gapBefore: true }, ...rest];
+  }, [resumedPoints, geo.points]);
   const distance = useMemo(() => pathDistanceM(routePoints), [routePoints]);
+
+  // `now` already ticks once a second for the elapsed timer, so staleness is
+  // free. Before the first fix there is nothing to be stale about — that is
+  // the ordinary "acquiring GPS" moment, not a suspension.
+  const gpsStalled = active && geo.lastFixAt != null && now - geo.lastFixAt > GPS_GAP_MS;
 
   async function start() {
     setBusy(true);
@@ -529,6 +564,25 @@ function WalkModeInner({ walkId }: { walkId: string }) {
             role="alert"
           />
         )}
+        {/* A suspended watch raises no error, so without this the screen looks
+            identical whether or not the route is still being recorded — the
+            one thing the operator most needs to know. `geo.error` takes
+            precedence: a denied permission is a different problem with a
+            different fix, and showing both would be noise. */}
+        {!geo.error && gpsStalled && (
+          <StateField
+            compact
+            tone="attention"
+            label="Recording paused"
+            title="No location fix for a while"
+            detail={
+              "The phone may have locked or switched apps. Reopen this screen to resume — "
+              + "the walk keeps running, and the stretch that wasn't recorded is left out "
+              + "of the route and the distance rather than guessed."
+            }
+            role="status"
+          />
+        )}
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--s-2)" }}>
           {(
@@ -581,8 +635,18 @@ function WalkModeInner({ walkId }: { walkId: string }) {
         <Button full onClick={() => void endAndSend()} disabled={busy || uploading}>
           {busy ? <Spinner /> : "End walk & send report"}
         </Button>
+        {/* The old copy ("keep this screen open") was the product's ENTIRE
+            mitigation for a suspended watch, and it asked for something the
+            operator cannot do with a phone in a pocket. Now the wake lock does
+            the work where the browser supports it, and where it does not the
+            hint says so plainly instead of implying the recording is fine. */}
         <p style={{ color: "var(--text-2)", fontSize: "var(--fs-12)", textAlign: "center" }}>
-          Keep this screen open during the walk — leaving pauses GPS recording.
+          {wakeLock.held
+            ? "The screen is being kept awake for this walk."
+            : wakeLock.supported
+            ? "Keep this screen open — GPS stops recording when the phone locks."
+            : "This browser can't keep the screen awake. Keep the phone unlocked "
+              + "with this screen open, or GPS stops recording."}
         </p>
       </div>
     </div>

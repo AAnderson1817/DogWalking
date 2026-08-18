@@ -76,6 +76,50 @@ work already done (review H8). Three rules:
    notes prefer the snapshot, since `walks.notes` is not written until
    completion.
 
+### GPS stops when the phone does, and the product has to say so
+
+`watchPosition` stops delivering fixes when the page is backgrounded or the
+screen locks, on both iOS Safari and Android Chrome. It stops **silently** — a
+suspended watch fires no error, so `geo.error` stayed null, nothing on screen
+changed, and the next fix was appended to the trail as though it were the next
+step of the walk (review H7). The route drew a straight line across the
+suspended interval and `distance_m` — the client-facing proof of service on the
+report card — measured it. A walk where the operator pocketed the phone could
+report a *longer* distance than one where they held it.
+
+Three parts, none of which is a cure:
+
+1. **A screen wake lock** (`useWakeLock`) while a walk is active, re-requested
+   on `visibilitychange`. The OS releases the sentinel whenever the page is
+   hidden, so acquiring it once means it survives exactly one app switch and
+   then never returns. Feature-detected: Safari < 16.4 and Firefox have no
+   `navigator.wakeLock`, and the footer copy says which case the operator is in
+   rather than implying the recording is fine.
+2. **A visible "Recording paused" state** when the last raw fix is older than
+   `GPS_GAP_MS`. Without it the screen is identical whether or not the route is
+   being recorded, which is the single thing the operator most needs to know.
+   `geo.error` takes precedence — a denied permission is a different problem
+   with a different fix.
+3. **The gap is marked, not drawn through.** `gapBefore` on the point after a
+   silence; `pathDistanceM` skips the segment into it, `toSvgPath` starts a new
+   subpath, Mapbox renders a `MultiLineString`, and `walk_gps_points.gap_before`
+   (0027) carries it so a resumed or completed walk still shows the break.
+   Under-reporting is deliberate: leaving out a stretch nobody recorded is
+   honest, inventing a straight line across it is not.
+
+**Detected on raw fixes, never on emitted points.** Raw fixes arrive about once
+a second whether or not the device is moving; emitted points are throttled to
+≥5 s **and** ≥10 m, so an operator waiting at a crossing legitimately produces
+none for minutes. A time-gap rule applied to emitted points — or to stored rows
+— would call that a suspension and delete real walking. That is also why 0027
+adds a column rather than deriving the flag from `recorded_at`, and why nothing
+is backfilled: a guessed gap is indistinguishable from an observed one.
+
+`shouldEmitPoint` lets a `gapBefore` fix through regardless of both thresholds.
+The device can wake within 10 m of where it slept, and if the throttle
+suppresses that fix the mark lands somewhere further along the trail or never
+lands at all.
+
 **Exit guards, both of them.** `beforeunload` covers reload / tab close / app
 switch. It does *not* cover the back button or an edge-swipe back gesture —
 that is a same-document history navigation, no unload fires, and Walk Mode

@@ -20,6 +20,11 @@ function sendBatch(batch: OutboxBatch): Promise<void> {
       lat: p.lat,
       lng: p.lng,
       accuracy_m: p.acc ?? null,
+      // Carried, not derived (0027). Only the device that watched the fixes
+      // arrive knows the watch had stopped; the stored timestamps cannot tell
+      // a suspension apart from an operator standing still, because the emit
+      // throttle needs ≥10 m as well as ≥5 s.
+      gap_before: p.gapBefore ?? false,
     })),
   );
 }
