@@ -8,6 +8,8 @@ import {
   encryptSecret,
   importVaultKey,
   pgHexToBytes,
+  VaultBlobError,
+  type VaultKey,
 } from "../_lib/crypto.ts";
 import {
   handleVault,
@@ -19,14 +21,51 @@ import {
 const CRED_META_COLUMNS =
   "id, operator_id, property_id, entry_method, label, key_location_hint, rotated_at, revoked_at";
 
-let vaultKey: CryptoKey | null = null;
-async function getVaultKey(): Promise<CryptoKey> {
-  if (!vaultKey) {
-    const raw = Deno.env.get("VAULT_MASTER_KEY");
-    if (!raw) throw new HttpError(500, "misconfigured", "vault key is not configured");
-    vaultKey = await importVaultKey(raw);
+/**
+ * The key ring. Two keys can be loaded at once — the current one, which
+ * encrypts and decrypts, and a retired one that only decrypts. That is what
+ * makes rotation possible: while a rewrap is in progress, some rows are on the
+ * new key and some on the old, and BOTH read correctly. A mixed fleet on mixed
+ * keys is the normal state during a rotation, not a hazard, so the rewrap can
+ * be paused, killed or resumed with no outage and no deadline.
+ *
+ * Decryption routes strictly by the key id in the blob — never "try each key
+ * until one works", which would reintroduce exactly the ambiguity the key id
+ * exists to remove.
+ */
+interface KeyRing {
+  primary: VaultKey;
+  byId: Map<string, VaultKey>;
+}
+
+let ring: KeyRing | null = null;
+
+async function getRing(): Promise<KeyRing> {
+  if (ring) return ring;
+  const primaryRaw = Deno.env.get("VAULT_MASTER_KEY");
+  if (!primaryRaw) {
+    throw new HttpError(500, "vault_key_missing", "the vault key is not configured");
   }
-  return vaultKey;
+  const primary = await importVaultKey(primaryRaw);
+  const byId = new Map<string, VaultKey>([[primary.id, primary]]);
+
+  // `none` is the explicit tombstone for "there is no retired key", so
+  // retiring one is a deliberate value rather than an absent variable that
+  // could equally mean a mis-typed secret name.
+  const previousRaw = (Deno.env.get("VAULT_MASTER_KEY_PREVIOUS") ?? "").trim();
+  if (previousRaw !== "" && previousRaw !== "none") {
+    const previous = await importVaultKey(previousRaw);
+    if (previous.id === primary.id) {
+      throw new HttpError(
+        500,
+        "vault_key_duplicate",
+        "the retired vault key is the same as the current one",
+      );
+    }
+    byId.set(previous.id, previous);
+  }
+  ring = { primary, byId };
+  return ring;
 }
 
 function makeDeps(clientIp: string | null): VaultDeps {
@@ -56,15 +95,24 @@ function makeDeps(clientIp: string | null): VaultDeps {
       return !error;
     },
 
-    async encrypt(plaintext) {
-      return await encryptSecret(await getVaultKey(), plaintext);
+    async encrypt(plaintext, binding) {
+      // Always the primary. A retired key must never write a new blob.
+      return await encryptSecret((await getRing()).primary, plaintext, binding);
     },
 
-    async decrypt(blob) {
+    async decrypt(blob, binding) {
+      const { byId } = await getRing();
       try {
-        return await decryptSecret(await getVaultKey(), blob);
-      } catch {
-        // Wrong key or tampered blob — never include details.
+        return await decryptSecret(byId, blob, binding);
+      } catch (e) {
+        // The blob names its key, so these are now distinguishable — and the
+        // distinction is the point. `key_unknown` is recoverable by supplying
+        // the key; `decrypt_failed` is not, and means tampering or a relocated
+        // row. Collapsing them into one message was the original defect.
+        if (e instanceof VaultBlobError) {
+          const status = e.code === "key_unknown" ? 409 : 500;
+          throw new HttpError(status, e.code, e.message);
+        }
         throw new HttpError(500, "decrypt_failed", "credential could not be decrypted");
       }
     },

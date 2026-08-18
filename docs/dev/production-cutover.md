@@ -31,10 +31,31 @@ Staging stays exactly as it is — it remains your test bed. Production is a
    pick the region closest to your clients (US Central customers → a US
    region), set a strong DB password, and choose the **Pro** plan.
 2. Note the Project Ref, URL, and anon key (Settings → API).
-3. **Generate a fresh vault key** (do NOT reuse staging's): SQL Editor →
-   `select encode(gen_random_bytes(32), 'base64');` — this becomes the
-   production `VAULT_MASTER_KEY`. Store it only in the GitHub environment
-   secret; if it's lost, every stored door code becomes unreadable.
+3. **Generate a fresh vault key** (do NOT reuse staging's), on your own
+   machine, **not in the SQL Editor**:
+
+   ```
+   openssl rand -base64 32
+   ```
+
+   The previous instruction here was `select encode(gen_random_bytes(32),
+   'base64')` in the Supabase SQL Editor. That sends the key over the network
+   into the very database it is supposed to be independent of, and leaves it
+   in the editor's query history and saved snippets — `_lib/crypto.ts` says
+   "never in the DB" and that step contradicted it (review B2).
+
+   Then, in this order:
+
+   a. **Escrow it first.** Put it in your password manager, labelled with the
+      project. GitHub will never show it to you again, and you cannot rotate
+      without the outgoing key.
+   b. Set it as the `VAULT_MASTER_KEY` environment secret.
+   c. Set `VAULT_MASTER_KEY_PREVIOUS` to the literal string `none`. It is an
+      explicit tombstone: absent could equally mean a mis-typed secret name.
+
+   Losing the key is no longer terminal *provided (a) actually happened* —
+   that copy is the whole of your recovery story. `docs/dev/vault-key-rotation.md`
+   covers rotating it.
 4. Auth → URL Configuration → Site URL = `https://app.yourdomain.com`
    (finalize after step 6, but set it as soon as you know the hostname).
 5. Auth → Providers → Email: leave **"Confirm email" ON** for production.
@@ -58,6 +79,8 @@ Staging stays exactly as it is — it remains your test bed. Production is a
    | `STRIPE_SECRET_KEY` | **live** key `sk_live_…` (step 4) |
    | `STRIPE_WEBHOOK_SECRET` | **live** `whsec_…` (step 4) |
    | `VAULT_MASTER_KEY` | the fresh key from step 2 |
+   | `VAULT_MASTER_KEY_PREVIOUS` | the literal `none` (see step 2) |
+   | `SUPABASE_SERVICE_ROLE_KEY` | prod Settings → API → `service_role`; required for the deploy's vault-key check |
    | `APP_BASE_URL` | `https://app.yourdomain.com` |
    | `RESEND_API_KEY` | from step 5 |
    | `NOTIFY_FROM_EMAIL` | e.g. `Sanpo <notifications@sanpocare.com>` |

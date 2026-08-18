@@ -5,6 +5,7 @@
 // appear in logs or errors; the only place a secret leaves this function is
 // the `secret` field of a successful `get` response.
 
+import type { VaultBinding } from "../_lib/crypto.ts";
 import { HttpError } from "../_lib/http.ts";
 
 export interface VaultBody {
@@ -34,11 +35,16 @@ export interface VaultDeps {
   /** Shared sliding-window limiter; false ⇒ over 5/min for this user. */
   allowAttempt(userId: string): boolean | Promise<boolean>;
   verifyPassword(email: string, password: string): Promise<boolean>;
-  encrypt(plaintext: string): Promise<Uint8Array>;
-  decrypt(blob: Uint8Array): Promise<string>;
+  /** The binding is authenticated (AES-GCM additionalData), so a ciphertext
+   *  cannot be moved to another row or another tenant (review B2). */
+  encrypt(plaintext: string, binding: VaultBinding): Promise<Uint8Array>;
+  decrypt(blob: Uint8Array, binding: VaultBinding): Promise<string>;
   getProperty(id: string): Promise<{ id: string; operator_id: string } | null>;
   getCredential(id: string): Promise<CredentialMeta | null>;
   insertCredential(row: {
+    /** Minted by the handler, not by the column default: the id is inside the
+     *  AAD, so it must exist before the plaintext is encrypted. */
+    id: string;
     operator_id: string;
     property_id: string;
     entry_method: string;
@@ -97,7 +103,10 @@ export async function handleVault(
         if (cred.revoked_at) {
           throw new HttpError(409, "credential_revoked", "credential has been revoked");
         }
-        const blob = await deps.encrypt(body.secret);
+        const blob = await deps.encrypt(body.secret, {
+          credentialId: cred.id,
+          operatorId: operator.id,
+        });
         const updated = await deps.rotateCredential(cred.id, {
           ciphertext: blob,
           entry_method: body.entry_method ?? undefined,
@@ -113,8 +122,16 @@ export async function handleVault(
       if (!property || property.operator_id !== operator.id) {
         throw new HttpError(404, "property_not_found", "property not found");
       }
-      const blob = await deps.encrypt(body.secret);
+      // Mint the id first: encryption binds to it. Insert-then-update was
+      // considered and rejected — it leaves a window where the row holds a
+      // blob bound to an id it does not yet have.
+      const id = crypto.randomUUID();
+      const blob = await deps.encrypt(body.secret, {
+        credentialId: id,
+        operatorId: operator.id,
+      });
       const created = await deps.insertCredential({
+        id,
         operator_id: operator.id,
         property_id: body.property_id,
         entry_method: body.entry_method,
@@ -137,7 +154,10 @@ export async function handleVault(
         body.purpose.trim(),
         operator.id,
       );
-      const secret = await deps.decrypt(ciphertext);
+      const secret = await deps.decrypt(ciphertext, {
+        credentialId: body.credential_id,
+        operatorId: operator.id,
+      });
       return { secret, label, entry_method };
     }
 
