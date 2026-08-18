@@ -19,6 +19,7 @@ export type Database = {
           revoked_at: string | null;
           created_at: string;
           updated_at: string;
+          key_id: string | null;
         };
         Insert: {
           id?: string;
@@ -661,6 +662,25 @@ export type Database = {
         };
         Relationships: [];
       };
+      vault_canary: {
+        Row: {
+          id: boolean;
+          ciphertext: string;
+          key_id: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          id?: boolean;
+          ciphertext: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: boolean;
+          ciphertext?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
       vault_rate_limit_attempts: {
         Row: {
           id: string;
@@ -1059,6 +1079,34 @@ export type Database = {
         };
         Returns: boolean;
       };
+      fn_vault_census: {
+        Args: {
+          p_key_id: string;
+        };
+        Returns: Array<{ total: number; on_primary: number; on_other: number; unreadable: number }>;
+      };
+      fn_vault_rewrap_apply: {
+        Args: {
+          p_id: string;
+          p_expect_ciphertext: string;
+          p_new_ciphertext: string;
+          p_expect_key_id: string;
+        };
+        Returns: boolean;
+      };
+      fn_vault_rewrap_batch: {
+        Args: {
+          p_key_id: string;
+          p_limit: number;
+        };
+        Returns: Array<{ id: string; operator_id: string; ciphertext: string; key_id: string }>;
+      };
+      fn_vault_set_canary: {
+        Args: {
+          p_ciphertext: string;
+        };
+        Returns: string;
+      };
       fn_walk_channel_access: {
         Args: {
           p_topic: string;
@@ -1114,6 +1162,7 @@ export type RecurringSchedules = Database["public"]["Tables"]["recurring_schedul
 export type SchedulePets = Database["public"]["Tables"]["schedule_pets"]["Row"];
 export type ServiceTypes = Database["public"]["Tables"]["service_types"]["Row"];
 export type StripeEvents = Database["public"]["Tables"]["stripe_events"]["Row"];
+export type VaultCanary = Database["public"]["Tables"]["vault_canary"]["Row"];
 export type VaultRateLimitAttempts = Database["public"]["Tables"]["vault_rate_limit_attempts"]["Row"];
 export type WalkGpsPoints = Database["public"]["Tables"]["walk_gps_points"]["Row"];
 export type WalkPets = Database["public"]["Tables"]["walk_pets"]["Row"];

@@ -2,6 +2,7 @@
 // soft revoke; plus overage idempotency (mocked deps).
 import { assert, assertEquals, assertRejects } from "./asserts.ts";
 import { handleVault, makeRateLimiter, type VaultDeps, type CredentialMeta } from "../credential-vault/handler.ts";
+import type { VaultBinding } from "../_lib/crypto.ts";
 import { chargeOverageForWalk, type OverageDeps } from "../_lib/overage.ts";
 
 const OP = { id: "op-1", email: "op@pawtrail.dev" };
@@ -20,12 +21,19 @@ function cred(overrides: Partial<CredentialMeta> = {}): CredentialMeta {
   };
 }
 
+interface Seen {
+  encryptBinding?: VaultBinding;
+  decryptBinding?: VaultBinding;
+  insertedId?: string;
+}
+
 function makeVaultDeps(opts: {
   passwordOk?: boolean;
   allow?: boolean;
   credential?: CredentialMeta | null;
-} = {}): { deps: VaultDeps; calls: string[] } {
+} = {}): { deps: VaultDeps; calls: string[]; seen: Seen } {
   const calls: string[] = [];
+  const seen: Seen = {};
   const blob = new Uint8Array(40);
   const deps: VaultDeps = {
     allowAttempt: () => opts.allow ?? true,
@@ -33,20 +41,27 @@ function makeVaultDeps(opts: {
       calls.push("verifyPassword");
       return Promise.resolve(opts.passwordOk ?? true);
     },
-    encrypt: (_pt) => {
+    // The fakes RECORD the binding. Ignoring it would let the handler bind a
+    // blob to the wrong row and every one of these tests would still pass —
+    // and the resulting ciphertext is unreadable forever, so it is exactly the
+    // mistake that must not be caught only in production.
+    encrypt: (_pt, binding) => {
       calls.push("encrypt");
+      seen.encryptBinding = binding;
       return Promise.resolve(blob);
     },
-    decrypt: (_b) => {
+    decrypt: (_b, binding) => {
       calls.push("decrypt");
+      seen.decryptBinding = binding;
       return Promise.resolve("s3cret");
     },
     getProperty: (id) => Promise.resolve(id === "prop-1" ? { id, operator_id: "op-1" } : null),
     getCredential: (_id) =>
       Promise.resolve(opts.credential === undefined ? cred() : opts.credential),
-    insertCredential: (_row) => {
+    insertCredential: (row) => {
       calls.push("insertCredential");
-      return Promise.resolve(cred());
+      seen.insertedId = row.id;
+      return Promise.resolve(cred({ id: row.id }));
     },
     rotateCredential: (_id, _f) => {
       calls.push("rotateCredential");
@@ -61,7 +76,7 @@ function makeVaultDeps(opts: {
       return Promise.resolve({ ciphertext: blob, label: "Front door", entry_method: "lockbox" });
     },
   };
-  return { deps, calls };
+  return { deps, calls, seen };
 }
 
 Deno.test("rate limit rejects before any password attempt", async () => {
@@ -324,4 +339,43 @@ Deno.test("infra error leaves the pending claim and rethrows (caller retries)", 
   assert(calls.includes("insertPayment:pending"));
   assert(!calls.includes("updatePayment:failed"), "claim must survive to block double-charging");
   assert(!calls.includes("notify:client"), "no decline notification for an infra failure");
+});
+
+// ── The binding is the thing that makes a blob readable at all ─────────────
+
+Deno.test("create binds the blob to the id it actually inserts", async () => {
+  const { deps, seen } = makeVaultDeps({ credential: null });
+  await handleVault(OP, { action: "put", password: "pw", property_id: "prop-1", entry_method: "lockbox", secret: "1234" }, deps);
+  // The id must be minted BEFORE encryption and be the same one stored: the
+  // credential_id is inside the AAD, so a mismatch here produces a row whose
+  // ciphertext can never be decrypted, and nothing would notice until an
+  // operator stood at a door.
+  assert(seen.insertedId, "no id was inserted");
+  assertEquals(seen.encryptBinding?.credentialId, seen.insertedId);
+  assertEquals(seen.encryptBinding?.operatorId, OP.id);
+});
+
+Deno.test("rotate binds to the existing credential, not a fresh id", async () => {
+  const { deps, seen } = makeVaultDeps({ credential: cred({ id: "cred-7" }) });
+  await handleVault(OP, { action: "put", password: "pw", credential_id: "cred-7", secret: "9999" }, deps);
+  assertEquals(seen.encryptBinding?.credentialId, "cred-7");
+  assertEquals(seen.encryptBinding?.operatorId, OP.id);
+});
+
+Deno.test("get binds to the credential being read", async () => {
+  const { deps, seen } = makeVaultDeps();
+  await handleVault(OP, { action: "get", password: "pw", credential_id: "cred-1", purpose: "at the door" }, deps);
+  assertEquals(seen.decryptBinding?.credentialId, "cred-1");
+  assertEquals(seen.decryptBinding?.operatorId, OP.id);
+});
+
+Deno.test("a create binding is never reused across two credentials", async () => {
+  const a = makeVaultDeps({ credential: null });
+  await handleVault(OP, { action: "put", password: "pw", property_id: "prop-1", entry_method: "lockbox", secret: "1" }, a.deps);
+  const b = makeVaultDeps({ credential: null });
+  await handleVault(OP, { action: "put", password: "pw", property_id: "prop-1", entry_method: "lockbox", secret: "2" }, b.deps);
+  assert(
+    a.seen.encryptBinding?.credentialId !== b.seen.encryptBinding?.credentialId,
+    "two creates must not share a credential id",
+  );
 });
