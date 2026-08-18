@@ -108,7 +108,13 @@ export default function BillingConsole() {
 
   return (
     <div className="page">
-      <h1>Money</h1>
+      <div className="money-heading-row">
+        <h1>Money</h1>
+        {/* The only route to Settings: the operator navigation is locked to
+            four approved items, so this is the entry point rather than a
+            fifth tab. */}
+        <Link className="money-settings-link" to="/settings">Settings</Link>
+      </div>
       {/* Persistent region: this is where a re-charge or a plan change
           reports whether it actually went through. */}
       <p role="status" style={{ marginTop: "var(--s-2)", color: "var(--text-2)", fontSize: "var(--fs-14)" }}>

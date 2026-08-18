@@ -116,6 +116,45 @@ export async function listPlans(): Promise<Plans[]> {
   return must(data, error);
 }
 
+// ── settings: service types and plans (review B6) ──────────────────────────
+// The database has always granted the operator full CRUD on both tables with
+// correct operator_id policies (0004); there was simply no UI and no client
+// binding. RLS supplies operator_id scoping, so none of these pass it.
+
+export async function createServiceType(
+  row: Omit<TableInsert<"service_types">, "operator_id">,
+): Promise<ServiceTypes> {
+  const { data: userData } = await supabase.auth.getUser();
+  const uid = userData.user?.id;
+  if (!uid) throw new Error("not signed in");
+  const { data, error } = await supabase
+    .from("service_types").insert({ ...row, operator_id: uid }).select().single();
+  return must(data, error);
+}
+
+export async function updateServiceType(
+  id: string,
+  patch: TableUpdate<"service_types">,
+): Promise<ServiceTypes> {
+  const { data, error } = await supabase
+    .from("service_types").update(patch).eq("id", id).select().single();
+  return must(data, error);
+}
+
+export async function deleteServiceType(id: string): Promise<void> {
+  const { error } = await supabase.from("service_types").delete().eq("id", id);
+  if (error) throw new Error(error.message);
+}
+
+export async function updatePlan(
+  id: string,
+  patch: TableUpdate<"plans">,
+): Promise<Plans> {
+  const { data, error } = await supabase
+    .from("plans").update(patch).eq("id", id).select().single();
+  return must(data, error);
+}
+
 // ── walks ──────────────────────────────────────────────────────────────────
 export interface WalkFilters {
   clientId?: string;
@@ -418,6 +457,26 @@ export interface ConnectStatus {
   charges_enabled: boolean;
   payouts_enabled: boolean;
   details_submitted: boolean;
+}
+
+/**
+ * Creating a plan is NOT a plain insert (review B6). A plan without a Stripe
+ * Price cannot be checked out, and the review's fix is explicit that the
+ * operator must not be asked to paste a `price_…` — so the edge function
+ * mints the Product and Price on their connected account and writes the row
+ * with the resulting id in one step.
+ */
+export function createPlan(body: {
+  name: string;
+  credits_per_cycle: number;
+  price_pence: number;
+  cycle: "weekly" | "monthly";
+  rollover_policy: "none" | "capped" | "unlimited";
+  rollover_cap?: number | null;
+  rollover_expiry_days?: number | null;
+  overage_rate_pence: number;
+}): Promise<{ plan: Plans }> {
+  return invokeEdge("create-plan", body);
 }
 
 export function connectStatus(): Promise<ConnectStatus> {

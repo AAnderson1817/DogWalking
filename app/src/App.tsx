@@ -15,6 +15,7 @@ import ClientDetail from "@/screens/ClientDetail";
 import WalkMode from "@/screens/WalkMode";
 import AccessVault from "@/screens/AccessVault";
 import BillingConsole from "@/screens/BillingConsole";
+import Settings from "@/screens/Settings";
 import PortalHome from "@/screens/PortalHome";
 import Booking from "@/screens/Booking";
 import PortalWalks from "@/screens/PortalWalks";
@@ -73,6 +74,11 @@ export default function App() {
       <Route path="/walks/:id/live" element={operatorBare(<WalkMode />)} />
       <Route path="/vault" element={operator(<AccessVault />)} />
       <Route path="/billing" element={operator(<BillingConsole />)} />
+      {/* Reached from Money rather than the nav: the four-item operator
+          navigation is a locked brand decision (Today / Calendar / Clients /
+          Money), and adding a fifth is a deliberate act, not a side effect of
+          shipping a settings screen. */}
+      <Route path="/settings" element={operator(<Settings />)} />
 
       <Route path="/portal" element={portal(<PortalHome />)} />
       <Route path="/portal/book" element={portal(<Booking />)} />

@@ -72,6 +72,9 @@ export interface OverageDeps {
   }): Promise<void>;
   /** True for card/payment failures (decline etc.) vs infra/DB errors. */
   isCardError(err: unknown): boolean;
+  /** Throws when the operator cannot take money yet. Optional so the pure
+   * tests can omit it; the real deps always supply it. */
+  resolveAccount?(): { stripeAccount: string };
   now?(): number;
 }
 
@@ -124,27 +127,52 @@ export async function chargeOverageForWalk(
   if (!billing) throw new OverageError("client_not_found", "client not found", 404);
   const amount = billing.plan?.overage_rate_pence;
 
-  const notifyFailure = async (reason: string): Promise<void> => {
-    await deps.insertNotification({
-      operator_id: walk.operator_id,
-      client_id: walk.client_id,
-      type: "payment_failed",
-      title: "Walk payment failed",
-      body: `We couldn't charge for your walk (${reason}). Please update your payment method.`,
-      walk_id: walkId,
-    });
+  /**
+   * Who hears about a failed charge depends on whose fault it is (review B6).
+   *
+   * A CARD fault is the client's: their card was declined, and updating it is
+   * something only they can do. Both personas are told.
+   *
+   * A CONFIGURATION fault is the operator's: no plan exists, no billing
+   * profile was ever set up, or the operator has not connected Stripe. The
+   * client can do nothing about any of these. Telling them "we couldn't charge
+   * for your walk, please update your payment method" is wrong twice over —
+   * it blames them for the operator's setup and points at a payment method
+   * they may not even have. An un-configured operator would otherwise dun
+   * their own customers on every single walk.
+   */
+  const notifyFailure = async (
+    reason: string,
+    fault: "card" | "configuration",
+  ): Promise<void> => {
+    if (fault === "card") {
+      await deps.insertNotification({
+        operator_id: walk.operator_id,
+        client_id: walk.client_id,
+        type: "payment_failed",
+        title: "Walk payment failed",
+        body: `We couldn't charge for your walk (${reason}). Please update your payment method.`,
+        walk_id: walkId,
+      });
+    }
     await deps.insertNotification({
       operator_id: walk.operator_id,
       client_id: null,
       type: "payment_failed",
-      title: `Overage charge failed for ${billing.full_name}`,
-      body: `The overage charge could not be completed (${reason}). The debt is visible in the billing console.`,
+      title: fault === "card"
+        ? `Overage charge failed for ${billing.full_name}`
+        : `Walk for ${billing.full_name} could not be billed — check your setup`,
+      body: fault === "card"
+        ? `The overage charge could not be completed (${reason}). The debt is visible in the billing console.`
+        : `${reason}. The walk is recorded and the charge is waiting in the billing console; `
+          + `your client has not been contacted about it.`,
       walk_id: walkId,
     });
   };
 
   const failWithoutAttempt = async (
     reason: string,
+    fault: "card" | "configuration" = "configuration",
   ): Promise<{ payment: OveragePayment; already_charged: false }> => {
     const payment = await deps.insertPayment({
       operator_id: walk.operator_id,
@@ -156,14 +184,32 @@ export async function chargeOverageForWalk(
       stripe_payment_intent_id: null,
       receipt_url: null,
     });
-    await notifyFailure(reason);
+    await notifyFailure(reason, fault);
     return { payment, already_charged: false };
   };
 
-  if (amount == null) return failWithoutAttempt("no plan on file");
-  if (!billing.stripe_customer_id) return failWithoutAttempt("no payment method on file");
+  if (amount == null) {
+    return failWithoutAttempt("This client is not on a plan, so there is no overage rate to charge");
+  }
+  if (!billing.stripe_customer_id) {
+    // No Stripe customer means checkout never completed, so the client has no
+    // payment method to update and no way to add one unaided.
+    return failWithoutAttempt("This client has no billing profile yet — send them a plan to subscribe to");
+  }
   // Narrowing doesn't survive into the closure below — capture it.
   const customerId = billing.stripe_customer_id;
+
+  // "Operator has not connected Stripe" is a configuration fault like the two
+  // above, not an exception: the walk still happened and the record of it
+  // should survive. Resolving here rather than at the top of complete-walk is
+  // what lets a credit-funded walk complete for an un-connected operator.
+  try {
+    deps.resolveAccount?.();
+  } catch {
+    return failWithoutAttempt(
+      "Connect a Stripe account before charging — your clients pay you directly, so the money needs somewhere to land",
+    );
+  }
 
   const chargeClaim = async (
     claim: OveragePayment,
@@ -188,7 +234,7 @@ export async function chargeOverageForWalk(
         // Card declined: the attempt is dead, the walk stays completed, the
         // debt shows in the billing console for a fresh re-charge attempt.
         const payment = await deps.updatePayment(claim.id!, { status: "failed" });
-        await notifyFailure("card declined");
+        await notifyFailure("card declined", "card");
         return { payment, already_charged: false };
       }
       // Infra error (Stripe unreachable, DB write failed): keep the pending

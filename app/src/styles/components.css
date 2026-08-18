@@ -606,7 +606,10 @@ input::file-selector-button {
   margin: 0;
   padding: 0 var(--s-4) var(--s-3);
   color: var(--text-2);
-  font-size: var(--fs-13);
+  /* fs-12, not fs-13: the type scale is 12/14/16/20/24/32/44 and --fs-13 does
+     not exist. It shipped undefined in the reversal PR, which makes the whole
+     declaration invalid and silently inherits the parent size. */
+  font-size: var(--fs-12);
   line-height: 1.45;
 }
 .payment-row__amount {
@@ -2045,4 +2048,79 @@ body:has(.today-emaki-page) .bottom-nav[data-navigation-persona="operator"] {
   font-size: var(--fs-14);
   line-height: 1.5;
   max-width: 60ch;
+}
+
+
+/* ── Settings (review B6) ────────────────────────────────────────────────
+   Reached from Money rather than the nav: the four-item operator navigation
+   is a locked brand decision, so a settings screen does not get to add a
+   fifth tab. */
+.money-heading-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s-3);
+}
+
+.money-settings-link {
+  color: var(--sanpo-color-text-link);
+  font-size: var(--fs-14);
+  font-weight: 700;
+}
+
+.settings-section {
+  margin-top: var(--s-6);
+  padding-top: var(--s-4);
+  border-top: var(--bw-xs) solid var(--sanpo-color-border-subtle);
+}
+
+.settings-help {
+  margin: var(--s-2) 0 var(--s-3);
+  color: var(--text-2);
+  font-size: var(--fs-14);
+  line-height: 1.5;
+  max-width: 60ch;
+}
+
+.settings-notice {
+  margin-top: var(--s-2);
+  color: var(--text-2);
+  font-size: var(--fs-14);
+}
+
+/* auto-fit rather than a fixed column count: these forms carry between four
+   and seven fields depending on the rollover policy, and a fixed grid leaves
+   a hole when the cap field is absent. */
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--s-3);
+  margin-bottom: var(--s-3);
+}
+
+.settings-list {
+  list-style: none;
+  margin: 0 0 var(--s-4);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-2) var(--s-3);
+  padding: var(--s-3);
+  border-radius: var(--r-md);
+  background: var(--sanpo-color-surface-raised);
+}
+
+.settings-row__name { font-weight: 700; }
+
+.settings-row__meta {
+  flex: 1 1 auto;
+  color: var(--text-2);
+  font-size: var(--fs-12);
 }

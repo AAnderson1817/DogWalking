@@ -8,20 +8,21 @@ const PAYMENT_COLS =
   "id, walk_id, type, amount_pence, status, stripe_payment_intent_id, receipt_url, created_at";
 
 /**
- * `account` is required, not optional (review B5). The operator is the
- * merchant of record, so the customer, the saved card and the PaymentIntent
- * all live on THEIR connected account — a call without it reaches the
- * platform account, where the customer id does not exist, and the failure
- * would read as "no payment method on file" rather than as a misrouted
- * charge. Making it a required parameter means a caller cannot omit it by
- * accident, which a default of `undefined` would have allowed.
+ * `resolveAccount` is required and is a THUNK (review B5). Required, because
+ * the operator is the merchant of record: the customer, the saved card and the
+ * PaymentIntent all live on THEIR connected account, and a call without it
+ * reaches the platform account where the customer id does not exist — failing
+ * as "no payment method on file" rather than as a misrouted charge. A thunk,
+ * because a credit-funded walk never charges anything, and resolving eagerly
+ * would stop an un-connected operator completing any walk at all.
  */
 export function makeOverageDeps(
   db: SupabaseClient,
   stripe: Stripe,
-  account: { stripeAccount: string },
+  resolveAccount: () => { stripeAccount: string },
 ): OverageDeps {
   return {
+    resolveAccount,
     async getWalk(id) {
       const { data, error } = await db
         .from("walks")
@@ -52,7 +53,7 @@ export function makeOverageDeps(
       const pi = await stripe.paymentIntents.retrieve(
         piId,
         { expand: ["latest_charge"] },
-        account,
+        resolveAccount(),
       );
       const charge = pi.latest_charge as Stripe.Charge | null;
       return {
@@ -90,7 +91,7 @@ export function makeOverageDeps(
           customer: customerId,
           type: "card",
           limit: 1,
-        }, account);
+        }, resolveAccount());
         paymentMethod = methods.data[0]?.id ?? null;
       }
       if (!paymentMethod) throw new Error("no payment method on file");
@@ -112,7 +113,7 @@ export function makeOverageDeps(
         // would replay a stored decline for ~24h and brick the re-charge.
         // Stripe scopes idempotency keys per account, so the key keeps its
         // meaning on the connected account.
-        { idempotencyKey: attemptKey, ...account },
+        { idempotencyKey: attemptKey, ...resolveAccount() },
       );
       const charge = pi.latest_charge as Stripe.Charge | null;
       return {

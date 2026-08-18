@@ -85,6 +85,30 @@ jobs:
           fi
           echo "PASS: no DEV fixtures in dist"
 
+      # A var() naming a property nothing defines makes the whole declaration
+      # invalid, and CSS fails silently: the element keeps its inherited value
+      # and the page still renders, just wrong. Two shipped this way — a
+      # font-size on --fs-13 (the scale is 12/14/16/20/24/32/44) and four
+      # colour tokens written from memory. Both were caught by hand; this is
+      # the check that catches the next one.
+      - name: Every CSS token used is a token that exists
+        run: |
+          python3 - <<'PY'
+          import re, pathlib, glob, sys
+          defined, used = set(), {}
+          for f in glob.glob('app/src/styles/**/*.css', recursive=True):
+              t = pathlib.Path(f).read_text()
+              defined |= set(re.findall(r'(--[a-zA-Z0-9-]+)\s*:', t))
+              for m in re.finditer(r'var\(\s*(--[a-zA-Z0-9-]+)', t):
+                  used.setdefault(m.group(1), f)
+          missing = sorted((k, v) for k, v in used.items() if k not in defined)
+          if missing:
+              for k, v in missing:
+                  print(f"::error file={v}::{k} is used but never defined")
+              sys.exit(1)
+          print(f"{len(used)} custom properties used, all defined")
+          PY
+
       # Twenty error messages were rendered as bare spans with no role and no
       # live region, so every failure in the product — including "ending the
       # walk did not bill" — was silent to a screen reader. FormError in
