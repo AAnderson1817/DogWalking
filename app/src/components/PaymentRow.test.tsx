@@ -16,6 +16,7 @@ const PAYMENT: PaymentDetailed = {
   currency: "usd",
   stripe_payment_intent_id: null,
   stripe_invoice_id: null,
+  superseded_at: null,
   status: "succeeded",
   receipt_url: "https://example.com/receipt",
   created_at: "2026-07-15T14:00:00Z",

@@ -149,7 +149,13 @@ export default function BillingConsole() {
             {filteredPayments.map((payment) => (
               <div key={payment.id}>
                 <PaymentRow payment={payment} showClient />
-                {payment.status === "failed" && payment.type === "overage" && payment.walk_id && (
+                {/* `superseded_at` hides the retry on a walk that has since
+                    been charged. Clicking it found the succeeded row, moved no
+                    money, and reported "Recovered $22.00" anyway (review
+                    M3) — the notice now tells the truth, and the button no
+                    longer invites the mistake. */}
+                {payment.status === "failed" && payment.type === "overage"
+                  && payment.walk_id && payment.superseded_at == null && (
                   <div className="payment-recovery">
                     <span>Payment failed. Retry this walk charge.</span>
                     <Button
