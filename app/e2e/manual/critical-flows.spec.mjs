@@ -1,3 +1,23 @@
+// MANUAL suite — not part of `npm run test:e2e`, and not coverage.
+//
+// Review H18: these five tests skipped on `E2E_*` variables that are set in no
+// workflow and in no local default, so they skipped for EVERYONE, always,
+// while `app/README.md` described them as "Playwright coverage" for booking,
+// billing, concurrent walk completion and offline recovery. A suite that has
+// never executed is worse than no suite, because it is counted.
+//
+// They need disposable fixtures on a real staging project, which nothing in
+// this repository can create. So rather than pretend, they live under
+// `e2e/manual/`, are excluded from the default run by `testIgnore` in
+// `playwright.config.mjs`, and — the important half — they now FAIL rather
+// than skip when the credentials are missing. Running them is a deliberate act
+// with a required setup; a green skip is not an available outcome.
+//
+//   E2E_BASE_URL=… E2E_OPERATOR_EMAIL=… E2E_OPERATOR_PASSWORD=… \
+//   npx playwright test --config playwright.config.mjs e2e/manual/
+//
+// See docs/dev/staging-setup.md for where the fixtures come from.
+
 import { expect, test } from "@playwright/test";
 
 const env = process.env;
@@ -8,6 +28,12 @@ const clientCredentials = env.E2E_CLIENT_EMAIL && env.E2E_CLIENT_PASSWORD
   ? { email: env.E2E_CLIENT_EMAIL, password: env.E2E_CLIENT_PASSWORD }
   : null;
 
+/** Fail loudly on a missing fixture. See the header: a skip is not an outcome
+ *  this suite offers, because a skip is what hid it for its whole life. */
+function requireEnv(name, what) {
+  if (!env[name]) throw new Error(`${name} is required for the manual suite — set it to ${what}.`);
+}
+
 async function signIn(page, credentials) {
   await page.goto("/signin");
   await page.getByLabel("Email").fill(credentials.email);
@@ -16,20 +42,31 @@ async function signIn(page, credentials) {
 }
 
 async function signInAsOperator(page) {
-  test.skip(!operatorCredentials, "Set E2E_OPERATOR_EMAIL and E2E_OPERATOR_PASSWORD to run operator journeys.");
+  // Fail, not skip. An unset secret used to read as a passing run.
+  if (!operatorCredentials) {
+    throw new Error(
+      "E2E_OPERATOR_EMAIL and E2E_OPERATOR_PASSWORD are required for the manual suite. " +
+        "These tests are deliberately excluded from `npm run test:e2e`; see the header.",
+    );
+  }
   await signIn(page, operatorCredentials);
   await expect(page).toHaveURL(/\/(?:$|calendar|roster|billing|walks)/);
 }
 
 async function signInAsClient(page) {
-  test.skip(!clientCredentials, "Set E2E_CLIENT_EMAIL and E2E_CLIENT_PASSWORD to run client portal journeys.");
+  if (!clientCredentials) {
+    throw new Error(
+      "E2E_CLIENT_EMAIL and E2E_CLIENT_PASSWORD are required for the manual suite. " +
+        "These tests are deliberately excluded from `npm run test:e2e`; see the header.",
+    );
+  }
   await signIn(page, clientCredentials);
   await expect(page).toHaveURL(/\/portal/);
 }
 
 test.describe("critical Sanpo journeys", () => {
   test("signup/invite flow accepts a staged invite claim URL", async ({ page }) => {
-    test.skip(!env.E2E_INVITE_URL, "Set E2E_INVITE_URL to a disposable staged invite URL.");
+    requireEnv("E2E_INVITE_URL", "a disposable staged invite URL");
 
     await page.goto(env.E2E_INVITE_URL);
     await expect(page.getByText(/invite|claim|sanpo/i).first()).toBeVisible();
@@ -53,8 +90,8 @@ test.describe("critical Sanpo journeys", () => {
   });
 
   test("concurrent walk completion leaves one browser with a resolved end state", async ({ browser }) => {
-    test.skip(!env.E2E_WALK_URL, "Set E2E_WALK_URL to a disposable live walk URL.");
-    test.skip(!operatorCredentials, "Set operator credentials for concurrent completion.");
+    requireEnv("E2E_WALK_URL", "a disposable live walk URL");
+    if (!operatorCredentials) throw new Error("operator credentials are required for concurrent completion");
 
     const first = await browser.newContext();
     const second = await browser.newContext();
@@ -84,7 +121,7 @@ test.describe("critical Sanpo journeys", () => {
   });
 
   test("offline walk recovery queues points and resumes after reconnect", async ({ page, context }) => {
-    test.skip(!env.E2E_WALK_URL, "Set E2E_WALK_URL to a disposable live walk URL.");
+    requireEnv("E2E_WALK_URL", "a disposable live walk URL");
     await signInAsOperator(page);
     await page.goto(env.E2E_WALK_URL);
 

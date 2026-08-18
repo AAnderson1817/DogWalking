@@ -107,15 +107,15 @@ npm run lint --prefix app              # Oxlint; warnings fail
 npm run test --prefix app -- --run     # Vitest unit tests
 npm run build --prefix app             # TypeScript build + Vite production build
 npm run preview --prefix app           # Preview the production build
-npm run test:e2e --prefix app          # Playwright critical-flow tests (requires E2E_* env)
-npx tsc --noEmit -p app                # TypeScript-only check
+npm run test:e2e --prefix app          # Playwright: Today composition + contrast (no backend needed)
+npm --prefix app exec tsc -- -b --force app   # TypeScript-only check
 ```
 
 Edge Function checks:
 
 ```bash
-deno check supabase/functions/*/index.ts
-deno test ./supabase/functions/_tests/
+deno check supabase/functions/**/index.ts
+deno test --allow-read=supabase/migrations ./supabase/functions/_tests/
 ```
 
 Database checks after applying migrations:
@@ -123,11 +123,28 @@ Database checks after applying migrations:
 ```bash
 psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/smoke.sql
 psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/materializer.sql
+./supabase/tests/concurrency.sh        # two real backends; the only suite that COMMITS
 ```
 
 ## End-to-end tests
 
-Playwright coverage for signup/invite, booking, concurrent walk completion, billing, and offline walk recovery lives in `e2e/critical-flows.spec.mjs`. The tests are designed for disposable staging fixtures and skip fixture-specific assertions unless the relevant environment variables are present:
+`npm run test:e2e --prefix app` runs the suites that need no backend: the
+locked Today composition across four viewports, the contrast floors sampled
+from the rendered artwork, and the tint-contrast sweep over the component
+gallery. They drive a plain `vite dev` against `/dev/today` and `/dev/kit`, so
+they take about two minutes and need no secrets. CI runs them on every push.
+
+Unit tests run in two vitest projects: `node` for `src/lib/` and `scripts/`,
+and `dom` (happy-dom + Testing Library) for components, screens and hooks.
+The split exists because the whole suite used to run in `node` and every
+`.test.tsx` rendered through `renderToStaticMarkup` — so no effect, cleanup,
+subscription, event handler or focus behaviour executed anywhere (review H18).
+
+### The manual suite is not coverage
+
+`e2e/manual/critical-flows.spec.mjs` needs disposable fixtures on a real
+staging project, so it is excluded from the default run by `testIgnore` and
+must be invoked deliberately:
 
 ```bash
 E2E_BASE_URL=https://staging.example.com \
@@ -137,8 +154,15 @@ E2E_CLIENT_EMAIL=client@example.com \
 E2E_CLIENT_PASSWORD=<password> \
 E2E_INVITE_URL=https://staging.example.com/claim/<token> \
 E2E_WALK_URL=https://staging.example.com/walks/<walk-id>/live \
-npm run test:e2e --prefix app
+npx playwright test --config playwright.config.mjs e2e/manual/
 ```
+
+**A missing variable now fails rather than skips.** This file previously sat
+in the default suite and skipped on `E2E_*` variables that were set in no
+workflow, so it skipped for everyone, always — while this README described it
+as coverage for booking, billing, concurrent completion and offline recovery.
+A suite that has never executed is worse than no suite, because it is counted.
+
 
 Install the Chromium browser bundle before first use with `npm run test:e2e:install --prefix app`.
 

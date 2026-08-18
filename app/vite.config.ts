@@ -89,8 +89,45 @@ export default defineConfig({
       "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
+  /**
+   * Two projects, because review H18 found that the whole suite ran in
+   * `environment: "node"` and every `.test.tsx` rendered through
+   * `renderToStaticMarkup`. Nothing that a component actually DOES was
+   * reachable: no effect body, no cleanup, no subscription, no event handler,
+   * no focus behaviour, no state transition. The harness could not express a
+   * test for Walk Mode's lifecycle or the vault's reveal-and-expire, so the
+   * gap was not "under-covered" — those tests were unwritable.
+   *
+   * `node` keeps the pure layer honest and fast; a DOM global leaking into
+   * `lib/` would hide a real dependency on `window` that the edge functions
+   * and the service worker do not have. `dom` is where behaviour lives.
+   */
   test: {
-    environment: "node",
-    include: ["src/**/*.test.ts", "src/**/*.test.tsx", "scripts/**/*.test.ts"],
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: "node",
+          environment: "node",
+          include: ["src/lib/**/*.test.ts", "scripts/**/*.test.ts"],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "dom",
+          environment: "happy-dom",
+          setupFiles: ["./src/test/setup.ts"],
+          include: [
+            "src/components/**/*.test.ts",
+            "src/components/**/*.test.tsx",
+            "src/screens/**/*.test.ts",
+            "src/screens/**/*.test.tsx",
+            "src/hooks/**/*.test.ts",
+            "src/hooks/**/*.test.tsx",
+          ],
+        },
+      },
+    ],
   },
 });

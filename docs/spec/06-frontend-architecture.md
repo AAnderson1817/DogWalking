@@ -173,5 +173,41 @@ and — in the other direction, so that deleting the handler outright cannot
 satisfy it — that the app shell and navigations still are. Confirmed red by
 reinstating exactly what this section used to prescribe.
 
+## Testing
+
+Two vitest projects, split by what they can express:
+
+| Project | Environment | Covers |
+| --- | --- | --- |
+| `node` | `node` | `src/lib/`, `scripts/` — pure functions, CSS/SQL text analysis, the service worker's fetch handler |
+| `dom` | `happy-dom` + Testing Library | `src/components/`, `src/screens/`, `src/hooks/` |
+
+The split is deliberate in both directions. `node` stays DOM-free so a
+`lib/` module cannot quietly grow a dependency on `window` that the edge
+functions and the service worker do not have. `dom` is where **behaviour**
+lives: effects, cleanups, subscriptions, event handlers, focus, timers.
+
+Before review H18 there was no `dom` project. The whole suite ran in `node`
+and every `.test.tsx` rendered through `renderToStaticMarkup`, so no effect
+body, cleanup, subscription, handler or state transition executed anywhere in
+the suite. That is not "under-covered": tests for Walk Mode's lifecycle, the
+vault's reveal-and-expire, a route guard's redirect or a load-error retry were
+**unwritable**, and every defect of that kind in the status log was found by
+hand.
+
+Rules that follow from it:
+
+- **A route guard is tested through a router.** `<Navigate>` returned from a
+  component is markup until something routes on it.
+- **A timer is tested with fake timers AND an unmount.** The reveal panel's
+  30-second auto-clear is a security property; an interval that outlives its
+  component keeps a decrypted secret in a live closure.
+- **Skip-on-missing-config is banned outside `e2e/manual/`.** A skip reads as
+  a pass. The manual suite throws instead, and CI fails a `test.skip(!…)`
+  anywhere else.
+- **Coverage that never runs is not coverage.** CI asserts the `dom` project
+  actually matched files, because an include glob that stops matching looks
+  exactly like a suite with nothing to say.
+
 ## Env
 `app/.env.local`: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_MAPBOX_TOKEN` (optional → SVG fallback). Access via typed `lib/env.ts`; build fails on missing required keys.

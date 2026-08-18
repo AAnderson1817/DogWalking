@@ -155,6 +155,29 @@ jobs:
       # walk did not bill" — was silent to a screen reader. FormError in
       # fields.tsx is now the only place that renders one; this keeps it that
       # way, because the bare pattern is the more obvious thing to write.
+      # Two ways the behavioural coverage added for H18 can quietly evaporate,
+      # and both have precedent in this repository: a suite that skips itself
+      # on unset config (the manual e2e suite skipped for everyone, always,
+      # while the README called it coverage), and a project whose include glob
+      # stops matching anything (the typecheck that checked zero files).
+      - name: Behavioural tests still execute
+        run: |
+          if grep -rn "test\.skip(!" app/e2e --include='*.mjs' --include='*.ts' \
+               | grep -v '/manual/'; then
+            echo "::error::a Playwright test skips itself on unset config outside e2e/manual/."
+            echo "Skip-on-missing-config reads as a pass. Move it to e2e/manual/ and throw instead."
+            exit 1
+          fi
+          # --outputFile, not a pipe: npm prints its own banner to stdout ahead
+          # of the reporter, so parsing the pipe fails on line 2.
+          (cd app && npx vitest run --project dom --reporter=json --outputFile=/tmp/dom.json >/dev/null 2>&1)
+          dom=$(python3 -c "import json; print(json.load(open('/tmp/dom.json'))['numTotalTests'])")
+          echo "dom project: $dom tests"
+          if [ "$dom" -lt 20 ]; then
+            echo "::error::the dom vitest project ran $dom tests — its include glob has stopped matching."
+            exit 1
+          fi
+
       - name: Errors go through FormError, not a bare span
         run: |
           if grep -rn 'className="field__error"' app/src --include='*.tsx' \
