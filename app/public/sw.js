@@ -22,10 +22,42 @@ const SHELL_URLS = [
   "/fonts/baloo-2-var.woff2",
 ].concat(Array.isArray(BUILD_ASSETS) ? BUILD_ASSETS : []);
 
+// The document is what makes an offline start possible at all. Everything
+// else degrades; without this the worker has nothing to serve a navigation.
+const REQUIRED_URLS = ["/index.html"];
+
+// Review M6. `cache.addAll` is atomic: one asset failing — a CDN hiccup, a
+// font 404, a chunk that has already rolled off after a fast redeploy — voids
+// the ENTIRE install, so the user is left with whatever worker they had, or
+// none. Per-URL under `allSettled` means a missing font costs a font.
+//
+// But "best effort" must not mean "install a shell that cannot start", so the
+// document is required and the install still rejects without it. And there is
+// deliberately NO `skipWaiting()` here any more: see the message handler.
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(SHELL_CACHE).then((cache) => cache.addAll(SHELL_URLS)).then(() => self.skipWaiting()),
+    caches.open(SHELL_CACHE).then(async (cache) => {
+      const results = await Promise.allSettled(SHELL_URLS.map((url) => cache.add(url)));
+      const failed = SHELL_URLS.filter((_, i) => results[i].status === "rejected");
+      if (failed.length > 0) console.warn("sw: precache incomplete", failed);
+      const missing = REQUIRED_URLS.filter((url) => failed.includes(url));
+      if (missing.length > 0) {
+        throw new Error(`sw: install failed, no offline document (${missing.join(", ")})`);
+      }
+    }),
   );
+});
+
+// Taking over is the PAGE's decision, not the worker's.
+//
+// `skipWaiting()` used to run unconditionally at install, so a deploy replaced
+// the controller under a running session and `activate` then deleted the cache
+// holding that session's chunks. A page that lazily imported anything
+// afterwards — the map, a route — fetched a hashed file the new deploy no
+// longer serves, and got a 404 in the middle of a walk. Now the new worker
+// waits, the app offers a reload, and this only fires when someone accepts.
+self.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "SKIP_WAITING") self.skipWaiting();
 });
 
 self.addEventListener("activate", (event) => {

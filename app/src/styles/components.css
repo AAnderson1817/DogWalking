@@ -2402,3 +2402,28 @@ body:has(.today-emaki-page) .bottom-nav[data-navigation-persona="operator"] {
 .access-trail__row--attention .access-trail__purpose {
   color: var(--sanpo-color-text-primary);
 }
+
+/* Service-worker update offer (review M6). Fixed above the nav so it cannot
+   be scrolled past, and above nothing the operator is mid-action on — it is
+   an offer, and "Later" is a first-class answer. */
+.update-prompt {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--nav-h, 64px) + var(--s-3));
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+  justify-content: center;
+  max-width: min(560px, calc(100vw - var(--s-6)));
+  padding: var(--s-3) var(--s-4);
+  border: var(--bw) solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--sanpo-color-surface-raised);
+  color: var(--sanpo-color-text-primary);
+  box-shadow: var(--shadow-raised, none);
+}
+.update-prompt__text { font-size: var(--fs-14); }
+.update-prompt__actions { display: flex; gap: var(--s-2); }

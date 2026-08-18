@@ -79,6 +79,40 @@ jobs:
           VITE_SUPABASE_ANON_KEY: ci-placeholder-anon-key
         run: npm run build
 
+      # Review M6. The stamping plugin used to wrap its whole body in a
+      # `try {} catch {}`, so a failure shipped an UNSTAMPED worker: `VERSION`
+      # stays the literal placeholder, so the activate-time sweep never deletes
+      # a stale cache again, and `BUILD_ASSETS` stays a string, so
+      # `Array.isArray` is false and the hashed chunks are never precached —
+      # no offline shell, from a green build. The plugin now throws, and this
+      # asserts the OUTCOME on the shipped artifact rather than trusting it.
+      - name: The built service worker is stamped, and precaches a usable shell
+        working-directory: app
+        run: |
+          python3 - <<'PY'
+          import json, re, sys, pathlib
+          sw = pathlib.Path("dist/sw.js").read_text()
+          if "__BUILD_VERSION__" in sw or "__BUILD_ASSETS__" in sw:
+              print("::error::sw.js shipped unstamped — no cache versioning, no offline shell")
+              sys.exit(1)
+          m = re.search(r"const BUILD_ASSETS = (\[.*?\]);", sw, re.S)
+          if not m:
+              print("::error::could not read BUILD_ASSETS out of the built sw.js")
+              sys.exit(1)
+          assets = json.loads(m.group(1))
+          scripts = [a for a in assets if a.endswith(".js")]
+          if not scripts:
+              print("::error::the precache contains no JavaScript — the offline shell cannot start")
+              sys.exit(1)
+          # The lazily-imported map library is 1.8 MB and belongs in the
+          # runtime cache, not in every install.
+          lazy = [a for a in assets if "mapbox" in a]
+          if lazy:
+              print(f"::error::precache still contains a lazily-imported chunk: {lazy}")
+              sys.exit(1)
+          print(f"PASS: sw.js stamped; precache has {len(assets)} files, {len(scripts)} script(s), no lazy chunks")
+          PY
+
       # The gate refuses in the other direction. Without this the step above
       # only proves that a build with variables set succeeds, which was never
       # in doubt — the defect was a build WITHOUT them succeeding.
