@@ -51,7 +51,44 @@ visible product labels use the approved Sanpo language.
 - `useWalkChannel(walkId, mode: 'broadcast'|'subscribe')` — Realtime channel `walk:{id}`; operator broadcasts `gps` events `{lat,lng,t,acc}` per emitted point and flushes batched inserts to `walk_gps_points` every 10 points or 60 s (whichever first, plus on end); portal subscribes and yields the live point stream. Phase 08 adds the offline IndexedDB queue in front of the flush.
 
 ## Walk Mode flow (phase 05)
-start → `walks.status='in_progress', started_at` → useGeolocation+broadcast → photo capture `<input capture="environment">` → compress client-side (≤1600px, ~0.8 q) → Storage `walk-photos/{operator}/{walk}/…` → potty/fed toggles → end → distance from point polyline (haversine sum) → `complete-walk` edge fn → render returned billing outcome → ReportCard preview.
+start → `walks.status='in_progress', started_at` → useGeolocation+broadcast → photo capture `<input capture="environment">` → compress client-side (≤1600px, ~0.8 q) → Storage `walk-photos/{operator}/{walk}/…` → **insert the `walk_photos` row immediately** → potty/fed toggles → end → distance from point polyline (haversine sum) → `complete-walk` edge fn → render returned billing outcome → ReportCard preview.
+
+### Nothing the operator does may depend on this screen staying mounted
+
+A walk is thirty minutes of an operator's hands being busy. The screen will be
+reloaded, back-swiped, and reclaimed by the OS, and none of that may cost them
+work already done (review H8). Three rules:
+
+1. **A photo is durable the moment it uploads.** `insertWalkPhoto` writes the
+   `walk_photos` row at upload time — `ignoreDuplicates` on
+   `uq_walk_photos_path`, the same conflict target complete-walk uses, so
+   sending the path again at completion is a no-op. Waiting until completion
+   meant the only pointer to an uploaded photo was React state, and any
+   remount stranded every photo in the bucket with nothing referencing it.
+2. **Toggles and notes live in the local snapshot** (`lib/walk-snapshot.ts`),
+   because they have no column until completion. Written on every change, read
+   back on resume. `shouldPersistProgress` gates the writer on `hydrated`:
+   the screen mounts empty and restores asynchronously, so a writer that runs
+   first persists the empty state over the record it is about to read.
+3. **Resume is server-first, snapshot-second.** Photos come from
+   `listWalkPhotos` (survives a different device) unioned with the snapshot
+   (catches a photo uploaded offline whose row insert had nowhere to go);
+   notes prefer the snapshot, since `walks.notes` is not written until
+   completion.
+
+**Exit guards, both of them.** `beforeunload` covers reload / tab close / app
+switch. It does *not* cover the back button or an edge-swipe back gesture —
+that is a same-document history navigation, no unload fires, and Walk Mode
+simply unmounted with recording stopped and no confirmation. That path is
+guarded by a history sentinel: an entry pushed on the same URL, so popping it
+re-renders the route instead of unmounting it and the confirm happens while
+the walk is still on screen. Deliberately not react-router's `useBlocker`,
+which requires a data router (`createBrowserRouter`); this app mounts
+`<BrowserRouter>` and migrating the router for one prompt is a much larger
+change than the bug warrants. The sentinel entry is left behind on a normal
+exit — it points at the same URL, so the only effect is one extra Back from
+the report card, and calling `history.back()` from a cleanup would race
+whatever navigation triggered it.
 
 ## PWA (phase 08)
 `manifest.webmanifest` (name Sanpo, theme `#FEF6EA`, display standalone,
