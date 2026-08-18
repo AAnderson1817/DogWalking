@@ -73,7 +73,10 @@ h1 { font-size: var(--fs-24); }
   font-size: var(--fs-12);
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--ink-500);
+  /* The CT-1 role, not the --ink-500 alias it used to read. This label is the
+     one that appears inside today's calendar column, where the tint escalation
+     has to reach it (review H24). */
+  color: var(--sanpo-color-text-secondary);
   font-weight: 900;
 }
 .numeral {

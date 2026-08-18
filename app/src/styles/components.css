@@ -1,5 +1,133 @@
 /* Sanpo Indigo Emaki component styles. */
 
+/* ── On-tint text roles (review H24) ───────────────────────────────────────
+   CT-1's text roles are chosen against Cream and White, where they clear
+   4.5:1 by 0.2–0.8. Every tint consumes that margin, so the palette's own
+   roles cannot pass AA on the palette's own tint surfaces:
+
+     role                on Cream   worst tint (Kaki)
+     text-secondary        4.73          3.71
+     text-success          5.03          3.95
+     text-attention        4.90          3.85
+     text-relationship     4.84          3.80
+     text-link             5.31          4.17
+
+   That is a finding about the design system rather than about one screen, and
+   it lands where it hurts most: the tint surfaces ARE the attention states.
+   The walk card that failed was the in-progress or overage one; the calendar
+   column that failed was today's.
+
+   Each on-tint role is its own role at 85%, mixed with CT-1 black. Mixing
+   with black scales all three channels by the same factor, so the hue and
+   saturation are untouched and only lightness moves — an escalation rather
+   than a different colour. Deliberately NOT a mix toward Indigo, which was
+   the other candidate: it pulls #B84828 to #8D483B and #796397 to #53598B,
+   turning "attention" and "relationship" into two shades of blue.
+
+   85% is one number for all five, because a per-role table is a thing that
+   drifts. Computed, not eyeballed: it is the largest common step that clears
+   4.5:1 on all five tints, and the result is 4.76:1 at worst (secondary on
+   Kaki tint) and 5.82:1 at best. `role-contrast.test.ts` recomputes the whole
+   role x surface matrix from these files on every run, so the numbers above
+   are checked rather than believed.
+
+   Defined in terms of `var(--role)` rather than as literals so the
+   `prefers-contrast: more` overrides in the vendor file carry through: when
+   text-secondary becomes Indigo there, its on-tint variant becomes darkened
+   Indigo rather than a stale blue-grey. */
+:root {
+  --sanpo-color-text-secondary-on-tint: var(--sanpo-color-text-secondary);
+  --sanpo-color-text-success-on-tint: var(--sanpo-color-text-success);
+  --sanpo-color-text-attention-on-tint: var(--sanpo-color-text-attention);
+  --sanpo-color-text-relationship-on-tint: var(--sanpo-color-text-relationship);
+  --sanpo-color-text-link-on-tint: var(--sanpo-color-text-link);
+}
+/* Separate rule for the same reason as --emaki-current: the minifier collapses
+   two declarations of one property within a single rule and keeps only the
+   last, which would delete the fallback. The fallbacks above are the
+   unescalated roles — i.e. the defect — so this block is load-bearing.
+   color-mix is Baseline since 2023; no supported browser takes the fallback. */
+@supports (color: color-mix(in srgb, red, blue)) {
+  :root {
+    --sanpo-color-text-secondary-on-tint:
+      color-mix(in srgb, var(--sanpo-color-text-secondary) 85%, var(--sanpo-color-production-black));
+    --sanpo-color-text-success-on-tint:
+      color-mix(in srgb, var(--sanpo-color-text-success) 85%, var(--sanpo-color-production-black));
+    --sanpo-color-text-attention-on-tint:
+      color-mix(in srgb, var(--sanpo-color-text-attention) 85%, var(--sanpo-color-production-black));
+    --sanpo-color-text-relationship-on-tint:
+      color-mix(in srgb, var(--sanpo-color-text-relationship) 85%, var(--sanpo-color-production-black));
+    --sanpo-color-text-link-on-tint:
+      color-mix(in srgb, var(--sanpo-color-text-link) 85%, var(--sanpo-color-production-black));
+  }
+}
+
+/* Escalation happens once per SURFACE, not once per component: every rule that
+   paints a CT-1 tint re-points the roles for everything inside it, so a
+   descendant written with `var(--sanpo-color-text-secondary)` is correct
+   without knowing what it is sitting on. That is the property worth having —
+   the two live failures the review found were both components that had no
+   idea they were on a tint.
+
+   This list must match the set of rules that paint a tint. It is not kept in
+   step by hand: `role-contrast.test.ts` parses this file, finds every rule
+   painting any `--sanpo-color-surface-*` tint — attention, information,
+   success, relationship, milestone — and fails naming any selector missing
+   from here. Add a tint, forget this list, and the test says so.
+
+   Note the roles are re-pointed but NOT the tokens derived from them on
+   `:root` (input-placeholder, navigation-inactive, status-cancelled).
+   Substitution happens where a custom property is declared, so those keep
+   `:root`'s value — verified in a browser, not assumed. Nothing inside a tint
+   uses them today; a control inside a tint has its own white fill. */
+.btn--ghost:hover:not(:disabled),
+.btn--ghost:active:not(:disabled),
+.icon-button:hover,
+.icon-button:active,
+.badge--scheduled,
+.badge--in_progress,
+.badge--overage,
+.badge--attention,
+.badge--completed,
+.state-field--information,
+.state-field--attention,
+.state-field--success,
+.loading-state,
+.payment-status--succeeded .payment-status__mark,
+.payment-status--pending .payment-status__mark,
+.payment-status--failed .payment-status__mark,
+.payment-recovery,
+button.walk-card:hover,
+.walk-card--in_progress,
+.walk-card--overage,
+.walk-card--attention,
+.live-banner,
+.calendar-walk,
+.calendar-walk--in_progress,
+.calendar-walk--overage,
+.calendar-walk--attention,
+.calendar-walk--completed,
+.calendar-week__day--today,
+.walk-live-state--offline,
+.report-fact--yes,
+.notification-row--unread,
+.conversation-row:hover,
+.conversation-row--selected,
+.inbox-thread__header,
+.message-field,
+.message-field--provider,
+.client-row:hover,
+.client-relationship-header,
+.pet-profile-row:hover,
+.connect-panel,
+.access-trail__row--attention {
+  --sanpo-color-text-secondary: var(--sanpo-color-text-secondary-on-tint);
+  --sanpo-color-text-success: var(--sanpo-color-text-success-on-tint);
+  --sanpo-color-text-attention: var(--sanpo-color-text-attention-on-tint);
+  --sanpo-color-text-relationship: var(--sanpo-color-text-relationship-on-tint);
+  --sanpo-color-text-link: var(--sanpo-color-text-link-on-tint);
+}
+
 /* ── Button ────────────────────────────────────────────────────────────── */
 .brand-logo {
   width: min(180px, 48vw);
@@ -1450,7 +1578,7 @@ a.today-emaki-visit__link:focus-visible {
   gap: var(--s-1);
   font-size: var(--fs-12);
   font-weight: 800;
-  color: var(--ink-500);
+  color: var(--sanpo-color-text-secondary);
   background: var(--cream-page);
   border: var(--bw-xs) solid var(--line-soft);
   border-radius: var(--r-full);
@@ -1484,10 +1612,13 @@ a.today-emaki-visit__link:focus-visible {
   justify-content: center;
   font-size: var(--fs-12);
   font-weight: 800;
-  color: var(--ink-500);
+  /* CT-1 has a role for exactly this and the nav was not using it, so the
+     `prefers-contrast: more` override written for --sanpo-color-navigation-
+     inactive reached nothing (review H24). */
+  color: var(--sanpo-color-navigation-inactive);
   text-decoration: none;
 }
-.bottom-nav__item--active { color: var(--brand); font-weight: 900; }
+.bottom-nav__item--active { color: var(--sanpo-color-navigation-active); font-weight: 900; }
 .bottom-nav__icon {
   font-size: var(--fs-20);
   line-height: 1;

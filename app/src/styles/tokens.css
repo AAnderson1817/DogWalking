@@ -3,7 +3,16 @@
 :root {
   /* compatibility aliases */
   --cream-page:var(--sanpo-color-brand-cream); --cream-deep:#F8ECDC; --card:var(--sanpo-color-production-white);
-  --ink-900:var(--sanpo-color-brand-indigo); --ink-700:var(--sanpo-color-neutral-muted); --ink-500:var(--sanpo-color-neutral-muted); --ink-mono:var(--sanpo-color-neutral-muted);
+  /* The ink aliases resolve to CT-1 ROLES, not to the raw palette entries
+     underneath them. That distinction is load-bearing and was wrong until
+     review H24: `--ink-500: var(--sanpo-color-neutral-muted)` reaches the same
+     colour today, but it bypasses everything the role layer exists to do.
+     `--sanpo-color-text-secondary` is what carries the `prefers-contrast: more`
+     override and the on-tint escalation; the raw palette entry carries
+     neither. So `.section-label` on today's calendar column measured 4.09:1
+     with the escalation live and inherited around it, and the nav's
+     high-contrast override had never reached the nav at all. */
+  --ink-900:var(--sanpo-color-text-primary); --ink-700:var(--sanpo-color-text-secondary); --ink-500:var(--sanpo-color-text-secondary); --ink-mono:var(--sanpo-color-text-secondary);
   --line-soft:var(--sanpo-color-border-subtle); --hairline:#E6E0D8;
   --orange:var(--sanpo-color-brand-indigo); --orange-deep:var(--sanpo-color-interaction-indigo-pressed); --orange-tint:var(--sanpo-color-supporting-asagi-tint);
   --butter:var(--sanpo-color-supporting-yamabuki-tint); --butter-ink:var(--sanpo-color-brand-indigo);

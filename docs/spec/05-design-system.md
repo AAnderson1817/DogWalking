@@ -334,6 +334,33 @@ edges; the two roles are deliberately split. Input borders are `2px`: Chrome
 floors border widths to whole device pixels, so `1.5px` renders as `1px` at
 DPR 1.
 
+**Tint surfaces escalate their text roles.** CT-1's text roles clear 4.5:1 on
+Cream and White by 0.2–0.8, and every tint consumes that margin: on the Kaki
+tint `text-secondary` is 3.71:1, `text-attention` 3.85:1,
+`text-relationship` 3.80:1, `text-success` 3.95:1. Only `text-primary` passes
+everywhere. Each role therefore has a `--sanpo-color-<role>-on-tint` variant —
+the role itself at 85%, mixed with CT-1 black, which scales all three channels
+equally and so moves lightness without touching hue. 85% is one number for all
+five because a per-role table drifts; it is the largest common step that clears
+the floor on every tint, and the result is 4.76:1 at worst.
+
+Escalation happens **once per surface, not once per component**: every rule
+painting a tint re-points the roles for its subtree, so a descendant written
+with `var(--sanpo-color-text-secondary)` is correct without knowing what it
+sits on. Both live failures the review found were components that had no idea
+they were on a tint.
+
+Two tests hold it. `scripts/role-contrast.test.ts` recomputes the whole role ×
+surface matrix from the stylesheets and fails any pair under 4.5:1, and parses
+`components.css` to fail any rule that paints a tint without joining the
+escalation list. `e2e/tint-contrast.spec.ts` then checks the rendered gallery,
+because the model cannot see everything: it found `.section-label` reading the
+legacy `--ink-500` alias, which resolved straight to the palette entry and so
+inherited past both the escalation and the `prefers-contrast` override. **The
+compatibility aliases resolve to CT-1 roles, never to raw palette entries** —
+that is what the alias layer is for, and getting it wrong is invisible until
+something overrides the role.
+
 **Contrast over artwork is measured from the artwork.** Where ink sits on a
 painted backdrop rather than a flat token — today that is only Today — the
 ratio is sampled from the rendered pixels, never computed from

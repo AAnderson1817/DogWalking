@@ -300,6 +300,11 @@ export default function DevKit() {
                 petNames: ["Nova"],
                 propertyLabel: "Riverside route",
                 status: "in_progress",
+                // The exact pair review H24 measured at 3.71:1: text-secondary
+                // on the Kaki tint an in-progress card paints. Without a
+                // clientName the card renders no secondary text at all, so the
+                // gallery showed the failing combination to nobody.
+                clientName: "Priya Raman",
               }}
               onClick={() => undefined}
             />
