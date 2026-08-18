@@ -21,4 +21,29 @@ CRM/client records · encrypted access vault · scheduling (recurring + one-off)
 - Client portal (same PWA, role-gated): Home (next walk, balance, latest report cards) · Booking against credits + overage extras · Live tracking · Report card history · Billing (plan, invoices, payment method, pause/resume) · Pet + access-instruction self-management (non-secret fields only; secrets are operator-entered — see spec 03).
 
 ## Stack
-React PWA single codebase · Supabase (Postgres 16, Auth, RLS, Realtime, Storage) · Deno edge functions · Stripe Billing + off-session PaymentIntents for overage · Mapbox GL (SVG polyline fallback) · Vercel/Netlify hosting · native fork option: React Native/Expo against same backend if background-GPS reliability demands it.
+React PWA single codebase · Supabase (Postgres 16, Auth, RLS, Realtime, Storage) · Deno edge functions · Stripe Billing + off-session PaymentIntents for overage · Mapbox GL (SVG polyline fallback) · Vercel/Netlify hosting.
+
+**Stated platform limit: a PWA cannot record GPS in the background.** This was
+a half-sentence hedge here ("native fork option: React Native/Expo … if
+background-GPS reliability demands it") from the first day and was never
+resolved (review H7). It is not a maybe. `watchPosition` stops delivering when
+the page is backgrounded or the screen locks, on iOS Safari and Android Chrome
+alike, and no web API changes that — a screen wake lock keeps the display on,
+it does not grant background location.
+
+What the product does about it: hold a wake lock while a walk is active, show
+the operator when recording has stalled, and mark the gap rather than drawing
+and measuring a straight line across it (`docs/spec/06`). What it does **not**
+do is pretend the trail is continuous.
+
+Two consequences that are decisions, not details:
+
+- **Live GPS is not sellable as an unqualified differentiator** until a
+  locked-screen field test has been run on real hardware — an iPhone and an
+  Android, screen off, phone in a pocket, thirty minutes. This has never been
+  done. Until it has, the honest claim is a recorded route with the gaps shown,
+  not continuous tracking.
+- **The React Native / Expo fork is the escalation** if that test says the
+  mitigations are not enough. Same backend, same schema; only the recording
+  surface moves. That is a real cost and it should be paid on evidence rather
+  than on either optimism or fear.

@@ -69,3 +69,36 @@ describe("fitPointsToViewBox", () => {
     expect(Number.isFinite(fitted[0]!.y)).toBe(true);
   });
 });
+
+// ── The route must not draw across a recording gap (review H7) ─────────────
+
+describe("MapView across a suspended watch", () => {
+  const GAPPED = [
+    { lat: 51.4419, lng: -0.0533 },
+    { lat: 51.4423, lng: -0.0528 },
+    { lat: 51.4500, lng: -0.0400, gapBefore: true },  // woke up here
+    { lat: 51.4505, lng: -0.0395 },
+  ];
+
+  it("lifts the pen at the gap instead of drawing a line nobody walked", () => {
+    const html = renderToStaticMarkup(<SvgMap points={GAPPED} />);
+    const d = /d="([^"]+)"/.exec(html)?.[1] ?? "";
+    // Two subpaths: a `moveto` mid-path starts a new one.
+    expect(d.match(/M/g)?.length).toBe(2);
+    // Three drawn segments become two, because the middle one is the jump.
+    expect(d.match(/L/g)?.length).toBe(2);
+  });
+
+  it("still draws one unbroken line when nothing was interrupted", () => {
+    const d = /d="([^"]+)"/.exec(renderToStaticMarkup(<SvgMap points={FIXTURE} />))?.[1] ?? "";
+    expect(d.match(/M/g)?.length).toBe(1);
+  });
+
+  it("carries the mark through the projection", () => {
+    // fitPointsToViewBox maps 1:1; if it dropped the flag the renderer above
+    // would silently go back to drawing one line.
+    const fitted = fitPointsToViewBox(GAPPED);
+    expect(fitted[2]!.gapBefore).toBe(true);
+    expect(fitted[1]!.gapBefore).toBeUndefined();
+  });
+});

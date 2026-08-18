@@ -10,6 +10,8 @@ export interface FitOptions {
 export interface FittedPoint {
   x: number;
   y: number;
+  /** Recording had stopped before this point — see lib/geo.ts (review H7). */
+  gapBefore?: boolean;
 }
 
 /**
@@ -17,7 +19,7 @@ export interface FittedPoint {
  * preserving aspect ratio and centering inside the box.
  */
 export function fitPointsToViewBox(
-  points: ReadonlyArray<{ lat: number; lng: number }>,
+  points: ReadonlyArray<{ lat: number; lng: number; gapBefore?: boolean }>,
   { width = 320, height = 200, padding = 16 }: FitOptions = {},
 ): FittedPoint[] {
   if (points.length === 0) return [];
@@ -47,12 +49,21 @@ export function fitPointsToViewBox(
     x: offsetX + ((p.lng - minLng) * lngScale) * scale,
     // SVG y grows downward; north is up.
     y: offsetY + (maxLat - p.lat) * scale,
+    ...(p.gapBefore ? { gapBefore: true } : {}),
   }));
 }
 
+/**
+ * One `d` attribute covering the whole trail, with a fresh `M` wherever
+ * recording had stopped (review H7).
+ *
+ * A `moveto` in the middle of a path starts a new subpath, so the renderer
+ * lifts the pen instead of drawing a straight line across the interval where
+ * the phone was asleep — which is not a route anyone walked.
+ */
 export function toSvgPath(fitted: ReadonlyArray<FittedPoint>): string {
   if (fitted.length === 0) return "";
   return fitted
-    .map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`)
+    .map((p, i) => `${i === 0 || p.gapBefore ? "M" : "L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`)
     .join(" ");
 }

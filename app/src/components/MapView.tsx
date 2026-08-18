@@ -4,10 +4,13 @@
 import { useEffect, useRef, useState } from "react";
 import { env } from "@/lib/env";
 import { fitPointsToViewBox, toSvgPath } from "@/lib/map-fit";
+import { splitOnGaps } from "@/lib/geo";
 
 export interface MapPoint {
   lat: number;
   lng: number;
+  /** Recording had stopped before this point — the line breaks here (H7). */
+  gapBefore?: boolean;
 }
 
 export interface MapViewProps {
@@ -104,11 +107,14 @@ function MapboxMap({ points, live }: MapViewProps) {
     const map = mapRef.current;
     if (!map || points.length === 0) return;
     const draw = () => {
-      const coords = points.map((p) => [p.lng, p.lat]);
+      // MultiLineString, not LineString: a run of fixes either side of a
+      // suspended watch is two recorded stretches, and joining them draws a
+      // route across ground nobody covered (review H7).
+      const segments = splitOnGaps(points).map((run) => run.map((p) => [p.lng, p.lat]));
       const data = {
         type: "Feature" as const,
         properties: {},
-        geometry: { type: "LineString" as const, coordinates: coords },
+        geometry: { type: "MultiLineString" as const, coordinates: segments },
       };
       const existing = map.getSource("route");
       if (existing) {

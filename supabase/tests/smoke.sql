@@ -1805,6 +1805,55 @@ begin
 end $$;
 
 
+-- ═══ GPS gap marks (0027) ════════════════════════════════════════════════
+-- The column must exist, default to "no gap", and be writable by the
+-- operator's own device — which is the only thing that can observe one, since
+-- the stored timestamps cannot tell a suspended watch apart from an operator
+-- standing at a crossing.
+do $$
+declare
+  v_walk uuid;
+  v_service uuid;
+  v_default boolean;
+  v_marked boolean;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  select id into v_service from service_types
+   where operator_id = '99999999-0000-4000-a000-000000000001' and is_default;
+
+  insert into walks (operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status)
+  values ('99999999-0000-4000-a000-000000000001',
+          '99999999-0000-4000-c000-00000000000a',
+          '99999999-0000-4000-d000-00000000000a',
+          v_service, date '2026-07-09', '10:00', '11:00', 'in_progress')
+  returning id into v_walk;
+
+  -- An insert that says nothing about gaps asserts there was none. Every row
+  -- written before 0027 means exactly that, which is why nothing is
+  -- backfilled: a guessed gap is indistinguishable from an observed one.
+  insert into walk_gps_points (walk_id, operator_id, recorded_at, lat, lng)
+  values (v_walk, '99999999-0000-4000-a000-000000000001', now(), 51.5, -0.1)
+  returning gap_before into v_default;
+  if v_default is not false then
+    raise exception 'FAIL: gap_before defaulted to % rather than false', v_default;
+  end if;
+
+  insert into walk_gps_points (walk_id, operator_id, recorded_at, lat, lng, gap_before)
+  values (v_walk, '99999999-0000-4000-a000-000000000001', now(), 51.51, -0.1, true)
+  returning gap_before into v_marked;
+  if v_marked is not true then
+    raise exception 'FAIL: gap_before did not persist';
+  end if;
+
+  if (select count(*) from walk_gps_points where walk_id = v_walk and gap_before) <> 1 then
+    raise exception 'FAIL: expected exactly one marked point on the trail';
+  end if;
+
+  raise notice 'gps gap marks (0027): OK';
+end $$;
+
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;
