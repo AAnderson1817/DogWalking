@@ -1313,7 +1313,7 @@ begin
   perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
 
   -- ── 1. Full refund of a cycle invoice, credits untouched ───────────────
-  perform fn_apply_invoice_paid(v_cli, 10, 'in_smoke_full', 9000, 'USD', null);
+  perform fn_apply_invoice_paid(v_cli, 10, 'in_smoke_full', 9000, 'USD', null, true);
   select id into v_pay from payments
    where stripe_invoice_id = 'in_smoke_full' and status = 'succeeded';
   select credit_balance into v_bal from clients where id = v_cli;
@@ -1356,7 +1356,7 @@ begin
   -- balance before each grant, so the balance reads identically whether or
   -- not the second grant happened. Confirmed against the pre-0023 body — two
   -- grant rows — before this assertion was written.
-  perform fn_apply_invoice_paid(v_cli, 10, 'in_smoke_full', 9000, 'USD', null);
+  perform fn_apply_invoice_paid(v_cli, 10, 'in_smoke_full', 9000, 'USD', null, true);
   select count(*) into v_n from credit_ledger
    where entry_type = 'grant' and stripe_invoice_id = 'in_smoke_full';
   if v_n <> 1 then
@@ -1364,7 +1364,7 @@ begin
   end if;
 
   -- ── 4. Partial refund floors at the balance and reports the shortfall ──
-  perform fn_apply_invoice_paid(v_cli, 10, 'in_smoke_part', 9000, 'USD', null);
+  perform fn_apply_invoice_paid(v_cli, 10, 'in_smoke_part', 9000, 'USD', null, true);
   select id into v_pay from payments
    where stripe_invoice_id = 'in_smoke_part' and status = 'succeeded';
   insert into credit_ledger (operator_id, client_id, entry_type, amount, note)
@@ -1612,6 +1612,196 @@ begin
 
   reset role;
   raise notice 'connect state is read-only to operators (0024): OK';
+end $$;
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Subscription state gates billable work (0026, review H9 + owner decision)
+--
+-- The materializer consulted ONE subscription predicate ('<> paused') and
+-- fn_book_walk consulted NONE — it gated on clients.status, which is the
+-- lifecycle column, not the billing one. A cancelled or past-due client kept
+-- having walks generated nightly and could still self-book.
+-- ═══════════════════════════════════════════════════════════════════════════
+do $$
+declare
+  v_op    uuid := '99999999-0000-4000-a000-000000000001';
+  v_cli   uuid := '99999999-0000-4000-c000-00000000000b';
+  v_prop  uuid;
+  v_sched uuid;
+  v_before int;
+  v_after  int;
+  v_state  text;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+
+  insert into properties (id, operator_id, client_id, label)
+  values (gen_random_uuid(), v_op, v_cli, 'B home 0026') returning id into v_prop;
+
+  insert into recurring_schedules (operator_id, client_id, property_id,
+                                   service_type_id, days_of_week, window_start,
+                                   window_end, start_date, active)
+  select v_op, v_cli, v_prop, st.id, array[1,2,3,4,5,6,7], '09:00', '10:00',
+         current_date, true
+    from service_types st where st.operator_id = v_op and st.is_default
+  returning id into v_sched;
+
+  -- Each non-serving state must generate ZERO walks. Asserted per state
+  -- rather than once, because the predicate is an allow-list and a mistake in
+  -- it would let exactly one state through.
+  foreach v_state in array array['cancelled', 'past_due', 'paused'] loop
+    delete from walks where schedule_id = v_sched;
+    update clients set subscription_status = v_state::subscription_status where id = v_cli;
+    perform fn_materialize_walks(7);
+    select count(*) into v_after from walks where schedule_id = v_sched;
+    if v_after <> 0 then
+      raise exception 'FAIL: subscription_status % generated % walks', v_state, v_after;
+    end if;
+  end loop;
+
+  -- ...and an active one still does, or the gate is just broken.
+  delete from walks where schedule_id = v_sched;
+  update clients set subscription_status = 'active' where id = v_cli;
+  perform fn_materialize_walks(7);
+  select count(*) into v_after from walks where schedule_id = v_sched;
+  if v_after = 0 then
+    raise exception 'FAIL: an active subscription generated no walks — the gate is too tight';
+  end if;
+
+  -- 'none' must keep working. It is the state of a client who never
+  -- subscribed, whom the operator may bill outside Sanpo; excluding it would
+  -- have broken every pre-subscription client the moment 0026 applied.
+  delete from walks where schedule_id = v_sched;
+  update clients set subscription_status = 'none' where id = v_cli;
+  perform fn_materialize_walks(7);
+  select count(*) into v_after from walks where schedule_id = v_sched;
+  if v_after = 0 then
+    raise exception 'FAIL: subscription_status none generated no walks';
+  end if;
+
+  delete from walks where schedule_id = v_sched;
+  delete from recurring_schedules where id = v_sched;
+  delete from properties where id = v_prop;
+  update clients set subscription_status = 'active' where id = v_cli;
+  raise notice 'materializer honours subscription state (0026): OK';
+end $$;
+
+-- fn_book_walk refuses a non-serving subscription. Runs as the CLIENT, since
+-- the function reads auth.uid().
+do $$
+declare
+  v_cli   uuid := '99999999-0000-4000-c000-00000000000a';
+  v_prop  uuid := '99999999-0000-4000-d000-00000000000a';
+  v_svc   uuid;
+  v_pet   uuid;
+  v_walk  uuid;
+  v_state text;
+begin
+  select id into v_svc from service_types
+   where operator_id = '99999999-0000-4000-a000-000000000001' and is_default;
+  select id into v_pet from pets where client_id = v_cli limit 1;
+  if v_pet is null then
+    insert into pets (operator_id, client_id, name)
+    values ('99999999-0000-4000-a000-000000000001', v_cli, 'Smoke pet 0026')
+    returning id into v_pet;
+  end if;
+
+  foreach v_state in array array['cancelled', 'past_due'] loop
+    update clients set subscription_status = v_state::subscription_status where id = v_cli;
+
+    set local role authenticated;
+    perform set_config('request.jwt.claims',
+      '{"sub":"99999999-0000-4000-a000-000000000003","role":"authenticated"}', true);
+    begin
+      perform fn_book_walk(v_prop, v_svc, current_date + 1, '09:00', '10:00', array[v_pet]);
+      raise exception 'FAIL: a % client booked a walk', v_state;
+    exception when others then
+      if sqlerrm like 'FAIL:%' then raise; end if;
+      -- The specific message, not merely "something was refused". Before 0026
+      -- this function raised nothing at all for these states, and a booking
+      -- that fails for an unrelated reason must not read as a pass.
+      if sqlerrm not like '%booking is closed until it is settled%' then
+        raise exception 'FAIL: wrong refusal for %: %', v_state, sqlerrm;
+      end if;
+    end;
+    reset role;
+  end loop;
+
+  -- An active client still books, or the gate is simply broken.
+  update clients set subscription_status = 'active' where id = v_cli;
+  set local role authenticated;
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000000003","role":"authenticated"}', true);
+  v_walk := fn_book_walk(v_prop, v_svc, current_date + 1, '09:00', '10:00', array[v_pet]);
+  if v_walk is null then raise exception 'FAIL: an active client could not book'; end if;
+  reset role;
+
+  raise notice 'fn_book_walk honours subscription state (0026): OK';
+end $$;
+
+-- Rollover belongs to a renewal, never to the first invoice. On policy 'none'
+-- fn_apply_rollover books an expiry for the WHOLE balance, so running it on
+-- subscription_create destroyed any credit granted before billing started.
+do $$
+declare
+  v_cli uuid := '99999999-0000-4000-c000-00000000000b';   -- rollover 'none'
+  v_bal int;
+  v_expiries int;
+  v_after_expiries int;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+
+  -- An operator grants a goodwill balance before the first invoice.
+  perform fn_grant_credits(v_cli, 6, 'smoke: pre-subscription goodwill');
+  select credit_balance into v_bal from clients where id = v_cli;
+  if v_bal < 6 then raise exception 'FAIL: setup grant did not land (%)', v_bal; end if;
+
+  -- Deltas, not ambient conditions. This client already carries expiry rows
+  -- from the reversal block earlier in this same transaction, so "an expiry
+  -- exists" and "an expiry happened recently" are both true regardless — the
+  -- first draft of this test failed for exactly that reason.
+  select count(*) into v_expiries from credit_ledger
+   where client_id = v_cli and entry_type = 'expiry';
+
+  -- First invoice: grants the cycle and must NOT expire the goodwill.
+  perform fn_apply_invoice_paid(v_cli, 5, 'in_first_0026', 9000, 'USD', null, false);
+
+  select count(*) into v_after_expiries from credit_ledger
+   where client_id = v_cli and entry_type = 'expiry';
+  if v_after_expiries <> v_expiries then
+    raise exception 'FAIL: the first invoice ran rollover and expired % credit lot(s)',
+      v_after_expiries - v_expiries;
+  end if;
+  if (select credit_balance from clients where id = v_cli) <> v_bal + 5 then
+    raise exception 'FAIL: expected the goodwill (%) plus a 5-credit cycle, got %',
+      v_bal, (select credit_balance from clients where id = v_cli);
+  end if;
+
+  -- A renewal DOES roll over, or the flag has simply switched the feature off.
+  perform fn_apply_invoice_paid(v_cli, 5, 'in_renew_0026', 9000, 'USD', null, true);
+  select count(*) into v_after_expiries from credit_ledger
+   where client_id = v_cli and entry_type = 'expiry';
+  if v_after_expiries = v_expiries then
+    raise exception 'FAIL: a renewal did not run rollover at all';
+  end if;
+
+  raise notice 'rollover runs on renewals only (0026): OK';
+end $$;
+
+-- A plan must state what an extra walk costs (owner decision).
+do $$
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  begin
+    insert into plans (operator_id, name, credits_per_cycle, price_pence, cycle,
+                       rollover_policy, overage_rate_pence)
+    values ('99999999-0000-4000-a000-000000000001', 'Zero overage', 4, 4000,
+            'monthly', 'none', 0);
+    raise exception 'FAIL: a plan with a zero overage rate was accepted';
+  exception when check_violation then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+  raise notice 'overage rate must be positive (0026): OK';
 end $$;
 
 

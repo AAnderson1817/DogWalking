@@ -938,6 +938,7 @@ export type Database = {
           p_amount_pence: number;
           p_currency: string;
           p_receipt_url: string;
+          p_is_renewal: boolean;
         };
         Returns: boolean;
       };
@@ -1197,7 +1198,7 @@ export type Database = {
       client_status: "invited" | "active" | "paused" | "archived";
       entry_method: "key_on_file" | "lockbox" | "smart_lock" | "door_code" | "buzzer_fob";
       ledger_entry_type: "grant" | "debit" | "adjust" | "rollover" | "expiry";
-      notification_type: "walk_complete" | "low_credit" | "renewal_upcoming" | "payment_failed" | "walk_scheduled" | "walk_cancelled" | "payment_refunded" | "payment_disputed";
+      notification_type: "walk_complete" | "low_credit" | "renewal_upcoming" | "payment_failed" | "walk_scheduled" | "walk_cancelled" | "payment_refunded" | "payment_disputed" | "subscription_cancelled" | "plan_changed_externally" | "payment_taken";
       payment_status: "pending" | "succeeded" | "failed" | "refunded" | "disputed";
       payment_type: "subscription" | "overage" | "topup";
       pet_size: "small" | "medium" | "large" | "giant";

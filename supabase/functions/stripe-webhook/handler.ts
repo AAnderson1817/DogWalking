@@ -78,6 +78,11 @@ export interface WebhookDeps {
     amountPence: number;
     currency: string;
     receiptUrl: string | null;
+    /** TRUE only for subscription_cycle. Rollover carries what is left of the
+     * cycle that just ended, and a first invoice has no prior cycle — running
+     * it there books an expiry for the whole balance on rollover 'none',
+     * destroying credit granted before billing started. */
+    isRenewal: boolean;
   }): Promise<boolean>;
   /** True when a payments row already exists for this invoice id. */
   hasPaymentForInvoice(invoiceId: string): Promise<boolean>;
@@ -209,9 +214,23 @@ async function applyEvent(
     }
 
     case "invoice.paid": {
-      if (!invoiceSubscriptionId(obj)) return { status: "ignored" };
+      const paidSubId = invoiceSubscriptionId(obj);
+      if (!paidSubId) return { status: "ignored" };
       const client = await deps.findClientByCustomer(String(obj.customer ?? ""), operatorId);
       if (!client) return { status: "ignored" };
+      // Scoped to the subscription actually bound to this client — the two
+      // sibling subscription arms both do this and say why, and this one did
+      // not. A customer can carry more than one live subscription (nothing
+      // stopped a second checkout), and their invoices have DIFFERENT ids, so
+      // uq_payments_subscription_invoice does not catch it: the result is two
+      // cycle grants and two rollovers for one client.
+      //
+      // An unbound client is allowed through: checkout.session.completed and
+      // invoice.paid race, and refusing here would drop the first cycle of
+      // every new subscription.
+      if (client.stripe_subscription_id && client.stripe_subscription_id !== paidSubId) {
+        return { status: "ignored" };
+      }
       const invoiceId = typeof obj.id === "string" ? obj.id : event.id;
       const currency = String(obj.currency ?? "usd");
 
@@ -249,6 +268,9 @@ async function applyEvent(
         amountPence: (obj.amount_paid as number) ?? 0,
         currency,
         receiptUrl: (obj.hosted_invoice_url as string | null) ?? null,
+        // CYCLE_REASONS admits subscription_create too, and both grant a
+        // cycle — but only a renewal has a previous cycle to roll over.
+        isRenewal: reason === "subscription_cycle",
       });
       return { status: "processed" };
     }
@@ -363,7 +385,29 @@ async function applyEvent(
       if (subId && client.stripe_subscription_id !== subId) {
         return { status: "ignored" };
       }
-      await deps.updateClient(client.id, { subscription_status: "cancelled" }, operatorId);
+      // Clear the binding as well as the status. Leaving stripe_subscription_id
+      // set means change-plan still takes the Stripe path on a dead
+      // subscription — and it commits a pending plan-change intent BEFORE the
+      // Stripe call, so the failure leaves an intent behind and surfaces as a
+      // bare "internal error". current_period_end goes too: the Money screen
+      // renders it as a confident renewal date for a subscription that will
+      // never renew.
+      await deps.updateClient(client.id, {
+        subscription_status: "cancelled",
+        stripe_subscription_id: null,
+        current_period_end: null,
+      }, operatorId);
+      // The operator otherwise learns about this when the client asks why
+      // their walks stopped — and after 0026 they DO stop, because the
+      // materializer and fn_book_walk both refuse a cancelled subscription.
+      await deps.insertNotification({
+        operator_id: client.operator_id,
+        client_id: null,
+        type: "subscription_cancelled",
+        title: `${client.full_name} cancelled their subscription`,
+        body: "No further walks will be scheduled or bookable for them, and no more credits will be granted. Walks already on the calendar are untouched.",
+        walk_id: null,
+      });
       return { status: "processed" };
     }
 

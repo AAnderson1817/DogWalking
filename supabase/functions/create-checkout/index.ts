@@ -22,7 +22,7 @@ serveFunction(async (req) => {
 
   const { data: client, error: cErr } = await db
     .from("clients")
-    .select("id, operator_id, full_name, email, stripe_customer_id")
+    .select("id, operator_id, full_name, email, stripe_customer_id, stripe_subscription_id, subscription_status")
     .eq("id", body.client_id)
     .maybeSingle();
   if (cErr) throw new HttpError(500, "db_error", "client lookup failed");
@@ -49,6 +49,20 @@ serveFunction(async (req) => {
   // (review B5): the customer, the subscription and the charge all live on
   // THEIR Stripe account, their business appears on the client's statement,
   // and the money lands in their bank — Sanpo is never in the flow of funds.
+  // One live subscription per client. Nothing stopped a second checkout, and
+  // a customer with two subscriptions receives two invoice.paid events with
+  // DIFFERENT invoice ids — so uq_payments_subscription_invoice does not catch
+  // it and the client is charged twice and granted two cycles. The webhook now
+  // ignores invoices for an unbound subscription, but the right place to stop
+  // it is before the second one exists.
+  if (client.stripe_subscription_id && client.subscription_status !== "cancelled") {
+    throw new HttpError(
+      409,
+      "already_subscribed",
+      "This client already has a live subscription. Change their plan instead of starting a second one.",
+    );
+  }
+
   const account = requireAccount(operator);
 
   let customerId = client.stripe_customer_id as string | null;
