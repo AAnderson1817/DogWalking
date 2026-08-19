@@ -34,7 +34,8 @@ export default function PortalHome() {
   const [client, setClient] = useState<Clients | null>(null);
   const [operator, setOperator] = useState<MyOperatorView | null>(null);
   const [plan, setPlan] = useState<Plans | null>(null);
-  const [walks, setWalks] = useState<WalkDetailed[]>([]);
+  const [upcomingWalks, setUpcoming] = useState<WalkDetailed[]>([]);
+  const [reports, setReports] = useState<WalkDetailed[]>([]);
   const [notifications, setNotifications] = useState<Notifications[]>([]);
   const [accessTrail, setAccessTrail] = useState<CredentialLogRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -43,9 +44,16 @@ export default function PortalHome() {
   const load = useCallback(async () => {
     const me = await getMyClient();
     if (!me) throw new Error("We couldn't load your account. Please try again.");
-    const [op, ws, ns, p, trail] = await Promise.all([
+    const [op, upcomingWalks, recentReports, ns, p, trail] = await Promise.all([
       getMyOperatorView(),
-      listWalksDetailed({}),
+      // Review M9. This was `listWalksDetailed({})` — every walk this client
+      // has ever had, to render one "next walk" card and three reports. About
+      // 470 rows for a client three years into a 3x/week plan, and past
+      // PostgREST's 1000-row cap it was worse than wasteful: the default order
+      // is ASCENDING, so a long-tenured client kept their first year and lost
+      // every recent walk, including the next one this screen exists to show.
+      listWalksDetailed({ from: todayLocal(), limit: 30 }),
+      listWalksDetailed({ status: "completed", newestFirst: true, limit: 3 }),
       listNotifications(true),
       me.plan_id ? getPlan(me.plan_id) : Promise.resolve(null),
       // Advisory. A client with no credential on file has an empty trail, and
@@ -55,7 +63,8 @@ export default function PortalHome() {
     ]);
     setClient(me);
     setOperator(op);
-    setWalks(ws);
+    setUpcoming(upcomingWalks);
+    setReports(recentReports);
     setNotifications(ns);
     setPlan(p);
     setAccessTrail(trail);
@@ -92,15 +101,13 @@ export default function PortalHome() {
     );
   }
 
-  const today = todayLocal();
-  const upcoming = walks
-    .filter((w) => (w.status === "scheduled" || w.status === "in_progress") && w.scheduled_date >= today)
-    .sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date) || a.window_start.localeCompare(b.window_start));
+  // `from` bounds the fetch to today onward; the status filter is the one part
+  // the query cannot express, since two statuses are wanted and PostgREST's
+  // `in` would need the pair spelled out in a second place. Already ordered.
+  const upcoming = upcomingWalks.filter(
+    (w) => w.status === "scheduled" || w.status === "in_progress",
+  );
   const next = upcoming[0];
-  const reports = walks
-    .filter((w) => w.status === "completed")
-    .sort((a, b) => b.scheduled_date.localeCompare(a.scheduled_date))
-    .slice(0, 3);
 
   return (
     <div className="page">
