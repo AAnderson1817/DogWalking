@@ -8,6 +8,7 @@ import { CreditMeter } from "@/components/CreditMeter";
 import { EmptyState } from "@/components/EmptyState";
 import { FormError, Input, Select, Textarea } from "@/components/fields";
 import { LoadError, loadErrorMessage } from "@/components/LoadError";
+import { SegmentedTabs, TabPanel } from "@/components/SegmentedTabs";
 import { Sheet } from "@/components/Sheet";
 import { Spinner } from "@/components/Spinner";
 import { LoadingState, StateField } from "@/components/StateField";
@@ -134,34 +135,29 @@ export default function ClientDetail() {
         </div>
       </header>
 
-      <div
-        role="tablist"
-        className="segmented-control"
-        style={{
-          marginTop: "var(--s-4)",
-        }}
-      >
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            role="tab"
-            className="segmented-control__button"
-            aria-selected={tab === t.key}
-            onClick={() => setTab(t.key)}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+      {/* Review M16. This control had no `aria-label` at all, so a screen
+          reader announced "tab, 5 of 5, selected" for the operator's main
+          client workspace with nothing saying what the tabs were for — and
+          the fifth of them is the credential vault. */}
+      <SegmentedTabs
+        idBase="client"
+        label="Client sections"
+        tabs={TABS}
+        value={tab}
+        onChange={setTab}
+        style={{ marginTop: "var(--s-4)" }}
+      />
 
       <div style={{ marginTop: "var(--s-4)" }}>
-        {tab === "pets" && <PetsTab clientId={client.id} />}
-        {tab === "plan" && operator && (
-          <PlanTab client={client} operator={operator} onChanged={() => void reload()} />
-        )}
-        {tab === "walks" && <WalksTab clientId={client.id} />}
-        {tab === "schedule" && <ScheduleTab clientId={client.id} />}
-        {tab === "access" && <AccessTab client={client} />}
+        <TabPanel idBase="client" tabKey={tab}>
+          {tab === "pets" && <PetsTab clientId={client.id} />}
+          {tab === "plan" && operator && (
+            <PlanTab client={client} operator={operator} onChanged={() => void reload()} />
+          )}
+          {tab === "walks" && <WalksTab clientId={client.id} />}
+          {tab === "schedule" && <ScheduleTab clientId={client.id} />}
+          {tab === "access" && <AccessTab client={client} />}
+        </TabPanel>
       </div>
     </div>
   );

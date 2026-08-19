@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="24" height="24" viewBox="0 0 24 24"
+     role="img" aria-labelledby="sanpo-pending-title sanpo-pending-desc"
+     style="color:#0C4774">
+  <title id="sanpo-pending-title">Pending</title>
+  <desc id="sanpo-pending-desc">Three dots in a row.</desc>
+  <circle cx="6" cy="12" r="1.6" fill="currentColor"/>
+  <circle cx="12" cy="12" r="1.6" fill="currentColor"/>
+  <circle cx="18" cy="12" r="1.6" fill="currentColor"/>
+</svg>

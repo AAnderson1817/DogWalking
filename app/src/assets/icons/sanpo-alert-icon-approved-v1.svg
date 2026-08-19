@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="24" height="24" viewBox="0 0 24 24"
+     role="img" aria-labelledby="sanpo-alert-title sanpo-alert-desc"
+     style="color:#0C4774">
+  <title id="sanpo-alert-title">Needs attention</title>
+  <desc id="sanpo-alert-desc">An exclamation mark inside a circle.</desc>
+  <circle cx="12" cy="12" r="8.25" fill="none" stroke="currentColor"
+          stroke-width="1.75"/>
+  <path d="M12 7.5 V13" fill="none" stroke="currentColor"
+        stroke-width="1.75" stroke-linecap="round"/>
+  <circle cx="12" cy="16.25" r="1.15" fill="currentColor"/>
+</svg>

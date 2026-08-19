@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="24" height="24" viewBox="0 0 24 24"
+     role="img" aria-labelledby="sanpo-disputed-title sanpo-disputed-desc"
+     style="color:#0C4774">
+  <title id="sanpo-disputed-title">Disputed</title>
+  <desc id="sanpo-disputed-desc">A warning triangle.</desc>
+  <path d="M12 4.75 L20.25 18.5 C20.6 19.083 20.18 19.75 19.5 19.75
+           H4.5 C3.82 19.75 3.4 19.083 3.75 18.5 Z"
+        fill="none" stroke="currentColor" stroke-width="1.75"
+        stroke-linejoin="round"/>
+  <path d="M12 9.75 V13.75" fill="none" stroke="currentColor"
+        stroke-width="1.75" stroke-linecap="round"/>
+  <circle cx="12" cy="16.75" r="1.15" fill="currentColor"/>
+</svg>

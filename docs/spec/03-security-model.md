@@ -310,6 +310,35 @@ audit trail, and it is what an insurance underwriter examines hardest.
 - `accessed_by` equals `operator_id` by construction and carries no information
   today. Kept for the moment a second persona can read a credential at all.
 
+
+### How long a revealed credential stays on screen (review M14)
+
+**30 seconds, extendable three times, 120 seconds maximum.** The number lived
+only in a code comment citing a spec that did not mention it, which is why it
+is here now.
+
+Thirty seconds with no way to extend is tight for the job this feature exists
+to do — a door code read off a phone, in gloves, at a keypad, in the cold — and
+considerably worse with a motor or cognitive disability, or with magnification,
+where reading the screen and reaching the keypad are separate operations.
+
+When it expired the operator had to run the whole cycle again: re-auth, type a
+purpose, reveal. That is not merely friction. It writes **another**
+`credential_access_log` row, so the trail this spec builds to make a real
+intrusion visible fills with repeated reads of the same door minutes apart —
+which is exactly the shape a real intrusion has.
+
+So **extending writes no audit row**: same person, same purpose, same door,
+still standing there. And it is **capped**, because an unlimited "keep showing"
+is the timer removed with extra steps; 120 s total is long enough for a keypad
+that needs two attempts and short enough that a phone put down mid-entry still
+clears while the operator is on the doorstep rather than in the van.
+
+The rule lives in `lib/vault-reveal.ts` and `extendReveal` refuses past the cap
+even when the caller does not check, so a second entry point cannot grant an
+unbounded reveal.
+
+
 ## Smoke-test security assertions (phase 00 suite must prove)
 1. As client A JWT: select on client B's rows across clients/pets/walks/ledger → 0 rows.
 2. As operator JWT: `UPDATE clients SET credit_balance = 999` → permission denied.

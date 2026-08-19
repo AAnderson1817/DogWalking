@@ -2,7 +2,7 @@
    compatibility aliases only; they resolve to the approved Sanpo system. */
 :root {
   /* compatibility aliases */
-  --cream-page:var(--sanpo-color-brand-cream); --cream-deep:#F8ECDC; --card:var(--sanpo-color-production-white);
+  --cream-page:var(--sanpo-color-brand-cream); --card:var(--sanpo-color-production-white);
   /* The ink aliases resolve to CT-1 ROLES, not to the raw palette entries
      underneath them. That distinction is load-bearing and was wrong until
      review H24: `--ink-500: var(--sanpo-color-neutral-muted)` reaches the same
@@ -13,27 +13,30 @@
      with the escalation live and inherited around it, and the nav's
      high-contrast override had never reached the nav at all. */
   --ink-900:var(--sanpo-color-text-primary); --ink-700:var(--sanpo-color-text-secondary); --ink-500:var(--sanpo-color-text-secondary); --ink-mono:var(--sanpo-color-text-secondary);
-  --line-soft:var(--sanpo-color-border-subtle); --hairline:#E6E0D8;
-  --orange:var(--sanpo-color-brand-indigo); --orange-deep:var(--sanpo-color-interaction-indigo-pressed); --orange-tint:var(--sanpo-color-supporting-asagi-tint);
-  --butter:var(--sanpo-color-supporting-yamabuki-tint); --butter-ink:var(--sanpo-color-brand-indigo);
-  --sky:var(--sanpo-color-supporting-asagi-tint); --sky-bright:var(--sanpo-color-supporting-asagi); --sky-ink:var(--sanpo-color-brand-indigo); --sky-mid:var(--sanpo-color-supporting-asagi);
-  --mint:var(--sanpo-color-supporting-matcha-tint); --mint-ink:var(--sanpo-color-brand-indigo);
-  --lilac:var(--sanpo-color-supporting-fuji-tint); --lilac-ink:var(--sanpo-color-brand-indigo);
-  --pink:var(--sanpo-color-supporting-kaki-tint); --pink-ink:var(--sanpo-color-brand-indigo); --blush:var(--sanpo-color-supporting-kaki);
-  --red:var(--sanpo-color-status-critical); --green:var(--sanpo-color-status-complete); --white:var(--sanpo-color-production-white);
-
-  /* legacy Trailhead aliases (screens reference these directly) */
-  --pine-950:var(--ink-900); --pine-900:var(--ink-900); --pine-800:var(--ink-900);
-  --pine-700:var(--ink-700); --pine-600:var(--orange-deep); --pine-400:var(--ink-500);
-  --teal-live:var(--sky-bright); --teal-dim:var(--sky-mid);
-  --paper:var(--cream-page); --mist:var(--hairline);
-  --ink:var(--ink-900); --ink-soft:var(--ink-700); --ink-faint:var(--ink-500);
+  /* Review M37. `--hairline` was a raw hex, `#E6E0D8`, and `--mist` resolved
+     to it — so the ledger row separators in ClientDetail and PortalBilling,
+     the vault credential rows and the Roster chips were all drawn by a
+     literal. Measured 1.22:1 on Cream and 1.31:1 on white: near-invisible,
+     and worse, a literal is the one thing the `prefers-contrast: more` block
+     cannot reach, so the billing ledger stayed invisible for exactly the
+     users who asked for more contrast. Pointed at the ROLE, which carries
+     that override (it becomes brand indigo) — the same distinction H24 had
+     to make for the ink aliases. */
+  --line-soft:var(--sanpo-color-border-subtle); --hairline:var(--sanpo-color-border-subtle);
+  /* `--orange`, `--pink-ink`, `--mint-ink`, `--lilac-ink` and `--pine-600`
+     all resolved to brand INDIGO, so a maintainer writing `var(--orange)` in
+     good faith got blue. The dead ones are deleted; `--orange-deep` survives
+     because `--pine-600` used it, and both are gone now, so the one live
+     consumer (`--brand`) names the role directly below. */
+  --butter:var(--sanpo-color-supporting-yamabuki-tint);
+  --sky-bright:var(--sanpo-color-supporting-asagi);
+  --white:var(--sanpo-color-production-white);
+  --mist:var(--hairline);
   --amber:var(--butter);
 
   /* semantic */
   --bg:var(--cream-page); --surface:var(--card); --text:var(--ink-900);
-  --text-2:var(--ink-700); --brand:var(--orange); --accent:var(--sky-bright);
-  --danger:var(--red); --warn:var(--butter);
+  --text-2:var(--ink-700); --brand:var(--sanpo-color-brand-indigo);
 
   /* The paper the Today artwork is painted on, sampled from the approved
      master (mean of the bottom six rows, border accents trimmed: #E8DAC4).

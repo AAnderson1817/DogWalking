@@ -60,7 +60,25 @@ describe("PaymentRow", () => {
 
 describe("PaymentStatus", () => {
   it("keeps a distinct mark and visible label for every state", () => {
-    expect(renderToStaticMarkup(<PaymentStatus status="succeeded" />)).toContain("✓");
+    // Review M19: the marks are drawn now, not typed. Same contract as before
+    // — a mark AND a visible label, never colour alone — but the mark is a
+    // masked SVG on the approved 24x24 grid, because Nunito does not contain
+    // U+2713 / U+21A9 / U+26A0 and a fallback font was drawing them.
+    const states = ["succeeded", "pending", "failed", "refunded", "disputed"] as const;
+    const marks = new Set<string>();
+    for (const status of states) {
+      const html = renderToStaticMarkup(<PaymentStatus status={status} />);
+      expect(html).toContain("approved-icon");
+      // The mask is an inlined data URI, so it is read by the master's own
+      // <title> id rather than by unpicking the URI escaping — which is what
+      // the first version of this tried, and it stopped at the first entity.
+      const name = /sanpo-([a-z]+)-title/.exec(html)?.[1];
+      expect(name, `${status} renders no approved mask`).toBeTruthy();
+      marks.add(name!);
+    }
+    // Distinct: two states sharing a mark is the same defect as no mark.
+    expect(marks.size).toBe(states.length);
+
     expect(renderToStaticMarkup(<PaymentStatus status="pending" />)).toContain("Processing");
     expect(renderToStaticMarkup(<PaymentStatus status="failed" />)).toContain("Needs attention");
     expect(renderToStaticMarkup(<PaymentStatus status="refunded" />)).toContain("Refunded");

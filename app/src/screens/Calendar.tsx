@@ -10,6 +10,7 @@ import { Card } from "@/components/Card";
 import { EmptyState } from "@/components/EmptyState";
 import { LoadError, loadErrorMessage } from "@/components/LoadError";
 import { FormError, Input, Select } from "@/components/fields";
+import { SegmentedTabs, TabPanel } from "@/components/SegmentedTabs";
 import { Sheet } from "@/components/Sheet";
 import { Spinner } from "@/components/Spinner";
 import { LoadingState } from "@/components/StateField";
@@ -34,6 +35,12 @@ import { todayLocal } from "@/lib/selectors";
 import type { Clients, Pets, Properties, ServiceTypes } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
 
+type CalendarView = "day" | "week";
+const CALENDAR_VIEWS = [
+  { key: "day", label: "Day" },
+  { key: "week", label: "Week" },
+] as const satisfies ReadonlyArray<{ key: CalendarView; label: string }>;
+
 const DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 function addDays(iso: string, days: number): string {
@@ -52,7 +59,7 @@ function weekStart(iso: string): string {
 export default function Calendar() {
   useDocumentTitle("Calendar");
   const navigate = useNavigate();
-  const [view, setView] = useState<"day" | "week">("day");
+  const [view, setView] = useState<CalendarView>("day");
   const [anchor, setAnchor] = useState(() => todayLocal());
   const [walks, setWalks] = useState<WalkDetailed[] | null>(null);
   const [selected, setSelected] = useState<WalkDetailed | null>(null);
@@ -126,26 +133,13 @@ export default function Calendar() {
     <div className="page">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "var(--s-2)" }}>
         <h1>Calendar</h1>
-        <div className="segmented-control" role="tablist" aria-label="Calendar view">
-          <button
-            type="button"
-            className="segmented-control__button"
-            role="tab"
-            aria-selected={view === "day"}
-            onClick={() => setView("day")}
-          >
-            Day
-          </button>
-          <button
-            type="button"
-            className="segmented-control__button"
-            role="tab"
-            aria-selected={view === "week"}
-            onClick={() => setView("week")}
-          >
-            Week
-          </button>
-        </div>
+        <SegmentedTabs
+          idBase="calendar"
+          label="Calendar view"
+          tabs={CALENDAR_VIEWS}
+          value={view}
+          onChange={setView}
+        />
       </div>
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "var(--s-3)" }}>
@@ -192,6 +186,7 @@ export default function Calendar() {
         </span>
       </div>
 
+      <TabPanel idBase="calendar" tabKey={view}>
       {view === "day" ? (
         <div className="walk-list" style={{ marginTop: "var(--s-4)" }}>
           {byDay(anchor).length === 0 ? (
@@ -279,6 +274,7 @@ export default function Calendar() {
           ))}
         </div>
       )}
+      </TabPanel>
 
       <WalkActionSheet
         walk={selected}

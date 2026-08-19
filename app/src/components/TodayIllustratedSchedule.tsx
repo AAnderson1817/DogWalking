@@ -1,5 +1,6 @@
 import { useId, type ReactNode } from "react";
 import { Link } from "react-router-dom";
+import { ApprovedIcon } from "./ApprovedIcon";
 
 export type TodayVisitState =
   | "completed"
@@ -182,7 +183,7 @@ export function TodayIllustratedSchedule({
                 </VisitLink>
                 {visit.state === "completed" ? (
                   <span className="today-emaki-visit__completed">
-                    <span className="today-emaki-visit__check" aria-hidden="true">✓</span>
+                    <ApprovedIcon name="check" size={14} className="today-emaki-visit__check" />
                     <span>DONE</span>
                   </span>
                 ) : visit.state === "current" && currentAction ? (

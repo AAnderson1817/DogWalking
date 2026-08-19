@@ -93,9 +93,6 @@
 .state-field--attention,
 .state-field--success,
 .loading-state,
-.payment-status--succeeded .payment-status__mark,
-.payment-status--pending .payment-status__mark,
-.payment-status--failed .payment-status__mark,
 .payment-recovery,
 button.walk-card:hover,
 .walk-card--in_progress,
@@ -758,35 +755,19 @@ input::file-selector-button {
   font-weight: 800;
   white-space: nowrap;
 }
+/* Review M19. The bordered box went with the glyph. It existed to give a text
+   mark a consistent footprint across fonts that drew it at wildly different
+   widths — a workaround for a mark the font did not contain, not a design
+   element. The drawn mark carries the state in its own colour, and the visible
+   label beside it remains the primary cue. */
 .payment-status__mark {
-  display: inline-grid;
-  place-items: center;
-  width: 20px;
-  height: 22px;
-  border: var(--bw-xs) solid var(--sanpo-color-border-subtle);
-  border-bottom-width: 3px;
-  color: var(--sanpo-color-text-primary);
-  font-size: var(--fs-14);
-  font-weight: 900;
-  line-height: 1;
+  flex: none;
 }
-.payment-status--succeeded .payment-status__mark {
-  border-color: var(--sanpo-color-status-complete);
-  background: var(--sanpo-color-surface-success);
-}
-.payment-status--pending .payment-status__mark {
-  border-color: var(--sanpo-color-brand-indigo);
-  border-bottom-color: var(--sanpo-color-status-milestone);
-  background: var(--sanpo-color-surface-milestone);
-}
-.payment-status--failed .payment-status__mark {
-  border-color: var(--sanpo-color-status-current);
-  background: var(--sanpo-color-surface-attention);
-}
-.payment-status--refunded .payment-status__mark {
-  border-color: var(--sanpo-color-status-cancelled);
-  background: var(--sanpo-color-surface-canvas);
-}
+.payment-status--succeeded .payment-status__mark { background-color: var(--sanpo-color-status-complete); }
+.payment-status--pending .payment-status__mark { background-color: var(--sanpo-color-status-milestone); }
+.payment-status--failed .payment-status__mark { background-color: var(--sanpo-color-status-current); }
+.payment-status--refunded .payment-status__mark { background-color: var(--sanpo-color-status-cancelled); }
+.payment-status--disputed .payment-status__mark { background-color: var(--sanpo-color-status-critical); }
 .payment-row__receipt {
   position: absolute;
   inset: 0 0 0 auto;
@@ -1612,7 +1593,11 @@ a.today-emaki-visit__link:focus-visible {
 /* ── ReportCard ────────────────────────────────────────────────────────── */
 .report-card { display: flex; flex-direction: column; gap: var(--s-4); }
 .report-card__photos { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--s-2); }
-.report-card__photo { aspect-ratio: 1; border: var(--bw) solid var(--line); border-radius: var(--r-lg); object-fit: cover; width: 100%; background: repeating-linear-gradient(45deg, #FFE3C2, #FFE3C2 6px, #FFD9AE 6px, #FFD9AE 12px); }
+/* Review M37. The placeholder behind a loading walk photo was two raw hexes
+   left over from the retired Biscuit palette (#FFE3C2 / #FFD9AE) — the last
+   literals in a rule in this file. CT-1 roles now, so the placeholder tracks
+   the palette and its `prefers-contrast` overrides like everything else. */
+.report-card__photo { aspect-ratio: 1; border: var(--bw) solid var(--line); border-radius: var(--r-lg); object-fit: cover; width: 100%; background: repeating-linear-gradient(45deg, var(--sanpo-color-surface-canvas), var(--sanpo-color-surface-canvas) 6px, var(--sanpo-color-neutral-rule) 6px, var(--sanpo-color-neutral-rule) 12px); }
 .report-card__facts { display: flex; gap: var(--s-2); flex-wrap: wrap; }
 .report-fact {
   display: flex;

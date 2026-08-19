@@ -146,7 +146,7 @@ export function NotificationList({
           onClick={() => onMarkRead(notification)}
           aria-label="Mark read"
         >
-          ✓
+          <ApprovedIcon name="check" size={16} />
         </button>
       )}
     </div>

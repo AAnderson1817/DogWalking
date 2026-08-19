@@ -31,6 +31,8 @@ describe("WalkCard schedule row", () => {
 
   it("uses CURRENT and DONE labels rather than color-only state", () => {
     expect(renderToStaticMarkup(<WalkCard walk={{ ...BASE, status: "in_progress" }} />)).toContain("CURRENT");
-    expect(renderToStaticMarkup(<WalkCard walk={{ ...BASE, status: "completed" }} />)).toContain("✓ DONE");
+    // "✓ DONE" lost its glyph in review M19 — the check was drawn by a
+    // fallback font. The label is what carries the state either way.
+    expect(renderToStaticMarkup(<WalkCard walk={{ ...BASE, status: "completed" }} />)).toContain("DONE");
   });
 });

@@ -325,6 +325,58 @@ system is a deliberate act recorded in a commit rather than a drive-by edit.
 It is real work with a real payoff for the premium positioning the artwork was
 bought to create, and it is not remediation. It stays open.
 
+## Segmented controls are real tabs (review M16)
+
+Both segmented controls declared `role="tablist"` and `role="tab"` with
+`aria-selected` over bare `<div>` content, and nothing else: no
+`aria-controls`, no `role="tabpanel"`, no roving `tabIndex`, no key handling,
+and no `aria-label` on ClientDetail's. A screen-reader user was told "tab, 5 of
+5, selected" for the operator's main client workspace — whose fifth tab is the
+credential vault — reached for the arrow keys that announcement implies, and
+nothing happened. **Incorrect ARIA is worse than none**: it promises an
+interaction the widget does not have.
+
+`SegmentedTabs` + `TabPanel` are the single implementation. Left/Right (and
+Up/Down, since the bar wraps to two rows on a narrow phone) move focus,
+Home/End jump to the ends, exactly one tab is in the tab order, and every tab
+`aria-controls` a real panel that `aria-labelledby` points back.
+
+**Manual activation**, not selection-follows-focus. The APG recommends
+automatic activation "as long as their associated tab panels are displayed
+without noticeable latency", and ClientDetail's panels each mount a component
+that fetches — arrowing across five tabs would fire five requests on a phone on
+cellular. Enter or Space selects. One behaviour for both controls: a widget
+that behaves differently in two places is its own accessibility problem.
+
+## State marks are drawn, never typed (review M19)
+
+The payment marks were text glyphs — `✓ … ! ↩ ⚠` — and Nunito does not contain
+three of them. Confirmed in Chromium through `CSS.getPlatformFontsForNode`
+(not by comparing advance widths, which was inconclusive because U+2713 and
+U+21A9 happen to share one): **U+2713, U+21A9 and U+26A0 render in DejaVu
+Sans**, the system fallback, while `…`, `!` and `—` do come from Nunito.
+
+So the two most important marks on the money surface, the check beside DONE on
+Today, the check on the **client's own report card**, the mark-read control and
+the care toggles were all drawn by whatever font the device happened to have,
+with synthesised weight — a different shape on the operator's phone and on a
+reviewer's laptop.
+
+Five state marks — `check`, `pending`, `alert`, `returned`, `disputed` — are
+now approved masters on the same 24×24 / 1.75px round-cap grid as the six
+navigation icons, under the same hash guard, routed through `ApprovedIcon`.
+One icon system, not two.
+
+The bordered box around the payment mark went with the glyph: it existed to
+give a text mark a consistent footprint across fonts that drew it at wildly
+different widths — a workaround for the defect, not a design element. The
+visible label beside the mark remains the primary state cue, as everywhere
+else in this spec.
+
+`scripts/no-glyph-marks.test.ts` keeps the rule. It bans only the characters
+the shipped font genuinely lacks; `…`, `—` and `–` are in Nunito, read better
+than their ASCII substitutes, and stay.
+
 ## Accessibility contract
 
 These are product rules, not review notes: a change that breaks one of them is
