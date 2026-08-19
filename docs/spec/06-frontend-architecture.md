@@ -173,6 +173,69 @@ only if the ended run had produced a fix (otherwise the trail opens with a
 break) and is cleared as soon as it is used (otherwise every later point is a
 new subpath and the rest of the walk's distance disappears).
 
+### Every list query is bounded, and filtering is the server's job (review M9)
+
+`api.ts` is a direct PostgREST client and had 61 exported functions with two
+`.limit()` calls between them. PostgREST caps an unbounded select at
+`max_rows` — 1000 — and returns the first page **without saying so**, so an
+unbounded query does not fail, it quietly answers a different question:
+
+- `listPayments()` fed Today's "Needs attention" strip and Money's three
+  headline totals. Ordered newest-first, so past the cap the *newest* failures
+  were the ones dropped — from the strip whose only job is to surface them.
+- `listWalksDetailed({})` in PortalHome ordered **ascending**, so a client past
+  the cap kept their first year of walks and lost every recent one, including
+  the "next walk" the screen exists to show.
+
+Three bounds, because one number is wrong somewhere: `LIST_PAGE` (200),
+`LIST_PAGE_LARGE` (500) and `WALK_DETAIL_PAGE` (5000) — a route bounded at 200
+points is a truncated route. `scripts/bounded-queries.test.ts` asserts every
+list query carries one, with exemptions declared by name and a reason.
+
+Filtering moved to Postgres where a screen was fetching a haystack to show a
+needle: `listLowCreditClients` and `listAttentionPayments` replace Today's
+`listClients()` + `listPayments()`, and PortalHome asks two bounded, correctly
+ordered questions instead of one unbounded one. `newestFirst` is load-bearing
+next to `limit` — "the last three reports" asked with a limit alone returns the
+oldest three.
+
+Where a predicate exists on both sides, it is declared **once**:
+`LOW_CREDIT_SUBSCRIPTION_STATUSES` is shared between the selector and the
+query, because two copies of a predicate is the drift this repository has
+already paid for in the payment-status sets.
+
+### A failed Realtime join is not silent (review M10)
+
+`channel.subscribe()` took no status callback. That mattered more once 0020
+made the walk topic private and authorization real: a rejected join looks
+exactly like a walk where nothing has happened yet. The operator's screen said
+it was broadcasting and the client's portal showed a map that would never move.
+
+`channelState` maps supabase-js's `SUBSCRIBED` / `CHANNEL_ERROR` / `TIMED_OUT`
+/ `CLOSED`, and reads **anything it does not recognise as still joining, never
+as live** — claiming a connection on no evidence is what makes this defect come
+back. Walk Mode says the client cannot watch (recording is unaffected, and the
+copy says so); the portal says the walk is under way but not viewable live.
+
+### Drag-to-reschedule is offered only where dragging works (review M11)
+
+Calendar's week view uses HTML5 drag-and-drop, which fires **no events at all**
+on touch. The walk chip nevertheless rendered `draggable` with a grab cursor on
+a phone, so the phase-06 headline interaction advertised itself and did nothing
+on the primary device.
+
+The affordance is gated on `usePointerFine()` — `(pointer: fine)`, live rather
+than read once, because a tablet gains a pointer when a keyboard case is
+attached, and defaulting to **false** where the query cannot run, since a
+device wrongly treated as touch keeps a working tap flow while one wrongly
+treated as mouse gets the affordance that does nothing.
+
+Removing it is only correct because the tap path exists and always did: the
+chip is a button that opens an action sheet wired to the same `reschedule()`.
+That is asserted, not assumed. Playwright declares only Desktop Chrome, and
+Calendar needs a backend so it cannot join the backend-free e2e suite — the
+DOM project is the layer that can see this.
+
 ### The outbox never destroys route data for being offline
 
 `attempts` used to increment on ANY failed send while `navigator.onLine` was

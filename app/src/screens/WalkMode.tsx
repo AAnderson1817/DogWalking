@@ -673,6 +673,26 @@ function WalkModeInner({ walkId }: { walkId: string }) {
           />
         )}
 
+        {/* Review M10. A failed Realtime join used to be silent, and since
+            0020 made the topic private and authorization real, a rejection
+            looks exactly like a walk where nothing has happened yet. The
+            recording is unaffected — points go to the durable outbox either
+            way — so this says that rather than alarming the operator about
+            data they are not losing. */}
+        {channel.status === "error" && (
+          <StateField
+            compact
+            tone="information"
+            label="Live view offline"
+            title="Your client can't watch this walk live"
+            detail={
+              "The route is still being recorded and their report will be complete. "
+              + "Only the live map is affected."
+            }
+            role="status"
+          />
+        )}
+
         {geo.error && (
           <StateField
             compact

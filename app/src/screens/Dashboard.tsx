@@ -15,22 +15,17 @@ import {
 import {
   getMyOperator,
   listAbandonedWalks,
-  listClients,
-  listPayments,
+  listAttentionPayments,
+  listLowCreditClients,
   listWalksDetailed,
   walkPetNames,
-  type WalkDetailed,
+  type AttentionPayment,
 } from "@/lib/api";
+import type { WalkDetailed } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { dateLocal, distanceMi, money, time12 } from "@/lib/format";
-import {
-  failedPayments,
-  liveWalk,
-  lowCreditClients,
-  todayLocal,
-  todaysWalks,
-} from "@/lib/selectors";
-import type { Clients, Operators, Payments } from "@/lib/types";
+import { liveWalk, todayLocal, todaysWalks } from "@/lib/selectors";
+import type { Clients, Operators } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
 
 const DISPLAY_TZ = "America/Chicago";
@@ -67,8 +62,8 @@ export default function Dashboard() {
   const [operator, setOperator] = useState<Operators | null>(null);
   const [walks, setWalks] = useState<WalkDetailed[] | null>(null);
   const [stale, setStale] = useState<WalkDetailed[]>([]);
-  const [clients, setClients] = useState<Clients[]>([]);
-  const [payments, setPayments] = useState<Payments[]>([]);
+  const [lowCredit, setLowCredit] = useState<Clients[]>([]);
+  const [attention, setAttention] = useState<AttentionPayment[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   // `background` refreshes never surface an error. A walker between visits is
@@ -79,18 +74,26 @@ export default function Dashboard() {
     if (!background) setError(null);
     const today = todayLocal();
     try {
-      const [op, todayWalks, abandoned, allClients, pays] = await Promise.all([
-        getMyOperator(),
+      // Review M9. This used to fetch EVERY client and EVERY payment to
+      // render at most five rows of each. Past PostgREST's 1000-row cap that
+      // was not merely wasteful: the payment list is ordered newest-first, so
+      // truncation silently dropped the newest failures from the strip whose
+      // whole job is to surface them. Both predicates are Postgres's now.
+      //
+      // The operator is fetched first because the low-credit threshold is a
+      // query INPUT — it cannot be applied server-side without knowing it.
+      const op = await getMyOperator();
+      const [todayWalks, abandoned, low, attention] = await Promise.all([
         listWalksDetailed({ date: today }),
         listAbandonedWalks(),
-        listClients(),
-        listPayments(),
+        listLowCreditClients(op?.low_credit_threshold ?? 2),
+        listAttentionPayments(5),
       ]);
       setOperator(op);
       setWalks(todayWalks);
       setStale(abandoned);
-      setClients(allClients);
-      setPayments(pays);
+      setLowCredit(low);
+      setAttention(attention);
       setError(null);
     } catch (caught) {
       if (!background) setError(loadErrorMessage(caught));
@@ -137,9 +140,10 @@ export default function Dashboard() {
 
   const ordered = todaysWalks(walks, todayLocal());
   const live = liveWalk(walks) as WalkDetailed | null;
-  const low = lowCreditClients(clients, operator?.low_credit_threshold ?? 2) as Clients[];
-  const failed = failedPayments(payments).slice(0, 5) as Payments[];
-  const clientName = (id: string) => clients.find((client) => client.id === id)?.full_name ?? "";
+  // Already filtered, ordered and bounded by the queries above; the selectors
+  // are no longer given a haystack to search.
+  const low = lowCredit;
+  const failed = attention;
   const completedDistance = ordered.reduce((total, walk) => total + (walk.distance_m ?? 0), 0);
   // Through the shared formatter, not an inline conversion: the inline one is
   // how Today and the client's report came to disagree about units (M36).
@@ -248,7 +252,7 @@ export default function Dashboard() {
               <div className="today-emaki-followups__list">
                 {failed.map((payment) => (
                   <Card key={payment.id} className="today-emaki-followups__item">
-                    <span>{clientName(payment.client_id)} · {dateLocal(payment.created_at)}</span>
+                    <span>{payment.client?.full_name ?? ""} · {dateLocal(payment.created_at)}</span>
                     <span className="today-emaki-followups__value">
                       <span className="numeral">{money(payment.amount_pence)}</span>
                       <Badge status="attention">Needs attention</Badge>

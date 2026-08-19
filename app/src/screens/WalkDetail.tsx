@@ -85,7 +85,21 @@ function WalkDetailInner({ walkId }: { walkId: string }) {
 
   return (
     <div className="page">
-      {live && (
+      {/* Review M10. `subscribe()` took no status callback, so a rejected
+          join was silent — and since 0020 made the topic private and
+          authorization real, a rejection looks exactly like a walk where
+          nothing has happened yet: a map that will never move, with the word
+          "Live" above it. The stored route is unaffected, so the copy says
+          what to do rather than implying the walk has gone wrong. */}
+      {live && channel.status === "error" ? (
+        <div className="walk-live-state walk-live-state--offline" style={{ marginBottom: "var(--s-2)" }}>
+          <span className="walk-live-state__label walk-live-state__label--offline">LIVE UNAVAILABLE</span>
+          <span className="walk-live-state__pet">The walk is under way</span>
+          <span className="walk-live-state__detail">
+            We can't show it moving right now. Refresh to see the route so far.
+          </span>
+        </div>
+      ) : live && (
         <div className="walk-live-state" style={{ marginBottom: "var(--s-2)" }}>
           <span className="walk-live-state__label">CURRENT</span>
           <span className="walk-live-state__pet">Live — on the trail now</span>
