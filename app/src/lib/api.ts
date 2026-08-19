@@ -2,6 +2,7 @@
 // flow through here; screens never call supabase.from directly. Wrappers for
 // later-phase surfaces exist as typed stubs so screens can bind early.
 import { businessWallClockToMs } from "./format";
+import { LOW_CREDIT_SUBSCRIPTION_STATUSES } from "./selectors";
 import { supabase } from "./supabase";
 import type { Database } from "./types";
 import type {
@@ -32,9 +33,33 @@ function must<T>(data: T | null, error: { message: string } | null): T {
   return data;
 }
 
+/**
+ * Row bounds for list queries (review M9).
+ *
+ * PostgREST caps an unbounded select at `max_rows` — 1000 — and returns the
+ * first page WITHOUT SAYING SO, so an unbounded query does not fail, it
+ * quietly answers a different question. Two of those questions were money and
+ * service: `listPayments()` feeds Today's "Needs attention" strip and Money's
+ * three headline totals, and `listWalksDetailed` orders ASCENDING, so a client
+ * past the cap keeps their oldest walks and loses every recent one — including
+ * the "next walk" the portal exists to show.
+ *
+ * An explicit limit does not remove the cap. It makes the boundary chosen and
+ * sayable, and it sits BELOW the cap so the number that applies is the one in
+ * this file rather than a platform default nothing here mentions.
+ *
+ * Three sizes, because one number would be wrong somewhere: a route bounded at
+ * 200 points is a truncated route, and a roster bounded at 5000 is not bounded.
+ */
+export const LIST_PAGE = 200;
+/** Reference data an operator scrolls: clients, pets, properties, ledger. */
+export const LIST_PAGE_LARGE = 500;
+/** One walk's own rows — GPS points arrive about every 5 s while walking. */
+export const WALK_DETAIL_PAGE = 5000;
+
 // ── clients ────────────────────────────────────────────────────────────────
 export async function listClients(): Promise<Clients[]> {
-  const { data, error } = await supabase.from("clients").select("*").order("full_name");
+  const { data, error } = await supabase.from("clients").select("*").order("full_name").limit(LIST_PAGE_LARGE);
   return must(data, error);
 }
 
@@ -67,7 +92,7 @@ export async function getMyClient(): Promise<Clients | null> {
 
 // ── pets ───────────────────────────────────────────────────────────────────
 export async function listPets(clientId?: string): Promise<Pets[]> {
-  let query = supabase.from("pets").select("*").eq("active", true).order("name");
+  let query = supabase.from("pets").select("*").eq("active", true).order("name").limit(LIST_PAGE_LARGE);
   if (clientId) query = query.eq("client_id", clientId);
   const { data, error } = await query;
   return must(data, error);
@@ -85,7 +110,7 @@ export async function updatePet(id: string, patch: TableUpdate<"pets">): Promise
 
 // ── properties ─────────────────────────────────────────────────────────────
 export async function listProperties(clientId?: string): Promise<Properties[]> {
-  let query = supabase.from("properties").select("*").order("label");
+  let query = supabase.from("properties").select("*").order("label").limit(LIST_PAGE_LARGE);
   if (clientId) query = query.eq("client_id", clientId);
   const { data, error } = await query;
   return must(data, error);
@@ -107,12 +132,12 @@ export async function updateProperty(
 
 // ── service types & plans ──────────────────────────────────────────────────
 export async function listServiceTypes(): Promise<ServiceTypes[]> {
-  const { data, error } = await supabase.from("service_types").select("*").order("duration_minutes");
+  const { data, error } = await supabase.from("service_types").select("*").order("duration_minutes").limit(LIST_PAGE);
   return must(data, error);
 }
 
 export async function listPlans(): Promise<Plans[]> {
-  const { data, error } = await supabase.from("plans").select("*").order("price_pence");
+  const { data, error } = await supabase.from("plans").select("*").order("price_pence").limit(LIST_PAGE);
   return must(data, error);
 }
 
@@ -162,18 +187,40 @@ export interface WalkFilters {
   from?: string;
   to?: string;
   status?: Walks["status"];
+  /**
+   * Newest first. Load-bearing next to `limit` (review M9): the default order
+   * is ascending, so "the last three reports" asked with a limit alone returns
+   * the OLDEST three — and a client past PostgREST's 1000-row cap loses every
+   * recent walk while keeping their first year.
+   */
+  newestFirst?: boolean;
+  /** Overrides the default bound where a caller knows it needs fewer. */
+  limit?: number;
+}
+
+/** Shared filter/ordering, so the two walk listers cannot drift apart. */
+function walkQuery<Q extends {
+  eq(col: string, v: unknown): Q;
+  gte(col: string, v: unknown): Q;
+  lte(col: string, v: unknown): Q;
+  order(col: string, opts?: { ascending: boolean }): Q;
+  limit(n: number): Q;
+}>(query: Q, filters: WalkFilters): Q {
+  let q = query;
+  if (filters.clientId) q = q.eq("client_id", filters.clientId);
+  if (filters.date) q = q.eq("scheduled_date", filters.date);
+  if (filters.from) q = q.gte("scheduled_date", filters.from);
+  if (filters.to) q = q.lte("scheduled_date", filters.to);
+  if (filters.status) q = q.eq("status", filters.status);
+  const ascending = !filters.newestFirst;
+  return q
+    .order("scheduled_date", { ascending })
+    .order("window_start", { ascending })
+    .limit(filters.limit ?? LIST_PAGE_LARGE);
 }
 
 export async function listWalks(filters: WalkFilters = {}): Promise<Walks[]> {
-  let query = supabase.from("walks").select("*");
-  if (filters.clientId) query = query.eq("client_id", filters.clientId);
-  if (filters.date) query = query.eq("scheduled_date", filters.date);
-  if (filters.from) query = query.gte("scheduled_date", filters.from);
-  if (filters.to) query = query.lte("scheduled_date", filters.to);
-  if (filters.status) query = query.eq("status", filters.status);
-  const { data, error } = await query
-    .order("scheduled_date")
-    .order("window_start");
+  const { data, error } = await walkQuery(supabase.from("walks").select("*"), filters);
   return must(data, error);
 }
 
@@ -216,7 +263,7 @@ export async function updateWalk(id: string, patch: TableUpdate<"walks">): Promi
 
 export async function listWalkPets(walkId: string): Promise<Pets[]> {
   const { data, error } = await supabase
-    .from("walk_pets").select("pets(*)").eq("walk_id", walkId);
+    .from("walk_pets").select("pets(*)").eq("walk_id", walkId).limit(LIST_PAGE);
   const rows = must(data, error);
   return rows.flatMap((r) => (r.pets ? [r.pets as unknown as Pets] : []));
 }
@@ -237,7 +284,7 @@ export async function setWalkPets(
 
 export async function listWalkPhotos(walkId: string): Promise<WalkPhotos[]> {
   const { data, error } = await supabase
-    .from("walk_photos").select("*").eq("walk_id", walkId).order("taken_at");
+    .from("walk_photos").select("*").eq("walk_id", walkId).order("taken_at").limit(LIST_PAGE);
   return must(data, error);
 }
 
@@ -274,7 +321,7 @@ export async function insertWalkPhoto(
 
 export async function listWalkGpsPoints(walkId: string): Promise<WalkGpsPoints[]> {
   const { data, error } = await supabase
-    .from("walk_gps_points").select("*").eq("walk_id", walkId).order("recorded_at");
+    .from("walk_gps_points").select("*").eq("walk_id", walkId).order("recorded_at").limit(WALK_DETAIL_PAGE);
   return must(data, error);
 }
 
@@ -288,7 +335,7 @@ export async function insertGpsPoints(
 
 // ── schedules (phase 06 surfaces; wrappers ready) ──────────────────────────
 export async function listSchedules(clientId?: string): Promise<RecurringSchedules[]> {
-  let query = supabase.from("recurring_schedules").select("*").eq("active", true);
+  let query = supabase.from("recurring_schedules").select("*").eq("active", true).limit(LIST_PAGE);
   if (clientId) query = query.eq("client_id", clientId);
   const { data, error } = await query;
   return must(data, error);
@@ -301,15 +348,71 @@ export async function listLedger(clientId: string): Promise<CreditLedger[]> {
     .select("*")
     .eq("client_id", clientId)
     .order("created_at", { ascending: false })
-    .order("seq", { ascending: false });
+    .order("seq", { ascending: false })
+    .limit(LIST_PAGE_LARGE);
   return must(data, error);
 }
 
 export async function listPayments(clientId?: string): Promise<Payments[]> {
-  let query = supabase.from("payments").select("*").order("created_at", { ascending: false });
+  let query = supabase
+    .from("payments")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(PAYMENTS_PAGE);
   if (clientId) query = query.eq("client_id", clientId);
   const { data, error } = await query;
   return must(data, error);
+}
+
+/**
+ * Clients at or below the operator's low-credit threshold (review M9).
+ *
+ * Today used to fetch EVERY client and filter in the browser to render at most
+ * a handful of rows. The predicate is the same one `lowCreditClients` applies
+ * — the shared status list below is what stops the two drifting — but asked of
+ * Postgres, which has the index and does not have to send the rest.
+ */
+export async function listLowCreditClients(
+  threshold: number,
+  limit = LIST_PAGE,
+): Promise<Clients[]> {
+  const { data, error } = await supabase
+    .from("clients")
+    .select("*")
+    .neq("status", "archived")
+    .in("subscription_status", [...LOW_CREDIT_SUBSCRIPTION_STATUSES])
+    .lte("credit_balance", threshold)
+    .order("credit_balance")
+    .limit(limit);
+  return must(data, error);
+}
+
+export interface AttentionPayment extends Payments {
+  client: { full_name: string } | null;
+}
+
+/**
+ * Failed payments that still need somebody to act (review M9, M3).
+ *
+ * Today used to fetch every payment ever and filter in the browser for at most
+ * five rows. Past PostgREST's 1000-row cap that silently dropped the newest
+ * failures — the ones that matter — from the strip whose entire job is to
+ * surface them.
+ *
+ * The client name is joined rather than looked up against a separate
+ * `listClients()` call, which is what made fetching the whole roster look
+ * necessary.
+ */
+export async function listAttentionPayments(limit = 5): Promise<AttentionPayment[]> {
+  const { data, error } = await supabase
+    .from("payments")
+    .select("*, client:clients(full_name)")
+    .eq("status", "failed")
+    // 0034: a failure settled by a later success is not anybody's to act on.
+    .is("superseded_at", null)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  return must(data as unknown as AttentionPayment[] | null, error);
 }
 
 export interface PaymentDetailed extends Payments {
@@ -355,7 +458,11 @@ export function paymentPetNames(payment: PaymentDetailed): string[] {
 }
 
 export async function listNotifications(unreadOnly = false): Promise<Notifications[]> {
-  let query = supabase.from("notifications").select("*").order("created_at", { ascending: false });
+  let query = supabase
+    .from("notifications")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(LIST_PAGE);
   if (unreadOnly) query = query.is("read_at", null);
   const { data, error } = await query;
   return must(data, error);
@@ -699,7 +806,7 @@ export interface CredentialMeta {
 export async function listCredentials(propertyId?: string): Promise<CredentialMeta[]> {
   let query = supabase.from("access_credentials").select(CRED_META).is("revoked_at", null);
   if (propertyId) query = query.eq("property_id", propertyId);
-  const { data, error } = await query.order("created_at");
+  const { data, error } = await query.order("created_at").limit(LIST_PAGE);
   return must(data as CredentialMeta[] | null, error);
 }
 
@@ -720,7 +827,8 @@ export async function listCredentialLog(credentialId: string): Promise<Credentia
     .from("credential_access_log")
     .select(CRED_LOG)
     .eq("credential_id", credentialId)
-    .order("accessed_at", { ascending: false });
+    .order("accessed_at", { ascending: false })
+    .limit(LIST_PAGE);
   return must(data as CredentialLogRow[] | null, error);
 }
 
@@ -754,15 +862,12 @@ export interface WalkDetailed extends Walks {
 }
 
 export async function listWalksDetailed(filters: WalkFilters = {}): Promise<WalkDetailed[]> {
-  let query = supabase
-    .from("walks")
-    .select("*, walk_pets(pets(name)), property:properties(label), client:clients(full_name)");
-  if (filters.clientId) query = query.eq("client_id", filters.clientId);
-  if (filters.date) query = query.eq("scheduled_date", filters.date);
-  if (filters.from) query = query.gte("scheduled_date", filters.from);
-  if (filters.to) query = query.lte("scheduled_date", filters.to);
-  if (filters.status) query = query.eq("status", filters.status);
-  const { data, error } = await query.order("scheduled_date").order("window_start");
+  const { data, error } = await walkQuery(
+    supabase
+      .from("walks")
+      .select("*, walk_pets(pets(name)), property:properties(label), client:clients(full_name)"),
+    filters,
+  );
   return must(data as unknown as WalkDetailed[] | null, error);
 }
 
@@ -780,7 +885,8 @@ export async function listAbandonedWalks(): Promise<WalkDetailed[]> {
     .select("*, walk_pets(pets(name)), property:properties(label), client:clients(full_name)")
     .eq("status", "in_progress")
     .not("abandoned_at", "is", null)
-    .order("started_at");
+    .order("started_at")
+    .limit(LIST_PAGE);
   return must(data as unknown as WalkDetailed[] | null, error);
 }
 

@@ -38,8 +38,10 @@ vi.mock("@/lib/api", () => ({
   getMyOperator: async () => ({ id: "op-1", display_name: "Op", low_credit_threshold: 2 }),
   listWalksDetailed: async () => [],
   listAbandonedWalks: async () => abandoned.rows,
-  listClients: async () => [],
-  listPayments: async () => [],
+  // Review M9 moved these predicates into Postgres: Today no longer fetches
+  // every client and every payment to render a handful of rows.
+  listLowCreditClients: async () => [],
+  listAttentionPayments: async () => [],
   walkPetNames: (w: { walk_pets: { pets: { name: string } | null }[] }) =>
     w.walk_pets.flatMap((wp) => (wp.pets ? [wp.pets.name] : [])),
 }));

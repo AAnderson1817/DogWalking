@@ -29,6 +29,29 @@ function sendBatch(batch: OutboxBatch): Promise<void> {
   );
 }
 
+/**
+ * Whether the Realtime join succeeded (review M10).
+ *
+ * `channel.subscribe()` took no status callback, so a failed join was MUTE.
+ * That matters more since 0020 made the topic private and authorization real:
+ * a rejected join now looks exactly like a walk where nothing has happened
+ * yet. The operator's screen says it is broadcasting and the client's portal
+ * shows a map that will never move, and neither is told.
+ */
+export type ChannelState = "joining" | "live" | "error";
+
+/**
+ * supabase-js reports `SUBSCRIBED`, `CHANNEL_ERROR`, `TIMED_OUT` or `CLOSED`.
+ * Pure so the mapping is testable without a socket — and so "anything I do not
+ * recognise is an error" is a stated rule rather than an accident. Reading an
+ * unknown status as healthy is the direction that makes this defect come back.
+ */
+export function channelState(status: string): ChannelState {
+  if (status === "SUBSCRIBED") return "live";
+  if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") return "error";
+  return "joining";
+}
+
 /** What the outbox is holding for this walk, for the screen to say out loud. */
 export interface OutboxStatus {
   /** Batches still waiting to be sent. */
@@ -53,6 +76,8 @@ export interface WalkChannelBroadcast {
    * perfectly.
    */
   outboxStatus: OutboxStatus;
+  /** Whether the live stream is actually connected (review M10). */
+  status: ChannelState;
 }
 
 export interface WalkChannelSubscribe {
@@ -60,6 +85,8 @@ export interface WalkChannelSubscribe {
   /** Live points received since mount. */
   livePoints: GeoPoint[];
   ended: boolean;
+  /** Whether the live stream is actually connected (review M10). */
+  status: ChannelState;
 }
 
 export function useWalkChannel(walkId: string, mode: "broadcast", operatorId: string): WalkChannelBroadcast;
@@ -73,6 +100,7 @@ export function useWalkChannel(
   const [livePoints, setLivePoints] = useState<GeoPoint[]>([]);
   const [ended, setEnded] = useState(false);
   const [outboxStatus, setOutboxStatus] = useState<OutboxStatus>({ pending: 0, lostPoints: 0 });
+  const [status, setStatus] = useState<ChannelState>("joining");
 
   // Phase 08: flushes land in a durable IndexedDB outbox that drains with
   // backoff and backfills after reloads/reconnects.
@@ -151,7 +179,7 @@ export function useWalkChannel(
         })
         .on("broadcast", { event: "ended" }, () => setEnded(true));
     }
-    channel.subscribe();
+    channel.subscribe((joinStatus) => setStatus(channelState(joinStatus)));
     channelRef.current = channel;
     return () => {
       if (mode === "broadcast") void batcher.end();
@@ -183,7 +211,7 @@ export function useWalkChannel(
   );
 
   if (mode === "broadcast") {
-    return { mode, sendPoint, end, pendingPoints, outboxStatus };
+    return { mode, sendPoint, end, pendingPoints, outboxStatus, status };
   }
-  return { mode, livePoints, ended };
+  return { mode, livePoints, ended, status };
 }

@@ -1,9 +1,12 @@
 // Calendar (phase 06): day + week views. Week view supports drag-to-
-// reschedule across days (scheduled walks only); tapping a walk opens an
-// action sheet (reschedule date/window, cancel, no-show, one-off report
-// access). Any empty slot can host a one-off walk.
+// reschedule across days (scheduled walks only, and only where the device has
+// a fine pointer — HTML5 drag-and-drop does not fire on touch, review M11);
+// tapping a walk opens an action sheet (reschedule date/window, cancel,
+// no-show, one-off report access), which is the path that works everywhere.
+// Any empty slot can host a one-off walk.
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
+import { usePointerFine } from "@/hooks/usePointerFine";
 import { Badge } from "@/components/Badge";
 import { Button } from "@/components/Button";
 import { Card } from "@/components/Card";
@@ -65,6 +68,7 @@ export default function Calendar() {
   const [selected, setSelected] = useState<WalkDetailed | null>(null);
   const [oneOffDate, setOneOffDate] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
+  const pointerFine = usePointerFine();
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -237,7 +241,12 @@ export default function Calendar() {
                 <div className="numeral" style={{ fontSize: "var(--fs-12)" }}>{day.slice(8)}</div>
               </div>
               {byDay(day).map((w) => {
-                const draggable = w.status === "scheduled";
+                // Review M11. HTML5 drag-and-drop does not fire on touch —
+                // no dragstart, no drop, nothing — so the affordance was a
+                // promise the primary device could not keep. The tap path
+                // (this same button opens an action sheet wired to the same
+                // `reschedule()`) works everywhere and is what a phone gets.
+                const draggable = w.status === "scheduled" && pointerFine;
                 const treatment = walkStatusTreatment(w.status, w.is_overage);
                 const petOrClient = walkPetNames(w)[0] ?? w.client?.full_name ?? "Walk";
                 return (

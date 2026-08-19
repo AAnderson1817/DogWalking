@@ -36,13 +36,23 @@ export function liveWalk<W extends { status: string; started_at: string | null }
   return live[0] ?? null;
 }
 
+/**
+ * Subscription states a low-credit warning applies to.
+ *
+ * Exported and shared with `listLowCreditClients`, which asks Postgres the
+ * same question (review M9). Two copies of a predicate — one in a selector and
+ * one in a PostgREST filter — is the drift this repository has already paid
+ * for in the payment-status sets.
+ */
+export const LOW_CREDIT_SUBSCRIPTION_STATUSES = ["active", "past_due"] as const;
+
 /** Clients at or below the operator's low-credit threshold (spec 02: ≤). */
 export function lowCreditClients<
   C extends { credit_balance: number; status: string; subscription_status: string },
 >(clients: readonly C[], threshold: number): C[] {
   return clients
     .filter((c) => c.status !== "archived")
-    .filter((c) => c.subscription_status === "active" || c.subscription_status === "past_due")
+    .filter((c) => (LOW_CREDIT_SUBSCRIPTION_STATUSES as readonly string[]).includes(c.subscription_status))
     .filter((c) => c.credit_balance <= threshold)
     .sort((a, b) => a.credit_balance - b.credit_balance);
 }
