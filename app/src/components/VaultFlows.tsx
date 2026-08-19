@@ -19,6 +19,14 @@ import {
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { dateLocal, timeLocal } from "@/lib/format";
+import {
+  canExtend,
+  extendReveal,
+  shouldAnnounce,
+  startReveal,
+  tickReveal,
+  type RevealTimer,
+} from "@/lib/vault-reveal";
 
 const ENTRY_METHODS = [
   "key_on_file",
@@ -41,8 +49,6 @@ export function entryMethodLabel(method: string): string {
   return METHOD_LABELS[method] ?? method;
 }
 
-const REVEAL_SECONDS = 30;
-
 /** One credential row with reveal / rotate / revoke / audit actions. */
 export function CredentialRow({
   credential,
@@ -55,7 +61,7 @@ export function CredentialRow({
   const [purposeOpen, setPurposeOpen] = useState(false);
   const [purpose, setPurpose] = useState("");
   const [secret, setSecret] = useState<string | null>(null);
-  const [countdown, setCountdown] = useState(REVEAL_SECONDS);
+  const [timer, setTimer] = useState<RevealTimer>(startReveal);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rotateOpen, setRotateOpen] = useState(false);
@@ -63,17 +69,21 @@ export function CredentialRow({
   const [audit, setAudit] = useState<CredentialLogRow[] | null>(null);
   const clearTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // 30 s auto-clear (spec/phase 05).
+  // Auto-clear (spec 03). The rule lives in `lib/vault-reveal` so the
+  // extension cap is testable without a component, and so the number is in
+  // one place rather than in a comment citing a spec that did not mention it
+  // (review M14).
   useEffect(() => {
     if (secret === null) return;
-    setCountdown(REVEAL_SECONDS);
+    setTimer(startReveal());
     clearTimerRef.current = setInterval(() => {
-      setCountdown((c) => {
-        if (c <= 1) {
+      setTimer((t) => {
+        const next = tickReveal(t);
+        if (next === null) {
           setSecret(null);
-          return REVEAL_SECONDS;
+          return startReveal();
         }
-        return c - 1;
+        return next;
       });
     }, 1000);
     return () => {
@@ -163,14 +173,26 @@ export function CredentialRow({
             Copy
           </Button>
           <span className="numeral vault-reveal__countdown" aria-hidden>
-            {countdown}s
+            {timer.countdown}s
           </span>
+          {/* Review M14. Without this, a timeout meant re-auth + purpose +
+              reveal again — and another `credential_access_log` row, so the
+              trail filled with repeated reads of the same door minutes apart,
+              which is exactly the shape a real intrusion has. Extending
+              writes no row: same person, same purpose, same door, still
+              standing there. Capped, because an unlimited "keep showing" is
+              the timer removed with extra steps. */}
+          {canExtend(timer) && (
+            <Button variant="ghost" onClick={() => setTimer(extendReveal)}>
+              Keep showing
+            </Button>
+          )}
           {/* The visible countdown is a glance affordance; this is the same
               information for a screen reader, announced politely at 10 s and
               then each of the last five seconds rather than every tick. */}
           <span className="sr-only" role="status">
-            {countdown === 10 || countdown <= 5
-              ? `Code clears in ${countdown} second${countdown === 1 ? "" : "s"}`
+            {shouldAnnounce(timer.countdown)
+              ? `Code clears in ${timer.countdown} second${timer.countdown === 1 ? "" : "s"}`
               : ""}
           </span>
         </div>

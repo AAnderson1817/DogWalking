@@ -24,7 +24,7 @@ function sequenceLabel(walk: WalkCardData): string {
     case "scheduled":
       return "UP NEXT";
     case "completed":
-      return "✓ DONE";
+      return "DONE";
     case "cancelled":
       return "CANCELLED";
     case "no_show":

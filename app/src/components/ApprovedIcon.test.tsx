@@ -7,13 +7,22 @@ import { BottomNav } from "./BottomNav";
 import { OPERATOR_NAV_ITEMS } from "./operator-navigation";
 
 describe("ApprovedIcon", () => {
-  it("exposes all six approved production masters", () => {
+  it("exposes every approved production master", () => {
+    // Six navigation icons from brand(#2), plus the five state marks added by
+    // review M19 — Money and the walk surfaces were drawing those as text
+    // glyphs Nunito does not contain, so a fallback font drew them differently
+    // on every device. Listed explicitly so adding one is a deliberate act.
     expect(Object.keys(APPROVED_ICON_URLS).sort()).toEqual([
+      "alert",
       "calendar",
+      "check",
       "clients",
       "day",
+      "disputed",
       "inbox",
       "payments",
+      "pending",
+      "returned",
       "route",
     ]);
   });

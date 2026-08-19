@@ -51,6 +51,7 @@ import {
 import { walkSessionBound } from "@/lib/walk-session";
 import type { Pets, Walks } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
+import { ApprovedIcon } from "@/components/ApprovedIcon";
 
 /** A trail point read back from the DB or the outbox, gap mark included. */
 interface ResumedPoint {
@@ -718,7 +719,7 @@ function WalkModeInner({ walkId }: { walkId: string }) {
               aria-pressed={toggles[key]}
               onClick={() => setToggles((t) => ({ ...t, [key]: !t[key] }))}
             >
-              {toggles[key] ? "✓ " : ""}{label}
+              {toggles[key] && <ApprovedIcon name="check" size={14} />}{label}
             </button>
           ))}
         </div>

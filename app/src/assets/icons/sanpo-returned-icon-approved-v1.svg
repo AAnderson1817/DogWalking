@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="24" height="24" viewBox="0 0 24 24"
+     role="img" aria-labelledby="sanpo-returned-title sanpo-returned-desc"
+     style="color:#0C4774">
+  <title id="sanpo-returned-title">Refunded</title>
+  <desc id="sanpo-returned-desc">An arrow curving back to the left.</desc>
+  <path d="M19 7.5 V11.5 C19 13.157 17.657 14.5 16 14.5 H6.5"
+        fill="none" stroke="currentColor" stroke-width="1.75"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M10 10.5 L6 14.5 L10 18.5" fill="none" stroke="currentColor"
+        stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

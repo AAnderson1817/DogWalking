@@ -32,6 +32,23 @@ const approved = {
   // stays "v1"; the PNG master is in git history at d313486.
   "../src/assets/illustrations/sanpo-today-indigo-emaki-background-approved-v1.webp":
     "a34625fd300b21fc6103dd603fdd919ab1f95641789731642f83b05e93d89b6c",
+  // Review M19. Five STATE MARKS on the same 24x24 / 1.75px round-cap grid as
+  // the navigation masters. Added because Money and the walk surfaces drew
+  // them as text glyphs, and Nunito does not contain three of them: verified
+  // in Chromium via `CSS.getPlatformFontsForNode` that U+2713, U+21A9 and
+  // U+26A0 render in DejaVu Sans, the system fallback. The two most important
+  // marks on the money surface, and the check on the client's own report
+  // card, were drawn by whatever font the device happened to have.
+  "../src/assets/icons/sanpo-alert-icon-approved-v1.svg":
+    "d0b0653a4124f9f55caa35b15aac30dd0796786a53f629bee2a5a6118b03f7fd",
+  "../src/assets/icons/sanpo-check-icon-approved-v1.svg":
+    "b56b6dcc648095e14070388754f1db5a9901f8ef9a207d8fc0616158a6d4744a",
+  "../src/assets/icons/sanpo-disputed-icon-approved-v1.svg":
+    "bfc3c501ec01918e9c5845e15db16d3b2bf2ddcfaf45d23aa762c85809b25d12",
+  "../src/assets/icons/sanpo-pending-icon-approved-v1.svg":
+    "33552f22cc6ad50a6148869f9798237aab2028dd602d2399871e2cadbfcffcab",
+  "../src/assets/icons/sanpo-returned-icon-approved-v1.svg":
+    "61edaf62071ce29c5cbcb01110753696ae5f8391bfc1498462ecb16fc2761fae",
   "../src/assets/icons/sanpo-calendar-icon-approved-v1.svg":
     "341a47a144c9057aac70888cee6cfddd99082a39bce66b9afb40f093e465b171",
   "../src/assets/icons/sanpo-clients-icon-approved-v1.svg":

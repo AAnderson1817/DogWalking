@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="24" height="24" viewBox="0 0 24 24"
+     role="img" aria-labelledby="sanpo-check-title sanpo-check-desc"
+     style="color:#0C4774">
+  <title id="sanpo-check-title">Complete</title>
+  <desc id="sanpo-check-desc">A check mark.</desc>
+  <path d="M5 12.5 L10 17.5 L19 6.5" fill="none" stroke="currentColor"
+        stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

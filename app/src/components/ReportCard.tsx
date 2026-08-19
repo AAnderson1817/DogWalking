@@ -2,6 +2,7 @@
 import { Card } from "./Card";
 import { MapView, type MapPoint } from "./MapView";
 import { distanceMi } from "@/lib/format";
+import { ApprovedIcon } from "./ApprovedIcon";
 
 export interface ReportCardData {
   photoUrls: string[];
@@ -19,7 +20,7 @@ function Fact({ label, value }: { label: string; value: boolean | null }) {
   if (value === null) return null;
   return (
     <span className={`report-fact${value ? " report-fact--yes" : ""}`}>
-      <span aria-hidden>{value ? "✓" : "—"}</span> {label}
+      {value ? <ApprovedIcon name="check" size={14} /> : <span aria-hidden>—</span>} {label}
     </span>
   );
 }
