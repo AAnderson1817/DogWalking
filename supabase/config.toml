@@ -448,5 +448,20 @@ verify_jwt = false
 # This function remains the manual path: the Calendar screen's "Run
 # materializer" button, and the staging smoke suite. It calls the same
 # fn_run_nightly_jobs() the cron does, so the two cannot drift.
+# Review M29. The ONLY public endpoint in this project, and deliberately so:
+# the recipient of a mistyped address is not a client, cannot sign in, and an
+# opt-out behind a session is no opt-out at all for exactly the person who most
+# needs one. RFC 8058 one-click also POSTs straight from the mail client, with
+# no Authorization header to offer.
+#
+# The token in the URL is the credential. It only ever suppresses its own
+# address, the operation is idempotent, and the function answers identically
+# for a token that does not exist — so there is nothing to learn by calling it.
+#
+# Unlike the `[auth]` block (review H2), `supabase functions deploy` DOES read
+# this, so the setting is version-controlled rather than a dashboard toggle.
+[functions.unsubscribe]
+verify_jwt = false
+
 [functions.materialize-walks]
 verify_jwt = true

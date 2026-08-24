@@ -65,6 +65,7 @@ export type Database = {
           created_at: string;
           updated_at: string;
           current_period_end: string | null;
+          unsubscribe_token: string;
         };
         Insert: {
           id?: string;
@@ -84,6 +85,7 @@ export type Database = {
           created_at?: string;
           updated_at?: string;
           current_period_end?: string | null;
+          unsubscribe_token?: string;
         };
         Update: {
           id?: string;
@@ -103,6 +105,7 @@ export type Database = {
           created_at?: string;
           updated_at?: string;
           current_period_end?: string | null;
+          unsubscribe_token?: string;
         };
         Relationships: [];
       };
@@ -188,6 +191,33 @@ export type Database = {
           note?: string | null;
           created_at?: string;
           stripe_invoice_id?: string | null;
+        };
+        Relationships: [];
+      };
+      email_suppressions: {
+        Row: {
+          id: string;
+          email: string;
+          operator_id: string | null;
+          notification_type: Database["public"]["Enums"]["notification_type"] | null;
+          reason: string;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          email: string;
+          operator_id?: string | null;
+          notification_type?: Database["public"]["Enums"]["notification_type"] | null;
+          reason: string;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          email?: string;
+          operator_id?: string | null;
+          notification_type?: Database["public"]["Enums"]["notification_type"] | null;
+          reason?: string;
+          created_at?: string;
         };
         Relationships: [];
       };
@@ -1079,6 +1109,14 @@ export type Database = {
         Args: Record<string, never>;
         Returns: unknown;
       };
+      fn_email_suppressed: {
+        Args: {
+          p_email: string;
+          p_operator: string;
+          p_type: Database["public"]["Enums"]["notification_type"];
+        };
+        Returns: boolean;
+      };
       fn_expire_credits: {
         Args: Record<string, never>;
         Returns: number;
@@ -1276,6 +1314,12 @@ export type Database = {
         Args: Record<string, never>;
         Returns: unknown;
       };
+      fn_unsubscribe_by_token: {
+        Args: {
+          p_token: string;
+        };
+        Returns: Array<{ o_applied: boolean; o_email: string }>;
+      };
       fn_vault_allow_attempt: {
         Args: {
           p_user: string;
@@ -1372,6 +1416,7 @@ export type AccessCredentials = Database["public"]["Tables"]["access_credentials
 export type Clients = Database["public"]["Tables"]["clients"]["Row"];
 export type CredentialAccessLog = Database["public"]["Tables"]["credential_access_log"]["Row"];
 export type CreditLedger = Database["public"]["Tables"]["credit_ledger"]["Row"];
+export type EmailSuppressions = Database["public"]["Tables"]["email_suppressions"]["Row"];
 export type JobRuns = Database["public"]["Tables"]["job_runs"]["Row"];
 export type Notifications = Database["public"]["Tables"]["notifications"]["Row"];
 export type Operators = Database["public"]["Tables"]["operators"]["Row"];

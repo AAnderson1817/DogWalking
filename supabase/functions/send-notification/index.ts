@@ -75,8 +75,34 @@ function makeDeps(apiKey: string, operatorId: string | null): SendDeps {
     },
 
     async getClient(id) {
-      const { data } = await db.from("clients").select("full_name, email").eq("id", id).maybeSingle();
+      const { data } = await db
+        .from("clients")
+        .select("full_name, email, unsubscribe_token")
+        .eq("id", id)
+        .maybeSingle();
       return data;
+    },
+
+    // Review M29. Suppression is keyed on the ADDRESS, not the client: the
+    // wrong recipient of a mistyped address has no client row of their own,
+    // so suppressing "this client" would let the same person start receiving
+    // again the moment the operator corrects and re-enters it.
+    async isSuppressed(email, operatorId, type) {
+      const { data, error } = await db.rpc("fn_email_suppressed", {
+        p_email: email,
+        p_operator: operatorId,
+        p_type: type,
+      });
+      // FAIL CLOSED. An unreadable suppression list means we do not know
+      // whether this person asked us to stop, and sending anyway is the one
+      // outcome that cannot be taken back. The row records the reason, and the
+      // nightly drain retries it.
+      if (error) {
+        throw new HttpError(500, "db_error", "suppression lookup failed", error, {
+          notification_id: null,
+        });
+      }
+      return data === true;
     },
 
     async getOperator(id) {
@@ -84,7 +110,24 @@ function makeDeps(apiKey: string, operatorId: string | null): SendDeps {
       return data;
     },
 
-    async sendEmail({ to, subject, html }) {
+    unsubscribeUrl(token) {
+      // The FUNCTION host, not the app's. RFC 8058 one-click sends a POST
+      // straight from the mail client, and a client-side SPA route cannot
+      // serve a POST at all — nor anything with JavaScript disabled, which is
+      // most mail clients. The recipient's only escape route has to work
+      // without the app loading.
+      //
+      // `NOTIFY_UNSUBSCRIBE_BASE` lets the owner put a friendlier domain in
+      // front of it later without touching this code; `SUPABASE_URL` is always
+      // set inside an edge function, so there is no unset case.
+      const base = (
+        Deno.env.get("NOTIFY_UNSUBSCRIBE_BASE")
+        ?? `${Deno.env.get("SUPABASE_URL") ?? ""}/functions/v1/unsubscribe`
+      ).replace(/\/+$/, "");
+      return `${base}?t=${encodeURIComponent(token)}`;
+    },
+
+    async sendEmail({ to, subject, html, headers }) {
       const res = await fetch("https://api.resend.com/emails", {
         method: "POST",
         headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
@@ -93,6 +136,7 @@ function makeDeps(apiKey: string, operatorId: string | null): SendDeps {
           to: [to],
           subject,
           html,
+          headers,
         }),
       });
       if (res.ok) return { ok: true };
@@ -176,7 +220,12 @@ serveFunction(async (req) => {
 });
 
 /** Minimal Indigo Emaki email field, inline CSS only. */
-function renderEmail(business: string, title: string, body: string): string {
+function renderEmail(
+  business: string,
+  title: string,
+  body: string,
+  unsubscribeUrl: string,
+): string {
   return `<!doctype html>
 <body style="margin:0;padding:24px;background:#FEF6EA;font-family:Nunito,system-ui,sans-serif;color:#0C4774;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
@@ -193,11 +242,35 @@ function renderEmail(business: string, title: string, body: string): string {
         </td></tr>
         <tr><td style="padding:0 24px 24px;">
           <p style="margin:0;color:#5D7180;font-size:12px;">Sent by Sanpo on behalf of ${escapeHtml(business)}.</p>
+          <!-- Review M29. A visible link as well as the List-Unsubscribe
+               header: the header is honoured by the big mail clients, and the
+               link is what a person on anything else can actually use. If the
+               address is wrong, this is the recipient's only route out. -->
+          <p style="margin:8px 0 0;color:#5D7180;font-size:12px;">
+            Not expecting these?
+            <a href="${escapeHtml(unsubscribeUrl)}" style="color:#0C4774;">Unsubscribe</a>.
+          </p>
+          <p style="margin:8px 0 0;color:#5D7180;font-size:11px;">${escapeHtml(postalAddress())}</p>
         </td></tr>
       </table>
     </td></tr>
   </table>
 </body>`;
+}
+
+/**
+ * The sender's physical postal address (review M29).
+ *
+ * Required in commercial mail by CAN-SPAM and expected by spam filters in
+ * transactional mail too. It is an env var rather than a literal because only
+ * the owner knows it, and it is listed in `docs/dev/owner-actions.md`.
+ *
+ * The fallback is deliberately a visible placeholder rather than a plausible
+ * address: an unset value should look unset in a test send, not ship a wrong
+ * address that nobody notices.
+ */
+function postalAddress(): string {
+  return Deno.env.get("NOTIFY_POSTAL_ADDRESS") ?? "[postal address not configured]";
 }
 
 function escapeHtml(s: string): string {

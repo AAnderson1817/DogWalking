@@ -33,6 +33,10 @@ const ROW: NotificationRow = {
 
 interface Opts {
   email?: string | null;
+  /** Review M29: this address has opted out. */
+  suppressed?: boolean;
+  /** The suppression list itself is unreadable. */
+  suppressionError?: boolean;
   send?: () => Promise<{ ok: true } | { ok: false; status: number; detail: string }>;
   backlog?: string[];
   rows?: Record<string, NotificationRow | null>;
@@ -41,6 +45,8 @@ interface Opts {
 function makeDeps(opts: Opts = {}) {
   const recorded: Array<{ id: string; outcome: Outcome; previousAttempts: number }> = [];
   const sentTo: string[] = [];
+  const sentHeaders: Array<Record<string, string>> = [];
+  const suppressionAsked: Array<[string, string, string]> = [];
   const deps: SendDeps = {
     getNotification: (id) => Promise.resolve(opts.rows ? (opts.rows[id] ?? null) : ROW),
     backlogIds: () => Promise.resolve(opts.backlog ?? []),
@@ -48,19 +54,27 @@ function makeDeps(opts: Opts = {}) {
       Promise.resolve({
         full_name: "Ada",
         email: opts.email === undefined ? "ada@example.test" : opts.email,
+        unsubscribe_token: "11111111-2222-4333-8444-555555555555",
       }),
+    isSuppressed: (email, operatorId, type) => {
+      suppressionAsked.push([email, operatorId, type]);
+      if (opts.suppressionError) return Promise.reject(new Error("suppression lookup failed"));
+      return Promise.resolve(opts.suppressed === true);
+    },
+    unsubscribeUrl: (token) => `https://fn.test/functions/v1/unsubscribe?t=${token}`,
     getOperator: () => Promise.resolve({ business_name: "Old Town Walks" }),
     sendEmail: (msg) => {
       sentTo.push(msg.to);
+      sentHeaders.push(msg.headers);
       return opts.send ? opts.send() : Promise.resolve({ ok: true as const });
     },
     record: (id, outcome, previousAttempts) => {
       recorded.push({ id, outcome, previousAttempts });
       return Promise.resolve();
     },
-    renderEmail: (b, t) => `<p>${b}: ${t}</p>`,
+    renderEmail: (b, t, _body, url) => `<p>${b}: ${t} <a href="${url}">Unsubscribe</a></p>`,
   };
-  return { deps, recorded, sentTo };
+  return { deps, recorded, sentTo, sentHeaders, suppressionAsked };
 }
 
 // ── every path records something ───────────────────────────────────────────
@@ -272,4 +286,70 @@ Deno.test("a pending notification sends normally", async () => {
   const outcome = await deliverNotification({ ...ROW, email_delivery_status: "pending" }, deps);
   assertEquals(outcome.kind, "sent");
   assertEquals(sentTo.length, 1);
+});
+
+// ── review M29: consent, and a way out ─────────────────────────────────────
+//
+// `clients.email` is typed by the operator into the Roster form and reconciled
+// with nothing, so one typo sends a stranger a recurring feed of when a named
+// person's house is empty — with no unsubscribe link, no List-Unsubscribe
+// header, and no consent record anywhere.
+
+Deno.test("an unsubscribed address is not emailed", async () => {
+  const { deps, recorded, sentTo } = makeDeps({ suppressed: true });
+  const outcome = await deliverNotification(ROW, deps);
+  assertEquals(outcome.kind, "skipped");
+  assertEquals(sentTo.length, 0);
+  assertEquals(recorded[0].outcome.kind, "skipped");
+});
+
+Deno.test("an unsubscribe is TERMINAL, not a retryable failure", async () => {
+  // The distinction 0029 turns on. Recorded as `failed`, the nightly drain
+  // would try this every night against somebody who explicitly asked us to
+  // stop — worse than the defect being fixed.
+  const { deps, recorded } = makeDeps({ suppressed: true });
+  await deliverNotification(ROW, deps);
+  const outcome = recorded[0].outcome;
+  assert(outcome.kind === "skipped");
+  assert(outcome.reason.includes("unsubscribed"));
+});
+
+Deno.test("suppression is asked about the ADDRESS, with the operator and type", async () => {
+  // Keyed on the address rather than the client: the wrong recipient of a
+  // mistyped address has no client row of their own, so suppressing "this
+  // client" would let the same person start receiving again the moment the
+  // operator corrects and re-enters it.
+  const { deps, suppressionAsked } = makeDeps();
+  await deliverNotification(ROW, deps);
+  assertEquals(suppressionAsked.length, 1);
+  assertEquals(suppressionAsked[0][0], "ada@example.test");
+  assertEquals(suppressionAsked[0][1], "op-1");
+  assertEquals(suppressionAsked[0][2], "payment_failed");
+});
+
+Deno.test("an unreadable suppression list fails CLOSED", async () => {
+  // We do not know whether this person asked us to stop, and sending anyway is
+  // the one outcome that cannot be taken back. The row records it and the
+  // nightly drain retries — which is exactly what a retryable failure is for.
+  const { deps, recorded, sentTo } = makeDeps({ suppressionError: true });
+  const outcome = await deliverNotification(ROW, deps);
+  assertEquals(sentTo.length, 0);
+  assertEquals(outcome.kind, "failed");
+  assert(recorded[0].outcome.kind === "failed");
+  assertFalse(recorded[0].outcome.permanent);
+});
+
+Deno.test("every email carries the one-click unsubscribe pair", async () => {
+  // Both headers, not just the URL: `List-Unsubscribe-Post` is what makes a
+  // mail client show its own one-click control rather than making the
+  // recipient hunt for the link in the body. Every operator sends from ONE
+  // shared identity, so the sending reputation is the platform's, aggregated.
+  const { deps, sentHeaders } = makeDeps();
+  await deliverNotification(ROW, deps);
+  assertEquals(sentHeaders.length, 1);
+  assertEquals(
+    sentHeaders[0]["List-Unsubscribe"],
+    "<https://fn.test/functions/v1/unsubscribe?t=11111111-2222-4333-8444-555555555555>",
+  );
+  assertEquals(sentHeaders[0]["List-Unsubscribe-Post"], "List-Unsubscribe=One-Click");
 });
