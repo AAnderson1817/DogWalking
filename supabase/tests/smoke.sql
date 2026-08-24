@@ -3080,9 +3080,28 @@ begin
        when others then if sqlerrm like 'FAIL:%' then raise; end if;
   end;
 
+  -- `reset role` does NOT undo `set local session authorization`, and this
+  -- block set one. Without this line every block appended after it ran as
+  -- `authenticated` — silently, since RLS answers a service-role question with
+  -- an empty result rather than an error. Found by a 0038 assertion failing
+  -- confusingly; the danger is the assertions it would have passed vacuously.
+  reset session authorization;
   reset role;
   perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
   raise notice 'storage policies: tenant folder + per-walk + per-pet scoping OK';
+end $$;
+
+-- The guard for the above, because the leak is invisible by construction: a
+-- block that expects the service role and gets `authenticated` sees an empty
+-- table, and "no rows" is what most negative assertions are looking for.
+do $$
+begin
+  if session_user <> 'postgres' then
+    raise exception
+      'FAIL: a persona leaked out of its block (session_user=%). Every assertion after this point is running as the wrong role — `reset role` does not undo `set local session authorization`.',
+      session_user;
+  end if;
+  raise notice 'no persona leaked out of the storage block: OK';
 end $$;
 
 
@@ -3147,6 +3166,214 @@ begin
   end if;
 
   raise notice 'walks is locked before clients everywhere (0037): OK';
+end $$;
+
+
+
+-- ── 0038 · email consent and the way out ─────────────────────────────────
+-- Review M29. `clients.email` is operator-typed and reconciled with nothing,
+-- so one typo sends a stranger a recurring feed of when a named person's house
+-- is empty. That person cannot sign in, so every rule here is about an opt-out
+-- that works for somebody with no account.
+do $$
+declare
+  v_token uuid;
+  v_applied boolean;
+  v_email text;
+  v_op uuid := '99999999-0000-4000-a000-000000000001';
+  v_cli uuid := '99999999-0000-4000-c000-00000000000a';
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+
+  update clients set email = 'Typo.Recipient@Example.TEST' where id = v_cli;
+  select unsubscribe_token into v_token from clients where id = v_cli;
+  if v_token is null then
+    raise exception 'FAIL: no unsubscribe token was issued';
+  end if;
+
+  -- Not suppressed to begin with, or the assertions below prove nothing.
+  if fn_email_suppressed('typo.recipient@example.test', v_op, 'walk_complete') then
+    raise exception 'FAIL: the address is suppressed before anyone unsubscribed';
+  end if;
+
+  select o_applied, o_email into v_applied, v_email
+    from fn_unsubscribe_by_token(v_token);
+  if not v_applied then
+    raise exception 'FAIL: a valid token did not unsubscribe';
+  end if;
+
+  -- Stored lowercased. The operator typed mixed case; the sender will ask with
+  -- whatever case the row holds, and one canonical form is what makes the
+  -- unique index the whole rule.
+  if v_email <> 'typo.recipient@example.test' then
+    raise exception 'FAIL: the suppressed address was not canonicalised: %', v_email;
+  end if;
+
+  -- Suppressed for EVERY operator and EVERY type: a stranger asking to stop is
+  -- not asking to stop from one business they have never heard of.
+  if not fn_email_suppressed('typo.recipient@example.test', v_op, 'walk_complete') then
+    raise exception 'FAIL: the address is not suppressed after unsubscribing';
+  end if;
+  if not fn_email_suppressed('typo.recipient@example.test', v_op, 'payment_failed') then
+    raise exception 'FAIL: the unsubscribe did not cover every notification type';
+  end if;
+  if not fn_email_suppressed('TYPO.recipient@Example.test', v_op, 'walk_complete') then
+    raise exception 'FAIL: suppression is case-sensitive — the sender would miss it';
+  end if;
+  if not fn_email_suppressed(
+       'typo.recipient@example.test', '99999999-0000-4000-a000-000000000002', 'walk_complete') then
+    raise exception 'FAIL: the unsubscribe did not cover every operator';
+  end if;
+
+  -- Somebody else is unaffected.
+  if fn_email_suppressed('someone.else@example.test', v_op, 'walk_complete') then
+    raise exception 'FAIL: unsubscribing one address suppressed another';
+  end if;
+
+  -- Idempotent. A person who clicks twice, or a mail client that prefetches
+  -- the link and then posts it, must not hit a unique violation.
+  select o_applied into v_applied from fn_unsubscribe_by_token(v_token);
+  if not v_applied then
+    raise exception 'FAIL: a second unsubscribe reported failure';
+  end if;
+  if (select count(*) from email_suppressions
+       where email = 'typo.recipient@example.test') <> 1 then
+    raise exception 'FAIL: unsubscribing twice wrote two rows';
+  end if;
+
+  -- An unknown token answers exactly like a known one. An unauthenticated
+  -- endpoint that distinguishes them is an oracle for guessing them.
+  --
+  -- RAISING is an oracle too, and a version that did was the first sabotage
+  -- this assertion failed to catch: the DO block simply aborted with the
+  -- sabotage's own message, which is not a `FAIL:` line and reads as a broken
+  -- suite rather than a broken rule. So the raise is caught here explicitly.
+  begin
+    select o_applied, o_email into v_applied, v_email
+      from fn_unsubscribe_by_token('00000000-0000-4000-8000-000000000000');
+  exception when others then
+    raise exception
+      'FAIL: an unknown token raised "%" — an unauthenticated endpoint that distinguishes a real token from a made-up one is an oracle for guessing them',
+      sqlerrm;
+  end;
+  if v_applied then
+    raise exception 'FAIL: an unknown token reported a successful unsubscribe';
+  end if;
+  if v_email is not null then
+    raise exception 'FAIL: an unknown token returned an address: %', v_email;
+  end if;
+
+  raise notice 'unsubscribe suppresses the address, for everyone, idempotently (0038): OK';
+end $$;
+
+-- The token is a bearer credential for "stop emailing this address", and the
+-- suppression list is the record that somebody asked. Neither is the API
+-- roles' business — an operator able to DELETE a suppression is the one thing
+-- that would make it worthless.
+do $$
+declare v_n int;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+
+  set local role authenticated;
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000000001","role":"authenticated"}', true);
+
+  begin
+    perform unsubscribe_token from clients limit 1;
+    raise exception 'FAIL: an operator can read the unsubscribe token';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  begin
+    select count(*) into v_n from email_suppressions;
+    raise exception 'FAIL: an operator can read the suppression list';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  begin
+    delete from email_suppressions;
+    raise exception 'FAIL: an operator can delete a suppression';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  begin
+    perform fn_unsubscribe_by_token('00000000-0000-4000-8000-000000000000');
+    raise exception 'FAIL: an operator called the unsubscribe function directly';
+  exception when insufficient_privilege then null;
+       when raise_exception then
+         if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  -- The rest of the client row is still readable — column privileges, not a
+  -- policy, so the token is withheld without withholding the client.
+  select count(*) into v_n from clients where id = '99999999-0000-4000-c000-00000000000a';
+  if v_n <> 1 then
+    raise exception 'FAIL: withholding the token withheld the client row';
+  end if;
+
+  -- Every OTHER column is still granted. 0038 replaced the table-level SELECT
+  -- with an explicit list, which is fail-closed for columns added later: a new
+  -- column silently becomes unreadable and `select("*")` starts failing with a
+  -- bare 42501 from PostgREST. This turns that into a sentence naming the
+  -- column and the file to add it to.
+  declare
+    v_missing text;
+  begin
+    select string_agg(c.column_name, ', ')
+      into v_missing
+      from information_schema.columns c
+     where c.table_schema = 'public'
+       and c.table_name = 'clients'
+       and c.column_name <> 'unsubscribe_token'
+       and not has_column_privilege('authenticated', 'public.clients', c.column_name, 'SELECT');
+    if v_missing is not null then
+      raise exception
+        'FAIL: clients column(s) not selectable by authenticated: % — add them to the grant list in 0038 (the table-level SELECT was replaced to withhold unsubscribe_token)',
+        v_missing;
+    end if;
+  end;
+
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  raise notice 'the token and the suppression list are service-role only (0038): OK';
+end $$;
+
+-- The client-facing low-credit body no longer states the balance: it is
+-- rendered verbatim into an email, and mail is the least private channel this
+-- product has. The OPERATOR row keeps its count — that is their own business
+-- data and the number is the point of the alert.
+do $$
+declare
+  v_client text;
+  v_operator text;
+  v_cli uuid := '99999999-0000-4000-c000-00000000000b';
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  delete from notifications where client_id = v_cli and type = 'low_credit';
+  update clients set credit_balance = 1 where id = v_cli;
+  perform fn_notify_low_credit(v_cli);
+
+  select body into v_client from notifications
+   where client_id = v_cli and type = 'low_credit' order by created_at desc limit 1;
+  select body into v_operator from notifications
+   where client_id is null and type = 'low_credit'
+     and title like '%Smoke Client B%' order by created_at desc limit 1;
+
+  if v_client is null or v_operator is null then
+    raise exception 'FAIL: fn_notify_low_credit did not raise both notifications';
+  end if;
+  if v_client ~ '[0-9]' then
+    raise exception 'FAIL: the client-facing low-credit body still states a number: %', v_client;
+  end if;
+  if v_operator !~ '[0-9]' then
+    raise exception 'FAIL: the operator-facing low-credit body lost its count: %', v_operator;
+  end if;
+
+  raise notice 'the client-facing low-credit email carries no balance (0038): OK';
 end $$;
 
 

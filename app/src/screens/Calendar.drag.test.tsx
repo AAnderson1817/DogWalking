@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { POINTER_FINE } from "@/hooks/usePointerFine";
+import { todayLocal } from "@/lib/selectors";
 
 /**
  * Review M11. The hook test proves the media query; this proves the Calendar
@@ -15,10 +16,21 @@ import { POINTER_FINE } from "@/hooks/usePointerFine";
 
 const pointerFine = vi.hoisted(() => ({ value: true }));
 
+/**
+ * Derived from the same "today" the component uses, never hardcoded.
+ *
+ * The first version of this file pinned `2026-08-19`, and the week view shows
+ * the week around today — so it passed on the day it was written and would
+ * have failed CI five days later, on a change that had nothing to do with the
+ * calendar. A fixture that expires is worse than no fixture: it fails
+ * somebody else's PR.
+ */
+const TODAY = todayLocal();
+
 const WALK = {
   id: "w-1",
   client_id: "c-1",
-  scheduled_date: "2026-08-19",
+  scheduled_date: TODAY,
   window_start: "10:00:00",
   window_end: "11:00:00",
   status: "scheduled",

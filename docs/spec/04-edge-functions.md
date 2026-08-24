@@ -507,6 +507,52 @@ For each active schedule: generate `walks` rows for the next 14 days for matchin
 `'none'` is deliberately included — that is a client who never subscribed, whom the operator may bill outside Sanpo. `past_due` is excluded by owner decision: service halts until payment clears. `fn_book_walk` carries the identical predicate, so client self-booking and nightly materialization cannot disagree. Idempotent via the `(schedule_id, scheduled_date)` unique index (`ON CONFLICT DO NOTHING`).
 Response: `{ created, expired_clients, expiry_error, walks_flagged_abandoned, stale_walk_error }`.
 
+## unsubscribe — public, unauthenticated, token-only (0038, review M29)
+
+The only endpoint in this project with `verify_jwt = false` besides the Stripe
+webhook, and for a reason that has no alternative: `clients.email` is typed by
+the operator and reconciled with nothing, so a typo sends a **stranger** a
+recurring feed of when a named person's house is empty. That person cannot sign
+in — they are not a client and claimed no invite — so an opt-out behind a
+session is no opt-out at all for exactly the recipient who most needs one.
+
+`clients.unsubscribe_token` is the credential: unguessable, carried only in
+mail already addressed to that person, withheld from the API roles by column
+privilege (0004's table-level SELECT on `clients` had to be replaced with an
+explicit column list — a column REVOKE against a table-level grant is a no-op),
+and rotatable by re-issuing it.
+
+Three deliberate non-features:
+
+- **It never says whether a token exists.** `fn_unsubscribe_by_token` answers
+  identically either way, and raising is an oracle too, not just returning
+  false. An unauthenticated endpoint that distinguishes them is a way to
+  enumerate them.
+- **It takes no other input.** No address, no client id, no scope. A public
+  endpoint that accepts an address is a way to unsubscribe somebody else.
+- **It is not rate-limited.** A valid token only ever suppresses its own
+  address and the operation is idempotent, so there is nothing to gain by
+  calling it repeatedly.
+
+Suppression is keyed on the **address**, not the client, and defaults to every
+operator and every type. The wrong recipient has no client row of their own, so
+suppressing "this client" would let the same address start receiving again the
+moment the operator corrects and re-enters it.
+
+`send-notification` asks `fn_email_suppressed` before every send and **fails
+closed**: an unreadable suppression list is recorded as a retryable failure, not
+sent anyway, because sending is the one outcome here that cannot be taken back.
+An actual suppression is TERMINAL — recorded as `skipped`, never as `failed`,
+or the nightly drain would retry it every night against somebody who asked us
+to stop.
+
+Every email carries `List-Unsubscribe` **and** `List-Unsubscribe-Post:
+List-Unsubscribe=One-Click` (RFC 8058) plus a visible link, since the header is
+honoured by the big mail clients and the link is what works everywhere else.
+The URL points at the function host, not the app: a one-click POST comes
+straight from the mail client, and a client-side SPA route cannot serve a POST
+at all.
+
 ### The schedule lives in a migration, not a dashboard (0028)
 
 `cron.schedule('sanpo-nightly', '0 3 * * *', 'select fn_run_nightly_jobs()')`.

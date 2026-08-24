@@ -41,17 +41,31 @@ export interface SendDeps {
   getNotification(id: string): Promise<NotificationRow | null>;
   /** Rows the nightly job counted as still owed an email. */
   backlogIds(): Promise<string[]>;
-  getClient(id: string): Promise<{ full_name: string; email: string | null } | null>;
+  getClient(id: string): Promise<{
+    full_name: string;
+    email: string | null;
+    unsubscribe_token: string;
+  } | null>;
+  /** Whether this address has opted out — see 0038 and review M29. */
+  isSuppressed(email: string, operatorId: string, type: string): Promise<boolean>;
   getOperator(id: string): Promise<{ business_name: string | null } | null>;
   /** Resolves on a 2xx; rejects or returns the provider's own words otherwise. */
   sendEmail(msg: {
     to: string;
     subject: string;
     html: string;
+    /**
+     * `List-Unsubscribe` and `List-Unsubscribe-Post`. Every operator sends
+     * from ONE shared identity, so the sending reputation is the platform's,
+     * aggregated — Sanpo is the bulk sender even when no operator is.
+     */
+    headers: Record<string, string>;
   }): Promise<{ ok: true } | { ok: false; status: number; detail: string }>;
   /** Stamp the outcome. The whole point of H17: no path leaves the row silent. */
   record(id: string, outcome: Outcome, previousAttempts: number): Promise<void>;
-  renderEmail(business: string, title: string, body: string): string;
+  renderEmail(business: string, title: string, body: string, unsubscribeUrl: string): string;
+  /** The one-click URL for a token, so the handler stays free of env lookups. */
+  unsubscribeUrl(token: string): string;
 }
 
 /**
@@ -113,13 +127,52 @@ export async function deliverNotification(
     return outcome;
   }
 
+  // Review M29. Terminal, like the two skips above: an address that has opted
+  // out is not owed a retry, and a sweep that treated this as "not yet sent"
+  // would try again every night against somebody who explicitly asked it to
+  // stop — which is worse than the original defect.
+  //
+  // Checked HERE rather than in the queue, so it applies to every path into
+  // this function: the DB webhook on INSERT, the nightly drain, and a direct
+  // POST of a notification id.
+  let suppressed: boolean;
+  try {
+    suppressed = await deps.isSuppressed(client.email, row.operator_id, row.type);
+  } catch (e) {
+    // FAIL CLOSED, and retryably. An unreadable suppression list means we do
+    // not know whether this person asked us to stop, and sending anyway is the
+    // one outcome here that cannot be taken back. Recorded as a failure so the
+    // nightly drain comes back to it — which is what makes failing closed
+    // affordable rather than a silent drop.
+    const outcome: Outcome = {
+      kind: "failed",
+      error: `suppression lookup failed: ${e instanceof Error ? e.message : "unknown"}`,
+      permanent: false,
+    };
+    await deps.record(row.id, outcome, row.email_attempts);
+    return outcome;
+  }
+  if (suppressed) {
+    const outcome: Outcome = { kind: "skipped", reason: "recipient unsubscribed" };
+    await deps.record(row.id, outcome, row.email_attempts);
+    return outcome;
+  }
+
   const business = operator?.business_name ?? "Your walker";
+  const unsubscribeUrl = deps.unsubscribeUrl(client.unsubscribe_token);
   let result: Awaited<ReturnType<SendDeps["sendEmail"]>>;
   try {
     result = await deps.sendEmail({
       to: client.email,
       subject: `${row.title} — ${business}`,
-      html: deps.renderEmail(business, row.title, row.body ?? ""),
+      html: deps.renderEmail(business, row.title, row.body ?? "", unsubscribeUrl),
+      // The pair, not just the URL: `List-Unsubscribe-Post` is what makes a
+      // mail client show its own one-click control instead of making the
+      // recipient find the link in the body.
+      headers: {
+        "List-Unsubscribe": `<${unsubscribeUrl}>`,
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+      },
     });
   } catch (e) {
     // Resend unreachable. Retryable — and the row now says so. Before this it

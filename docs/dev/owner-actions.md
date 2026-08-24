@@ -117,6 +117,31 @@ rather than silent. Client-facing mail does not leave until this is set.
 
 ---
 
+### 10. `NOTIFY_POSTAL_ADDRESS` — a physical address in the email footer
+
+**Set the secret `NOTIFY_POSTAL_ADDRESS` on the Supabase project** to the
+business's real postal address, e.g. `Sanpo, 123 Example St, Chicago, IL 60601`.
+
+Until it is set, every notification email carries the literal text
+`[postal address not configured]` in its footer. That is deliberate: an unset
+value should look unset in a test send rather than silently ship a plausible
+wrong address that nobody notices.
+
+Why it matters: a physical address is required in commercial mail by CAN-SPAM,
+and its absence is a spam-filter signal in transactional mail too. Every
+operator sends from ONE shared identity (`notifications@sanpocare.com`), so the
+sending reputation is the platform's, aggregated — Sanpo is the bulk sender
+even when no single operator is (review M29).
+
+Only the owner knows the address, which is why it is here and not a literal in
+the template.
+
+**Optional, same area:** `NOTIFY_UNSUBSCRIBE_BASE`. The one-click unsubscribe
+URL defaults to the Supabase functions host, which works but reads as a long
+opaque URL in the footer. Point this at a friendlier domain that proxies to
+`/functions/v1/unsubscribe` and the link becomes readable. Nothing breaks if it
+stays unset.
+
 ## Keeping this honest
 
 When a pull request creates one of these, add it here in the same commit rather
