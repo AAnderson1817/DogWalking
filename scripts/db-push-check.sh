@@ -58,7 +58,7 @@ CHECK_URL="${DB_URL%/*}/${CHECK_DB}"
 # in the URL at all, while CI's postgres service container demands one. The
 # password below is not a secret — it exists only so the connection works under
 # either auth method, and the role lives for the length of this script.
-DEPLOY_PASSWORD="sanpo_local_check"
+DEPLOY_PASSWORD="sanpo_local_check"  # keep in step with platform-roles.sql
 DEPLOY_URL=$(python3 - "$CHECK_URL" "$DEPLOY_PASSWORD" <<'PY'
 import sys, urllib.parse as u
 p = u.urlsplit(sys.argv[1])
