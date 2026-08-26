@@ -13,7 +13,16 @@ on:
     workflows: ["Deploy staging (Supabase)"]
     types: [completed]
 
-permissions: {}
+# Was `{}`, which is right for a workflow that only makes outbound HTTP calls
+# and wrong the moment one of its jobs checks the repository out — on a private
+# repository `actions/checkout` needs this scope and 403s without it. The
+# `auth-posture` job gained a checkout in #48 and has not run since (every
+# staging-smoke run after it was `skipped`, because it fires on a successful
+# staging deploy and staging has not deployed), so the gap has never shown
+# itself. Found while giving the new verify-deployment workflow the same
+# treatment; read-only either way.
+permissions:
+  contents: read
 
 # Serialize runs: they share fixed fixture emails, so concurrent runs would
 # fight over the same throwaway users.
