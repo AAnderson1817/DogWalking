@@ -2,7 +2,47 @@
 
 Single Vite React-TS PWA in `app/`, serving both personas behind role-gated routes. No state library: typed fetch layer + React context + local state. (React Query is a v1.1 option; do not add now.)
 
-## Routes (react-router-dom 6)
+## Routes (react-router-dom 7)
+
+The app mounts `<BrowserRouter>`, not a data router — `createBrowserRouter`
+and everything that needs it (loaders, actions, `useBlocker`) is deliberately
+unused; see the Walk Mode exit guard below.
+
+**Version 7 is a security floor, not a preference (review M41).** 6.x carries
+an open redirect (CVE-2025-68470) and its backslash bypass
+(GHSA-wrjc-x8rr-h8h6), plus an SSR-hydration constructor injection. The review
+prescribed "upgrade to 7.x" and that was already wrong when it was written:
+the advisory range is `6.0.0 - 7.17.0`, so most of 7 is equally affected and
+the patched line is **>= 7.18.0**. Do not treat "we are on 7" as remediation
+without checking the minor.
+
+### Navigation targets
+
+Every `navigate()` and `<Link to>` target in this app is a string literal, or a
+template whose first segment is a literal (`/walks/${id}/live`). That is what
+made the open redirect unreachable here: a value beginning `//host` or
+`\\host` is another origin, and none of these can begin that way whatever is
+interpolated.
+
+That was true by accident. `lib/internal-path.ts` makes it checkable: anything
+handed to a navigation that did NOT come from a literal in this codebase goes
+through `internalPath()`, which returns `null` for a protocol-relative target,
+a backslash target, a scheme, a relative path, or one carrying control
+characters (browsers strip those before resolving, so the value navigated to is
+not the value inspected). The one current caller is `deepLink` in
+`NotificationInbox`, which builds from a stored `walk_id`.
+
+It is deliberately not paired with a CI grep over `navigate(` arguments: the
+one legitimate non-literal call site would have to be allow-listed by name, and
+a stale exception that excuses a real check is a failure mode this repository
+has already paid for. The helper exists to be the obvious thing to reach for.
+
+The upgrade was done in two commits on purpose. `v7_startTransition` and
+`v7_relativeSplatPath` are the only two behavioural changes 7 makes to this
+app and both are opt-in flags on 6, so they were switched on and the whole
+suite run green *under 6* before the version moved. A major upgrade that
+carries a behaviour change inside it gives a regression two places to have
+come from.
 ```
 /signin            SignIn (email+password, magic-link option)
 /onboard           Onboard (first-run operator setup: business, defaults)
@@ -128,8 +168,9 @@ guarded by a history sentinel: an entry pushed on the same URL, so popping it
 re-renders the route instead of unmounting it and the confirm happens while
 the walk is still on screen. Deliberately not react-router's `useBlocker`,
 which requires a data router (`createBrowserRouter`); this app mounts
-`<BrowserRouter>` and migrating the router for one prompt is a much larger
-change than the bug warrants. The sentinel entry is left behind on a normal
+`<BrowserRouter>` and adopting a data router for one prompt is a much larger
+change than the bug warrants. (Still true after the move to router 7 — that
+upgrade changed the version, not the router style.) The sentinel entry is left behind on a normal
 exit — it points at the same URL, so the only effect is one extra Back from
 the report card, and calling `history.back()` from a cleanup would race
 whatever navigation triggered it.

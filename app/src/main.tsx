@@ -38,6 +38,12 @@ if (missing.length > 0) {
   root.render(
     <StrictMode>
       <ErrorBoundary>
+        {/* react-router 7 (review M41). `v7_startTransition` and
+            `v7_relativeSplatPath` were the only two behavioural changes it
+            makes to this app; both were turned on as opt-in flags under 6 and
+            the whole suite run green before the version moved, so a
+            regression could not have two places to have come from. They are
+            defaults in 7, so the flags are gone rather than kept as no-ops. */}
         <BrowserRouter>
           <AuthProvider>
             <App />
