@@ -9,11 +9,25 @@ import { Sheet } from "./Sheet";
 import { LoadingState, StateField } from "./StateField";
 import { listNotifications, markNotificationRead } from "@/lib/api";
 import { dateLocal, timeLocal } from "@/lib/format";
+import { internalPath } from "@/lib/internal-path";
 import type { Notifications } from "@/lib/types";
 
+/**
+ * The one navigation target in this app built from stored data rather than a
+ * literal, which makes it the only place the react-router open-redirect
+ * advisories (review M41) could ever have bitten. It could not, in fact: every
+ * branch below prefixes a literal segment, so the result cannot begin `//` or
+ * `\` whatever `walk_id` holds.
+ *
+ * It goes through `internalPath` anyway. "Safe because of how the string
+ * happens to be assembled" is a property a later edit can remove without
+ * anyone noticing; "safe because the function refuses otherwise" is not.
+ */
 function deepLink(n: Notifications, persona: "operator" | "client"): string | null {
   if (n.walk_id) {
-    return persona === "operator" ? `/walks/${n.walk_id}/live` : `/portal/walks/${n.walk_id}`;
+    return internalPath(
+      persona === "operator" ? `/walks/${n.walk_id}/live` : `/portal/walks/${n.walk_id}`,
+    );
   }
   switch (n.type) {
     case "payment_failed":
