@@ -22,7 +22,12 @@ on:
         default: staging
         required: true
 
-permissions: {}
+# `contents: read`, not `{}`. The job checks the repository out — the list of
+# functions to probe comes from the filesystem — and on a private repository
+# `actions/checkout` needs the scope to do it. Sibling workflows here declare
+# `{}` and get away with it only where no job checks anything out.
+permissions:
+  contents: read
 
 concurrency:
   group: verify-deployment-${{ inputs.environment }}
