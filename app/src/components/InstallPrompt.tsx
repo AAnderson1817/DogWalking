@@ -38,16 +38,7 @@ export function InstallPrompt() {
   if (!eligible || !deferred) return null;
 
   return (
-    <Card
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: "var(--s-3)",
-        background: "var(--butter)",
-        color: "var(--ink-900)",
-        marginTop: "var(--s-4)",
-      }}
-    >
+    <Card className="install-prompt">
       <div style={{ flex: 1 }}>
         <div style={{ fontWeight: 700 }}>Put Sanpo on your home screen</div>
         <div style={{ fontSize: "var(--fs-14)", opacity: 0.8 }}>

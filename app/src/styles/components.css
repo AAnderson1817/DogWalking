@@ -117,6 +117,11 @@ button.walk-card:hover,
 .client-relationship-header,
 .pet-profile-row:hover,
 .connect-panel,
+.booking-cost--overage,
+.walk-billing,
+.walk-billing--overage,
+.walk-hazards,
+.install-prompt,
 .access-trail__row--attention {
   --sanpo-color-text-secondary: var(--sanpo-color-text-secondary-on-tint);
   --sanpo-color-text-success: var(--sanpo-color-text-success-on-tint);
@@ -204,6 +209,101 @@ button.walk-card:hover,
 }
 .card--flat { box-shadow: none; }        /* dense lists, ledger rows */
 .card--soft { border-color: var(--sanpo-color-border-subtle); box-shadow: none; } /* quiet panels */
+
+/* ── A border role is not a fill ───────────────────────────────────────────
+   Both rules below were inline `background: var(--mist)`, and `--mist` resolves
+   through `--hairline` to `--sanpo-color-border-subtle` (tokens.css:25,34).
+
+   That is a BORDER role, and the vendor palette darkens border roles to Indigo
+   under `prefers-contrast: more` (vendor:83-86). As a border that is the whole
+   point — the rule gets more visible. As a FILL it inverts, because the text on
+   it resolves `--text` -> `--ink-900` -> `--sanpo-color-text-primary` -> the
+   same Indigo. Measured in a real browser under `contrast: more`: background
+   rgb(12,71,116) on colour rgb(12,71,116). 1.00:1. Invisible.
+
+   So the rule is: fill with a SURFACE role, bound with a BORDER role. A surface
+   role is untouched by the high-contrast override; a border role is improved by
+   it. Both sites are Indigo on Cream at 9.03:1 in both modes now — the same
+   pair the vault reveal panel settled on.
+
+   Neither site was reachable by any existing check: `role-contrast.test.ts`
+   parses `components.css`, and these lived in TSX. That gap is closed by
+   `scripts/inline-style-tokens.test.ts`. */
+.invite-link {
+  display: block;
+  background: var(--sanpo-color-surface-canvas);
+  border: var(--bw) solid var(--sanpo-color-border-subtle);
+  border-radius: var(--r-sm);
+  padding: var(--s-3);
+  font-size: var(--fs-12);
+  color: var(--sanpo-color-text-primary);
+  word-break: break-all;
+}
+
+.booking-cost { background: var(--sanpo-color-surface-canvas); box-shadow: none; }
+
+/* The overage branch changes colour, and deliberately. It was `--amber`, which
+   resolves through `--butter` to the Yamabuki tint — the MILESTONE role, spec
+   05:14 "Yamabuki marks positive milestones" — on the panel telling a client
+   they are about to be charged extra. Spec 05:99 is explicit: "`overage` and
+   `attention`: Kaki attention tint and border", and every sibling already
+   obeys it (.badge--overage :502, .walk-card--overage :890,
+   .calendar-walk--overage :1520). Booking was the sole outlier, and only
+   because an inline style reached for a legacy alias instead of a role. */
+.booking-cost--overage {
+  background: var(--sanpo-color-surface-attention);
+  border-color: var(--sanpo-color-border-attention);
+}
+
+/* Three more tints that were inline, moved here for one reason: an inline tint
+   is invisible to the H24 escalation gate. `role-contrast.test.ts` parses
+   `components.css` and fails any rule that paints a tint without joining the
+   escalation list at :83-121 — so a tint expressed in TSX gets no such check,
+   and the two 1.00:1 inversions above are what that blind spot looks like when
+   it goes wrong. Moving a tint out of a style object is what puts it under the
+   gate. */
+.walk-billing { background: var(--sanpo-color-surface-success); border-color: var(--sanpo-color-status-complete); }
+.walk-billing--overage { background: var(--sanpo-color-surface-attention); border-color: var(--sanpo-color-border-attention); }
+.walk-billing__figure { font-weight: 700; font-size: var(--fs-20); }
+/* The inline version carried `opacity: 0.85`, deliberately not reproduced.
+   Opacity on text is de-emphasis that no contrast check can see: it multiplies
+   the rendered ratio by an amount that depends on what is behind it, so the
+   measured value stops matching the token the rule names. This line sits on a
+   tint and inherits text-primary from the parent; at full opacity that is
+   measurable, and if it should be quieter it should say so with a role. */
+.walk-billing__detail { font-size: var(--fs-14); margin-top: var(--s-1); }
+.walk-hazards { background: var(--sanpo-color-surface-attention); border-color: var(--sanpo-color-border-attention); }
+.install-prompt {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  background: var(--sanpo-color-surface-milestone);
+  margin-top: var(--s-4);
+}
+.walk-billing,
+.walk-billing--overage,
+.walk-hazards,
+.install-prompt { color: var(--sanpo-color-text-primary); }
+
+/* The last four `var(--mist)` sites. These use it as a BORDER, which is
+   correct — the high-contrast override makes them MORE visible, which is the
+   whole point of the role. They move only so the alias has no consumers left
+   and can be deleted; the resolved value is unchanged.
+
+   `.ledger-table` is shared: the two ledger tables in ClientDetail and
+   PortalBilling were byte-identical style objects on both the table and its
+   rows, which is the drift this repository has already paid for elsewhere. */
+.ledger-table { width: 100%; margin-top: var(--s-2); border-collapse: collapse; font-size: var(--fs-14); }
+.ledger-table tbody tr { border-bottom: var(--bw-xs) solid var(--sanpo-color-border-subtle); }
+.ledger-table td { padding: var(--s-2) 0; }
+.vault-credential-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3) 0;
+  border-bottom: var(--bw-xs) solid var(--sanpo-color-border-subtle);
+}
+.vault-audit-row { border-bottom: var(--bw-xs) solid var(--sanpo-color-border-subtle); padding-bottom: var(--s-2); }
 
 /* ── Fields ────────────────────────────────────────────────────────────── */
 .field { display: flex; flex-direction: column; gap: var(--s-1); }
@@ -1391,7 +1491,18 @@ a.today-emaki-visit__link:focus-visible {
   align-items: flex-start;
   gap: var(--s-3);
   padding: 5cqw 3.5cqw;
-  color: var(--sanpo-color-text-secondary);
+  /* Was `--sanpo-color-text-secondary`, which fails AA here at EVERY viewport
+     and always has. The `20px` ceiling of the clamp is unreachable: the field
+     is capped at 640px (:925, and 07:52 narrows it further on desktop), so
+     `2.7cqw` never exceeds 17.28px — under the 18.66px large-text threshold,
+     so the floor is permanently 4.5:1. text-secondary measures 3.69:1 on
+     `--emaki-paper` and 3.91:1 on the artwork sample beneath it; both fail.
+     text-primary is 7.03:1 / 7.46:1.
+
+     `today-contrast.spec.ts` targets the progress strokes, the row accents and
+     the upcoming rows — not this element, which is why an empty day was the
+     one Today state nothing measured. */
+  color: var(--sanpo-color-text-primary);
   font-size: clamp(14px, 2.7cqw, 20px);
   font-weight: 700;
 }

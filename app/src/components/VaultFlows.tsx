@@ -134,15 +134,7 @@ export function CredentialRow({
   }
 
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: "var(--s-2)",
-        padding: "var(--s-3) 0",
-        borderBottom: "1px solid var(--mist)",
-      }}
-    >
+    <div className="vault-credential-row">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "var(--s-2)" }}>
         <div>
           <div style={{ fontWeight: 600 }}>{credential.label ?? entryMethodLabel(credential.entry_method)}</div>
@@ -243,7 +235,7 @@ export function CredentialRow({
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-2)" }}>
             {audit.map((row) => (
-              <div key={row.id} style={{ borderBottom: "1px solid var(--mist)", paddingBottom: "var(--s-2)" }}>
+              <div key={row.id} className="vault-audit-row">
                 <div style={{ fontWeight: 600, fontSize: "var(--fs-14)" }}>{row.purpose}</div>
                 <div style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>
                   {dateLocal(row.accessed_at)} · {timeLocal(row.accessed_at)}

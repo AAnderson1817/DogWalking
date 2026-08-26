@@ -470,23 +470,15 @@ function WalkModeInner({ walkId }: { walkId: string }) {
         <span className="section-label">Walk complete</span>
         <h1>{petNames || "Report card"}</h1>
         <Card
-          style={{
-            marginTop: "var(--s-3)",
-            background: billing.outcome === "overage"
-              ? "var(--sanpo-color-surface-attention)"
-              : "var(--sanpo-color-surface-success)",
-            color: "var(--sanpo-color-text-primary)",
-            borderColor: billing.outcome === "overage"
-              ? "var(--sanpo-color-border-attention)"
-              : "var(--sanpo-color-status-complete)",
-          }}
+          className={`walk-billing${billing.outcome === "overage" ? " walk-billing--overage" : ""}`}
+          style={{ marginTop: "var(--s-3)" }}
         >
-          <div style={{ fontWeight: 700, fontSize: "var(--fs-20)" }} className="display">
+          <div className="walk-billing__figure display">
             {billing.outcome === "debited"
               ? `Debited ${billing.cost_credits} credit${billing.cost_credits === 1 ? "" : "s"}`
               : `Overage — ${billing.charged_pence != null ? money(billing.charged_pence) : "charge pending"}`}
           </div>
-          <div style={{ fontSize: "var(--fs-14)", marginTop: "var(--s-1)", opacity: 0.85 }}>
+          <div className="walk-billing__detail">
             {billing.outcome === "debited"
               ? "Fully covered by the credit balance."
               : `Whole walk charged at the plan overage rate${paymentLabel ? ` — ${paymentLabel}` : ""}.`}
@@ -527,13 +519,7 @@ function WalkModeInner({ walkId }: { walkId: string }) {
             </p>
           </div>
           {reactive.length > 0 && (
-            <Card
-              style={{
-                background: "var(--sanpo-color-surface-attention)",
-                borderColor: "var(--sanpo-color-border-attention)",
-                color: "var(--sanpo-color-text-primary)",
-              }}
-            >
+            <Card className="walk-hazards">
               {reactive.map((p) => (
                 <div key={p.id} style={{ display: "flex", gap: "var(--s-2)", alignItems: "center" }}>
                   <Badge status="attention">{p.is_reactive ? "Reactive" : "Escape risk"}</Badge>
