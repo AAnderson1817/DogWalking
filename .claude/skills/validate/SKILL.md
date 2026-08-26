@@ -69,6 +69,21 @@ supabase db reset
 ```
 or `scripts/db-reset.sh` on the no-Docker local stack.
 
+## 7b. Would `supabase db push` apply this? (requires `LOCAL_DB_URL`)
+```
+./scripts/db-push-check.sh
+```
+Gate 7 connects as the cluster's bootstrap **superuser** and applies each file
+statement-at-a-time, so it answers a weaker question than a deploy asks (review
+M5): a superuser skips every ownership and privilege check, and hosted
+Supabase's `postgres` is not one. This re-applies all of them from zero as a
+non-superuser holding only the privileges in
+`scripts/local-stack/platform-roles.sql`, one transaction per file — which is
+also what stops a migration adding an enum value and using it in the same file
+— and checks the filename/version contract `db push` derives its ordering from.
+It uses its own throwaway database, so it neither needs nor disturbs gate 7's.
+Must end with `DB PUSH CHECK PASS`.
+
 ## 8. SQL assertions (requires `LOCAL_DB_URL`)
 ```
 psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/smoke.sql

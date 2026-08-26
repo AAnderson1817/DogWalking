@@ -212,6 +212,15 @@ and will silently strand client invites) and **notifications** (the
 
 ## 7. Deploy the backend
 
+0. **First, ask the project whether it can run this schema.** Paste the query
+   from `docs/dev/db-push-requirements.md` into the SQL editor *as `postgres`*.
+   Every column must come back `t`. It takes ten seconds and it is the only
+   thing standing between here and two failure modes that are much worse
+   discovered later: `db push` dying part-way at `must be owner of table
+   objects`, and — quieter, and far worse — a schema that applies perfectly and
+   then does nothing, because without `BYPASSRLS` every `SECURITY DEFINER`
+   function reads zero rows from the FORCE-RLS tables it owns (review M5).
+
 1. GitHub → Actions → **"Deploy production (Supabase)"** → Run workflow →
    type `deploy-production` in the confirm box → tick **sync_secrets** →
    run → approve the environment gate when it pauses.
@@ -273,6 +282,16 @@ and will silently strand client invites) and **notifications** (the
   statements and receipts.
 
 ## 9. Go-live verification (with your own real card)
+
+The deploy workflow already ran the mechanical half: its `verify-functions` job
+lists the project's functions, requires every one this repository ships to be
+present and ACTIVE, and asks each for its own no-side-effect response — because
+`supabase functions deploy` reports success once a bundle is uploaded and never
+runs it, so a module that throws while evaluating deploys "successfully" and
+500s on its first real call (review M4). Re-run it any time from Actions →
+**"Verify a deployment"** → `production`; it only reads.
+
+What follows is the half a probe cannot do — money actually moving.
 
 Run the whole loop once as a real customer before inviting anyone:
 

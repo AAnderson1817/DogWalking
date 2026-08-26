@@ -192,6 +192,34 @@ jobs:
           # No secret is printed: the response carries a key id and counts only.
           echo "$body"
 
+  # ── Did any of that actually work? ────────────────────────────────────────
+  # `supabase functions deploy` reports success once a bundle is uploaded; it
+  # never runs it. A function whose module throws while evaluating deploys
+  # "successfully" and 500s on its first real call (review M4). This asks each
+  # deployed function a harmless GET and requires its own answer back — the
+  # read-only argument for every probe is in the script's header, and the
+  # unsubscribe one is pinned by a test rather than assumed.
+  #
+  # Before `frontend`, deliberately: a frontend released onto functions that
+  # cannot boot is the H16 ordering bug with a different dependency.
+  verify-functions:
+    name: Verify the deployed functions
+    needs: [migrate, deploy-functions]
+    if: ${{ needs.migrate.result == 'success' && needs.deploy-functions.result == 'success' && needs.verify-functions.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+        with:
+          # The commit that was just deployed — the function list has to be the
+          # one deploy-functions used, not whatever main has moved on to.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: Probe every function this repository ships
+        env:
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: ./scripts/verify-deployment.sh
+
   # ── The frontend, LAST ────────────────────────────────────────────────────
   # Staging gets the same ordering as production, and for a reason beyond
   # symmetry: the runbook's whole posture is "every future change follows the
@@ -205,7 +233,7 @@ jobs:
   # a release ref rather than a deploy hook or an ignored build step.
   frontend:
     name: Release the frontend
-    needs: [migrate, deploy-functions]
+    needs: [migrate, deploy-functions, verify-functions]
     # deploy-functions DIRECTLY, not assert-deployed — that job exits
     # 0 when migrate failed, so keying off it would release a frontend onto a
     # database that never migrated.
@@ -271,7 +299,7 @@ jobs:
   # of trusting the expression that produces it.
   assert-deployed:
     name: Everything actually deployed
-    needs: [migrate, deploy-functions, frontend]
+    needs: [migrate, deploy-functions, verify-functions, frontend]
     if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
@@ -279,15 +307,20 @@ jobs:
         env:
           MIGRATE: ${{ needs.migrate.result }}
           FUNCTIONS: ${{ needs.deploy-functions.result }}
+          VERIFY: ${{ needs.verify-functions.result }}
           FRONTEND: ${{ needs.frontend.result }}
         run: |
-          echo "migrate=$MIGRATE deploy-functions=$FUNCTIONS frontend=$FRONTEND"
+          echo "migrate=$MIGRATE deploy-functions=$FUNCTIONS verify=$VERIFY frontend=$FRONTEND"
           if [ "$MIGRATE" != "success" ]; then
             echo "migrations did not succeed — that failure is reported by its own job"
             exit 0
           fi
           if [ "$FUNCTIONS" != "success" ]; then
             echo "::error title=No functions were deployed::migrate succeeded but deploy-functions ended '$FUNCTIONS'. A skipped job does not fail a workflow, so without this check the run would have reported success having deployed nothing."
+            exit 1
+          fi
+          if [ "$VERIFY" != "success" ]; then
+            echo "::error title=The deployed functions were not verified::deploy-functions succeeded but verify-functions ended '$VERIFY'. A bundle that uploaded is not a function that boots — that is the whole of review M4, so a skipped verification is not an acceptable way to reach a green deploy."
             exit 1
           fi
           if [ "$FRONTEND" != "success" ]; then

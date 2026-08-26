@@ -579,6 +579,15 @@ jobs:
       - name: Reset — shim + migrations 0001..NNNN + seed
         run: ./scripts/db-reset.sh
 
+      # The reset above connects as the cluster's bootstrap SUPERUSER and
+      # applies each file statement-at-a-time, so it answers a weaker question
+      # than a deploy asks (review M5). This re-applies all of them from zero
+      # as a non-superuser holding only an enumerated set of platform
+      # privileges, one transaction per file, and checks the filename/version
+      # contract `supabase db push` derives its ordering from. ~5s.
+      - name: Would `supabase db push` apply this?
+        run: ./scripts/db-push-check.sh
+
       # psql RAISE NOTICE output (including the PASS markers) goes to
       # stderr — merge streams before the tee/grep.
       - name: Smoke suite (credit engine + full spec-03 security matrix)

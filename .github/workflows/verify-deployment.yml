@@ -1,0 +1,52 @@
+name: Verify a deployment
+
+# The same read-only check the deploy workflows run, on demand.
+#
+# Review M4's second half: `docs/dev/production-cutover.md` §9 is a genuine
+# nine-step verification, and it covers the first cutover once. Nothing ever
+# runs it again — so "are the deployed functions still the ones this repository
+# ships, and do they still boot?" had no answer between deploys, which is
+# exactly when it is asked (after a dashboard change, after a secret rotation,
+# after an incident, before telling a customer everything is fine).
+#
+# Deliberately its own workflow rather than a re-run of a deploy: re-running a
+# deploy to find out whether it worked applies migrations and uploads bundles
+# again. This one only reads. See the read-only argument in the script header.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Which project to verify"
+        type: choice
+        options: [staging, production]
+        default: staging
+        required: true
+
+permissions: {}
+
+concurrency:
+  group: verify-deployment-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Probe ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+
+      - name: Probe every function this repository ships
+        env:
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          ./scripts/verify-deployment.sh 2>&1 | tee /tmp/verify.out
+          status=${PIPESTATUS[0]}
+          {
+            echo "## ${{ inputs.environment }} — deployed function check"
+            echo '```'
+            cat /tmp/verify.out
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
