@@ -205,7 +205,7 @@ jobs:
   verify-functions:
     name: Verify the deployed functions
     needs: [migrate, deploy-functions]
-    if: ${{ needs.migrate.result == 'success' && needs.deploy-functions.result == 'success' && needs.verify-functions.result == 'success' }}
+    if: ${{ !cancelled() && needs.migrate.result == 'success' && needs.deploy-functions.result == 'success' && needs.verify-functions.result == 'success' }}
     runs-on: ubuntu-latest
     environment: staging
     steps:
@@ -231,13 +231,25 @@ jobs:
   # Vercel's staging production-branch is `release/staging`, a ref only this job
   # advances. See the long note on the same job in deploy-production.yml for why
   # a release ref rather than a deploy hook or an ignored build step.
+  # `!cancelled()` is load-bearing, not decoration — the same trap as
+  # deploy-functions above, one level further out. An `if` with no status-check
+  # function has an implicit success() prepended, and a skipped job skips its
+  # dependents transitively: `sync-secrets` is opt-in and therefore skipped on
+  # every ordinary push, so `frontend` was skipped on every deploy even though
+  # both of ITS needs reported success. Observed on 7833cb8 — the first staging
+  # run since H16 added the job where migrate and deploy-functions both
+  # succeeded, i.e. the first that could expose it — as
+  # `migrate=success deploy-functions=success frontend=skipped`, which
+  # assert-deployed correctly turned red. Using any status function drops the
+  # implicit condition, which is why every ancestor's result is then asserted
+  # here by hand.
   frontend:
     name: Release the frontend
     needs: [migrate, deploy-functions, verify-functions]
     # deploy-functions DIRECTLY, not assert-deployed — that job exits
     # 0 when migrate failed, so keying off it would release a frontend onto a
     # database that never migrated.
-    if: ${{ needs.migrate.result == 'success' && needs.deploy-functions.result == 'success' }}
+    if: ${{ !cancelled() && needs.migrate.result == 'success' && needs.deploy-functions.result == 'success' }}
     runs-on: ubuntu-latest
     environment: staging
     permissions:
