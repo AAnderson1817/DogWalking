@@ -522,6 +522,18 @@ privilege (0004's table-level SELECT on `clients` had to be replaced with an
 explicit column list — a column REVOKE against a table-level grant is a no-op),
 and rotatable by re-issuing it.
 
+**GET is the primary method here, and it is the only function where that is
+true.** The link lives in an email and a person clicks it; RFC 8058 one-click
+then POSTs. `serveFunction` refuses any non-POST with 405 *before* it calls the
+handler, which is what protects the money paths from a charge that can be
+prefetched or linked — so widening is opt-in per function
+(`serveFunction(handler, { methods: ["GET", "POST"] })`) and visible at the call
+site. This function shipped without declaring it, so every recipient who
+clicked got a JSON 405: its tests drove the handler and never went through the
+gate. Any new function that answers something other than 405 to a GET must also
+be given a contract in `scripts/verify-deployment.sh`, which probes exactly
+this.
+
 Three deliberate non-features:
 
 - **It never says whether a token exists.** `fn_unsubscribe_by_token` answers

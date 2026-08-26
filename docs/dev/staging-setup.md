@@ -110,11 +110,17 @@ at once.
 ## 5. Deploy
 
 1. GitHub → Actions → "Deploy staging (Supabase)" → Run workflow →
-   tick **sync secrets** → run. This pushes all migrations (0001–0012),
-   deploys all nine edge functions, and sets the edge secrets.
-   - If `db push` fails on the storage policies ("must be owner of table
-     objects"), create just those policies via the SQL Editor (copy them
-     from `0004_security.sql` / `0008_portal.sql`) and re-run.
+   tick **sync secrets** → run. This pushes every migration, deploys every
+   edge function, sets the edge secrets, and then verifies the functions
+   actually boot.
+   - **If `db push` fails on the storage policies** ("must be owner of table
+     objects"), the deploy role is not a member of the role that owns
+     `storage.objects`. Do NOT hand-create the policies in the SQL Editor —
+     that was this page's advice for a year and it leaves the project in a
+     state no migration describes, so the next `db push` diverges again. Run
+     the query in `docs/dev/db-push-requirements.md` instead: it names which
+     privilege is missing, and 0020 needs the same thing for
+     `realtime.messages`, which the old advice did not cover at all.
 2. Post-deploy dashboard wiring (one-time):
    - **Cron**: nothing to do. Migration `0028` schedules it
      (`sanpo-nightly`, `0 3 * * *`, calling `fn_run_nightly_jobs()`).

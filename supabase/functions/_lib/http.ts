@@ -253,9 +253,28 @@ export function connectError(reason: "no_account" | "charges_disabled"): HttpErr
  * are not. Anything that is not an HttpError at all is a bug and is logged as
  * a 500 regardless.
  */
-export function serveFunction(handler: (req: Request) => Promise<Response>): void {
-  Deno.serve((req) => handleRequest(req, handler));
+export function serveFunction(
+  handler: (req: Request) => Promise<Response>,
+  options: ServeOptions = {},
+): void {
+  Deno.serve((req) => handleRequest(req, handler, options));
 }
+
+/**
+ * Which methods reach the handler. POST-only is the default and every money
+ * path relies on it, so widening is opt-in per function and visible at the
+ * call site.
+ *
+ * `unsubscribe` is the one function that needs GET, and needing it is not a
+ * preference: the link lives in an email, and a person clicking a link issues
+ * a GET. It went out declaring nothing, so `serveFunction` answered every
+ * click with 405 — the endpoint worked in its tests, which drove the handler,
+ * and failed for every actual recipient. Found while enumerating what each
+ * deployed function answers to a harmless probe (review M4).
+ */
+export type ServeOptions = { methods?: readonly string[] };
+
+const DEFAULT_METHODS = ["POST"] as const;
 
 /**
  * The whole of serveFunction's behaviour, outside `Deno.serve` so it can be
@@ -266,13 +285,15 @@ export function serveFunction(handler: (req: Request) => Promise<Response>): voi
 export async function handleRequest(
   req: Request,
   handler: (req: Request) => Promise<Response>,
+  options: ServeOptions = {},
 ): Promise<Response> {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
   const reqId = requestId(req);
-  if (req.method !== "POST") {
-    return jsonErr("method_not_allowed", "POST only", 405, reqId);
+  const allowed = options.methods ?? DEFAULT_METHODS;
+  if (!allowed.includes(req.method)) {
+    return jsonErr("method_not_allowed", `${allowed.join(", ")} only`, 405, reqId);
   }
   const fn = functionName(req.url);
   try {
