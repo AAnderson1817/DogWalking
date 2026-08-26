@@ -480,6 +480,35 @@ jobs:
         working-directory: app
         run: npx playwright test --config playwright.config.mjs e2e/tint-contrast.spec.ts
 
+      # Review M20. Two properties only a rendered page can answer: whether a
+      # day column gains anything from a wider screen (it gained NOTHING between
+      # 768 and 1440 — measured 86.84px at both), and whether a pet name stays
+      # inside its own day (it did not — "Bartholomew" painted 2.16px into
+      # Tuesday at 1440x900, 9px at 390x844).
+      - name: Calendar week geometry
+        working-directory: app
+        run: npx playwright test --config playwright.config.mjs e2e/calendar-week.spec.ts
+
+      # CI runs e2e specs by explicit filename above, so a spec file added
+      # without a step here runs NOWHERE while looking like coverage — this
+      # repository's single most-recorded failure mode (a typecheck over zero
+      # files, a `?raw` import resolving to empty, a test file matching no
+      # vitest project, a vault step that verified nothing).
+      - name: Every e2e spec is actually run by this workflow
+        working-directory: app
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+          workflow = pathlib.Path("../.github/workflows/ci.yml").read_text()
+          specs = sorted(p.name for p in pathlib.Path("e2e").glob("*.spec.ts"))
+          missing = [s for s in specs if f"e2e/{s}" not in workflow]
+          if missing:
+              for m in missing:
+                  print(f"::error file=app/e2e/{m}::no CI step runs this spec, so it never runs")
+              sys.exit(1)
+          print(f"PASS: all {len(specs)} e2e specs have a step ({', '.join(specs)})")
+          PY
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (node24)
         if: failure()
         with:

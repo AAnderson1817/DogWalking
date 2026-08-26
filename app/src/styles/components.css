@@ -1618,6 +1618,20 @@ a.today-emaki-visit__link:focus-visible {
 .calendar-walk__status {
   display: block;
 }
+/* A pet name wider than the column does not stop at the chip's border — it
+   paints over it and into the NEXT day. Measured with "11:30 AM Bartholomew":
+   6.16px past its own border and 2.16px into Tuesday at 1440x900, and 13px /
+   9px at 390x844. Roughly ten characters at 12px/700 in a 67px box, so
+   Bartholomew, Marshmallow, Wellington and Persephone are all ordinary dog
+   names that do it.
+
+   `.walk-card__route` already carries this (:915) and `.payment-row__pet`
+   carries ellipsis (:706) — the calendar chip is the one row type that got
+   neither. Wrapping rather than truncating, because spec 05 requires the pet
+   text to stay visible. `anywhere` rather than `break-word`, matching :915. */
+.calendar-walk__summary {
+  overflow-wrap: anywhere;
+}
 .calendar-walk__status {
   margin-top: 1px;
   font-size: 0.625rem;
@@ -2343,6 +2357,28 @@ body:has(.today-emaki-page) .bottom-nav {
   }
   body:has(.bottom-nav--rail) .page {
     margin-left: calc(88px + (100% - 88px - min(var(--page-max, 640px), 100% - 88px)) / 2);
+  }
+
+  /* Review M20. The 640px cap (spec 05) is a READING measure: right for prose,
+     a form and a list of rows, wrong for a grid whose columns ARE the
+     information. Measured, the week's seven days are 86.84px each at 768x1024
+     AND at 1440x900 — widening the browser from 768 to 1440 gains the grid
+     exactly zero pixels, because the constraint is the column, not the
+     viewport. Inside a day that leaves a 67px text box.
+
+     This moves `--page-max` rather than `max-width` because the rail centring
+     one rule above reads the same custom property; a second literal is how the
+     two get out of step, which is why the property exists at all.
+
+     `100% - 88px` is load-bearing, not decoration. With a bare `1120px` a
+     1024px viewport resolves max-width to the full 1024 while margin-left is
+     still 88, and the page overflows the document by exactly the rail width.
+
+     The media query is load-bearing too: `bottom-nav--rail` is on the element
+     at EVERY width — only this block makes it a rail — so outside the query the
+     centring calc would subtract 88px on a phone. */
+  .page--wide {
+    --page-max: min(1120px, 100% - 88px);
   }
 }
 

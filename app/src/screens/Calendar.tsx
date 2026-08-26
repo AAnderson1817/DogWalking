@@ -134,7 +134,13 @@ export default function Calendar() {
       .sort((a, b) => a.window_start.localeCompare(b.window_start));
 
   return (
-    <div className="page">
+    /* The week grid is the only production surface that is a grid rather than a
+       reading measure, so it is the only one that leaves the 640px cap (spec
+       05, review M20). Day view keeps 640 deliberately: `.walk-card` is
+       `minmax(92px, 0.72fr) minmax(0, 1.7fr)`, and stretching that to 1120
+       gives a 780px route line — a worse reading measure than the one shipping
+       now. The loading and error returns above keep plain `.page` too. */
+    <div className={view === "week" ? "page page--wide" : "page"}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "var(--s-2)" }}>
         <h1>Calendar</h1>
         <SegmentedTabs

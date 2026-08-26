@@ -29,6 +29,9 @@ import NotFound from "@/screens/NotFound";
 const DevKit = import.meta.env.DEV ? lazy(() => import("@/screens/DevKit")) : null;
 const InboxPreview = import.meta.env.DEV ? lazy(() => import("@/screens/InboxPreview")) : null;
 const TodayPreview = import.meta.env.DEV ? lazy(() => import("@/screens/TodayPreview")) : null;
+const CalendarWeekPreview = import.meta.env.DEV
+  ? lazy(() => import("@/screens/CalendarWeekPreview"))
+  : null;
 
 function operator(el: React.ReactNode) {
   return (
@@ -115,6 +118,17 @@ export default function App() {
           element={
             <Suspense fallback={null}>
               <TodayPreview />
+            </Suspense>
+          }
+        />
+      )}
+
+      {CalendarWeekPreview && (
+        <Route
+          path="/dev/calendar"
+          element={
+            <Suspense fallback={null}>
+              <CalendarWeekPreview />
             </Suspense>
           }
         />

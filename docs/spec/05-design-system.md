@@ -24,6 +24,21 @@ generic KPI-card grids, or game-style HUD elements.
   navigation is fixed at the bottom on touch layouts and becomes a left rail
   at `1024 px`. **Both personas render the same component and the same
   treatment; only the destination list differs** (review M18).
+- **The `640 px` cap is a reading measure, and one surface is permitted to
+  leave it** (review M20). `.page--wide` raises `--page-max` to
+  `min(1120px, 100% - 88px)` at `1024 px` and above, and the Calendar **week
+  view** is its only production user. The reason is specific: a reading measure
+  is right for prose, a form and a list of rows, and wrong for a grid whose
+  columns *are* the information. Measured, the week's seven days were `86.84 px`
+  each at both `768x1024` and `1440x900` — widening the browser gained the grid
+  exactly zero pixels, because the constraint was the cap and not the viewport,
+  leaving a 67px text box per day.
+  The `100% - 88px` term is not decoration: with a bare `1120px`, a `1024px`
+  viewport resolves `max-width` to the full `1024` while the rail centring still
+  subtracts the rail, and the document overflows by exactly `88px` — measured.
+  Day view keeps `640 px` deliberately; stretching `.walk-card` to `1120`
+  produces a `780px` route line, a worse reading measure than the one it
+  replaces. Any further `.page--wide` user needs a sentence here first.
 - Approved UI icons are the unchanged masters in `app/src/assets/icons`.
   Product state changes color, adjacent language, or placement—not geometry.
 
