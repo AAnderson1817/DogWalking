@@ -20,9 +20,10 @@ generic KPI-card grids, or game-style HUD elements.
 - Primary actions are Indigo with Cream text. One action dominates a surface.
 - Illustration is functional environmental context, never wallpaper. Schedule
   text, route state, safety information, and actions remain live HTML.
-- Layout is mobile-first and caps working surfaces at `640 px`. The operator
+- Layout is mobile-first and caps working surfaces at `640 px`. Primary
   navigation is fixed at the bottom on touch layouts and becomes a left rail
-  at `1024 px`.
+  at `1024 px`. **Both personas render the same component and the same
+  treatment; only the destination list differs** (review M18).
 - Approved UI icons are the unchanged masters in `app/src/assets/icons`.
   Product state changes color, adjacent language, or placement—not geometry.
 
@@ -33,10 +34,20 @@ PawTrail appearance.
 ## Sanpo production navigation override
 
 The following approved production rules supersede the older PawTrail/Biscuit
-operator-navigation examples without otherwise redesigning the component kit:
+navigation examples **for both personas** without otherwise redesigning the
+component kit. There is one navigation treatment: a rule that applies to one
+persona and not the other requires a stated reason here, and none currently
+does. `data-navigation-persona` survives in the DOM as a test hook and is not
+a styling hook — `route-reachability.test.ts` fails any stylesheet that selects
+on it.
 
 - Authoritative primary destinations: `Today / Calendar / Clients / Money`.
 - Route mapping: `/`, `/calendar`, `/roster`, `/billing`.
+- Client portal destinations: `Home / Book / Walks / Billing`, mapping to
+  `/portal`, `/portal/book`, `/portal/walks`, `/portal/billing`. These had
+  never been written down. Pet profiles are a secondary self-service utility
+  reached from Home at `/portal/pets` — like Inbox, Access Vault and Settings
+  on the operator side, not a bottom-navigation destination.
 - Inbox remains a visible secondary utility and is not a bottom-navigation
   destination.
 - Access Vault remains a secondary client-management utility.
@@ -47,9 +58,23 @@ operator-navigation examples without otherwise redesigning the component kit:
 - Never alter icon geometry for selected, unread, complete, warning, focus, or
   disabled state.
 - Primary navigation always retains visible text labels.
-- Operator navigation uses CT-1 roles: Indigo active, Yamabuki active marker,
-  Muted-toward-Indigo inactive, Cream canvas, and Asagi focus.
-- The Today field runs under the operator bar, which is transparent by
+- Navigation uses CT-1 roles in **both** personas: Indigo active, Yamabuki
+  active marker, Muted-toward-Indigo inactive, Cream canvas, and Asagi focus.
+  The active state is carried by the Indigo label, weight 900, `aria-current`
+  and the Yamabuki marker together; the marker is the fourth of four and is
+  measured but exempt from the 3:1 non-text floor for that reason.
+- CT-1 defines `--sanpo-color-navigation-active-marker` as
+  `--sanpo-color-status-current`, which is **Kaki** — and it has no consumer
+  anywhere in the app. The marker is Yamabuki, per the rule above, so the
+  semantically-named token and this spec disagree and anyone who reaches for
+  the obvious name silently gets the wrong colour. The rule is pinned by a
+  test rather than left to be rediscovered.
+- The client's navigation focus ring was drawn **outside the viewport** until
+  M18: the operator rule carried `outline-offset: -3px` and the client fell
+  through to the global `+3px` on an element at `bottom: 0`. Measured at
+  390x800 — ring outer edge at y=806 against an 800px viewport. One treatment
+  removes the class of defect, not just this instance.
+- The Today field runs under the bar, which is transparent by
   design, so its labels sit on painted artwork rather than flat Cream. Two
   things keep them legible and must stay together: a gradient scrim on the
   bar, and an inactive label deepened 30% toward Indigo. Plain Muted is only
@@ -57,6 +82,11 @@ operator-navigation examples without otherwise redesigning the component kit:
   artwork; deepened it holds 4.79:1 at worst, 5.66:1 median, while active
   Indigo reads 8.79:1. Active/inactive separation is carried by weight 900
   and the Yamabuki marker, not by colour alone.
+  The same transparent bar and gradient scrim render in the client portal,
+  where the surface beneath is flat Cream rather than artwork; the scrim
+  resolves toward Cream there and toward `--emaki-paper` on Today. That
+  resolution is keyed on the illustrated page, not on the persona — which is
+  why the treatment needs no persona fork at all.
 - `npm run verify:brand-assets` guards the approved asset hashes and runs
   automatically before production builds.
 

@@ -43,8 +43,11 @@ export function BottomNav({
     <nav
       id={NAV_ID}
       tabIndex={-1}
-      className={`bottom-nav${persona === "operator" ? " bottom-nav--rail" : ""}`}
+      className="bottom-nav bottom-nav--rail"
       aria-label="Primary"
+      /* Kept, but it is no longer a styling hook — `components.css` contains
+         zero `[data-navigation-persona]` selectors and a CI grep keeps it that
+         way. It stays as a test and analytics hook. Review M18. */
       data-navigation-persona={persona}
     >
       {items.map((item) => (
