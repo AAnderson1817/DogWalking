@@ -84,6 +84,11 @@ create extension if not exists pgcrypto;
 -- for the length of one check, on a throwaway database, and the connection has
 -- to work whether the local cluster is `trust` (a laptop) or password-only
 -- (CI's postgres service container).
+--
+-- It is duplicated in db-push-check.sh's DEPLOY_PASSWORD, because this file is
+-- plain SQL and cannot read a shell variable. Changing one without the other
+-- fails loudly and immediately — the first `psql` as sb_deploy is refused —
+-- rather than silently weakening anything, but change both.
 create role sb_deploy login nosuperuser createrole createdb password 'sanpo_local_check';
 
 -- BYPASSRLS is the requirement with the sharpest consequence, and it is not
