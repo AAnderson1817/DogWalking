@@ -761,7 +761,7 @@ input::file-selector-button {
 .money-value dt {
   color: var(--sanpo-color-text-secondary);
   font-size: var(--fs-12);
-  font-weight: 800;
+  font-weight: var(--fw-quiet);
 }
 .money-value dd {
   overflow-wrap: anywhere;
@@ -808,7 +808,7 @@ input::file-selector-button {
   overflow: hidden;
   color: var(--sanpo-color-text-secondary);
   font-size: var(--fs-12);
-  font-weight: 700;
+  font-weight: var(--fw-quiet);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -820,7 +820,7 @@ input::file-selector-button {
   gap: 0 var(--s-2);
   color: var(--sanpo-color-text-secondary);
   font-size: var(--fs-12);
-  font-weight: 700;
+  font-weight: var(--fw-quiet);
 }
 .payment-row__status { grid-area: status; justify-self: end; }
 
@@ -998,7 +998,7 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
   overflow: hidden;
   color: var(--sanpo-color-text-secondary);
   font-size: var(--fs-12);
-  font-weight: 700;
+  font-weight: var(--fw-quiet);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1009,7 +1009,7 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
   gap: var(--s-1);
   color: var(--sanpo-color-text-secondary);
   font-size: var(--fs-12);
-  font-weight: 700;
+  font-weight: var(--fw-quiet);
   line-height: 1.3;
 }
 .walk-card__route { overflow-wrap: anywhere; }
@@ -1679,7 +1679,7 @@ a.today-emaki-visit__link:focus-visible {
   color: var(--sanpo-color-text-secondary);
   font-family: var(--font-body);
   font-size: var(--fs-12);
-  font-weight: 700;
+  font-weight: var(--fw-quiet);
 }
 
 /* ── Active walk state ────────────────────────────────────────────────── */
@@ -1729,7 +1729,7 @@ a.today-emaki-visit__link:focus-visible {
   align-items: center;
   gap: var(--s-1);
   font-size: var(--fs-12);
-  font-weight: 800;
+  font-weight: var(--fw-quiet);
   color: var(--sanpo-color-text-secondary);
   background: var(--cream-page);
   border: var(--bw-xs) solid var(--line-soft);
@@ -1943,7 +1943,7 @@ body:has(.today-emaki-page) .bottom-nav {
 .notification-inbox__empty {
   color: var(--sanpo-color-text-secondary);
   font-size: var(--fs-14);
-  font-weight: 700;
+  font-weight: var(--fw-quiet);
 }
 .notification-inbox__summary { padding: var(--s-2) 0; }
 .notification-row {
@@ -2023,7 +2023,7 @@ body:has(.today-emaki-page) .bottom-nav {
   margin-top: var(--s-1);
   color: var(--sanpo-color-text-secondary);
   font-size: var(--fs-14);
-  font-weight: 700;
+  font-weight: var(--fw-quiet);
 }
 .inbox-search { padding: 0 var(--s-6) var(--s-4); }
 .inbox-search .field__control { min-height: 48px; }
@@ -2080,7 +2080,7 @@ body:has(.today-emaki-page) .bottom-nav {
 .conversation-row__time {
   color: var(--sanpo-color-text-secondary);
   font-size: var(--fs-12);
-  font-weight: 700;
+  font-weight: var(--fw-quiet);
 }
 .conversation-row__identity span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conversation-row__preview {
@@ -2251,7 +2251,7 @@ body:has(.today-emaki-page) .bottom-nav {
   overflow: hidden;
   color: var(--sanpo-color-text-secondary);
   font-size: var(--fs-14);
-  font-weight: 700;
+  font-weight: var(--fw-quiet);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2308,7 +2308,7 @@ body:has(.today-emaki-page) .bottom-nav {
 .pet-profile-row__identity { grid-area: identity; display: flex; flex-direction: column; min-width: 0; }
 .pet-profile-row__identity strong { font-weight: 900; }
 .pet-profile-row__identity span,
-.pet-profile-row__note { color: var(--sanpo-color-text-secondary); font-size: var(--fs-14); font-weight: 700; }
+.pet-profile-row__note { color: var(--sanpo-color-text-secondary); font-size: var(--fs-14); font-weight: var(--fw-quiet); }
 .pet-profile-row__flags { grid-area: flags; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--s-1); }
 .pet-profile-row__note { grid-area: note; }
 

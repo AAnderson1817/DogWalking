@@ -412,6 +412,43 @@ now approved masters on the same 24×24 / 1.75px round-cap grid as the six
 navigation icons, under the same hash guard, routed through `ApprovedIcon`.
 One icon system, not two.
 
+## The weight ramp (review M21)
+
+Nunito ships a live `wght` axis from 200 to 1000, and the `@font-face` rule
+declares the same range the file carries. Verified by rendering rather than by
+reading the declaration: at 40px the advance widths rise monotonically across
+400-900 (496 / 498 / 509 / 519 / 527 / 541) and every weight resolves to the
+same variable face with no fallback, so an intermediate weight is a real
+interpolated instance and not a synthesised one.
+
+The product used only the top of that axis. Of 84 weight declarations **none
+was below `body`'s 600**, and all fourteen rules pairing the de-emphasis colour
+with a weight sat at 700 or 800 — so a client name under a pet name, a route or
+a timestamp rendered *heavier* than the body text it is subordinate to.
+De-emphasis was carried by colour and size alone, and
+`--sanpo-color-text-secondary` is 4.73:1 on Cream: 0.23 above the floor, with
+nothing left to spend.
+
+- `--fw-quiet: 500` is the step that was missing; `--fw-body: 600` names the
+  value `body` already used.
+- **Text painted in a de-emphasis colour is never heavier than body.**
+  `type-ramp.test.ts` enforces it across CSS *and* inline styles — the one
+  offender outside the stylesheet was a 12px caption at weight 800, which a
+  CSS-only check would have missed.
+- 500 rather than 400: the affected rules drop 200 units, which is plainly
+  visible, and the finding is the *inversion* rather than absolute lightness.
+  400 thins 12px text at 4.73:1 to where an unchanged ratio flatters a stroke
+  that is no longer there.
+- **Controls are out of scope.** `.segmented-control__button` and
+  `.choice-button` carry active/inactive separation in their weight, which is
+  an affordance decision, not a text-hierarchy one. Changing them needs its own
+  argument; the test names them as exemptions rather than skipping them
+  silently.
+- The loud end stays literal. A token with no users is churn.
+- Today is untouched: it already has a quiet voice of its own — the illustrated
+  schedule spans 1000 down to 600 and holds colour constant — and that ramp is
+  spec 07's, not this one.
+
 The bordered box around the payment mark went with the glyph: it existed to
 give a text mark a consistent footprint across fonts that drew it at wildly
 different widths — a workaround for the defect, not a design element. The

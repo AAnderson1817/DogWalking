@@ -21,7 +21,7 @@ body {
   color: var(--text);
   font-family: var(--font-body);
   font-size: var(--fs-16);
-  font-weight: 600;
+  font-weight: var(--fw-body);   /* was the literal 600 — identical value */
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   min-height: 100dvh;

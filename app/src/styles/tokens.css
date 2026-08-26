@@ -52,6 +52,27 @@
   /* type */
   --font-body:'Nunito',system-ui,sans-serif;
   --font-display:var(--font-body);
+  /* Weight ramp (review M21). Nunito ships a LIVE 200-1000 `wght` axis — the
+     `@font-face` at global.css:9-12 declares the same range the file carries,
+     and it was measured rather than trusted: rendered at 40px, advance widths
+     rise monotonically 496 / 498 / 509 / 519 / 527 / 541 across 400-900 and
+     every weight resolves to the same variable face with no fallback. So 500
+     is a real interpolated instance, not a synthesised or snapped one.
+
+     Until now the product used only the top of that axis. Of 84 weight
+     declarations, NONE was below 600 while `body` is 600 — and all fourteen
+     rules pairing the de-emphasis colour with a weight sat at 700 or 800. A
+     client name under a pet name, a route, a timestamp: all rendered HEAVIER
+     than the body text they are subordinate to. That left de-emphasis to
+     colour and size alone, and `--sanpo-color-text-secondary` is 4.73:1 on
+     Cream — 0.23 above the floor, with nothing left to spend (H24).
+
+     500 rather than the review's 400. The affected rules drop 200 units, which
+     is plainly visible; the finding is the INVERSION, not absolute lightness.
+     400 would thin 12px text at 4.73:1 to where an unchanged ratio flatters a
+     stroke that is no longer there. The loud end stays literal: a token with no
+     users is churn, and M37 had just deleted 32 of those. */
+  --fw-quiet:500; --fw-body:600;
   --fs-12:.75rem; --fs-14:.875rem; --fs-16:1rem; --fs-20:1.25rem;
   --fs-24:1.5rem; --fs-32:2rem; --fs-44:2.75rem;
   /* space (4pt) */ --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-6:24px; --s-8:32px; --s-12:48px;
