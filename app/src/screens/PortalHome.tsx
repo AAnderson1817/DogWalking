@@ -115,6 +115,16 @@ export default function PortalHome() {
         <div>
           <span className="section-label">{operator?.business_name ?? "Your walker"}</span>
           <h1>Hi, {client.full_name.split(" ")[0]}</h1>
+          {/* `/portal/pets` is routed (App.tsx) and specified (06:63), and
+              NOTHING in the app linked to it — a 241-line screen reachable
+              only by typing the URL. Same class as `fn_book_walk`'s phantom
+              `active` column: shipped, spec'd, never exercised, invisible
+              because nothing covered the client half. Deliberately not a fifth
+              nav tab; the operator precedent that a screen does not add a tab
+              as a side effect of shipping is written down twice. */}
+          <Link className="secondary-link" to="/portal/pets">
+            Your pets
+          </Link>
         </div>
         <NotificationBell persona="client" />
       </div>
