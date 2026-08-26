@@ -28,11 +28,7 @@
      good faith got blue. The dead ones are deleted; `--orange-deep` survives
      because `--pine-600` used it, and both are gone now, so the one live
      consumer (`--brand`) names the role directly below. */
-  --butter:var(--sanpo-color-supporting-yamabuki-tint);
-  --sky-bright:var(--sanpo-color-supporting-asagi);
   --white:var(--sanpo-color-production-white);
-  --mist:var(--hairline);
-  --amber:var(--butter);
 
   /* semantic */
   --bg:var(--cream-page); --surface:var(--card); --text:var(--ink-900);
@@ -60,8 +56,7 @@
   --fs-24:1.5rem; --fs-32:2rem; --fs-44:2.75rem;
   /* space (4pt) */ --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-6:24px; --s-8:32px; --s-12:48px;
   /* radius */ --r-sm:8px; --r-md:10px; --r-lg:12px; --r-full:999px;
-  /* elevation */
-  --shadow-1:var(--pop-sm); --shadow-2:var(--pop);
+  /* elevation */ --shadow-2:var(--pop);
   /* motion */ --ease:cubic-bezier(.2,.8,.2,1); --t-fast:150ms; --t-med:250ms;
 }
 /* Walk Mode retains the same quiet day canvas. */

@@ -186,14 +186,24 @@ jobs:
           # script-src is the directive that actually stops an injected payload
           # executing; the rest is depth. 'unsafe-inline'/'unsafe-eval' there
           # would make the whole header decorative.
+          #
+          # style-src joined it once the premise for the exception turned out to
+          # be false. Spec 06 recorded that 'unsafe-inline' was "required by
+          # ~240 inline style={{…}} objects" and could not be tightened without
+          # refactoring them. React never writes a style ATTRIBUTE — it assigns
+          # through CSSOM (`node = node.style`), which CSP does not govern — so
+          # the exception bought nothing. Verified by serving the real build
+          # under the tightened header: 0 violations, 0 console errors, every
+          # inline style applied. Re-widening it needs the same evidence.
           for bad in ("'unsafe-inline'", "'unsafe-eval'"):
-              seg = next((d for d in csp.split(";") if d.strip().startswith("script-src")), "")
-              if bad in seg:
-                  print(f"::error file=app/vercel.json::script-src allows {bad}"); sys.exit(1)
+              for directive in ("script-src", "style-src"):
+                  seg = next((d for d in csp.split(";") if d.strip().startswith(directive)), "")
+                  if bad in seg:
+                      print(f"::error file=app/vercel.json::{directive} allows {bad}"); sys.exit(1)
           for directive in ("default-src", "script-src", "frame-ancestors", "object-src", "base-uri"):
               if directive not in csp:
                   print(f"::error file=app/vercel.json::CSP has no {directive}"); sys.exit(1)
-          print("PASS: security headers present, script-src has no unsafe-* escape")
+          print("PASS: security headers present, script-src and style-src have no unsafe-* escape")
           PY
 
       - name: Secret-leak grep (validate gate 7)

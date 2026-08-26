@@ -477,10 +477,29 @@ are depth. `Permissions-Policy` grants `geolocation=(self)` and denies the
 rest, because an injected iframe would otherwise inherit geolocation on a page
 whose entire purpose is precise location.
 
-Two deliberate loosenings, both stated rather than hidden:
+`style-src 'self'` carries no `'unsafe-inline'` either, and CI now checks both
+directives. **This paragraph previously said the opposite** — that
+`'unsafe-inline'` "is required by ~240 inline `style={{…}}` objects" and "cannot
+be tightened without that refactor". That was wrong, and wrong in the expensive
+direction: it recorded a permanent weakening of the header as the price of a
+refactor nobody was going to do.
 
-- **`style-src 'unsafe-inline'`** is required by ~240 inline `style={{…}}`
-  objects (review M38). It cannot be tightened without that refactor.
+React does not write a style **attribute**. It assigns through CSSOM —
+`node = node.style` then per property — and CSP governs attributes and
+stylesheets, not CSSOM writes. Verified rather than reasoned: the real built
+bundle was served under `style-src 'self'` with the rest of the header intact,
+and produced **0 violations and 0 console errors** with every inline style
+applied, including one resolving a `var()`. Independently, the bundle contains
+no `setAttribute("style")` and no `cssText`, and `dist/index.html` contains no
+`style=` and no `<style`.
+
+The honest limit: only the signed-out route can be loaded without a backend, so
+the authenticated screens were not rendered under the tightened header. The
+mechanism is screen-independent and the bundle-level checks cover all of it, but
+that is an inference and the render is not.
+
+One deliberate loosening remains, stated rather than hidden:
+
 - **`img-src … https:`** is broad because walk photos arrive as Supabase signed
   URLs on an origin unknown at build time. The residual is that an injected
   `<img>` could beacon to any host — verified: the foreign image was NOT

@@ -236,7 +236,7 @@ export default function Booking() {
           </div>
 
           {cost !== null && (
-            <Card style={{ background: needsOverage ? "var(--amber)" : "var(--mist)", boxShadow: "none" }}>
+            <Card className={`booking-cost${needsOverage ? " booking-cost--overage" : ""}`}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
                 <span style={{ fontWeight: 600 }}>Cost</span>
                 <span className="numeral" style={{ fontWeight: 700, fontSize: "var(--fs-20)" }}>

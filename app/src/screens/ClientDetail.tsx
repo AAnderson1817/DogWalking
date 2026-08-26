@@ -465,13 +465,13 @@ function PlanTab({
         ) : ledger.length === 0 ? (
           <StateField compact title="No credit activity yet" />
         ) : (
-          <table style={{ width: "100%", marginTop: "var(--s-2)", borderCollapse: "collapse", fontSize: "var(--fs-14)" }}>
+          <table className="ledger-table">
             <tbody>
               {ledger.map((entry) => {
                 const line = formatLedgerEntry(entry);
                 return (
-                  <tr key={entry.id} style={{ borderBottom: "1px solid var(--mist)" }}>
-                    <td style={{ padding: "var(--s-2) 0" }}>
+                  <tr key={entry.id}>
+                    <td>
                       <div style={{ fontWeight: 600 }}>{line.label}</div>
                       <div style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>
                         {dateLocal(line.createdAt)}{line.note ? ` · ${line.note}` : ""}

@@ -176,15 +176,7 @@ export default function Roster() {
               Send this link to your client — it signs them into their portal
               and links their account.
             </p>
-            <code
-              style={{
-                background: "var(--mist)",
-                borderRadius: "var(--r-sm)",
-                padding: "var(--s-3)",
-                fontSize: "var(--fs-12)",
-                wordBreak: "break-all",
-              }}
-            >
+            <code className="invite-link">
               {inviteUrl}
             </code>
             <Button
