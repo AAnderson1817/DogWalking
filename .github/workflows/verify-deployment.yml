@@ -51,7 +51,14 @@ jobs:
           {
             echo "## ${{ inputs.environment }} — deployed function check"
             echo '```'
-            cat /tmp/verify.out
+            # `::add-mask::<value>` is the one line in this script's output that
+            # CONTAINS the service key — registering a mask means printing the
+            # secret once, which the runner then consumes and redacts from its
+            # own log. A job summary is a different sink, and whether the same
+            # redaction reaches it is not something to find out by leaking a
+            # service_role key. The runner has already eaten the directive by
+            # the time anyone reads the log; drop it from the file too.
+            grep -v '^::add-mask::' /tmp/verify.out
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
