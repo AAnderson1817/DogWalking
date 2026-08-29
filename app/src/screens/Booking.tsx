@@ -27,7 +27,7 @@ import {
   type MyOperatorView,
   type WalkDetailed,
 } from "@/lib/api";
-import { effectiveWalkCost } from "@/lib/credits";
+import { availableCredits, committedCredits, effectiveWalkCost } from "@/lib/credits";
 import { money, walkTime } from "@/lib/format";
 import { todayLocal } from "@/lib/selectors";
 import type { Clients, Pets, Plans, Properties, ServiceTypes } from "@/lib/types";
@@ -90,7 +90,26 @@ export default function Booking() {
     [service, date],
   );
   const balance = client?.credit_balance ?? 0;
-  const needsOverage = cost !== null && cost > balance;
+  /**
+   * Review H12. This compared the walk's cost against the RAW balance, so a
+   * client with two credits could book three walks and see the overage
+   * confirmation on none of them — each is individually affordable at the
+   * moment it is booked, and billing happens at completion. The third walk
+   * then fired an off-session charge they had never been shown.
+   *
+   * Already-booked walks are a claim on the balance, so they are counted.
+   */
+  const committed = useMemo(
+    () =>
+      committedCredits(upcoming, (w) => {
+        const svc = services.find((x) => x.id === (w as { service_type_id?: string }).service_type_id);
+        const when = (w as { scheduled_date?: string }).scheduled_date;
+        return svc && when ? effectiveWalkCost(svc, when) : 0;
+      }),
+    [upcoming, services],
+  );
+  const available = availableCredits(balance, committed);
+  const needsOverage = cost !== null && cost > available;
   const overagePence = plan?.overage_rate_pence ?? null;
 
   async function submit(e: FormEvent) {
@@ -245,6 +264,13 @@ export default function Booking() {
               </div>
               <div style={{ fontSize: "var(--fs-14)", marginTop: "var(--s-1)" }}>
                 Your balance: <span className="numeral">{balance}</span>
+                {committed > 0 && (
+                  <>
+                    {" — "}
+                    <span className="numeral">{committed}</span> already booked,{" "}
+                    <span className="numeral">{available}</span> left
+                  </>
+                )}
               </div>
               {needsOverage && (
                 <div style={{ marginTop: "var(--s-2)" }}>

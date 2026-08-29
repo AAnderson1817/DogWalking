@@ -228,11 +228,16 @@ interface OverageOpts {
   notConnected?: boolean;
   /** Stripe rejects the request itself — retrying cannot fix it. */
   permanentFails?: boolean;
+  /** PaymentIntent status the charge returns (review H12: only `succeeded` announces). */
+  piStatus?: string;
+  /** Receipt URL on the PaymentIntent, if any. */
+  receiptUrl?: string | null;
 }
 
 function makeODeps(opts: OverageOpts = {}) {
   const calls: string[] = [];
   const updates: Array<Record<string, unknown>> = [];
+  const notes: Array<Record<string, unknown>> = [];
   let attemptKey = "";
   const NOW = 1_700_000_000_000;
   const deps: OverageDeps = {
@@ -282,7 +287,11 @@ function makeODeps(opts: OverageOpts = {}) {
         return Promise.reject({ type: "StripeInvalidRequestError", code: "resource_missing" });
       }
       if (opts.infraFails) return Promise.reject(new Error("stripe unreachable"));
-      return Promise.resolve({ id: "pi_2", status: "succeeded", receipt_url: null });
+      return Promise.resolve({
+        id: "pi_2",
+        status: opts.piStatus ?? "succeeded",
+        receipt_url: opts.receiptUrl ?? null,
+      });
     },
     insertPayment: (row) => {
       calls.push(`insertPayment:${row.status}`);
@@ -303,6 +312,10 @@ function makeODeps(opts: OverageOpts = {}) {
     },
     insertNotification: (row) => {
       calls.push(`notify:${row.client_id === null ? "operator" : "client"}`);
+      // The ROW is kept, not just the fact of it: H12 is about what the
+      // message says — the amount and that money moved — so a test that only
+      // counted notifications would pass against a blank one.
+      notes.push(row as Record<string, unknown>);
       return Promise.resolve();
     },
     isCardError: (err) => (err as { type?: string })?.type === "StripeCardError",
@@ -314,7 +327,7 @@ function makeODeps(opts: OverageOpts = {}) {
     },
     now: () => NOW,
   };
-  return { deps, calls, updates, attemptKey: () => attemptKey };
+  return { deps, calls, updates, notes, attemptKey: () => attemptKey };
 }
 
 Deno.test("existing succeeded overage payment short-circuits (no new charge)", async () => {
@@ -748,4 +761,71 @@ Deno.test("a malformed request is refused before it costs a slot", async () => {
     handleVault(OP, { action: "get", credential_id: "cred-1", purpose: "walk" }, deps)
   );
   assertFalse(calls.includes("allowAttempt"));
+});
+
+// ── H12: an off-session charge the client is actually told about ───────────
+//
+// `notifyFailure` shipped with no counterpart. A SUCCESSFUL charge sent
+// nothing, so the only message the client got was `walk_complete` — "Your walk
+// report card is ready" — with no amount and no mention that money had moved.
+
+function clientNote(notes: Array<Record<string, unknown>>, type: string) {
+  return notes.find((n) => n.type === type && n.client_id !== null);
+}
+
+Deno.test("H12: a successful overage charge tells the client, with the amount", async () => {
+  const { deps, notes } = makeODeps();
+  const result = await chargeOverageForWalk("walk-1", deps);
+  assertEquals(result.payment.status, "succeeded");
+  const note = clientNote(notes, "payment_taken");
+  assert(note, "a successful off-session charge must notify the client");
+  // The amount is the whole point — an announcement without it is not one.
+  assert(String(note.title).includes("$22.00"), `title lacked the amount: ${note.title}`);
+  assert(String(note.body).includes("$22.00"), `body lacked the amount: ${note.body}`);
+  assertEquals(note.walk_id, "walk-1");
+});
+
+Deno.test("H12: the receipt travels with the notification when Stripe gave one", async () => {
+  const { deps, notes } = makeODeps({ receiptUrl: "https://stripe.test/receipt/abc" });
+  await chargeOverageForWalk("walk-1", deps);
+  const note = clientNote(notes, "payment_taken")!;
+  assert(String(note.body).includes("https://stripe.test/receipt/abc"));
+});
+
+Deno.test("H12: no receipt line is invented when Stripe did not give one", async () => {
+  const { deps, notes } = makeODeps({ receiptUrl: null });
+  await chargeOverageForWalk("walk-1", deps);
+  const note = clientNote(notes, "payment_taken")!;
+  assertFalse(String(note.body).includes("Receipt:"));
+});
+
+/**
+ * A `pending` PaymentIntent has taken nothing yet. Announcing it would be
+ * contradicted by the decline notification minutes later, which is worse for
+ * the client than one message arriving when the money actually moves.
+ */
+Deno.test("H12: a pending charge announces nothing", async () => {
+  const { deps, notes } = makeODeps({ piStatus: "processing" });
+  const result = await chargeOverageForWalk("walk-1", deps);
+  assertEquals(result.payment.status, "pending");
+  assertEquals(clientNote(notes, "payment_taken"), undefined);
+});
+
+/** A declined charge must not report that money was taken. */
+Deno.test("H12: a declined charge announces no payment", async () => {
+  const { deps, notes } = makeODeps({ declines: true });
+  await chargeOverageForWalk("walk-1", deps);
+  assertEquals(clientNote(notes, "payment_taken"), undefined);
+  assert(clientNote(notes, "payment_failed"), "a decline is still the client's to fix");
+});
+
+/**
+ * A configuration fault is the operator's. The client must hear nothing at
+ * all — not a failure (it is not theirs to fix, review B6) and certainly not a
+ * payment_taken.
+ */
+Deno.test("H12: an unconfigured operator does not message the client at all", async () => {
+  const { deps, notes } = makeODeps({ noPlan: true });
+  await chargeOverageForWalk("walk-1", deps);
+  assertEquals(notes.filter((n) => n.client_id !== null).length, 0);
 });
