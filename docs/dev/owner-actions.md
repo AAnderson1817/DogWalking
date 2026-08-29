@@ -150,8 +150,23 @@ subprocessor is dropped from the list.
 CCPA/CPRA, against your state's requirements, or against what Stripe's live-mode
 review expects to see. Nothing in this repository can do that.
 
-Two specifics worth a professional eye: the notice says Sanpo processes data on
-the operator's instructions, which is a processor/controller split that should
+**What the terms deliberately do NOT contain**, because writing plausible
+versions of them would be the most dangerous thing this session could produce —
+they would *read* as protection and provide none:
+
+- no limitation of liability
+- no warranty disclaimer (the "provided as-is" line is plain English, not a
+  disclaimer in any enforceable form)
+- no indemnity
+- no arbitration clause
+- no governing-law provision
+
+If you want those, a lawyer writes them. Do not assume a page titled "Terms of
+service" is covering you for anything on that list.
+
+Two further specifics worth a professional eye: the notice says Sanpo processes
+data on the operator's instructions, which is a processor/controller split that
+should
 match whatever agreement you have with operators; and the terms disclaim any
 role in the walking arrangement itself, which is the position the product's
 architecture takes but not necessarily the one a court would.
