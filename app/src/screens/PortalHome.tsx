@@ -28,9 +28,11 @@ import { dateLocal } from "@/lib/format";
 import { todayLocal } from "@/lib/selectors";
 import type { Clients, Notifications, Plans } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
+import { useAuth } from "@/lib/auth-context";
 
 export default function PortalHome() {
   useDocumentTitle("Your walks");
+  const auth = useAuth();
   const navigate = useNavigate();
   const [client, setClient] = useState<Clients | null>(null);
   const [operator, setOperator] = useState<MyOperatorView | null>(null);
@@ -43,7 +45,7 @@ export default function PortalHome() {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const me = await getMyClient();
+    const me = await getMyClient(auth.session?.user.id);
     if (!me) throw new Error("We couldn't load your account. Please try again.");
     const [op, upcomingWalks, recentReports, ns, p, trail] = await Promise.all([
       getMyOperatorView(),
@@ -69,7 +71,7 @@ export default function PortalHome() {
     setNotifications(ns);
     setPlan(p);
     setAccessTrail(trail);
-  }, []);
+  }, [auth.session?.user.id]);
 
   useEffect(() => {
     setError(null);

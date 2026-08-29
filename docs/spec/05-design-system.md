@@ -459,6 +459,67 @@ else in this spec.
 the shipped font genuinely lacks; `…`, `—` and `–` are in Nunito, read better
 than their ASCII substitutes, and stay.
 
+## Functional motion (review L17)
+
+The product shipped with three transitions and three keyframes: no press state
+on any row, no transition on nav selection, and pressing END WALK — the single
+most consequential action an operator takes — produced no designed moment at
+all. The progress stroke simply rendered differently on the next paint.
+
+Four durations, and they are a scale rather than a palette:
+
+| Token | Value | For |
+| --- | --- | --- |
+| `--t-press` | 60 ms | A press acknowledging a finger. Anything past ~80 ms stops reading as response and starts reading as lag. |
+| `--t-fast` | 150 ms | Colour on hover, focus and selection. |
+| `--t-med` | 250 ms | A value changing on screen — the credit meter filling. |
+| `--t-slow` | 400 ms | Reserved for **one** thing: the Today progress advancing when a walk completes. |
+
+Two rules:
+
+1. **A surface that changes colour on interaction fades over `--t-fast`.**
+   Instant is not "fast", it is unattributable — the eye cannot tell a hover
+   from a repaint, so the feedback does not arrive as feedback.
+2. **A surface you can press acknowledges the press within `--t-press`.** On
+   touch this is the only response that exists before the next screen arrives,
+   and its absence is what makes a tap feel like it was missed. Card-shaped
+   controls scale (compositor-only, so it costs no layout pass on the longest
+   list in the product); full-bleed rows have no edge to compress against, so
+   they deepen their tint instead. A press state that paints a tint joins the
+   H24 escalation list like any other — the contrast test caught all three of
+   these on the commit that added them.
+
+END WALK's moment is the travelled stroke growing into the segment the
+finished walk occupied, with the "you are here" marker sliding with it. The
+stroke is drawn by **clipping** the full path, not by `stroke-dashoffset`, so
+what animates is the clip rectangle's `width` and `x` — CSS geometry
+properties, transitionable in current engines and verified tweening in
+Chromium (270px → 810.6px at 120 ms → 900px). An engine that does not
+transition them jumps the value, which is the pre-L17 behaviour, so this can
+only add.
+
+`prefers-reduced-motion: reduce` already collapses every duration here to
+0.01 ms globally. The **states stay** — only the tweening goes, so nothing
+becomes unattributable for somebody who asked for less motion.
+
+## Screens with no navigation are centred (review L16)
+
+`.page--centered` — 404, the error boundary, sign-in, password reset. These
+used to land top-left in a bare page with no mark on them, and error screens
+are disproportionately what people screenshot and send on.
+
+The modifier centres on both axes, drops the bottom-nav reserve (there is no
+nav on these routes, and reserving 72px for one leaves the content visibly
+high), and caps its child at 400px rather than the 640px reading measure —
+every one of these is a single short message or one form, and 640px of a
+two-line apology reads as a layout accident. The Sanpo mark appears at
+`.brand-logo--small`, sized so the page is recognisably Sanpo without the logo
+becoming the subject: the apology is the content.
+
+`ConfigError` is deliberately **not** one of these. It renders when the app's
+own module graph may be the broken thing, so it carries its own inline styles
+and imports no stylesheet at all.
+
 ## Accessibility contract
 
 These are product rules, not review notes: a change that breaks one of them is

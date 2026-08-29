@@ -52,6 +52,7 @@ type Tab = "pets" | "plan" | "walks" | "schedule" | "access";
 
 export default function ClientDetail() {
   useDocumentTitle("Client");
+  const auth = useAuth();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [client, setClient] = useState<Clients | null>(null);
@@ -66,7 +67,7 @@ export default function ClientDetail() {
   const reload = useCallback(async () => {
     if (!id) return;
     try {
-      const [c, op] = await Promise.all([getClient(id), getMyOperator()]);
+      const [c, op] = await Promise.all([getClient(id), getMyOperator(auth.session?.user.id)]);
       setClient(c);
       setOperator(op);
       setError(null);
@@ -81,7 +82,7 @@ export default function ClientDetail() {
       setMissing(isNotFound(e));
       setError(loadErrorMessage(e));
     }
-  }, [id]);
+  }, [id, auth.session?.user.id]);
 
   useEffect(() => {
     void reload();

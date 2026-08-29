@@ -16,6 +16,21 @@ const COMPONENTS = read("../src/styles/components.css");
 const VENDOR = read("../src/styles/vendor/sanpo-product-color-tokens-r1.css");
 
 /**
+ * Every stylesheet that paints tints, each with its own escalation rule and its
+ * own coverage check. `components.css` was the only one until review L21 moved
+ * the inbox prototype's ~200 lines into their own file — and a second stylesheet
+ * the checker does not read is exactly the hole this pair of tests exists to
+ * close, so the list is the input rather than a constant.
+ *
+ * `minPainters` is per-file for the same reason the vacuity guard exists at all:
+ * a floor of 20 would pass vacuously on any small stylesheet added later.
+ */
+const SHEETS = [
+  { name: "components.css", css: COMPONENTS, minPainters: 20 },
+  { name: "prototypes/inbox-field.css", css: read("../src/prototypes/inbox-field.css"), minPainters: 4 },
+];
+
+/**
  * Review H24: the palette's own text roles cannot pass AA on the palette's own
  * tint surfaces. `text-secondary` scores 3.71:1 on the Kaki tint against a
  * 4.5:1 floor, and the tint surfaces ARE the attention states — the walk card
@@ -246,10 +261,10 @@ function escalatingSelectors(css: string): Set<string> {
   );
 }
 
-describe("tint surfaces escalate their text roles", () => {
+describe.each(SHEETS)("tint surfaces escalate their text roles ($name)", ({ css, minPainters }) => {
   it("every rule that paints a tint is in the escalation list", () => {
-    const painters = tintPaintingSelectors(COMPONENTS);
-    const escalating = escalatingSelectors(COMPONENTS);
+    const painters = tintPaintingSelectors(css);
+    const escalating = escalatingSelectors(css);
     const missing = [...painters]
       .filter(([sel]) => !escalating.has(sel))
       .map(([sel, tint]) => `${sel} paints ${tint} but does not escalate its text roles`);
@@ -257,13 +272,13 @@ describe("tint surfaces escalate their text roles", () => {
   });
 
   it("the escalation list has no selectors that paint nothing", () => {
-    const painters = tintPaintingSelectors(COMPONENTS);
-    const stale = [...escalatingSelectors(COMPONENTS)].filter((s) => !painters.has(s));
+    const painters = tintPaintingSelectors(css);
+    const stale = [...escalatingSelectors(css)].filter((s) => !painters.has(s));
     expect(stale).toEqual([]);
   });
 
   /** Sanity check on the parser: if it finds nothing, both tests above pass vacuously. */
   it("the parser actually finds the tint surfaces", () => {
-    expect(tintPaintingSelectors(COMPONENTS).size).toBeGreaterThan(20);
+    expect(tintPaintingSelectors(css).size).toBeGreaterThanOrEqual(minPainters);
   });
 });

@@ -24,11 +24,12 @@ import WalkDetail from "@/screens/WalkDetail";
 import PortalBilling from "@/screens/PortalBilling";
 import PetProfiles from "@/screens/PetProfiles";
 import NotFound from "@/screens/NotFound";
+import ResetPassword from "@/screens/ResetPassword";
 
 // Dev-only component gallery; the statically-false DEV guard removes both
 // the route and the chunk from production builds (verified in build output).
 const DevKit = import.meta.env.DEV ? lazy(() => import("@/screens/DevKit")) : null;
-const InboxPreview = import.meta.env.DEV ? lazy(() => import("@/screens/InboxPreview")) : null;
+const InboxPreview = import.meta.env.DEV ? lazy(() => import("@/prototypes/InboxPreview")) : null;
 const TodayPreview = import.meta.env.DEV ? lazy(() => import("@/screens/TodayPreview")) : null;
 const CalendarWeekPreview = import.meta.env.DEV
   ? lazy(() => import("@/screens/CalendarWeekPreview"))
@@ -70,6 +71,10 @@ export default function App() {
       <Route path="/signin" element={publicRoute(<SignIn />)} />
       <Route path="/onboard" element={publicRoute(<Onboard />)} />
       <Route path="/claim/:token" element={publicRoute(<ClaimInvite />)} />
+      {/* Review L16. Public and NOT behind RequireRole: the recovery link
+          creates a session, but a role lookup that fails or is slow must not
+          stand between somebody and the password they are here to set. */}
+      <Route path="/reset-password" element={publicRoute(<ResetPassword />)} />
       {/* Review H6. Public: the people who most need the privacy notice are the
           ones who have NOT signed in — somebody who got an email they did not
           expect, or who is deciding whether to claim an invite at all. */}

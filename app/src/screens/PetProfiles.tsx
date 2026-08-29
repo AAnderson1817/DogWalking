@@ -24,9 +24,11 @@ import {
 import { compressImage } from "@/lib/image";
 import type { Clients, Pets, Properties } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
+import { useAuth } from "@/lib/auth-context";
 
 export default function PetProfiles() {
   useDocumentTitle("Your pets");
+  const auth = useAuth();
   const [client, setClient] = useState<Clients | null>(null);
   const [pets, setPets] = useState<Pets[]>([]);
   const [properties, setProperties] = useState<Properties[]>([]);
@@ -38,7 +40,7 @@ export default function PetProfiles() {
   const load = useCallback(async () => {
     setLoadError(null);
     try {
-      const me = await getMyClient();
+      const me = await getMyClient(auth.session?.user.id);
       if (!me) throw new Error("We couldn't load your account. Please try again.");
       const [ps, props] = await Promise.all([listPets(me.id), listProperties(me.id)]);
       setClient(me);
@@ -58,7 +60,7 @@ export default function PetProfiles() {
     } catch (error) {
       setLoadError(loadErrorMessage(error));
     }
-  }, []);
+  }, [auth.session?.user.id]);
 
   useEffect(() => {
     void load().finally(() => setLoading(false));

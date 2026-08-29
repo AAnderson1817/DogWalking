@@ -33,12 +33,14 @@ import {
 import type { Operators, Plans, ServiceTypes } from "@/lib/types";
 import { money } from "@/lib/format";
 import { useDocumentTitle } from "@/lib/use-document-title";
+import { useAuth } from "@/lib/auth-context";
 
 type Cycle = "weekly" | "monthly";
 type Rollover = "none" | "capped" | "unlimited";
 
 export default function Settings() {
   useDocumentTitle("Settings");
+  const auth = useAuth();
   const [operator, setOperator] = useState<Operators | null>(null);
   const [services, setServices] = useState<ServiceTypes[]>([]);
   const [plans, setPlans] = useState<Plans[]>([]);
@@ -49,7 +51,7 @@ export default function Settings() {
   const load = useCallback(async () => {
     try {
       const [op, st, pl] = await Promise.all([
-        getMyOperator(),
+        getMyOperator(auth.session?.user.id),
         listServiceTypes(),
         listPlans(),
       ]);
@@ -62,7 +64,7 @@ export default function Settings() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [auth.session?.user.id]);
 
   useEffect(() => {
     void load();

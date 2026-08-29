@@ -128,15 +128,32 @@ export function TodayIllustratedSchedule({
           {distanceLabel && <p className="today-emaki__distance">{distanceLabel}</p>}
         </div>
 
-        <div
-          className="today-emaki-progress"
-          role="img"
-          aria-label={`${completed} of ${visits.length} visits complete. ${current ? `${current.petName} is in progress.` : "No walk is currently active."}`}
-        >
-          <svg viewBox="0 0 1000 54" preserveAspectRatio="none" aria-hidden="true">
+        {/* Review L15. `role="img"` used to sit on this DIV, which also
+            contains the pace and next-visit copy below — and `img` is
+            children-presentational in ARIA, so conforming assistive technology
+            prunes its subtree. That silently deleted two of the three things
+            this screen exists to say, and the only two not repeated in the
+            visit list. Chromium happens not to prune them, which is exactly
+            why it survived: relying on one browser's leniency about a
+            spec-defined behaviour is not support.
+
+            The role belongs on the SVG, which genuinely IS an image and has no
+            text of its own. */}
+        <div className="today-emaki-progress">
+          <svg
+            viewBox="0 0 1000 54"
+            preserveAspectRatio="none"
+            role="img"
+            aria-label={`${completed} of ${visits.length} visits complete. ${current ? `${current.petName} is in progress.` : "No walk is currently active."}`}
+          >
             <defs>
-              <clipPath id={`${clipId}-complete`}><rect x="0" y="0" width={completeEnd * 10} height="54" /></clipPath>
-              <clipPath id={`${clipId}-current`}><rect x={completeEnd * 10} y="0" width={(currentEnd - completeEnd) * 10} height="54" /></clipPath>
+              {/* `today-emaki-progress__clip` carries the L17 transition. A
+                  class rather than a `clipPath rect` type selector: SVG type
+                  selectors are case-sensitive inside an HTML document, and a
+                  silently-non-matching selector is exactly the kind of thing
+                  that would leave this looking finished and doing nothing. */}
+              <clipPath id={`${clipId}-complete`}><rect className="today-emaki-progress__clip" x="0" y="0" width={completeEnd * 10} height="54" /></clipPath>
+              <clipPath id={`${clipId}-current`}><rect className="today-emaki-progress__clip" x={completeEnd * 10} y="0" width={(currentEnd - completeEnd) * 10} height="54" /></clipPath>
             </defs>
             <path className="today-emaki-progress__base" d="M3 29 C105 1 193 52 288 22 S478 5 584 28 S789 47 997 18" pathLength="100" />
             <path

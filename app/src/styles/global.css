@@ -65,6 +65,32 @@ a { color: inherit; }
   flex: 1;
 }
 
+/* Review L16. Screens with no navigation — 404, the error boundary, sign-in,
+   password reset, the config panel — used to land top-left in a bare page with
+   nothing above them. Error screens are disproportionately what people
+   screenshot and send, so this is the composition a stranger is most likely to
+   see first.
+
+   `place-items` rather than `margin: auto`: the child is a grid item, so it
+   centres on both axes without the child needing to know it is being centred.
+   The nav reserve is removed rather than overridden to 0 further down, because
+   there is no nav on any of these routes and reserving 72px for one leaves the
+   content visibly high. `min-height` keeps the page a full viewport even when
+   `#root` is not stretching it. */
+.page--centered {
+  display: grid;
+  place-items: center;
+  min-height: 100dvh;
+  padding-bottom: var(--s-4);
+}
+/* The centred child. Narrower than the 640px reading measure because every one
+   of these is a single short message or one form — 640px of a two-line
+   apology reads as a layout accident. */
+.page--centered > * {
+  width: 100%;
+  max-width: 400px;
+}
+
 /* ── type rules ───────────────────────────────────────────────────────── */
 h1, h2, h3, .display {
   font-family: var(--font-display);
@@ -90,11 +116,22 @@ h1 { font-size: var(--fs-24); }
 .walkmode .numeral { font-size: var(--fs-32); }
 
 /* Current/live state uses Kaki and retains an adjacent visible text label. */
-@keyframes pulse-live { 0%{box-shadow:0 0 0 0 rgb(184 72 40/.55)} 70%{box-shadow:0 0 0 12px rgb(184 72 40/0)} 100%{box-shadow:0 0 0 0 rgb(184 72 40/0)} }
+/* Review L18. `rgb(184 72 40)` IS `--sanpo-color-supporting-kaki`, i.e.
+   `--sanpo-color-status-current` — the marker that says a walk is in progress.
+   No contrast consequence today, but it is the same drift the project already
+   paid to fix once in components.css, and CLAUDE.md's no-raw-colour rule named
+   only that file. `color-mix` because a literal cannot carry an alpha of a
+   token; the `@supports` fallback is the same pattern a11y(emaki) needed when
+   the minifier collapsed two declarations and dropped the plain one. */
+@keyframes pulse-live {
+  0%   { box-shadow: 0 0 0 0    color-mix(in srgb, var(--sanpo-color-status-current) 55%, transparent); }
+  70%  { box-shadow: 0 0 0 12px color-mix(in srgb, var(--sanpo-color-status-current) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0    color-mix(in srgb, var(--sanpo-color-status-current) 0%, transparent); }
+}
 .pulse-live { width:10px;height:10px;border-radius:var(--r-full);background:var(--sanpo-color-status-current);border:2px solid var(--sanpo-color-brand-indigo);animation:pulse-live 2s infinite; }
 
 @media (prefers-reduced-motion: reduce) {
-  .pulse-live { animation: none; box-shadow: 0 0 0 3px rgb(184 72 40 / 0.3); }
+  .pulse-live { animation: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--sanpo-color-status-current) 30%, transparent); }
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;

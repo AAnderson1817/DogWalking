@@ -32,9 +32,11 @@ import { money, walkTime } from "@/lib/format";
 import { todayLocal } from "@/lib/selectors";
 import type { Clients, Pets, Plans, Properties, ServiceTypes } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
+import { useAuth } from "@/lib/auth-context";
 
 export default function Booking() {
   useDocumentTitle("Book a walk");
+  const auth = useAuth();
   const [client, setClient] = useState<Clients | null>(null);
   const [operator, setOperator] = useState<MyOperatorView | null>(null);
   const [plan, setPlan] = useState<Plans | null>(null);
@@ -57,7 +59,7 @@ export default function Booking() {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const me = await getMyClient();
+    const me = await getMyClient(auth.session?.user.id);
     if (!me) throw new Error("We couldn't load your account. Please try again.");
     const [op, sts, props, ps, walks, p] = await Promise.all([
       getMyOperatorView(),
@@ -77,7 +79,7 @@ export default function Booking() {
     setServiceId((prev) => prev || (sts.find((s) => s.is_default)?.id ?? sts[0]?.id ?? ""));
     setPropertyId((prev) => prev || (props[0]?.id ?? ""));
     setSelectedPets((prev) => (prev.length ? prev : ps.map((x) => x.id)));
-  }, []);
+  }, [auth.session?.user.id]);
 
   useEffect(() => {
     setLoadError(null);

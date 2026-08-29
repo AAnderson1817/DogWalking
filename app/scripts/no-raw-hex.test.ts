@@ -29,6 +29,10 @@ const STYLES = join(import.meta.dirname, "..", "src", "styles");
  * a new line.
  */
 const LITERAL_ALLOWED: Record<string, string> = {
+  "--scrim":
+    "the modal backdrop, a warm brown in no CT-1 role. Re-pointing it at a "
+    + "role would change the hue of every sheet in the product — a design "
+    + "decision, not a lint fix. Named so the literal has one home.",
   "--emaki-paper":
     "sampled from the approved Today master (mean of its bottom rows) so the "
     + "field can continue below the artwork without a seam. Not a brand colour "
@@ -53,6 +57,22 @@ function literalsIn(file: string): Array<{ line: number; hex: string; text: stri
       if (declared && declared in LITERAL_ALLOWED) continue;
       found.push({ line: i + 1, hex: m[0], text: text.trim().slice(0, 100) });
     }
+    /**
+     * Functional notation too (review L18). The hex pattern scanned
+     * `global.css` all along and still missed `rgb(184 72 40/.55)` — the Kaki
+     * that marks a walk in progress — because it is not a hex. A rule that
+     * only knows one spelling of the thing it forbids is the same shape as a
+     * grep defeated by a second space.
+     *
+     * A call containing `var(` is fine: that IS the token layer, e.g.
+     * `color-mix(in srgb, var(--x) 55%, transparent)`.
+     */
+    for (const m of text.matchAll(/\b(rgba?|hsla?)\(([^)]*)\)/g)) {
+      if (m[2].includes("var(")) continue;
+      const declared = /(--[a-zA-Z0-9-]+)\s*:\s*[^;]*$/.exec(text.slice(0, m.index))?.[1];
+      if (declared && declared in LITERAL_ALLOWED) continue;
+      found.push({ line: i + 1, hex: m[0], text: text.trim().slice(0, 100) });
+    }
   });
   return found;
 }
@@ -65,6 +85,8 @@ describe("no raw hex outside the vendor palette", () => {
     expect(files.length).toBeGreaterThan(1);
     expect(files.map((f) => f.split("/").pop())).toContain("components.css");
     expect(files.map((f) => f.split("/").pop())).toContain("tokens.css");
+    // L18 lived here and the guard scanned it — it just did not know rgb().
+    expect(files.map((f) => f.split("/").pop())).toContain("global.css");
   });
 
   it("has no colour literals", () => {

@@ -4,7 +4,7 @@
 // tapping a walk opens an action sheet (reschedule date/window, cancel,
 // no-show, one-off report access), which is the path that works everywhere.
 // Any empty slot can host a one-off walk.
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { usePointerFine } from "@/hooks/usePointerFine";
 import { Badge } from "@/components/Badge";
@@ -76,8 +76,23 @@ export default function Calendar() {
   const from = view === "day" ? anchor : weekStart(anchor);
   const to = view === "day" ? anchor : addDays(weekStart(anchor), 6);
 
+  /**
+   * Review L10. This is the only loader in the app whose deps change while it
+   * stays mounted — every other screen's change is a route change, which
+   * unmounts. Page back and forward quickly and a slow response for a week you
+   * have already left lands last and wins, blanking the week you are actually
+   * looking at. An empty week is the state that invites a double-booking.
+   *
+   * A monotonic id rather than an AbortController: the request is already in
+   * flight and its result is merely stale, not wrong, and PostgREST responses
+   * are cheap to discard. What matters is that a late arrival cannot write.
+   */
+  const requestId = useRef(0);
   const load = useCallback(async () => {
-    setWalks(await listWalksDetailed({ from, to }));
+    const mine = ++requestId.current;
+    const rows = await listWalksDetailed({ from, to });
+    if (mine !== requestId.current) return;
+    setWalks(rows);
   }, [from, to]);
 
   useEffect(() => {

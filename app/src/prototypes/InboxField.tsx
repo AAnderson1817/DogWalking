@@ -1,6 +1,21 @@
+/**
+ * PROTOTYPE — not wired to anything, and there is no `messages` table.
+ *
+ * A complete correspondence surface (thread list, search, unread counts, the
+ * mobile index/thread split, compose and send) built against models that do not
+ * exist in the database. It is reachable only from the DEV-gated `/dev/inbox`
+ * route. Review H33 is the decision about whether two-way messaging gets built;
+ * until it does, this lives here so nobody spends an afternoon tracing where
+ * messages come from. See `app/README.md`.
+ *
+ * Its stylesheet is imported below rather than sitting in `components.css`,
+ * because CSS is not tree-shaken and ~200 lines of it were shipping to every
+ * user (review L21).
+ */
 import { useMemo, useState, type FormEvent } from "react";
-import { Button } from "./Button";
-import { Input, Textarea } from "./fields";
+import { Button } from "@/components/Button";
+import { Input, Textarea } from "@/components/fields";
+import "./inbox-field.css";
 
 export interface InboxMessage {
   id: string;

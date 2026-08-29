@@ -77,7 +77,7 @@ function staticallyReachableChunks(bundle: Record<string, BundleChunk>): Set<str
 function stampServiceWorker(): Plugin {
   let shellChunks = new Set<string>();
   return {
-    name: "pawtrail-sw-version",
+    name: "sanpo-sw-version",
     apply: "build",
     generateBundle(_options, bundle) {
       // The module graph is only available here; `closeBundle` sees the
@@ -243,6 +243,12 @@ export default defineConfig({
             // nowhere — silently, which is the failure mode H18 was about.
             // The CI orphan check fails any test file no project claims.
             "src/lib/**/*.test.tsx",
+            // Prototypes (review L21) are components even though no route
+            // renders them, so their tests belong in the DOM project. Listed
+            // rather than left out: a prototype whose test runs nowhere is a
+            // prototype that has quietly stopped compiling.
+            "src/prototypes/**/*.test.ts",
+            "src/prototypes/**/*.test.tsx",
           ],
         },
       },

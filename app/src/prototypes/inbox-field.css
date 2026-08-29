@@ -1,0 +1,237 @@
+/*
+ * Prototype styles (review L21).
+ *
+ * CSS is not tree-shaken. These ~200 lines described a correspondence surface
+ * that no production route renders and a live banner that no screen mounts, and
+ * they rode along in every production stylesheet regardless — maintained by
+ * every token change, re-read by every reviewer, shipped to every user.
+ *
+ * They live here rather than in `components.css` and are imported from
+ * `InboxField.tsx` itself, so they ship exactly when the prototype does: today,
+ * only under the DEV-gated `/dev/inbox` route.
+ *
+ * The tint-escalation rule below is a twin of the one in `components.css`
+ * (review H24) rather than a second policy. `role-contrast.test.ts` reads this
+ * file too, so a prototype rule that paints a tint without escalating its text
+ * roles fails the same check a production one would.
+ */
+
+.conversation-row:hover,
+.conversation-row--selected,
+.inbox-thread__header,
+.message-field,
+.message-field--provider {
+  --sanpo-color-text-secondary: var(--sanpo-color-text-secondary-on-tint);
+  --sanpo-color-text-success: var(--sanpo-color-text-success-on-tint);
+  --sanpo-color-text-attention: var(--sanpo-color-text-attention-on-tint);
+  --sanpo-color-text-relationship: var(--sanpo-color-text-relationship-on-tint);
+  --sanpo-color-text-link: var(--sanpo-color-text-link-on-tint);
+}
+
+/* ── Inbox correspondence field ───────────────────────────────────────── */
+.inbox-preview-page {
+  min-height: 100dvh;
+  padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+  background: var(--sanpo-color-surface-canvas);
+}
+.inbox-field {
+  width: 100%;
+  min-height: calc(100dvh - 72px - env(safe-area-inset-bottom, 0px));
+  background: var(--sanpo-color-surface-canvas);
+  color: var(--sanpo-color-text-primary);
+}
+.inbox-index { display: flex; flex-direction: column; min-width: 0; }
+.inbox-thread { display: none; min-width: 0; }
+.inbox-field--thread .inbox-index { display: none; }
+.inbox-field--thread .inbox-thread { display: grid; }
+.inbox-index__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s-3);
+  min-height: 108px;
+  padding: var(--s-6);
+}
+.inbox-index__count {
+  margin-top: var(--s-1);
+  color: var(--sanpo-color-text-secondary);
+  font-size: var(--fs-14);
+  font-weight: var(--fw-quiet);
+}
+.inbox-search { padding: 0 var(--s-6) var(--s-4); }
+.conversation-index {
+  border-top: var(--bw-xs) solid var(--sanpo-color-border-subtle);
+}
+.conversation-index__empty {
+  padding: var(--s-6);
+  color: var(--sanpo-color-text-secondary);
+  font-size: var(--fs-14);
+}
+.conversation-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "identity time"
+    "preview unread";
+  width: 100%;
+  min-height: 98px;
+  padding: var(--s-3) var(--s-6);
+  gap: var(--s-1) var(--s-3);
+  border: 0;
+  border-bottom: var(--bw-xs) solid var(--sanpo-color-border-subtle);
+  background: transparent;
+  color: var(--sanpo-color-text-primary);
+  text-align: left;
+}
+.conversation-row:hover { background: var(--sanpo-color-surface-relationship); }
+.conversation-row--selected {
+  padding-left: calc(var(--s-6) - 3px);
+  border-left: 3px solid var(--sanpo-color-message-relationship-accent);
+  background: var(--sanpo-color-surface-relationship);
+}
+.conversation-row--selected .conversation-row__identity span,
+.conversation-row--selected .conversation-row__preview,
+.conversation-row--selected .conversation-row__time { color: var(--sanpo-color-text-primary); }
+.conversation-row__identity {
+  grid-area: identity;
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  gap: var(--s-2);
+}
+.conversation-row__identity strong {
+  overflow: hidden;
+  font-size: var(--fs-16);
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conversation-row__identity span,
+.conversation-row__preview,
+.conversation-row__time {
+  color: var(--sanpo-color-text-secondary);
+  font-size: var(--fs-12);
+  font-weight: var(--fw-quiet);
+}
+.conversation-row__identity span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-row__preview {
+  grid-area: preview;
+  overflow: hidden;
+  font-size: var(--fs-14);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conversation-row--unread .conversation-row__preview { color: var(--sanpo-color-text-primary); font-weight: 900; }
+.conversation-row__time { grid-area: time; justify-self: end; white-space: nowrap; }
+.conversation-row__unread-label {
+  grid-area: unread;
+  display: inline-flex;
+  align-items: center;
+  justify-self: end;
+  gap: var(--s-1);
+  color: var(--sanpo-color-text-primary);
+  font-size: var(--fs-12);
+  font-weight: 900;
+}
+.conversation-row__unread-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--r-full);
+  background: var(--sanpo-color-message-unread-accent);
+}
+.inbox-thread {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: calc(100dvh - 72px - env(safe-area-inset-bottom, 0px));
+}
+.inbox-thread__header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 84px;
+  padding: var(--s-3) var(--s-6);
+  gap: var(--s-2) var(--s-3);
+  border-bottom: var(--bw-xs) solid var(--sanpo-color-border-subtle);
+  background: var(--sanpo-color-surface-relationship);
+}
+.inbox-thread__back { grid-column: 1 / -1; justify-self: start; }
+.inbox-thread__identity { min-width: 0; }
+.inbox-thread__identity h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inbox-thread__identity p {
+  color: var(--sanpo-color-text-primary);
+  font-size: var(--fs-12);
+  font-weight: 700;
+}
+.inbox-thread__empty { margin: auto; color: var(--sanpo-color-text-secondary); }
+.message-history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  overflow-y: auto;
+  width: min(100%, 620px);
+  margin: 0 auto;
+  padding: var(--s-6);
+}
+.message-field {
+  width: fit-content;
+  max-width: min(88%, 520px);
+  padding: var(--s-3) var(--s-4);
+  border-left: 3px solid var(--sanpo-color-message-relationship-accent);
+  background: var(--sanpo-color-surface-relationship);
+}
+.message-field--provider {
+  align-self: flex-end;
+  border-left: 0;
+  border-right: 3px solid var(--sanpo-color-status-upcoming);
+  background: var(--sanpo-color-surface-information);
+}
+.message-field__meta {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-3);
+  margin-bottom: var(--s-1);
+  color: var(--sanpo-color-text-primary);
+  font-size: var(--fs-12);
+}
+.message-field p { overflow-wrap: anywhere; }
+.message-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  min-height: 72px;
+  padding: var(--s-3) var(--s-6);
+  gap: var(--s-3);
+  border-top: var(--bw-xs) solid var(--sanpo-color-border-subtle);
+  background: var(--sanpo-color-surface-canvas);
+}
+
+@media (min-width: 720px) {
+  .inbox-field {
+    display: grid;
+    grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  }
+  .inbox-field .inbox-index { display: flex; border-right: var(--bw-xs) solid var(--sanpo-color-border-subtle); }
+  .inbox-field .inbox-thread { display: grid; }
+  .inbox-thread__back { display: none; }
+}
+
+@media (min-width: 1024px) {
+  .inbox-preview-page { margin-left: 88px; padding-bottom: 0; }
+  .inbox-field {
+    grid-template-columns: 400px minmax(0, 1fr);
+    max-width: 1440px;
+    min-height: 100dvh;
+    margin: 0 auto;
+  }
+  .inbox-field .inbox-thread { min-height: 100dvh; }
+  .conversation-row { min-height: 104px; }
+  .message-history { min-width: min(420px, 100%); }
+}
+
+/* Prototype containers scoping production primitives. These are prototype
+   rules — `.btn` and `.field__control` are only re-sized inside an inbox — so
+   they travel with the prototype rather than sitting in `components.css`
+   describing a container that is not there. */
+.inbox-index__header .btn { flex-shrink: 0; white-space: nowrap; }
+.inbox-search .field__control { min-height: 48px; }
+.message-composer .field__control { min-height: 48px; resize: none; }
