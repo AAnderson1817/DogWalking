@@ -608,6 +608,96 @@ export async function previewInvite(
   return data;
 }
 
+// ── data export and erasure (review H5) ────────────────────────────────────
+
+/** The whole of a client's record as one JSON document, for portability. */
+export async function exportClientData(clientId: string): Promise<unknown> {
+  const { data, error } = await supabase.rpc("fn_export_client_data", { p_client: clientId });
+  if (error) throw new Error(error.message);
+  return data;
+}
+
+export interface PurgeResult {
+  /** Objects the browser removed from storage. */
+  photosDeleted: number;
+  /** Objects storage refused to delete. Non-empty means the purge is INCOMPLETE. */
+  failedPaths: string[];
+}
+
+/**
+ * Erase a client's personal data.
+ *
+ * Two phases, and the order is the whole design. SQL cannot delete an object
+ * from a Supabase bucket — dropping the `storage.objects` row removes the
+ * metadata and leaves the file — so a SQL-only purge would destroy the POINTER
+ * to a photo of somebody's house and leave the photo.
+ *
+ * So `fn_purge_client` destroys everything it can and RETURNS the storage
+ * paths, keeping the rows that name them. This function deletes the objects
+ * (the operator already holds a storage delete policy scoped to their own
+ * folder, 0004), and only then calls `fn_purge_client_photos` to drop the rows.
+ *
+ * The rows are the work queue — the pattern the vault rewrap settled on. If
+ * this dies between the phases, re-running returns the same paths. A file left
+ * in the bucket with nothing in the database naming it is structurally
+ * impossible, because the row outlives the object by construction.
+ *
+ * A path that storage refuses is REPORTED rather than swallowed, and the rows
+ * are still dropped only for what actually went. Reporting "deleted" over a
+ * file that is still there is the one outcome that would make this worse than
+ * doing nothing.
+ */
+export async function purgeClient(clientId: string): Promise<PurgeResult> {
+  const { data, error } = await supabase.rpc("fn_purge_client", { p_client: clientId });
+  if (error) throw new Error(error.message);
+  const paths = ((data ?? []) as Array<{ storage_path: string }>)
+    .map((r) => r.storage_path)
+    .filter((p): p is string => typeof p === "string" && p.length > 0);
+
+  const failedPaths: string[] = [];
+  let photosDeleted = 0;
+
+  // Split by bucket: walk photos and pet photos live in different ones, and
+  // `remove` is per-bucket.
+  for (const bucket of ["walk-photos", "pet-photos"] as const) {
+    const mine = paths.filter((p) => bucketOf(p) === bucket);
+    if (mine.length === 0) continue;
+    const { data: removed, error: rmError } = await supabase.storage
+      .from(bucket)
+      .remove(mine.map(stripBucket));
+    if (rmError) {
+      failedPaths.push(...mine);
+      continue;
+    }
+    photosDeleted += removed?.length ?? 0;
+    const removedSet = new Set((removed ?? []).map((o) => o.name));
+    failedPaths.push(...mine.filter((p) => !removedSet.has(stripBucket(p))));
+  }
+
+  if (failedPaths.length === 0) {
+    await supabase.rpc("fn_purge_client_photos", { p_client: clientId });
+  }
+  return { photosDeleted, failedPaths };
+}
+
+/**
+ * Stored paths may or may not carry the bucket as a first segment depending on
+ * where they were written. Both shapes are handled rather than assumed, because
+ * guessing wrong here means silently failing to delete a photo while reporting
+ * success.
+ */
+function bucketOf(path: string): "walk-photos" | "pet-photos" {
+  if (path.startsWith("pet-photos/")) return "pet-photos";
+  if (path.startsWith("walk-photos/")) return "walk-photos";
+  // Pet photos are written as `{operator}/pet/...`; walk photos as
+  // `{operator}/{walk}/...`.
+  return path.split("/")[1] === "pet" ? "pet-photos" : "walk-photos";
+}
+
+function stripBucket(path: string): string {
+  return path.replace(/^(walk-photos|pet-photos)\//, "");
+}
+
 // ── edge function invocations ──────────────────────────────────────────────
 interface Envelope<T> {
   ok: boolean;

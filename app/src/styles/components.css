@@ -280,6 +280,37 @@ button.walk-card:hover,
   gap: var(--s-2);
 }
 
+/* Review H5. Shares the invite panel's shape; the destructive action is a
+   sheet with a typed confirmation rather than a red button on the page. */
+.client-data-panel {
+  margin-top: var(--s-4);
+  padding: var(--s-4);
+  background: var(--sanpo-color-surface-raised);
+  border: var(--bw) solid var(--sanpo-color-border-subtle);
+  border-radius: var(--r-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.client-data-panel__detail {
+  margin: 0;
+  color: var(--sanpo-color-text-secondary);
+  font-size: var(--fs-14);
+}
+
+.client-data-panel__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.settings-hint {
+  margin: 0;
+  color: var(--sanpo-color-text-secondary);
+  font-size: var(--fs-12);
+}
+
 .booking-cost { background: var(--sanpo-color-surface-canvas); box-shadow: none; }
 
 /* The overage branch changes colour, and deliberately. It was `--amber`, which

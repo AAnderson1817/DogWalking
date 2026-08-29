@@ -68,6 +68,7 @@ export type Database = {
           unsubscribe_token: string;
           invite_expires_at: string | null;
           invite_revoked_at: string | null;
+          purged_at: string | null;
         };
         Insert: {
           id?: string;
@@ -90,6 +91,7 @@ export type Database = {
           unsubscribe_token?: string;
           invite_expires_at?: string | null;
           invite_revoked_at?: string | null;
+          purged_at?: string | null;
         };
         Update: {
           id?: string;
@@ -112,6 +114,7 @@ export type Database = {
           unsubscribe_token?: string;
           invite_expires_at?: string | null;
           invite_revoked_at?: string | null;
+          purged_at?: string | null;
         };
         Relationships: [];
       };
@@ -356,6 +359,7 @@ export type Database = {
           stripe_payouts_enabled: boolean;
           stripe_details_submitted: boolean;
           stripe_account_connected_at: string | null;
+          gps_retention_days: number;
         };
         Insert: {
           id: string;
@@ -374,6 +378,7 @@ export type Database = {
           stripe_payouts_enabled?: boolean;
           stripe_details_submitted?: boolean;
           stripe_account_connected_at?: string | null;
+          gps_retention_days?: number;
         };
         Update: {
           id?: string;
@@ -392,6 +397,7 @@ export type Database = {
           stripe_payouts_enabled?: boolean;
           stripe_details_submitted?: boolean;
           stripe_account_connected_at?: string | null;
+          gps_retention_days?: number;
         };
         Relationships: [];
       };
@@ -1168,6 +1174,12 @@ export type Database = {
         };
         Returns: number;
       };
+      fn_export_client_data: {
+        Args: {
+          p_client: string;
+        };
+        Returns: Json;
+      };
       fn_grant_credits: {
         Args: {
           p_client: string;
@@ -1266,6 +1278,18 @@ export type Database = {
         };
         Returns: Array<{ full_name: string; business_name: string; already_claimed: boolean }>;
       };
+      fn_purge_client: {
+        Args: {
+          p_client: string;
+        };
+        Returns: Array<{ storage_path: string }>;
+      };
+      fn_purge_client_photos: {
+        Args: {
+          p_client: string;
+        };
+        Returns: number;
+      };
       fn_read_credential: {
         Args: {
           p_credential: string;
@@ -1360,6 +1384,10 @@ export type Database = {
         Args: {
           p_hours: number;
         };
+        Returns: number;
+      };
+      fn_sweep_gps_retention: {
+        Args: Record<string, never>;
         Returns: number;
       };
       fn_touch_updated_at: {

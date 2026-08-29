@@ -122,6 +122,10 @@ function BusinessSection({
   const [displayName, setDisplayName] = useState(operator.display_name);
   const [phone, setPhone] = useState(operator.phone ?? "");
   const [threshold, setThreshold] = useState(String(operator.low_credit_threshold));
+  // Review H5. How long a walk's GPS trace is kept. It is a business decision,
+  // so it is a setting rather than a constant in a migration — a constant
+  // would make the answer ours.
+  const [retention, setRetention] = useState(String(operator.gps_retention_days));
   const [busy, setBusy] = useState(false);
 
   async function save() {
@@ -132,12 +136,18 @@ function BusinessSection({
         onError("Low-credit warning must be a whole number of credits, 0 or more.");
         return;
       }
+      const days = Number(retention);
+      if (!Number.isInteger(days) || days < 0 || days > 3650) {
+        onError("Route history must be a whole number of days between 0 and 3650.");
+        return;
+      }
       onSaved(
         await updateOperator(operator.id, {
           business_name: businessName.trim(),
           display_name: displayName.trim(),
           phone: phone.trim() || null,
           low_credit_threshold: n,
+          gps_retention_days: days,
         }),
       );
     } catch (e) {
@@ -173,6 +183,20 @@ function BusinessSection({
           onChange={(e) => setThreshold(e.target.value)}
           inputMode="numeric"
         />
+        <Input
+          label="Keep route history for (days)"
+          value={retention}
+          onChange={(e) => setRetention(e.target.value)}
+          inputMode="numeric"
+          aria-describedby="retention-hint"
+        />
+      </div>
+      <p id="retention-hint" className="settings-hint">
+        A walk&rsquo;s GPS trace is deleted this many days after the walk. 0 keeps
+        them indefinitely. The walk itself, and its billing record, are kept
+        either way.
+      </p>
+      <div className="settings-grid">
       </div>
       <Button onClick={() => void save()} disabled={busy}>
         {busy ? <Spinner /> : "Save business details"}

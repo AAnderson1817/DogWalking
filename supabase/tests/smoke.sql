@@ -3565,6 +3565,260 @@ begin
   raise notice 'invite expiry, revocation, binding, reissue and log (0039): OK';
 end $$;
 
+-- ═══ 0040: a client can be exported, then destroyed — ledger intact ═══════
+do $$
+declare
+  v_op    uuid := '99999999-0000-4000-a000-000000000001';
+  v_cl    uuid := '99999999-0000-4000-c000-0000000000d1';
+  v_prop  uuid := '99999999-0000-4000-b000-0000000000d1';
+  v_pet   uuid := '99999999-0000-4000-d000-0000000000d1';
+  v_walk  uuid := '99999999-0000-4000-f000-0000000000d1';
+  v_cred  uuid := '99999999-0000-4000-e000-0000000000d1';
+  v_svc   uuid;
+  v_ledger_before int;
+  v_ledger_after  int;
+  v_paths int;
+  v_export jsonb;
+begin
+  reset session authorization;
+  select id into v_svc from service_types where operator_id = v_op limit 1;
+
+  insert into clients (id, operator_id, full_name, email, phone, notes, status, auth_user_id)
+  values (v_cl, v_op, 'Purge Me', 'purge@pawtrail.dev', '+1 555 0100',
+          'gate sticks in the rain', 'active', null);
+  insert into properties (id, operator_id, client_id, label, address_line1, city, postcode,
+                          access_notes_public, lat, lng)
+  values (v_prop, v_op, v_cl, 'Home', '14 Elm Street', 'Chicago', '60601',
+          'side gate, latch is stiff', 41.88, -87.63);
+  insert into pets (id, operator_id, client_id, name, medical_notes, medication_notes, photo_path)
+  values (v_pet, v_op, v_cl, 'Rex', 'epileptic', 'phenobarbital 2x daily',
+          v_op || '/pet/rex.jpg');
+  insert into walks (id, operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status, notes, origin_date)
+  values (v_walk, v_op, v_cl, v_prop, v_svc, current_date - 400,
+          '09:00', '10:00', 'completed',
+          'left the back door unlocked by mistake', current_date - 400);
+  insert into walk_pets (walk_id, pet_id, operator_id) values (v_walk, v_pet, v_op);
+  insert into walk_gps_points (walk_id, operator_id, lat, lng, recorded_at)
+  values (v_walk, v_op, 41.88, -87.63, now() - interval '400 days');
+  insert into walk_photos (walk_id, operator_id, storage_path)
+  values (v_walk, v_op, v_op || '/' || v_walk || '/1.jpg');
+  -- With its audit row, the way fn_write_credential creates one. Without this
+  -- the fixture is a credential no product path could have produced, and the
+  -- purge's hardest constraint — credential_access_log is immutable and
+  -- RESTRICTs on credential_id — is never exercised. The first version of
+  -- this block inserted the credential alone and the purge passed while
+  -- raising for every real client.
+  insert into access_credentials (id, operator_id, property_id, entry_method, label, ciphertext)
+  values (v_cred, v_op, v_prop, 'door_code', 'Front door', repeat('\001', 40)::bytea);
+  insert into credential_access_log (operator_id, credential_id, accessed_by, purpose, action)
+  values (v_op, v_cred, v_op, 'created', 'create');
+  -- money that must survive
+  perform fn_grant_credits(v_cl, 3, 'purge fixture');
+
+  select count(*) into v_ledger_before from credit_ledger where client_id = v_cl;
+  if v_ledger_before = 0 then
+    raise exception 'FAIL: fixture wrote no ledger rows, so survival proves nothing';
+  end if;
+
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  set local session authorization authenticated;
+
+  -- ── export names the things a person would ask for ────────────────────
+  v_export := fn_export_client_data(v_cl);
+  if v_export #>> '{client,full_name}' <> 'Purge Me' then
+    raise exception 'FAIL: export did not carry the client';
+  end if;
+  if not (v_export::text like '%14 Elm Street%') then
+    raise exception 'FAIL: export omitted the address';
+  end if;
+  if not (v_export::text like '%phenobarbital%') then
+    raise exception 'FAIL: export omitted the medication notes';
+  end if;
+  if v_export::text like '%\\x00%' then
+    raise exception 'FAIL: export leaked vault ciphertext';
+  end if;
+
+  -- a foreign operator cannot export it
+  reset session authorization;
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000000002","role":"authenticated"}', true);
+  set local session authorization authenticated;
+  begin
+    perform fn_export_client_data(v_cl);
+    raise exception 'FAIL: a foreign operator exported another tenant''s client';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%no such client%' then
+      raise exception 'FAIL: foreign export refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  begin
+    perform fn_purge_client(v_cl);
+    raise exception 'FAIL: a foreign operator purged another tenant''s client';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%no such client%' then
+      raise exception 'FAIL: foreign purge refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  reset session authorization;
+
+  -- ── purge ─────────────────────────────────────────────────────────────
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  set local session authorization authenticated;
+
+  select count(*) into v_paths from fn_purge_client(v_cl);
+  if v_paths <> 2 then
+    raise exception 'FAIL: expected 2 storage paths to delete, got %', v_paths;
+  end if;
+  perform fn_purge_client_photos(v_cl);
+  reset session authorization;
+
+  -- ── the sensitive things are gone ─────────────────────────────────────
+  if exists (select 1 from walk_gps_points where walk_id = v_walk) then
+    raise exception 'FAIL: the GPS trace survived the purge';
+  end if;
+  -- The secret is destroyed; the row and its audit trail are not, because
+  -- credential_access_log is immutable and RESTRICTs on credential_id — and
+  -- because letting a purge erase the trail would hand the audited party a way
+  -- to erase their own reads.
+  if exists (
+    select 1 from access_credentials ac join properties p on p.id = ac.property_id
+     where p.client_id = v_cl
+       and (ac.ciphertext <> repeat('\000', 37)::bytea
+            or ac.label is not null
+            or ac.revoked_at is null)
+  ) then
+    raise exception 'FAIL: the door code survived the purge';
+  end if;
+  if (select key_id from access_credentials where id = v_cred) is not null then
+    raise exception 'FAIL: the redacted credential still reads as a live blob';
+  end if;
+  if not exists (select 1 from credential_access_log where credential_id = v_cred) then
+    raise exception 'FAIL: the purge erased the credential audit trail';
+  end if;
+  if exists (select 1 from pets where client_id = v_cl) then
+    raise exception 'FAIL: the medical notes survived the purge';
+  end if;
+  if exists (select 1 from walk_photos where walk_id = v_walk) then
+    raise exception 'FAIL: the photo rows survived the purge';
+  end if;
+  if (select address_line1 from properties where id = v_prop) is not null then
+    raise exception 'FAIL: the address survived the purge';
+  end if;
+  if (select notes from walks where id = v_walk) is not null then
+    raise exception 'FAIL: the walk notes survived the purge';
+  end if;
+  if (select full_name from clients where id = v_cl) <> 'Deleted client' then
+    raise exception 'FAIL: the client was not tombstoned';
+  end if;
+  if (select email from clients where id = v_cl) is not null then
+    raise exception 'FAIL: the email survived the purge';
+  end if;
+  if (select purged_at from clients where id = v_cl) is null then
+    raise exception 'FAIL: the purge left no marker';
+  end if;
+
+  -- ── and the money did not move ────────────────────────────────────────
+  select count(*) into v_ledger_after from credit_ledger where client_id = v_cl;
+  if v_ledger_after <> v_ledger_before then
+    raise exception 'FAIL: the purge destroyed % ledger rows',
+      v_ledger_before - v_ledger_after;
+  end if;
+  if not exists (select 1 from walks where id = v_walk) then
+    raise exception 'FAIL: the purge deleted a walk the ledger references';
+  end if;
+
+  -- ── idempotent: running it again is a no-op, not an error ─────────────
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  set local session authorization authenticated;
+  select count(*) into v_paths from fn_purge_client(v_cl);
+  if v_paths <> 0 then
+    raise exception 'FAIL: a second purge found % paths to delete', v_paths;
+  end if;
+  reset session authorization;
+
+  raise notice 'client export, purge and ledger survival (0040): OK';
+end $$;
+
+-- ═══ 0040: the retention sweep drops old traces and nothing else ══════════
+do $$
+declare
+  v_op   uuid := '99999999-0000-4000-a000-000000000001';
+  v_cl   uuid := '99999999-0000-4000-c000-0000000000d2';
+  v_prop uuid := '99999999-0000-4000-b000-0000000000d2';
+  v_old  uuid := '99999999-0000-4000-f000-0000000000d2';
+  v_new  uuid := '99999999-0000-4000-f000-0000000000d3';
+  v_live uuid := '99999999-0000-4000-f000-0000000000d4';
+  v_svc  uuid;
+  v_n    int;
+begin
+  reset session authorization;
+  select id into v_svc from service_types where operator_id = v_op limit 1;
+
+  insert into clients (id, operator_id, full_name, status)
+  values (v_cl, v_op, 'Retention Fixture', 'active');
+  insert into properties (id, operator_id, client_id, label)
+  values (v_prop, v_op, v_cl, 'Home');
+
+  insert into walks (id, operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status, origin_date) values
+    (v_old,  v_op, v_cl, v_prop, v_svc, current_date - 400, '09:00', '10:00', 'completed',   current_date - 400),
+    (v_new,  v_op, v_cl, v_prop, v_svc, current_date - 10,  '09:00', '10:00', 'completed',   current_date - 10),
+    -- an in-progress walk older than the window: its trace must NOT be
+    -- dropped, or an abandoned walk loses the only record of what happened.
+    (v_live, v_op, v_cl, v_prop, v_svc, current_date - 400, '09:00', '10:00', 'in_progress', current_date - 400);
+  insert into walk_gps_points (walk_id, operator_id, lat, lng, recorded_at) values
+    (v_old,  v_op, 41.0, -87.0, now() - interval '400 days'),
+    (v_new,  v_op, 41.0, -87.0, now() - interval '10 days'),
+    (v_live, v_op, 41.0, -87.0, now() - interval '400 days');
+
+  v_n := fn_sweep_gps_retention();
+  if v_n <> 1 then
+    raise exception 'FAIL: sweep dropped % point(s), expected exactly 1', v_n;
+  end if;
+  if exists (select 1 from walk_gps_points where walk_id = v_old) then
+    raise exception 'FAIL: the sweep left a trace past the retention window';
+  end if;
+  if not exists (select 1 from walk_gps_points where walk_id = v_new) then
+    raise exception 'FAIL: the sweep dropped a trace inside the window';
+  end if;
+  if not exists (select 1 from walk_gps_points where walk_id = v_live) then
+    raise exception 'FAIL: the sweep dropped an unfinished walk''s trace';
+  end if;
+
+  -- 0 disables it rather than meaning "delete everything today"
+  update operators set gps_retention_days = 0 where id = v_op;
+  insert into walk_gps_points (walk_id, operator_id, lat, lng, recorded_at)
+  values (v_old, v_op, 41.0, -87.0, now() - interval '400 days');
+  v_n := fn_sweep_gps_retention();
+  if v_n <> 0 then
+    raise exception 'FAIL: retention 0 swept % points instead of disabling', v_n;
+  end if;
+  update operators set gps_retention_days = 365 where id = v_op;
+
+  -- service role only
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  set local session authorization authenticated;
+  begin
+    perform fn_sweep_gps_retention();
+    raise exception 'FAIL: an operator ran the retention sweep';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%service role only%' and sqlerrm not like '%permission denied%' then
+      raise exception 'FAIL: sweep refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  reset session authorization;
+
+  raise notice 'GPS retention sweep drops only what it should (0040): OK';
+end $$;
+
 
 rollback;
 
