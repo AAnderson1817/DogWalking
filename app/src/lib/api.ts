@@ -81,9 +81,23 @@ export async function updateClient(id: string, patch: TableUpdate<"clients">): P
 }
 
 /** The signed-in client persona's own row (portal). */
-export async function getMyClient(): Promise<Clients | null> {
-  const { data: userData } = await supabase.auth.getUser();
-  const uid = userData.user?.id;
+/**
+ * Review L11. `auth.getUser()` is a network round trip to `/auth/v1/user`, and
+ * it ran on every mount of six screens including Today — serialized in FRONT
+ * of the real query, for an id `AuthProvider` has already resolved and
+ * `RequireRole` has already blocked render on.
+ *
+ * The id is now an optional argument. Callers that hold it (every screen, via
+ * `useAuth()`) skip the round trip; the fallback keeps the function usable
+ * from anywhere and keeps this a performance change rather than a refactor
+ * that could strand a caller.
+ */
+export async function getMyClient(userId?: string): Promise<Clients | null> {
+  let uid = userId;
+  if (!uid) {
+    const { data: userData } = await supabase.auth.getUser();
+    uid = userData.user?.id;
+  }
   if (!uid) return null;
   const { data, error } = await supabase
     .from("clients").select("*").eq("auth_user_id", uid).maybeSingle();
@@ -977,9 +991,13 @@ export async function signedPhotoUrl(path: string, expiresIn = 3600): Promise<st
 }
 
 // ── operators (phase 04) ───────────────────────────────────────────────────
-export async function getMyOperator(): Promise<Operators | null> {
-  const { data: userData } = await supabase.auth.getUser();
-  const uid = userData.user?.id;
+/** Same round-trip removal as `getMyClient` — see the note there (review L11). */
+export async function getMyOperator(userId?: string): Promise<Operators | null> {
+  let uid = userId;
+  if (!uid) {
+    const { data: userData } = await supabase.auth.getUser();
+    uid = userData.user?.id;
+  }
   if (!uid) return null;
   const { data, error } = await supabase
     .from("operators").select("*").eq("id", uid).maybeSingle();

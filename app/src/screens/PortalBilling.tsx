@@ -23,9 +23,11 @@ import { formatLedgerEntry } from "@/lib/credits";
 import { dateLocal, money } from "@/lib/format";
 import type { Clients, CreditLedger, Plans } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
+import { useAuth } from "@/lib/auth-context";
 
 export default function PortalBilling() {
   useDocumentTitle("Billing");
+  const auth = useAuth();
   const [client, setClient] = useState<Clients | null>(null);
   const [plan, setPlan] = useState<Plans | null>(null);
   const [ledger, setLedger] = useState<CreditLedger[]>([]);
@@ -40,7 +42,7 @@ export default function PortalBilling() {
     setLoadError(null);
     setLoading(true);
     return (async () => {
-      const me = await getMyClient();
+      const me = await getMyClient(auth.session?.user.id);
       if (!me) throw new Error("We couldn't load your account. Please try again.");
       const [p, lg, pay] = await Promise.all([
         me.plan_id ? getPlan(me.plan_id) : Promise.resolve(null),
@@ -54,7 +56,7 @@ export default function PortalBilling() {
     })()
       .catch((e) => setLoadError(loadErrorMessage(e)))
       .finally(() => setLoading(false));
-  }, []);
+  }, [auth.session?.user.id]);
 
   useEffect(() => {
     void reload();

@@ -1,6 +1,14 @@
 /* Sanpo Indigo Emaki production tokens. Older variable names remain as
    compatibility aliases only; they resolve to the approved Sanpo system. */
 :root {
+  /* The modal scrim. A warm brown that is NOT a CT-1 role and deliberately not
+     re-pointed at one: swapping it for Indigo would change the hue of every
+     sheet backdrop in the product, which is a design decision and not a lint
+     fix (review L18's sweep found it). Named here so the literal has exactly
+     one home and the exemption is recorded, the same treatment --emaki-paper
+     gets. */
+  --scrim: rgb(59 42 32 / 0.5);
+
   /* compatibility aliases */
   --cream-page:var(--sanpo-color-brand-cream); --card:var(--sanpo-color-production-white);
   /* The ink aliases resolve to CT-1 ROLES, not to the raw palette entries
@@ -78,7 +86,15 @@
   /* space (4pt) */ --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-6:24px; --s-8:32px; --s-12:48px;
   /* radius */ --r-sm:8px; --r-md:10px; --r-lg:12px; --r-full:999px;
   /* elevation */ --shadow-2:var(--pop);
-  /* motion */ --ease:cubic-bezier(.2,.8,.2,1); --t-fast:150ms; --t-med:250ms;
+  /* motion (review L17). --t-press is a press, not an animation: anything
+     slower than ~80ms stops reading as "this responded to my finger" and
+     starts reading as lag. --t-slow is for one thing, the Today progress
+     stroke advancing when a walk completes, which is the only moment in the
+     product worth narrating. Hover reuses --t-fast rather than adding a third
+     near-identical duration — buttons already use it for exactly this, and a
+     row that fades at a different speed from a button is worse than 30ms off
+     a suggested figure. */
+  /* motion */ --ease:cubic-bezier(.2,.8,.2,1); --t-press:60ms; --t-fast:150ms; --t-med:250ms; --t-slow:400ms;
 }
 /* Walk Mode retains the same quiet day canvas. */
 .walkmode { --bg:var(--cream-page); --surface:var(--card); --text:var(--ink-900); --text-2:var(--ink-700); }

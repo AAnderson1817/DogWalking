@@ -1,11 +1,12 @@
-// Dev-only high-fidelity Inbox reference used by the visual-migration gate.
+// Dev-only harness for the `InboxField` prototype in this directory. Renders
+// fixtures; there is no messages table behind it (review H33).
 import { useState } from "react";
 import { BottomNav } from "@/components/BottomNav";
 import {
   InboxField,
   type InboxConversation,
   type InboxMessage,
-} from "@/components/InboxField";
+} from "./InboxField";
 
 const FIXTURES: InboxConversation[] = [
   {

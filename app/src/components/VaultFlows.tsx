@@ -17,6 +17,7 @@ import {
   type CredentialLogRow,
   type CredentialMeta,
 } from "@/lib/api";
+import { browserClipboard, makeSecretClipboard } from "@/lib/clipboard";
 import { useAuth } from "@/lib/auth-context";
 import { dateLocal, timeLocal } from "@/lib/format";
 import {
@@ -65,6 +66,10 @@ export function CredentialRow({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rotateOpen, setRotateOpen] = useState(false);
+  // Review L2. One instance per panel, so the scrub only ever targets a copy
+  // this panel made — a shared module-level one would clear a clipboard the
+  // operator filled from somewhere else entirely.
+  const clipboard = useRef(makeSecretClipboard(browserClipboard)).current;
   const [auditOpen, setAuditOpen] = useState(false);
   const [audit, setAudit] = useState<CredentialLogRow[] | null>(null);
   const clearTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -88,8 +93,13 @@ export function CredentialRow({
     }, 1000);
     return () => {
       if (clearTimerRef.current) clearInterval(clearTimerRef.current);
+      // Review L2: the reveal is going away, so take the copy with it where we
+      // can. Runs on expiry, on a manual close, and on unmount — an interval
+      // that outlives its component was already the M14 lesson, and a door
+      // code on the pasteboard is the same shape.
+      void clipboard.clear();
     };
-  }, [secret]);
+  }, [secret, clipboard]);
 
   async function reveal(e: FormEvent) {
     e.preventDefault();
@@ -158,9 +168,16 @@ export function CredentialRow({
         // 1.00:1. Cream on Indigo is 9.03:1.
         <div className="vault-reveal">
           <code className="numeral vault-reveal__code">{secret}</code>
+          {/* Review L2. The 30s auto-clear applies to what is on screen; the
+              copy that leaves the app persists in the OS pasteboard, is
+              readable by the next foregrounded app on iOS, and syncs to the
+              operator's Mac. The scrub below is best-effort — a page cannot
+              write to the clipboard without focus — so the label says the copy
+              leaves the app rather than implying the timer covers it. */}
           <Button
             variant="ghost"
-            onClick={() => void navigator.clipboard.writeText(secret)}
+            onClick={() => void clipboard.copy(secret)}
+            title="Copies to your device clipboard. Cleared when this closes, if the app still has focus."
           >
             Copy
           </Button>

@@ -62,23 +62,35 @@
   }
 }
 
-/* Escalation happens once per SURFACE, not once per component: every rule that
-   paints a CT-1 tint re-points the roles for everything inside it, so a
+/* Escalation happens once per SURFACE,
+not once per component: every rule that
+   paints a CT-1 tint re-points the roles for everything inside it,
+so a
    descendant written with `var(--sanpo-color-text-secondary)` is correct
    without knowing what it is sitting on. That is the property worth having —
    the two live failures the review found were both components that had no
    idea they were on a tint.
 
    This list must match the set of rules that paint a tint. It is not kept in
-   step by hand: `role-contrast.test.ts` parses this file, finds every rule
-   painting any `--sanpo-color-surface-*` tint — attention, information,
-   success, relationship, milestone — and fails naming any selector missing
-   from here. Add a tint, forget this list, and the test says so.
+   step by hand: `role-contrast.test.ts` parses this file,
+finds every rule
+   painting any `--sanpo-color-surface-*` tint — attention,
+information,
+success,
+relationship,
+milestone — and fails naming any selector missing
+   from here. Add a tint,
+forget this list,
+and the test says so.
 
    Note the roles are re-pointed but NOT the tokens derived from them on
-   `:root` (input-placeholder, navigation-inactive, status-cancelled).
-   Substitution happens where a custom property is declared, so those keep
-   `:root`'s value — verified in a browser, not assumed. Nothing inside a tint
+   `:root` (input-placeholder,
+navigation-inactive,
+status-cancelled).
+   Substitution happens where a custom property is declared,
+so those keep
+   `:root`'s value — verified in a browser,
+not assumed. Nothing inside a tint
    uses them today; a control inside a tint has its own white fill. */
 .btn--ghost:hover:not(:disabled),
 .btn--ghost:active:not(:disabled),
@@ -98,7 +110,6 @@ button.walk-card:hover,
 .walk-card--in_progress,
 .walk-card--overage,
 .walk-card--attention,
-.live-banner,
 .calendar-walk,
 .calendar-walk--in_progress,
 .calendar-walk--overage,
@@ -108,14 +119,12 @@ button.walk-card:hover,
 .walk-live-state--offline,
 .report-fact--yes,
 .notification-row--unread,
-.conversation-row:hover,
-.conversation-row--selected,
-.inbox-thread__header,
-.message-field,
-.message-field--provider,
 .client-row:hover,
+.client-row:active,
 .client-relationship-header,
+.notification-row:active,
 .pet-profile-row:hover,
+.pet-profile-row:active,
 .connect-panel,
 .booking-cost--overage,
 .walk-billing,
@@ -135,6 +144,16 @@ button.walk-card:hover,
   width: min(180px, 48vw);
   height: auto;
   margin: 0 auto var(--s-2);
+}
+/* Error screens (review L16). The mark is there so the page is recognisably
+   Sanpo rather than a browser default, not so it competes with the message —
+   the apology is the content, and at 180px the logo reads as the subject.
+   `display: block` because an `img` is inline by default and `margin: auto`
+   does nothing to an inline box. */
+.brand-logo--small {
+  display: block;
+  width: min(96px, 28vw);
+  margin-bottom: var(--s-4);
 }
 
 .btn {
@@ -741,11 +760,76 @@ input::file-selector-button {
   border-color: var(--sanpo-color-status-critical);
 }
 
+/* ── Functional motion (review L17) ──────────────────────────────────────
+   The product had three transitions and three keyframes: no press state on
+   any row, no transition on nav selection, and pressing END WALK produced no
+   designed moment at all — the progress stroke simply rendered differently on
+   the next paint.
+
+   Two rules, and neither is decoration:
+
+   1. A surface that changes colour on hover or selection fades over
+      `--t-fast` instead of snapping. Instant is not "fast", it is
+      unattributable: the eye cannot tell a hover from a repaint.
+   2. A surface you can press acknowledges the press in `--t-press`. On touch
+      this is the only feedback that exists before the next screen arrives,
+      and its absence is what makes a tap feel like it was missed.
+
+   The press is `scale`, which is compositor-only, so it cannot cost a layout
+   pass on the longest list in the product. `prefers-reduced-motion` already
+   collapses every duration here to 0.01ms — the states themselves stay, so
+   nothing becomes unattributable for somebody who asked for less motion; only
+   the tweening goes. */
+.client-row,
+.pet-profile-row,
+.notification-row,
+.calendar-walk,
+.today-emaki-visit__link,
+.secondary-link,
+.text-button,
+.bottom-nav__item {
+  transition:
+    background-color var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease);
+}
+
+/* `button.walk-card` and `.calendar-walk` are the two card-shaped controls an
+   operator taps most, and `.today-emaki-current-action` is END WALK. `.btn`
+   already had colour states and never had a press. */
+.btn:not(:disabled),
+button.walk-card,
+.calendar-walk,
+.today-emaki-current-action {
+  transition:
+    background-color var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease),
+    transform var(--t-press) var(--ease);
+}
+.btn:not(:disabled):active,
+button.walk-card:active,
+.today-emaki-current-action:active {
+  transform: scale(0.98);
+}
+/* Calendar chips are small and sit in a dense grid, so the same 2% reads as a
+   wobble rather than a press. */
+.calendar-walk:active { transform: scale(0.99); }
+
+/* A full-bleed row has no edge to compress against, so it presses by
+   deepening rather than shrinking — the relationship tint one step further
+   than its own hover. */
+.client-row:active,
+.pet-profile-row:active,
+.notification-row:active {
+  background: var(--sanpo-color-surface-relationship);
+}
+
 /* ── Sheet (bottom sheet, mobile-first) ────────────────────────────────── */
 .sheet-backdrop {
   position: fixed;
   inset: 0;
-  background: rgb(59 42 32 / 0.5);
+  background: var(--scrim);
   z-index: 40;
   animation: sheet-fade var(--t-med) var(--ease);
 }
@@ -1290,6 +1374,17 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
      is what happened to --emaki-current's two literals once already.
      Measured 4.72–4.76:1. */
   --emaki-complete: var(--sanpo-color-supporting-matcha);
+
+  /* The two row hairlines. `rgb(12 71 116 / 0.24)` and `/ 0.22` until now —
+     which is `--sanpo-color-brand-indigo` written out by hand, so the one
+     thing that could not reach them was the `prefers-contrast: more` override
+     on the role. Same defect as `--hairline` in review M37, in the one place
+     it is hardest to notice, because a hairline that never darkens looks
+     exactly like a hairline. Two values rather than one: the progress rule and
+     the visit rows shipped at different alphas and this is not the change that
+     should decide they agree. */
+  --emaki-rule-strong: var(--sanpo-color-border-subtle);
+  --emaki-rule: var(--sanpo-color-border-subtle);
 }
 /* Separate rule, not a second declaration above: the minifier collapses two
    declarations of one property and drops the fallback, which would leave a
@@ -1310,6 +1405,13 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
       var(--sanpo-color-supporting-matcha) 80%,
       var(--sanpo-color-brand-indigo)
     );
+    /* `color-mix(in srgb, C X%, transparent)` is exactly C at alpha X/100, so
+       these are the shipped pixels to the byte — the point of the change is
+       where the colour comes FROM, not what it looks like. The fallback above
+       is the opaque subtle-border role, which is darker rather than lighter:
+       a browser without color-mix gets a heavier rule, never an absent one. */
+    --emaki-rule-strong: color-mix(in srgb, var(--sanpo-color-brand-indigo) 24%, transparent);
+    --emaki-rule: color-mix(in srgb, var(--sanpo-color-brand-indigo) 22%, transparent);
   }
 }
 /* Pinned to the top at its own intrinsic ratio: width drives, height follows.
@@ -1438,7 +1540,7 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
 }
 .today-emaki-progress {
   padding-top: 3.45cqw;
-  border-bottom: 1px solid rgb(12 71 116 / 0.24);
+  border-bottom: 1px solid var(--emaki-rule-strong);
 }
 .today-emaki-progress svg {
   width: 100%;
@@ -1488,6 +1590,31 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
   stroke-linecap: round;
   stroke-width: 6px;
   vector-effect: non-scaling-stroke;
+  /* Review L17: the marker slides to the next visit rather than teleporting.
+     `x1`/`x2` are presentation attributes, which are the lowest-priority CSS,
+     so changing them changes the computed value and a transition on the
+     geometry property fires. */
+  transition: x1 var(--t-slow) var(--ease), x2 var(--t-slow) var(--ease);
+}
+
+/* Review L17: END WALK's designed moment.
+ *
+ * This is the one place in the product where something the operator did
+ * changes a picture, and it happened between two paints with nothing to see.
+ * The travelled stroke now grows into the segment the finished walk occupied
+ * over `--t-slow`, and the "you are here" marker slides with it.
+ *
+ * The stroke is drawn by CLIPPING the full path, not by `stroke-dashoffset`
+ * as the review assumed, so what animates is the clip rectangle's geometry.
+ * `width` and `x` on an SVG `rect` are transitionable CSS geometry properties
+ * in current engines. Where an engine does not transition them the value jumps
+ * — which is exactly today's behaviour, so this can only ever add.
+ *
+ * The selector is a class, not `clipPath rect`: SVG type selectors are
+ * case-sensitive inside an HTML document, and a selector that silently matches
+ * nothing would leave this looking finished and doing nothing. */
+.today-emaki-progress__clip {
+  transition: width var(--t-slow) var(--ease), x var(--t-slow) var(--ease);
 }
 .today-emaki-progress__copy {
   padding: 1.1cqw 0 1.5cqw;
@@ -1511,7 +1638,7 @@ button.walk-card:hover { background: var(--sanpo-color-surface-information); }
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   min-height: 15.7cqw;
-  border-bottom: 1px solid rgb(12 71 116 / 0.22);
+  border-bottom: 1px solid var(--emaki-rule);
 }
 /* The row's tappable region: time + identity. The trailing action or state
    label stays outside it, so END WALK is its own control rather than an
@@ -1671,55 +1798,6 @@ a.today-emaki-visit__link:focus-visible {
   color: var(--sanpo-color-text-secondary);
   font-size: var(--fs-14);
 }
-
-/* ── LiveWalkBanner ────────────────────────────────────────────────────── */
-.live-banner-link {
-  display: block;
-  color: inherit;
-  text-decoration: none;
-}
-.live-banner {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  grid-template-rows: auto auto;
-  align-items: center;
-  column-gap: var(--s-3);
-  background: var(--sanpo-color-surface-attention);
-  color: var(--sanpo-color-text-primary);
-  border: 0;
-  border-left: 3px solid var(--sanpo-color-status-current);
-  border-bottom: var(--bw-xs) solid var(--sanpo-color-border-subtle);
-  padding: var(--s-3) var(--s-4);
-  border-radius: 0;
-  box-shadow: none;
-}
-.live-banner__state {
-  grid-column: 2;
-  color: var(--sanpo-color-text-primary);
-  font-size: var(--fs-12);
-  font-weight: 900;
-  letter-spacing: 0.08em;
-}
-.live-banner__label { grid-column: 2; font-weight: 900; line-height: 1.25; }
-.live-banner__timer {
-  grid-column: 3;
-  grid-row: 2;
-  font-family: var(--font-body);
-  font-feature-settings: "tnum";
-  font-size: var(--fs-20);
-  font-weight: 800;
-  color: var(--sanpo-color-text-primary);
-}
-.live-banner__action {
-  grid-column: 3;
-  grid-row: 1;
-  color: var(--sanpo-color-text-link);
-  font-size: var(--fs-12);
-  font-weight: 900;
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-.live-banner__route-icon { grid-column: 1; grid-row: 1 / 3; color: var(--sanpo-color-brand-indigo); }
 
 /* ── Calendar semantic walk states ────────────────────────────────────── */
 .calendar-walk {
@@ -2138,209 +2216,6 @@ body:has(.today-emaki-page) .bottom-nav {
   color: var(--sanpo-color-text-primary);
   font-size: var(--fs-12);
   font-weight: 900;
-}
-
-/* ── Inbox correspondence field ───────────────────────────────────────── */
-.inbox-preview-page {
-  min-height: 100dvh;
-  padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px));
-  background: var(--sanpo-color-surface-canvas);
-}
-.inbox-field {
-  width: 100%;
-  min-height: calc(100dvh - 72px - env(safe-area-inset-bottom, 0px));
-  background: var(--sanpo-color-surface-canvas);
-  color: var(--sanpo-color-text-primary);
-}
-.inbox-index { display: flex; flex-direction: column; min-width: 0; }
-.inbox-thread { display: none; min-width: 0; }
-.inbox-field--thread .inbox-index { display: none; }
-.inbox-field--thread .inbox-thread { display: grid; }
-.inbox-index__header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--s-3);
-  min-height: 108px;
-  padding: var(--s-6);
-}
-.inbox-index__header .btn { flex-shrink: 0; white-space: nowrap; }
-.inbox-index__count {
-  margin-top: var(--s-1);
-  color: var(--sanpo-color-text-secondary);
-  font-size: var(--fs-14);
-  font-weight: var(--fw-quiet);
-}
-.inbox-search { padding: 0 var(--s-6) var(--s-4); }
-.inbox-search .field__control { min-height: 48px; }
-.conversation-index {
-  border-top: var(--bw-xs) solid var(--sanpo-color-border-subtle);
-}
-.conversation-index__empty {
-  padding: var(--s-6);
-  color: var(--sanpo-color-text-secondary);
-  font-size: var(--fs-14);
-}
-.conversation-row {
-  position: relative;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-areas:
-    "identity time"
-    "preview unread";
-  width: 100%;
-  min-height: 98px;
-  padding: var(--s-3) var(--s-6);
-  gap: var(--s-1) var(--s-3);
-  border: 0;
-  border-bottom: var(--bw-xs) solid var(--sanpo-color-border-subtle);
-  background: transparent;
-  color: var(--sanpo-color-text-primary);
-  text-align: left;
-}
-.conversation-row:hover { background: var(--sanpo-color-surface-relationship); }
-.conversation-row--selected {
-  padding-left: calc(var(--s-6) - 3px);
-  border-left: 3px solid var(--sanpo-color-message-relationship-accent);
-  background: var(--sanpo-color-surface-relationship);
-}
-.conversation-row--selected .conversation-row__identity span,
-.conversation-row--selected .conversation-row__preview,
-.conversation-row--selected .conversation-row__time { color: var(--sanpo-color-text-primary); }
-.conversation-row__identity {
-  grid-area: identity;
-  display: flex;
-  align-items: baseline;
-  min-width: 0;
-  gap: var(--s-2);
-}
-.conversation-row__identity strong {
-  overflow: hidden;
-  font-size: var(--fs-16);
-  font-weight: 900;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.conversation-row__identity span,
-.conversation-row__preview,
-.conversation-row__time {
-  color: var(--sanpo-color-text-secondary);
-  font-size: var(--fs-12);
-  font-weight: var(--fw-quiet);
-}
-.conversation-row__identity span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.conversation-row__preview {
-  grid-area: preview;
-  overflow: hidden;
-  font-size: var(--fs-14);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.conversation-row--unread .conversation-row__preview { color: var(--sanpo-color-text-primary); font-weight: 900; }
-.conversation-row__time { grid-area: time; justify-self: end; white-space: nowrap; }
-.conversation-row__unread-label {
-  grid-area: unread;
-  display: inline-flex;
-  align-items: center;
-  justify-self: end;
-  gap: var(--s-1);
-  color: var(--sanpo-color-text-primary);
-  font-size: var(--fs-12);
-  font-weight: 900;
-}
-.conversation-row__unread-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: var(--r-full);
-  background: var(--sanpo-color-message-unread-accent);
-}
-.inbox-thread {
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  min-height: calc(100dvh - 72px - env(safe-area-inset-bottom, 0px));
-}
-.inbox-thread__header {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  min-height: 84px;
-  padding: var(--s-3) var(--s-6);
-  gap: var(--s-2) var(--s-3);
-  border-bottom: var(--bw-xs) solid var(--sanpo-color-border-subtle);
-  background: var(--sanpo-color-surface-relationship);
-}
-.inbox-thread__back { grid-column: 1 / -1; justify-self: start; }
-.inbox-thread__identity { min-width: 0; }
-.inbox-thread__identity h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.inbox-thread__identity p {
-  color: var(--sanpo-color-text-primary);
-  font-size: var(--fs-12);
-  font-weight: 700;
-}
-.inbox-thread__empty { margin: auto; color: var(--sanpo-color-text-secondary); }
-.message-history {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-3);
-  overflow-y: auto;
-  width: min(100%, 620px);
-  margin: 0 auto;
-  padding: var(--s-6);
-}
-.message-field {
-  width: fit-content;
-  max-width: min(88%, 520px);
-  padding: var(--s-3) var(--s-4);
-  border-left: 3px solid var(--sanpo-color-message-relationship-accent);
-  background: var(--sanpo-color-surface-relationship);
-}
-.message-field--provider {
-  align-self: flex-end;
-  border-left: 0;
-  border-right: 3px solid var(--sanpo-color-status-upcoming);
-  background: var(--sanpo-color-surface-information);
-}
-.message-field__meta {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--s-3);
-  margin-bottom: var(--s-1);
-  color: var(--sanpo-color-text-primary);
-  font-size: var(--fs-12);
-}
-.message-field p { overflow-wrap: anywhere; }
-.message-composer {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  min-height: 72px;
-  padding: var(--s-3) var(--s-6);
-  gap: var(--s-3);
-  border-top: var(--bw-xs) solid var(--sanpo-color-border-subtle);
-  background: var(--sanpo-color-surface-canvas);
-}
-.message-composer .field__control { min-height: 48px; resize: none; }
-
-@media (min-width: 720px) {
-  .inbox-field {
-    display: grid;
-    grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
-  }
-  .inbox-field .inbox-index { display: flex; border-right: var(--bw-xs) solid var(--sanpo-color-border-subtle); }
-  .inbox-field .inbox-thread { display: grid; }
-  .inbox-thread__back { display: none; }
-}
-
-@media (min-width: 1024px) {
-  .inbox-preview-page { margin-left: 88px; padding-bottom: 0; }
-  .inbox-field {
-    grid-template-columns: 400px minmax(0, 1fr);
-    max-width: 1440px;
-    min-height: 100dvh;
-    margin: 0 auto;
-  }
-  .inbox-field .inbox-thread { min-height: 100dvh; }
-  .conversation-row { min-height: 104px; }
-  .message-history { min-width: min(420px, 100%); }
 }
 
 .notification-row__unread { display: inline-flex; align-items: center; gap: var(--s-1); }

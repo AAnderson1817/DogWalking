@@ -333,6 +333,28 @@ opening the app. An unresolved operator id disables the check; treating "not
 yet known" as "not yours" would destroy the operator's own data on every cold
 start.
 
+### Device storage keys keep the retired brand name, deliberately
+
+`pawtrail:walk:{id}` (localStorage), `pawtrail-outbox` (IndexedDB),
+`pawtrail-shell-{version}` (Cache Storage) and the two `pawtrail-*` install
+keys are the four places the retired brand name survives in shipping code, and
+they stay (review L23 renamed the Stripe metadata keys, the seed data and the
+docs; not these).
+
+These are not labels, they are addresses. Every one names data that already
+exists on an installed device, and renaming a key does not move what it points
+at — it orphans it. Concretely: a renamed snapshot prefix discards an
+in-progress walk's photos, notes and care toggles at the exact moment Walk Mode
+resumes (which is the whole point of review H8); a renamed outbox database
+abandons undelivered GPS points (M7); and the cache prefix is swept by
+`startsWith("pawtrail-")` in the worker's `activate`, so renaming it without
+renaming the sweep leaves every stale shell cached forever.
+
+Doing it properly means a migration that reads both names, and a migration is
+the wrong shape here: the keys are invisible to users, invisible to operators
+and invisible in Stripe. Same treatment as the `*_pence` columns, which hold
+cents. If they are ever renamed, the rename and the dual-read land together.
+
 ### Today shows unfinished walks regardless of their date
 
 The sweep is only half the fix. Today loads `{ date: today }`, so a walk
@@ -426,6 +448,80 @@ repository has already shipped one check a *comment* could satisfy. It asserts
 and — in the other direction, so that deleting the handler outright cannot
 satisfy it — that the app shell and navigations still are. Confirmed red by
 reinstating exactly what this section used to prescribe.
+
+## Getting back into an account (review L16)
+
+Before this there was no recovery path. A grep for `resetPasswordForEmail` and
+"Forgot" returned nothing: the magic link was the only route back in, and it is
+presented as an *alternative way to sign in* rather than as recovery, so
+somebody who had forgotten their password had to work that out for themselves.
+For an operator, that account holds every client's entry codes.
+
+- **SignIn gains a third mode**, `reset`, rather than a separate route — the
+  person is already on the screen with their email in the field, and bouncing
+  them elsewhere to retype it is the friction that makes people give up and
+  text the operator instead.
+- **`/reset-password` is public and not behind `RequireRole`.** The recovery
+  link creates a session, but a role lookup that is slow or fails must not
+  stand between somebody and the password they came to set.
+- **The screen watches for a late session.** `getSession()` can resolve before
+  supabase-js has finished parsing the URL fragment, so the first answer is
+  null for a link that is perfectly good; without the `onAuthStateChange`
+  subscription the screen settles on "link expired" and the person gives up
+  holding a working link. Tested by delivering the session after the first
+  render.
+- **The confirmation never depends on whether the address has an account.**
+  `describeResetOutcome` returns the same conditional sentence — "if that
+  address has an account…" — for success and for every unrecognised failure,
+  and the neutral branch is the **default** rather than a list of known-safe
+  codes: a status this code has never seen must not become a disclosure by
+  omission. Only two things surface: a 429 (waiting is actionable) and a
+  transport failure with no status (promising an email that was never
+  requested costs somebody an hour).
+- **`redirectTo` must be on Supabase's allow-list**, exactly. `site_url` alone
+  permits `site_url` and nothing under it, so an unlisted
+  `{site}/reset-password` fails in the way hardest to report: GoTrue accepts
+  the request, sends a good email, and redirects to `site_url` — the person
+  arrives *signed in on Today* with no password form and no error.
+  `config.toml` carries the local entries; the deployed ones are in
+  `owner-actions.md`.
+
+`lib/password-policy.ts` states the rule client-side, and the **server remains
+the authority** — every place that sets a password surfaces GoTrue's own error
+rather than swallowing it. The constants duplicate `supabase/config.toml`,
+which is why `scripts/password-policy.test.ts` parses the toml and fails when
+they stop matching; the check is deliberately no *stricter* than the server,
+because a client rule that refuses a valid password locks somebody out with no
+way to tell it is the client's fault.
+
+## Prototypes are not components (review L21)
+
+`src/prototypes/` holds UI that is finished, tested and styled but wired to
+nothing. `InboxField` — a complete correspondence surface, reachable only from
+the DEV-gated `/dev/inbox` — is the only occupant; there is no `messages`
+table, no `api.ts` function and no production route (review H33).
+
+The rules, and the reason each exists:
+
+- **Nothing in `src/prototypes/` may be imported from `components/`,
+  `screens/`, `lib/` or `hooks/`.** The dependency runs one way, so a prototype
+  can never become load-bearing by accident.
+- **A prototype owns its stylesheet and imports it itself.** CSS is not
+  tree-shaken: about 200 lines of correspondence layout rode along in every
+  production stylesheet for a screen that does not exist, maintained by every
+  token change. Moving them cut the built stylesheet from 65.0 KB to 58.5 KB.
+- **`role-contrast.test.ts` reads every stylesheet, not just
+  `components.css`.** A second sheet the checker cannot see is precisely the
+  hole those tests exist to close, so the file list is an input rather than a
+  constant.
+- **Its tests are claimed by the `dom` vitest project.** A test file matching
+  no project runs nowhere, silently — and a prototype whose test runs nowhere
+  is a prototype that has quietly stopped compiling.
+
+`LiveWalkBanner` was deleted rather than moved here. It was the pre-emaki
+"current moment" banner, superseded by the current-visit row inside
+`TodayIllustratedSchedule`, so it was not a prototype awaiting a backend but a
+retired component the DEV gallery still presented as current.
 
 ## Testing
 

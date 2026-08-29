@@ -26,7 +26,8 @@ export function todaysWalks<
     );
 }
 
-/** The walk to surface in the LiveWalkBanner (most recently started). */
+/** The walk currently underway (most recently started); drives Today's
+  * current-visit row, its pace label and what counts as "next". */
 export function liveWalk<W extends { status: string; started_at: string | null }>(
   walks: readonly W[],
 ): W | null {

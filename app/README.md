@@ -17,6 +17,7 @@ app/
   src/components/          # shared UI, shell, sheets, vault and notification components
   src/hooks/               # realtime/walk hooks
   src/lib/                 # Supabase API client, env access, GPS batching/outbox, generated DB types
+  src/prototypes/          # built but not wired — see "Prototypes" below
   src/screens/             # operator and client portal routes
   vite.config.ts           # Vite config and service-worker asset stamping plugin
 supabase/
@@ -165,6 +166,40 @@ A suite that has never executed is worse than no suite, because it is counted.
 
 
 Install the Chromium browser bundle before first use with `npm run test:e2e:install --prefix app`.
+
+## Prototypes
+
+`src/prototypes/` holds UI that is finished, tested and styled but **wired to
+nothing**. It exists so that a maintainer who meets one of these components does
+not spend an afternoon looking for the table behind it.
+
+The rules for the directory:
+
+- Nothing in `src/prototypes/` may be imported from `src/components/`,
+  `src/screens/`, `src/lib/` or `src/hooks/`. The dependency runs one way.
+- A prototype owns its stylesheet and imports it itself. CSS is not tree-shaken,
+  so rules left in `components.css` ship to every user whether or not any route
+  renders them — which is what happened here: about 200 lines of correspondence
+  layout rode along in the production stylesheet for a screen that does not
+  exist (review L21). The build asserts they are gone.
+- A prototype is reachable only from a `import.meta.env.DEV` route, so its
+  JavaScript is stripped from the production bundle. CI greps `dist/` for the
+  fixtures.
+- When a prototype graduates, it moves out of this directory with its
+  stylesheet and this list gets shorter.
+
+Currently here:
+
+| Prototype | What it is | What is missing |
+| --- | --- | --- |
+| `InboxField.tsx` | A complete operator↔client correspondence surface: thread list, search, unread counts, the mobile index/thread split, compose and send. Reachable at `/dev/inbox` via `InboxPreview.tsx`. | Everything behind it. There is no `messages` or `conversations` table in any migration, no `api.ts` function and no production route. Two-way messaging is review finding H33; the models here are typed against a schema that has never existed. |
+
+`LiveWalkBanner` used to be listed here and has been deleted rather than moved.
+It was the pre-emaki "current moment" banner, superseded by the current-visit row
+inside `TodayIllustratedSchedule` — which is the locked Today composition, so the
+banner was not a prototype awaiting a backend but a retired component the
+component gallery still presented as current. It is recoverable from git history
+if the composition is ever revisited.
 
 ## Architecture notes
 

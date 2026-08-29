@@ -82,7 +82,7 @@ export default function Dashboard() {
       //
       // The operator is fetched first because the low-credit threshold is a
       // query INPUT — it cannot be applied server-side without knowing it.
-      const op = await getMyOperator();
+      const op = await getMyOperator(auth.session?.user.id);
       const [todayWalks, abandoned, low, attention] = await Promise.all([
         listWalksDetailed({ date: today }),
         listAbandonedWalks(),
@@ -98,7 +98,7 @@ export default function Dashboard() {
     } catch (caught) {
       if (!background) setError(loadErrorMessage(caught));
     }
-  }, []);
+  }, [auth.session?.user.id]);
 
   useEffect(() => {
     void load();

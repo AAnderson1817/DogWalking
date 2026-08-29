@@ -9,7 +9,6 @@ import { Card } from "@/components/Card";
 import { CreditMeter } from "@/components/CreditMeter";
 import { EmptyState } from "@/components/EmptyState";
 import { Input, Select, Textarea } from "@/components/fields";
-import { LiveWalkBanner } from "@/components/LiveWalkBanner";
 import { MapView } from "@/components/MapView";
 import { MoneyValueRail } from "@/components/MoneyValueRail";
 import { NotificationList } from "@/components/NotificationInbox";
@@ -199,7 +198,6 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 export default function DevKit() {
   const [sheetOpen, setSheetOpen] = useState(false);
-  const [banner, setBanner] = useState(false);
   const [walkmode, setWalkmode] = useState(false);
 
   return (
@@ -433,11 +431,10 @@ export default function DevKit() {
         <Section title="Overlays & modes">
           <div style={{ display: "flex", gap: "var(--s-2)", flexWrap: "wrap" }}>
             <Button variant="ghost" onClick={() => setSheetOpen(true)}>Open Sheet</Button>
-            <Button variant="ghost" onClick={() => setBanner((b) => !b)}>Toggle LiveWalkBanner</Button>
             <Button variant="ghost" onClick={() => setWalkmode((w) => !w)}>Toggle .walkmode</Button>
           </div>
           <div className="numeral" style={{ fontSize: "var(--fs-32)" }}>
-            12:34 · 2.1 km
+            12:34 · 1.3 mi
           </div>
         </Section>
 
@@ -448,13 +445,6 @@ export default function DevKit() {
         </Section>
       </div>
 
-      {banner && (
-        <LiveWalkBanner
-          walkId="fixture"
-          startedAt={new Date(Date.now() - 754000).toISOString()}
-          label="Walking Biscuit & Pickle"
-        />
-      )}
       <Sheet open={sheetOpen} onClose={() => setSheetOpen(false)} title="Confirm password">
         <Input label="Password" type="password" placeholder="••••••••" />
         <div style={{ marginTop: "var(--s-4)" }}>
