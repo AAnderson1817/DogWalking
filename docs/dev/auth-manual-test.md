@@ -9,7 +9,7 @@ the confirm link when it appears.
 ## 1. Operator signup → onboard → dashboard
 1. Open `/signin` → "Use a magic link instead" is offered (do not use yet).
 2. Create the operator account in Studio (Auth → Add user,
-   `op-test@pawtrail.dev` / password) — or sign up via the Studio invite.
+   `op-test@sanpo.test` / password) — or sign up via the Studio invite.
 3. Sign in at `/signin` with email+password.
 4. With no persona row you land on `/onboard`. Fill "Business name" =
    Test Walks, "Your name" = Op. Submit.
@@ -21,7 +21,7 @@ the confirm link when it appears.
 ## 2. Client invite → claim → portal
 1. As the operator (Studio or Roster once phase 05 lands), insert a
    `clients` row: `operator_id` = your uid, `full_name` = Casey Client,
-   `email` = casey@pawtrail.dev. Copy its `invite_token`.
+   `email` = casey@sanpo.test. Copy its `invite_token`.
 2. Open an incognito window at `/claim/<invite_token>`.
 3. Create the account (email+password ≥8 chars). After signup the invite
    preview must show "Casey Client" and your business name.

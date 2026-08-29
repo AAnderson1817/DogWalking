@@ -1,6 +1,6 @@
 # Local stack without Docker
 
-The HANDOFF assumes `supabase start` (Docker). This repo also supports a
+The usual path is `supabase start` (Docker). This repo also supports a
 bare-metal fallback for environments where the Docker daemon is unavailable,
 using a system PostgreSQL server plus a compatibility shim.
 

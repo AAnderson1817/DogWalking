@@ -284,7 +284,11 @@ jobs:
           python3 - <<'PY'
           import re, pathlib, glob, sys
           defined, used = set(), {}
-          for f in glob.glob('app/src/styles/**/*.css', recursive=True):
+          # `src/**`, not `src/styles/**`: review L21 moved the inbox
+          # prototype's stylesheet next to the component that imports it, and a
+          # stylesheet this check cannot see is a stylesheet whose undefined
+          # tokens ship silently — which is the whole failure being guarded.
+          for f in glob.glob('app/src/**/*.css', recursive=True):
               # Comments first. A `var(--role)` written in prose to explain a
               # rule is not a use, and neither is a `--x:` inside one; without
               # this the check fails on its own documentation.
@@ -552,7 +556,7 @@ jobs:
         # `deno test` bare while the documented local command was `deno test
         # -A`, so a test could pass locally on a permission CI does not grant
         # — which is exactly how the above shipped red.
-        run: deno test --allow-read=supabase/migrations ./supabase/functions/_tests/
+        run: deno test --allow-read=supabase/migrations,supabase/functions ./supabase/functions/_tests/
 
       # Every deliberate 5xx used to discard the underlying Postgres/Stripe
       # error at the throw site, because HttpError had nowhere to put one
