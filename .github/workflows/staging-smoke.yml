@@ -152,13 +152,26 @@ jobs:
           # row it had failed to remove, and the job failed with a message that
           # named neither cause. The bound is there so a project with a large
           # user table cannot spin here forever.
+          # Stops on an EMPTY page, never on a short one. The first version of
+          # this asked for `per_page=200` and stopped when a page returned
+          # fewer than 200 — but GoTrue caps the page size, so page 1 came back
+          # with 100, `100 -lt 200` was true, and it returned "not found" having
+          # read exactly one page. That is the bug it was written to fix,
+          # reintroduced by inferring the last page from the size REQUESTED
+          # rather than from what the server actually did.
+          #
+          # `seen` guards the other direction: an endpoint that ignores `page`
+          # would otherwise be rescanned to the bound and still report absence.
           user_id_for() {
-            local page=1 body id
-            while [ "$page" -le 20 ]; do
-              body=$(admin "$base/auth/v1/admin/users?page=$page&per_page=200")
+            local page=1 body id first seen=""
+            while [ "$page" -le 50 ]; do
+              body=$(admin "$base/auth/v1/admin/users?page=$page&per_page=100")
               id=$(printf '%s' "$body" | jq -r --arg e "$1" '.users[]? | select(.email==$e) | .id' | head -1)
               [ -n "$id" ] && { printf '%s' "$id"; return 0; }
-              [ "$(printf '%s' "$body" | jq -r '.users | length')" -lt 200 ] && return 0
+              [ "$(printf '%s' "$body" | jq -r '.users | length')" -eq 0 ] && return 0
+              first=$(printf '%s' "$body" | jq -r '.users[0].id // empty')
+              [ -n "$first" ] && [ "$first" = "$seen" ] && return 0
+              seen=$first
               page=$((page + 1))
             done
             return 0
@@ -192,7 +205,20 @@ jobs:
           if [ -z "$op_uid" ]; then
             # `error_description`/`msg` only — never the whole body, and the
             # password is this script's own throwaway, not a secret of anyone's.
-            echo "::error title=Could not create the fixture operator::HTTP $opcode — $(jq -r '.error_description // .msg // .message // "no message"' "$mkuser")"
+            msg=$(jq -r '.error_description // .msg // .message // "no message"' "$mkuser")
+            echo "::error title=Could not create the fixture operator::HTTP $opcode — $msg"
+            # A 422 means cleanup left the previous run's user behind. Which
+            # half failed is the next question, and the answer is one lookup:
+            # if the search CAN see it, the delete is what is broken; if it
+            # cannot, the search is. Without this the two look identical.
+            if [ "$opcode" = "422" ]; then
+              stale=$(user_id_for "$op_email")
+              if [ -n "$stale" ]; then
+                echo "::error title=Cleanup did not delete the leftover::The lookup can see $op_email as $stale, so the DELETE is what failed — most likely an operators row still references the auth user. Delete it by hand and the next run is clean."
+              else
+                echo "::error title=The lookup cannot see the leftover::GoTrue says $op_email exists but the paginated admin search does not return it, so the SEARCH is what is broken, not the delete."
+              fi
+            fi
             exit 1
           fi
           client_row=""; cl_uid=""
