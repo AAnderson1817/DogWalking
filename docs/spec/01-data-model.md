@@ -20,7 +20,7 @@ All `id` columns `uuid default gen_random_uuid() primary key` unless noted. All 
 **operators** — `id` = `auth.users.id` (no default). `business_name`, `display_name`, `email`, `phone`, `timezone text default 'America/Chicago'`, `currency char(3) default 'USD'`, `low_credit_threshold int default 2`.
 Insert trigger seeds default service types (below).
 
-**clients** — `operator_id`, `auth_user_id uuid null unique` (linked on invite claim), `full_name`, `email`, `phone`, `status client_status default 'invited'`, `notes text`, `invite_token uuid default gen_random_uuid() unique`, `stripe_customer_id text`, `plan_id uuid null references plans`, `subscription_status subscription_status default 'none'`, `stripe_subscription_id text`, `credit_balance int not null default 0 check (credit_balance >= 0)` ← denormalized, definer-only write (spec 03).
+**clients** — `operator_id`, `auth_user_id uuid null unique` (linked on invite claim), `full_name`, `email`, `phone`, `status client_status default 'invited'`, `notes text`, `invite_token uuid default gen_random_uuid() unique`, `invite_expires_at timestamptz default now() + 14 days`, `invite_revoked_at timestamptz null`, `stripe_customer_id text`, `plan_id uuid null references plans`, `subscription_status subscription_status default 'none'`, `stripe_subscription_id text`, `credit_balance int not null default 0 check (credit_balance >= 0)` ← denormalized, definer-only write (spec 03).
 
 **properties** — `operator_id`, `client_id`, `label` (e.g. "Home"), `address_line1`, `address_line2`, `city`, `postcode`, `access_notes_public text` (non-secret: "gate sticks, lift on left"), `lat/lng double precision null`.
 

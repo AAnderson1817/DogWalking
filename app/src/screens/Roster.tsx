@@ -12,7 +12,7 @@ import { Sheet } from "@/components/Sheet";
 import { Spinner } from "@/components/Spinner";
 import { LoadingState } from "@/components/StateField";
 import { clientStatusTreatment } from "@/components/status-treatment";
-import { createClient, listClients, listPets } from "@/lib/api";
+import { createClient, inviteUrlFor, listClients, listPets } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import type { Clients, Pets } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
@@ -69,7 +69,7 @@ export default function Roster() {
         email: newEmail.trim() || null,
         phone: newPhone.trim() || null,
       });
-      setInviteUrl(`${window.location.origin}/claim/${created.invite_token}`);
+      setInviteUrl(inviteUrlFor(created.invite_token));
       setNewName("");
       setNewEmail("");
       setNewPhone("");

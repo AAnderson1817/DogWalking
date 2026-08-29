@@ -798,23 +798,29 @@ begin
     raise exception 'FAIL: invite preview leaked rows for a bogus token';
   end if;
 
-  select fn_claim_invite('99999999-9999-4999-a999-999999999999') into v_client;
+  -- 0039 changed the contract: refusals are RETURNED, not raised, because a
+  -- raise rolls back the audit row written alongside them.
+  select c.client_id into v_client
+    from fn_claim_invite('99999999-9999-4999-a999-999999999999') c;
   if v_client <> '99999999-0000-4000-c000-00000000000f' then
     raise exception 'FAIL: claim returned wrong client';
   end if;
   if (select status from clients where id = v_client) <> 'active' then
     raise exception 'FAIL: claim did not activate client';
   end if;
-  -- second claim of the same token fails
-  begin
-    perform fn_claim_invite('99999999-9999-4999-a999-999999999999');
-    raise exception 'FAIL: double claim succeeded';
-  exception when others then
-    if sqlerrm like 'FAIL:%' then raise; end if;
-    if sqlerrm not like '%invalid or already claimed invite%' then
-      raise exception 'FAIL: double claim succeeded — rejected for the wrong reason: %', sqlerrm;
-    end if;
-  end;
+  -- second claim of the same token refuses, and binds nobody
+  if (select c.outcome from fn_claim_invite('99999999-9999-4999-a999-999999999999') c)
+       <> 'already_claimed' then
+    raise exception 'FAIL: double claim was not reported as already_claimed';
+  end if;
+  if (select c.client_id from fn_claim_invite('99999999-9999-4999-a999-999999999999') c)
+       is not null then
+    raise exception 'FAIL: a refused claim returned a client id';
+  end if;
+  if (select auth_user_id from clients where id = v_client)
+       <> '99999999-0000-4000-a000-000000000004' then
+    raise exception 'FAIL: a second claim rebound the client';
+  end if;
   reset session authorization;
 
   -- client persona may update contact fields but not notes/status
@@ -3374,6 +3380,189 @@ begin
   end if;
 
   raise notice 'the client-facing low-credit email carries no balance (0038): OK';
+end $$;
+
+-- ═══ 0039: an invite expires, can be withdrawn, reissued, and is logged ════
+--
+-- Every branch below was confirmed to FAIL against the pre-0039 function,
+-- which claimed unconditionally. The negative cases are the point: a claim
+-- that dies of an undefined column is indistinguishable from one correctly
+-- refused, so each asserts the SPECIFIC message.
+do $$
+declare
+  v_client   uuid;
+  v_token    uuid;
+  v_new      uuid;
+  v_rows     int;
+begin
+  reset session authorization;
+
+  insert into auth.users (id, email) values
+    ('99999999-0000-4000-a000-00000000004a', 'h4-a@pawtrail.dev'),
+    ('99999999-0000-4000-a000-00000000004b', 'h4-b@pawtrail.dev');
+
+  -- ── expired invite ──────────────────────────────────────────────────────
+  insert into clients (id, operator_id, full_name, status, invite_token, invite_expires_at)
+  values ('99999999-0000-4000-c000-0000000000e1', '99999999-0000-4000-a000-000000000001',
+          'H4 Expired', 'invited', '99999999-0000-4000-e000-000000000001',
+          now() - interval '1 day');
+
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-00000000004a","role":"authenticated","email":"h4-a@pawtrail.dev"}', true);
+  set local session authorization authenticated;
+
+  -- the preview must refuse too, or the screen names a real client and a real
+  -- business to the holder of a dead link before failing at the last step
+  if (select count(*) from fn_preview_invite('99999999-0000-4000-e000-000000000001')) <> 0 then
+    raise exception 'FAIL: preview rendered an expired invite';
+  end if;
+
+  if (select c.outcome from fn_claim_invite('99999999-0000-4000-e000-000000000001') c)
+       <> 'expired' then
+    raise exception 'FAIL: an expired invite was not refused as expired';
+  end if;
+  if (select auth_user_id from clients
+       where id = '99999999-0000-4000-c000-0000000000e1') is not null then
+    raise exception 'FAIL: an expired invite bound an account anyway';
+  end if;
+  reset session authorization;
+
+  -- ── revoked invite ──────────────────────────────────────────────────────
+  insert into clients (id, operator_id, full_name, status, invite_token, invite_revoked_at)
+  values ('99999999-0000-4000-c000-0000000000e2', '99999999-0000-4000-a000-000000000001',
+          'H4 Revoked', 'invited', '99999999-0000-4000-e000-000000000002', now());
+
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-00000000004a","role":"authenticated","email":"h4-a@pawtrail.dev"}', true);
+  set local session authorization authenticated;
+  if (select count(*) from fn_preview_invite('99999999-0000-4000-e000-000000000002')) <> 0 then
+    raise exception 'FAIL: preview rendered a revoked invite';
+  end if;
+  if (select c.outcome from fn_claim_invite('99999999-0000-4000-e000-000000000002') c)
+       <> 'revoked' then
+    raise exception 'FAIL: a revoked invite was not refused as revoked';
+  end if;
+  reset session authorization;
+
+  -- ── the forwarded link: right token, wrong person ───────────────────────
+  insert into clients (id, operator_id, full_name, email, status, invite_token)
+  values ('99999999-0000-4000-c000-0000000000e3', '99999999-0000-4000-a000-000000000001',
+          'H4 Bound', 'h4-a@pawtrail.dev', 'invited', '99999999-0000-4000-e000-000000000003');
+
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-00000000004b","role":"authenticated","email":"h4-b@pawtrail.dev"}', true);
+  set local session authorization authenticated;
+  if (select c.outcome from fn_claim_invite('99999999-0000-4000-e000-000000000003') c)
+       <> 'email_mismatch' then
+    raise exception 'FAIL: a forwarded invite was not refused as email_mismatch';
+  end if;
+  if (select auth_user_id from clients
+       where id = '99999999-0000-4000-c000-0000000000e3') is not null then
+    raise exception 'FAIL: the wrong address bound the account anyway';
+  end if;
+  reset session authorization;
+
+  -- ...and the invited address still works, case- and whitespace-insensitively
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-00000000004a","role":"authenticated","email":"  H4-A@PawTrail.dev "}', true);
+  set local session authorization authenticated;
+  select c.client_id into v_client
+    from fn_claim_invite('99999999-0000-4000-e000-000000000003') c;
+  if v_client <> '99999999-0000-4000-c000-0000000000e3' then
+    raise exception 'FAIL: the invited address could not claim its own invite';
+  end if;
+  reset session authorization;
+
+  -- ── the log recorded all four, and the operator can read them ───────────
+  -- The refusals are the rows that matter, and they are the ones a
+  -- log-then-raise implementation silently discards.
+  select count(distinct outcome) into v_rows from invite_claim_attempts
+   where client_id in ('99999999-0000-4000-c000-0000000000e1',
+                       '99999999-0000-4000-c000-0000000000e2',
+                       '99999999-0000-4000-c000-0000000000e3')
+     and outcome in ('expired', 'revoked', 'email_mismatch', 'claimed');
+  if v_rows <> 4 then
+    raise exception 'FAIL: expected all four outcomes logged, got % distinct', v_rows;
+  end if;
+  if (select count(*) from invite_claim_attempts
+       where client_id = '99999999-0000-4000-c000-0000000000e3'
+         and outcome = 'email_mismatch'
+         and attempted_email = 'h4-b@pawtrail.dev') <> 1 then
+    raise exception 'FAIL: the mismatch row does not name the address that tried';
+  end if;
+
+  -- append-only, like credit_ledger and credential_access_log
+  begin
+    update invite_claim_attempts set outcome = 'claimed'
+     where client_id = '99999999-0000-4000-c000-0000000000e3';
+    raise exception 'FAIL: an audit row was rewritten';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%append-only%' then
+      raise exception 'FAIL: audit mutation blocked for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- ── reissue is the operator's, and only for their own client ────────────
+  insert into clients (id, operator_id, full_name, status, invite_token, invite_expires_at)
+  values ('99999999-0000-4000-c000-0000000000e4', '99999999-0000-4000-a000-000000000001',
+          'H4 Reissue', 'invited', '99999999-0000-4000-e000-000000000004',
+          now() - interval '1 day');
+  select invite_token into v_token from clients
+   where id = '99999999-0000-4000-c000-0000000000e4';
+
+  -- a foreign authenticated user cannot mint a token for somebody else's client
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-00000000004b","role":"authenticated","email":"h4-b@pawtrail.dev"}', true);
+  set local session authorization authenticated;
+  begin
+    perform fn_rotate_invite('99999999-0000-4000-c000-0000000000e4');
+    raise exception 'FAIL: a stranger reissued an invite for another operator''s client';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%no unclaimed invite%' then
+      raise exception 'FAIL: foreign rotate refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  reset session authorization;
+
+  -- the owning operator can, and it revives an expired invite
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000000001","role":"authenticated"}', true);
+  set local session authorization authenticated;
+  select fn_rotate_invite('99999999-0000-4000-c000-0000000000e4') into v_new;
+  if v_new = v_token then
+    raise exception 'FAIL: reissue returned the same token';
+  end if;
+  if (select invite_expires_at from clients
+       where id = '99999999-0000-4000-c000-0000000000e4') <= now() then
+    raise exception 'FAIL: reissue left the invite expired';
+  end if;
+
+  perform fn_revoke_invite('99999999-0000-4000-c000-0000000000e4');
+  if (select invite_revoked_at from clients
+       where id = '99999999-0000-4000-c000-0000000000e4') is null then
+    raise exception 'FAIL: revoke did not stamp the row';
+  end if;
+  reset session authorization;
+
+  -- ── the token itself is still unwritable through the API role ───────────
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000000001","role":"authenticated"}', true);
+  set local session authorization authenticated;
+  begin
+    update clients set invite_expires_at = now() + interval '99 years'
+     where id = '99999999-0000-4000-c000-0000000000e4';
+    raise exception 'FAIL: an operator extended an invite by direct UPDATE';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%permission denied%' then
+      raise exception 'FAIL: direct expiry write refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  reset session authorization;
+
+  raise notice 'invite expiry, revocation, binding, reissue and log (0039): OK';
 end $$;
 
 

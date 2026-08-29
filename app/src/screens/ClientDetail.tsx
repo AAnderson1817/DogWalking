@@ -8,6 +8,7 @@ import { CreditMeter } from "@/components/CreditMeter";
 import { EmptyState } from "@/components/EmptyState";
 import { FormError, Input, Select, Textarea } from "@/components/fields";
 import { LoadError, loadErrorMessage } from "@/components/LoadError";
+import { InvitePanel } from "@/components/InvitePanel";
 import { SegmentedTabs, TabPanel } from "@/components/SegmentedTabs";
 import { Sheet } from "@/components/Sheet";
 import { Spinner } from "@/components/Spinner";
@@ -134,6 +135,10 @@ export default function ClientDetail() {
           <Badge status={clientTreatment.badge}>{clientTreatment.label}</Badge>
         </div>
       </header>
+
+      {/* Review H4: the operator's only way to reissue or withdraw an invite.
+          Renders nothing once the client has claimed. */}
+      <InvitePanel client={client} onChanged={() => void reload()} />
 
       {/* Review M16. This control had no `aria-label` at all, so a screen
           reader announced "tab, 5 of 5, selected" for the operator's main
