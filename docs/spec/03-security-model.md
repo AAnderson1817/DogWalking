@@ -150,12 +150,21 @@ The vault now reads the request token's `aal` claim and resolves three cases:
 | `aal1_no_factor` | the account has no verified factor | allowed, at reduced assurance |
 | `insufficient` | a verified factor exists but this session did not use it | **refused** |
 
-Graduated deliberately: requiring `aal2` unconditionally would make the vault
-unusable, because MFA needs the Supabase Pro plan. So **enrolling a factor is
-what closes the exploit**, with no further code change — and an attacker cannot
+Graduated deliberately: requiring `aal2` unconditionally would lock out every
+operator who has not yet enrolled a factor. So **enrolling a factor is what
+closes the exploit**, with no further code change — and an attacker cannot
 manufacture `aal2`, since it needs the factor itself. A *missing* claim counts as
 `aal1`, never as strong; reading strength from an absent claim would be the gate
 failing open.
+
+`aal2` is not merely the strongest available control here, it is the **only**
+one that closes this path. Turning on `secure_password_change` — the obvious
+remedy, and what an earlier version of this section prescribed — does not:
+GoTrue requires reauthentication for a password change only once a session is
+older than 24h, so a freshly stolen session changes the password unchallenged.
+A session timebox under 24h removes even that residue, because no session can
+then reach the threshold. `docs/dev/auth-posture.md` carries the full argument
+and the read-back that prompted it.
 
 The claim read is unverified, and safe for the same reason `isServiceAuth`'s is:
 every function using it deploys with `verify_jwt` on, so the gateway has already
