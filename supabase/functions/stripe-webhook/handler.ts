@@ -10,6 +10,11 @@
 // claimant could still fail is how grants got lost. A claim stuck in
 // 'processing' past its lease is taken over by the next retry.
 
+// The only import in this module: `handler.ts` is otherwise entirely
+// dependency-injected. These are constants, not a dependency — and sharing
+// them with the writer is the point (review L23).
+import { STRIPE_META } from "../_lib/stripe_metadata.ts";
+
 export interface StripeEventLike {
   id: string;
   type: string;
@@ -377,9 +382,10 @@ async function applyEvent(
       const priceId = subscriptionPriceId(obj);
       const plan = priceId ? await deps.findPlanByPriceId(client.operator_id, priceId) : null;
       const meta = (obj.metadata ?? {}) as Record<string, unknown>;
-      const metadataIntentId = typeof meta.pawtrail_plan_change_intent_id === "string"
-        ? meta.pawtrail_plan_change_intent_id
-        : null;
+      // See the write site in `change-plan/index.ts` for why this is renamed
+      // rather than dual-read (review L23).
+      const rawIntentId = meta[STRIPE_META.planChangeIntentId];
+      const metadataIntentId = typeof rawIntentId === "string" ? rawIntentId : null;
       // Only two matches are safe: the exact intent id stamped into the
       // subscription's metadata by change-plan, or (for pre-intent subs with
       // no metadata) sub + resolved plan — proof the price really moved to

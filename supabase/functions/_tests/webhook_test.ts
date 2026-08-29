@@ -342,7 +342,7 @@ Deno.test("subscription.updated applies a pending plan-change intent before upda
       id: "sub_1",
       customer: "cus_1",
       status: "active",
-      metadata: { pawtrail_plan_change_intent_id: "intent-1" },
+      metadata: { sanpo_plan_change_intent_id: "intent-1" },
       items: { data: [{ price: { id: "price_1" } }] },
     }),
     deps,
@@ -950,7 +950,7 @@ Deno.test("H11: an in-app plan change still wins, and is not reported as externa
   await handleStripeEvent(
     event(
       "customer.subscription.updated",
-      subOnPrice("price_2", { pawtrail_plan_change_intent_id: "intent-9" }),
+      subOnPrice("price_2", { sanpo_plan_change_intent_id: "intent-9" }),
     ),
     deps,
   );

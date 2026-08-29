@@ -1,4 +1,4 @@
--- PawTrail smoke suite (phase 00).
+-- Sanpo smoke suite (phase 00).
 -- Run: psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/smoke.sql
 --
 -- Personas are simulated with SET LOCAL SESSION AUTHORIZATION (so
@@ -14,13 +14,13 @@ begin;
 do $$
 begin
   insert into auth.users (id, email) values
-    ('99999999-0000-4000-a000-000000000001', 'smoke-op1@pawtrail.dev'),
-    ('99999999-0000-4000-a000-000000000002', 'smoke-op2@pawtrail.dev'),
-    ('99999999-0000-4000-a000-000000000003', 'smoke-client-a@pawtrail.dev');
+    ('99999999-0000-4000-a000-000000000001', 'smoke-op1@sanpo.test'),
+    ('99999999-0000-4000-a000-000000000002', 'smoke-op2@sanpo.test'),
+    ('99999999-0000-4000-a000-000000000003', 'smoke-client-a@sanpo.test');
 
   insert into operators (id, business_name, display_name, email) values
-    ('99999999-0000-4000-a000-000000000001', 'Smoke Walks 1', 'Op1', 'smoke-op1@pawtrail.dev'),
-    ('99999999-0000-4000-a000-000000000002', 'Smoke Walks 2', 'Op2', 'smoke-op2@pawtrail.dev');
+    ('99999999-0000-4000-a000-000000000001', 'Smoke Walks 1', 'Op1', 'smoke-op1@sanpo.test'),
+    ('99999999-0000-4000-a000-000000000002', 'Smoke Walks 2', 'Op2', 'smoke-op2@sanpo.test');
 
   insert into plans (id, operator_id, name, credits_per_cycle, price_pence, cycle,
                      rollover_policy, rollover_cap, rollover_expiry_days, overage_rate_pence)
@@ -780,7 +780,7 @@ begin
   -- claim invite binds auth user and activates (fixture: fresh invite client)
   reset session authorization;
   insert into auth.users (id, email)
-  values ('99999999-0000-4000-a000-000000000004', 'smoke-claimer@pawtrail.dev');
+  values ('99999999-0000-4000-a000-000000000004', 'smoke-claimer@sanpo.test');
   insert into clients (id, operator_id, full_name, status, invite_token)
   values ('99999999-0000-4000-c000-00000000000f', '99999999-0000-4000-a000-000000000001',
           'Smoke Claimer', 'invited', '99999999-9999-4999-a999-999999999999');
@@ -827,7 +827,7 @@ begin
   perform set_config('request.jwt.claims',
     '{"sub":"99999999-0000-4000-a000-000000000003","role":"authenticated"}', true);
   set local session authorization authenticated;
-  update clients set phone = '+44 7700 900099'
+  update clients set phone = '+1 312 555 0199'
    where id = '99999999-0000-4000-c000-00000000000a';
   begin
     update clients set notes = 'client-forged note'
@@ -1182,7 +1182,7 @@ begin
 
   -- A second tenant with a signed-in client, so "another operator's client"
   -- is a real persona and not an absence.
-  insert into auth.users (id, email) values (v_auth_f2, 'smoke-client-f2@pawtrail.dev');
+  insert into auth.users (id, email) values (v_auth_f2, 'smoke-client-f2@sanpo.test');
   insert into service_types (id, operator_id, name, duration_minutes, credit_cost)
   values ('99999999-0000-4000-3000-0000000000b1', v_op_b, 'Smoke B walk', 30, 1);
   insert into walks (id, operator_id, client_id, property_id, service_type_id,
@@ -3326,20 +3326,46 @@ begin
   -- column silently becomes unreadable and `select("*")` starts failing with a
   -- bare 42501 from PostgREST. This turns that into a sentence naming the
   -- column and the file to add it to.
+  --
+  -- The withheld set is NAMED, and asserted in both directions. Listing the
+  -- exemptions rather than one `<>` keeps the check fail-closed for a column
+  -- added later while making each withholding a decision somebody wrote down:
+  --   unsubscribe_token  0038 — a bearer credential for "stop emailing this
+  --                      address", and listClients() selects *
+  --   notes              0043 (L3) — the operator's private note ABOUT the
+  --                      client; the portal must not read it
+  --   stripe_customer_id / stripe_subscription_id
+  --                      0043 (L3) — external billing identifiers with no
+  --                      reader in app/src
   declare
+    v_withheld text[] := array[
+      'unsubscribe_token', 'notes', 'stripe_customer_id', 'stripe_subscription_id'
+    ];
     v_missing text;
+    v_leaked  text;
   begin
     select string_agg(c.column_name, ', ')
       into v_missing
       from information_schema.columns c
      where c.table_schema = 'public'
        and c.table_name = 'clients'
-       and c.column_name <> 'unsubscribe_token'
+       and not (c.column_name = any (v_withheld))
        and not has_column_privilege('authenticated', 'public.clients', c.column_name, 'SELECT');
     if v_missing is not null then
       raise exception
-        'FAIL: clients column(s) not selectable by authenticated: % — add them to the grant list in 0038 (the table-level SELECT was replaced to withhold unsubscribe_token)',
+        'FAIL: clients column(s) not selectable by authenticated: % — add them to the grant list in the latest migration that narrowed it',
         v_missing;
+    end if;
+
+    -- The other direction. Without this the exemption list is a way to make
+    -- the check pass by naming a column, rather than a record of one that is
+    -- genuinely withheld.
+    select string_agg(c, ', ') into v_leaked
+      from unnest(v_withheld) c
+     where has_column_privilege('authenticated', 'public.clients', c, 'SELECT');
+    if v_leaked is not null then
+      raise exception
+        'FAIL: column(s) listed as withheld are selectable by authenticated: %', v_leaked;
     end if;
   end;
 
@@ -3398,8 +3424,8 @@ begin
   reset session authorization;
 
   insert into auth.users (id, email) values
-    ('99999999-0000-4000-a000-00000000004a', 'h4-a@pawtrail.dev'),
-    ('99999999-0000-4000-a000-00000000004b', 'h4-b@pawtrail.dev');
+    ('99999999-0000-4000-a000-00000000004a', 'h4-a@sanpo.test'),
+    ('99999999-0000-4000-a000-00000000004b', 'h4-b@sanpo.test');
 
   -- ── expired invite ──────────────────────────────────────────────────────
   insert into clients (id, operator_id, full_name, status, invite_token, invite_expires_at)
@@ -3408,7 +3434,7 @@ begin
           now() - interval '1 day');
 
   perform set_config('request.jwt.claims',
-    '{"sub":"99999999-0000-4000-a000-00000000004a","role":"authenticated","email":"h4-a@pawtrail.dev"}', true);
+    '{"sub":"99999999-0000-4000-a000-00000000004a","role":"authenticated","email":"h4-a@sanpo.test"}', true);
   set local session authorization authenticated;
 
   -- the preview must refuse too, or the screen names a real client and a real
@@ -3433,7 +3459,7 @@ begin
           'H4 Revoked', 'invited', '99999999-0000-4000-e000-000000000002', now());
 
   perform set_config('request.jwt.claims',
-    '{"sub":"99999999-0000-4000-a000-00000000004a","role":"authenticated","email":"h4-a@pawtrail.dev"}', true);
+    '{"sub":"99999999-0000-4000-a000-00000000004a","role":"authenticated","email":"h4-a@sanpo.test"}', true);
   set local session authorization authenticated;
   if (select count(*) from fn_preview_invite('99999999-0000-4000-e000-000000000002')) <> 0 then
     raise exception 'FAIL: preview rendered a revoked invite';
@@ -3447,10 +3473,10 @@ begin
   -- ── the forwarded link: right token, wrong person ───────────────────────
   insert into clients (id, operator_id, full_name, email, status, invite_token)
   values ('99999999-0000-4000-c000-0000000000e3', '99999999-0000-4000-a000-000000000001',
-          'H4 Bound', 'h4-a@pawtrail.dev', 'invited', '99999999-0000-4000-e000-000000000003');
+          'H4 Bound', 'h4-a@sanpo.test', 'invited', '99999999-0000-4000-e000-000000000003');
 
   perform set_config('request.jwt.claims',
-    '{"sub":"99999999-0000-4000-a000-00000000004b","role":"authenticated","email":"h4-b@pawtrail.dev"}', true);
+    '{"sub":"99999999-0000-4000-a000-00000000004b","role":"authenticated","email":"h4-b@sanpo.test"}', true);
   set local session authorization authenticated;
   if (select c.outcome from fn_claim_invite('99999999-0000-4000-e000-000000000003') c)
        <> 'email_mismatch' then
@@ -3464,7 +3490,7 @@ begin
 
   -- ...and the invited address still works, case- and whitespace-insensitively
   perform set_config('request.jwt.claims',
-    '{"sub":"99999999-0000-4000-a000-00000000004a","role":"authenticated","email":"  H4-A@PawTrail.dev "}', true);
+    '{"sub":"99999999-0000-4000-a000-00000000004a","role":"authenticated","email":"  H4-A@Sanpo.Test "}', true);
   set local session authorization authenticated;
   select c.client_id into v_client
     from fn_claim_invite('99999999-0000-4000-e000-000000000003') c;
@@ -3487,7 +3513,7 @@ begin
   if (select count(*) from invite_claim_attempts
        where client_id = '99999999-0000-4000-c000-0000000000e3'
          and outcome = 'email_mismatch'
-         and attempted_email = 'h4-b@pawtrail.dev') <> 1 then
+         and attempted_email = 'h4-b@sanpo.test') <> 1 then
     raise exception 'FAIL: the mismatch row does not name the address that tried';
   end if;
 
@@ -3513,7 +3539,7 @@ begin
 
   -- a foreign authenticated user cannot mint a token for somebody else's client
   perform set_config('request.jwt.claims',
-    '{"sub":"99999999-0000-4000-a000-00000000004b","role":"authenticated","email":"h4-b@pawtrail.dev"}', true);
+    '{"sub":"99999999-0000-4000-a000-00000000004b","role":"authenticated","email":"h4-b@sanpo.test"}', true);
   set local session authorization authenticated;
   begin
     perform fn_rotate_invite('99999999-0000-4000-c000-0000000000e4');
@@ -3584,7 +3610,7 @@ begin
   select id into v_svc from service_types where operator_id = v_op limit 1;
 
   insert into clients (id, operator_id, full_name, email, phone, notes, status, auth_user_id)
-  values (v_cl, v_op, 'Purge Me', 'purge@pawtrail.dev', '+1 555 0100',
+  values (v_cl, v_op, 'Purge Me', 'purge@sanpo.test', '+1 555 0100',
           'gate sticks in the rain', 'active', null);
   insert into properties (id, operator_id, client_id, label, address_line1, city, postcode,
                           access_notes_public, lat, lng)
@@ -3828,13 +3854,13 @@ declare
   v_res  record;
 begin
   reset session authorization;
-  insert into auth.users (id, email) values (v_user, 'consent@pawtrail.dev');
+  insert into auth.users (id, email) values (v_user, 'consent@sanpo.test');
   insert into clients (id, operator_id, full_name, email, status, invite_token)
-  values (v_cl, v_op, 'Consent Case', 'consent@pawtrail.dev', 'invited',
+  values (v_cl, v_op, 'Consent Case', 'consent@sanpo.test', 'invited',
           '99999999-0000-4000-e000-0000000000c1');
 
   perform set_config('request.jwt.claims',
-    format('{"sub":"%s","role":"authenticated","email":"consent@pawtrail.dev"}', v_user), true);
+    format('{"sub":"%s","role":"authenticated","email":"consent@sanpo.test"}', v_user), true);
   set local session authorization authenticated;
 
   select * into v_res from fn_claim_invite('99999999-0000-4000-e000-0000000000c1', '2026-08-29');
@@ -3881,7 +3907,7 @@ declare
   v_res  record;
 begin
   reset session authorization;
-  insert into auth.users (id, email) values (v_user, 'noversion@pawtrail.dev');
+  insert into auth.users (id, email) values (v_user, 'noversion@sanpo.test');
   insert into clients (id, operator_id, full_name, status, invite_token)
   values (v_cl, v_op, 'No Version', 'invited', '99999999-0000-4000-e000-0000000000c2');
 
@@ -3920,8 +3946,8 @@ declare
 begin
   reset session authorization;
   insert into auth.users (id, email) values
-    (v_user,  'claimer@pawtrail.dev'),
-    (v_other, 'stranger@pawtrail.dev');
+    (v_user,  'claimer@sanpo.test'),
+    (v_other, 'stranger@sanpo.test');
   insert into clients (id, operator_id, full_name, status, invite_token)
   values (v_cl, v_op, 'Claimed Then Purged', 'invited', v_tok);
   insert into properties (id, operator_id, client_id, label)
@@ -3929,7 +3955,7 @@ begin
 
   -- claim it, which writes the attempt row the purge used to choke on
   perform set_config('request.jwt.claims',
-    format('{"sub":"%s","role":"authenticated","email":"claimer@pawtrail.dev"}', v_user), true);
+    format('{"sub":"%s","role":"authenticated","email":"claimer@sanpo.test"}', v_user), true);
   set local session authorization authenticated;
   if (select c.outcome from fn_claim_invite(v_tok) c) <> 'claimed' then
     raise exception 'FAIL: the fixture claim did not succeed';
@@ -3975,7 +4001,7 @@ begin
   end if;
   -- the old token must be dead, not merely replaced
   perform set_config('request.jwt.claims',
-    format('{"sub":"%s","role":"authenticated","email":"claimer@pawtrail.dev"}', v_user), true);
+    format('{"sub":"%s","role":"authenticated","email":"claimer@sanpo.test"}', v_user), true);
   set local session authorization authenticated;
   if (select c.outcome from fn_claim_invite(v_tok) c) <> 'not_found' then
     raise exception 'FAIL: the released token still resolves';
@@ -4047,6 +4073,80 @@ begin
   end;
 
   raise notice 'the invite log is still append-only outside a purge (0042): OK';
+end $$;
+
+-- ═══ 0043: price snapshot, credential delete, operator-private columns ════
+do $$
+declare
+  v_op   uuid := '99999999-0000-4000-a000-000000000001';
+  v_cl   uuid := '99999999-0000-4000-c000-0000000000a1';
+  v_prop uuid := '99999999-0000-4000-b000-0000000000a1';
+  v_svc  uuid;
+  v_walk uuid := '99999999-0000-4000-f000-0000000000a1';
+  v_cost int;
+begin
+  reset session authorization;
+  select id into v_svc from service_types where operator_id = v_op limit 1;
+
+  insert into clients (id, operator_id, full_name, status, notes)
+  values (v_cl, v_op, 'Snapshot Client', 'active', 'private operator note');
+  insert into properties (id, operator_id, client_id, label)
+  values (v_prop, v_op, v_cl, 'Home');
+
+  -- ── L7: the price is captured at creation, not read at completion ──────
+  update service_types set credit_cost = 2 where id = v_svc;
+  insert into walks (id, operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status, origin_date)
+  values (v_walk, v_op, v_cl, v_prop, v_svc, current_date, '09:00', '10:00',
+          'scheduled', current_date);
+
+  if (select cost_credits from walks where id = v_walk) <> 2 then
+    raise exception 'FAIL: the walk did not snapshot its price at creation';
+  end if;
+
+  -- The operator raises the price AFTER the walk was agreed. The walk keeps
+  -- what it was booked at — this is the whole finding.
+  update service_types set credit_cost = 9 where id = v_svc;
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  set local session authorization authenticated;
+  v_cost := fn_walk_cost(v_walk);
+  reset session authorization;
+  if v_cost <> 2 then
+    raise exception 'FAIL: fn_walk_cost charged the NEW price (%), not the agreed one', v_cost;
+  end if;
+
+  -- A walk with no snapshot still costs what the live tables say, which is the
+  -- pre-0043 behaviour every existing row relies on.
+  update walks set cost_credits = null where id = v_walk;
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  set local session authorization authenticated;
+  v_cost := fn_walk_cost(v_walk);
+  reset session authorization;
+  if v_cost <> 9 then
+    raise exception 'FAIL: an unsnapshotted walk did not fall back to the live price (got %)', v_cost;
+  end if;
+  update service_types set credit_cost = 1 where id = v_svc;
+
+  -- ── L3: the client persona cannot read the operator's private note ─────
+  -- Checked through the GRANT rather than a select, because a revoked column
+  -- makes `select notes` a 42501 and the point is the privilege itself.
+  if has_column_privilege('authenticated', 'public.clients', 'notes', 'SELECT') then
+    raise exception 'FAIL: clients.notes is still selectable by the client persona';
+  end if;
+  -- ...while invite_token is deliberately KEPT: the operator's InvitePanel
+  -- builds the claim URL from it, and column privileges are role-wide.
+  if not has_column_privilege('authenticated', 'public.clients', 'invite_token', 'SELECT') then
+    raise exception 'FAIL: invite_token was revoked — the operator invite surface needs it';
+  end if;
+
+  -- ── L4: a credential cannot be hard-deleted around the vault ───────────
+  if has_table_privilege('authenticated', 'public.access_credentials', 'DELETE') then
+    raise exception 'FAIL: an operator can still hard-delete a credential';
+  end if;
+
+  raise notice 'price snapshot, private columns, credential delete (0043): OK';
 end $$;
 
 

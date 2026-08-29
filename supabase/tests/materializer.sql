@@ -14,9 +14,9 @@ begin
 
   -- ── fixtures ────────────────────────────────────────────────────────────
   insert into auth.users (id, email)
-  values ('88888888-0000-4000-a000-000000000001', 'mat-op@pawtrail.dev');
+  values ('88888888-0000-4000-a000-000000000001', 'mat-op@sanpo.test');
   insert into operators (id, business_name, display_name, email)
-  values ('88888888-0000-4000-a000-000000000001', 'Mat Walks', 'Mat', 'mat-op@pawtrail.dev');
+  values ('88888888-0000-4000-a000-000000000001', 'Mat Walks', 'Mat', 'mat-op@sanpo.test');
 
   insert into clients (id, operator_id, full_name, status, subscription_status)
   values

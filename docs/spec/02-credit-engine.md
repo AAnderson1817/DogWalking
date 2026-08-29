@@ -44,7 +44,17 @@ against two real backends.
 
 **fn_apply_invoice_paid(…, p_is_renewal boolean) → boolean** — gained the flag in 0026. `fn_apply_rollover` runs ONLY when true. Rollover means "carry what is left of the cycle that just ended", so a first invoice (`subscription_create`) has no prior cycle and running it there is a bug rather than a policy: on `rollover_policy='none'` it inserts a negative ledger row for the whole balance before the first grant lands, destroying any credit granted before billing started. The six-argument version is dropped rather than kept as an overload — two functions differing only by a trailing boolean is the shape a caller gets wrong, and the six-argument one is the version that destroys credits.
 
-**fn_walk_cost(p_walk uuid) → int** — `service_types.credit_cost` + `weekend_surcharge_credits` if `scheduled_date` is Sat/Sun. STABLE, no lock.
+**fn_walk_cost(p_walk uuid) → int** — `coalesce(walks.cost_credits, service_types.credit_cost + weekend_surcharge_credits if scheduled_date is Sat/Sun)`. STABLE, no lock.
+
+**The price is snapshotted at creation, not read at completion (0043, review L7).** `walks.cost_credits` and `walks.overage_rate_pence` are written by `trg_walks_snapshot_price`, a BEFORE INSERT trigger. The client agrees to a price at booking and is charged at completion, and until 0043 both figures were read from fully mutable tables at the later moment — so an operator editing a service type or an overage rate on the Settings screen silently re-priced every walk already on the calendar, with nothing in the database proving what was agreed.
+
+Three rules, each deliberate:
+
+- **A trigger, not each creator.** A walk is born three ways — `fn_book_walk` (client), the operator's direct INSERT, and `fn_materialize_walks` (nightly) — and a fourth will exist. A trigger cannot be forgotten by the one that comes next.
+- **Nothing is backfilled.** Rows created before 0043 carry null and fall back to the live tables, which is exactly the behaviour they shipped with. A backfill would stamp today's prices onto historical walks and present them as the agreed price — a guess indistinguishable from a real snapshot. Same call 0023 made on untraceable payments.
+- **`overage_rate_pence` null means "no snapshot", never "free".** The overage path already refuses a walk whose client is on no plan; writing 0 would turn that honest refusal into a silent zero-value charge.
+
+No API role has UPDATE on either column: a snapshot the operator can rewrite afterwards is not a snapshot. Re-pricing an existing walk is a decision, and a surface for it would need its own function and its own audit line.
 
 **fn_debit_walk(p_walk uuid) → table(outcome text, cost int, new_balance int)** — locks the **walk, then the client** (0037, see the lock order below); cost := fn_walk_cost. If `balance >= cost`: ledger `debit` (−cost, walk_id), set `walks.credits_debited = cost`, `is_overage = false` → outcome `'debited'`. Else: NO ledger entry, balance untouched, set `credits_debited = 0`, `is_overage = true` → outcome `'overage'` (caller charges the WHOLE walk at `plans.overage_rate_pence` — invariant 3, never partial). Idempotent: if walk already debited or already flagged overage, returns prior outcome without re-applying.
 
