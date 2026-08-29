@@ -108,6 +108,12 @@ named, minimal privilege set — but whether a given Supabase project *grants*
 that much cannot be read from this repository, and no amount of local modelling
 substitutes for asking the project.
 
+Automating it into the deploy was considered and declined; the runbook records
+why, and what would have to be established first. The short version: the runner
+may have no IPv4 route to a direct Postgres connection, and a gate that blocks
+the first production deploy with a networking error is worse than a checklist
+item.
+
 The load-bearing row is **`BYPASSRLS`**. 0004 puts `force row level security`
 on 23 tenant tables; FORCE means the owner is subject to its own policies, and
 a `SECURITY DEFINER` function runs as its owner. Without that attribute all 53
