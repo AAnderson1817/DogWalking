@@ -15,6 +15,42 @@ Nothing here blocks development. Several block *production*.
 
 ---
 
+## If you only do three things
+
+In this order. Each takes minutes, none costs money, and each closes something
+the rest of the system currently papers over.
+
+| | Action | Why first |
+| --- | --- | --- |
+| 1 | **Enrol a TOTP factor** (§9) | The only control that actually closes the stolen-session path to the vault. Free, already enabled, nothing to buy. |
+| 2 | **Realtime → Allow public access: OFF** (§6) | Until this is off, a named client's live position at their home address is joinable by anyone holding the anon key that ships in the bundle. |
+| 3 | **Branch protection on `main`** (§7) | `main` is a deploy trigger. Verified still off on 2026-08-29. |
+
+Everything else is either a spending decision, a one-time pre-production check,
+or a setting that only matters once real clients exist.
+
+## How each of these is checked
+
+The point of this page is that none of it can be done from the repository. What
+*can* be done from here is noticing when one is still undone, so the list does
+not quietly rot:
+
+| Item | What tells you |
+| --- | --- |
+| §2 vault key verification | The staging deploy's `Verify the vault key opens this project` step warns and says it proved nothing |
+| §5 schema capability | `docs/dev/db-push-requirements.md`, run once before the first production push |
+| §6 Realtime public access | Nothing automated. `docs/dev/realtime-authorization.md` has a positive and a negative check to run by hand |
+| §7 branch protection | `GET /repos/{owner}/{repo}/branches` → `main.protected` |
+| §8 auth settings | `.github/workflows/auth-posture.yml`, every staging deploy |
+| §9 TOTP | Same workflow — it already reports enrolment and verification as on |
+| §11 `RESEND_API_KEY` | `Nightly ops check` goes red when an email backlog survives its retry |
+
+Two of these have no automated signal at all — §6 and §4 — and that is worth
+knowing about them specifically, because they are the two whose absence is
+invisible from inside the product.
+
+---
+
 ## Blocks production
 
 ### 1. Stripe: listen on **connected accounts**
@@ -45,8 +81,14 @@ Set the production branch to `release/staging` (staging project) and
 
 Until then Vercel deploys `main` on push, which means the frontend ships
 **ahead of its own migrations** — a client opening a screen whose RPC does not
-exist yet (review H16). The `frontend` job in both deploy workflows already
-pushes the release refs; nothing consumes them until this is set.
+exist yet (review H16).
+
+**The repository half is confirmed working.** `release/staging` exists and sits
+at the same commit as `main` (`df81429`, checked 2026-08-29), so the `frontend`
+job is advancing the ref exactly as designed. `release/production` does not
+exist yet, which is correct — production has never deployed. Nothing consumes
+either ref until the Vercel setting changes; this is one dashboard field per
+project, and the machinery behind it is already running.
 
 ### 4. Backups: plan tier, PITR, storage destination — review B3
 `docs/dev/disaster-recovery.md` states plainly that RTO and RPO are
@@ -101,25 +143,47 @@ straight to it deploys staging Supabase and runs the smoke suite. The rule
 exists as prose in `CLAUDE.md` and is enforced by nothing. It matters slightly
 more since the `frontend` deploy job gained `contents: write`.
 
-*(This session cannot verify the current state: the token 403s on the branch
-and ruleset endpoints, so the setting is unreadable from here as well as
-unwritable.)*
+**Verified open, 2026-08-29.** This entry used to say the state was unreadable
+from here because the token 403s on the branch and ruleset endpoints. That is
+no longer true for the branches endpoint: `GET /repos/{o}/{r}/branches` returns
+`main` with `"protected": false`. Read as narrowly as it deserves — that field
+reflects classic branch protection, and a repository *ruleset* is a separate
+mechanism that would not necessarily appear in it. So: no branch protection,
+and rulesets remain unverified from here.
 
 ### 8. Two auth settings in the dashboard
-The `auth-posture` job ran for the first time on 2026-08-29 and read the live
-staging config back. Two values sit below the intended posture, and both are
-dashboard-only:
+Both are at **Authentication → Providers → Email**, and both are read back
+automatically by `.github/workflows/auth-posture.yml` after every staging
+deploy.
 
-| Setting | Live | Intended | Where |
+| Setting | Live | Intended | Confidence |
 | --- | --- | --- | --- |
-| Minimum password length | **6** | 12 | Authentication → Providers → Email |
-| Secure password change | **off** | on | Authentication → Providers → Email |
+| Minimum password length | **6** | 12 | **Verified** — read from the API on 2026-08-29 |
+| Secure password change | **unknown** | on | *Not yet read* — see below |
+
+**Correction to the previous version of this entry**, which stated the second
+row as "off". It was never measured. `check-auth-posture.sh` was asking the
+Management API for `secure_password_change_enabled`, a key that API has never
+returned, so the value was unreadable under that name and the "off" was an
+artifact of the check's own defect. The gate has been fixed to name the two keys
+the response actually carries
+(`security_update_password_require_current_password` and
+`security_update_password_require_reauthentication`), and the next run of the
+posture workflow reads them for the first time.
+
+That defect also meant this gate **could not be satisfied by any dashboard
+change** — so it failed on every run from the day it landed, which is why the
+staging smoke workflow was permanently red and why the posture check now lives
+in its own workflow. Fixing the check was in-repository work and is done; what
+remains for you is the password floor, and whichever of the two password-change
+settings the next run reports as off.
 
 `config.toml` governs `supabase start` on a laptop and nothing deployed. Wiring
 `config push` is deliberately not done, and `docs/dev/auth-posture.md` says why.
 
 Read the current values off the job summary rather than trusting this table to
-stay accurate — it is a snapshot of one run.
+stay accurate — it is a snapshot of one run, and one of its rows has already
+been wrong once.
 
 **Also on that page: the redirect allow-list.** Password recovery (review L16)
 sends people to `{site}/reset-password`, and the list is matched **exactly** —
