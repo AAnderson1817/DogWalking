@@ -8,6 +8,7 @@ import type { Database } from "./types";
 import type {
   Clients,
   CreditLedger,
+  InviteClaimOutcome,
   Notifications,
   Operators,
   Payments,
@@ -495,10 +496,103 @@ export async function walkCost(walkId: string): Promise<number> {
   return data as number;
 }
 
+/**
+ * Why the outcomes come back as data rather than as thrown errors (review H4).
+ *
+ * `fn_claim_invite` writes an audit row for every attempt, and a PL/pgSQL
+ * `raise` rolls the transaction back to the caller's savepoint — which
+ * discards the row it just wrote. Log-then-raise therefore records only the
+ * attempts that SUCCEEDED, and the refusals, which are the interesting ones,
+ * vanish. So the function returns its verdict and this layer turns it into an
+ * error for the screen.
+ *
+ * The refusal is never the exception: it is the absence of the binding UPDATE,
+ * which the function performs only on `claimed`.
+ */
+// The outcome enum comes from the generated schema types rather than being
+// restated here. A second copy is the drift this repository has already paid
+// for once, in the payment-status sets.
+export class InviteClaimError extends Error {
+  // Written out rather than declared as a constructor parameter property:
+  // `erasableSyntaxOnly` is on, and that syntax is not type-erasable.
+  readonly outcome: Exclude<InviteClaimOutcome, "claimed">;
+
+  constructor(outcome: Exclude<InviteClaimOutcome, "claimed">) {
+    super(INVITE_CLAIM_MESSAGE[outcome]);
+    this.name = "InviteClaimError";
+    this.outcome = outcome;
+  }
+}
+
+/**
+ * Each message names what the person can actually do next. "Expired" and
+ * "withdrawn" are deliberately different sentences: an expired invite wants a
+ * reissue, a withdrawn one was somebody's decision and asking for a reissue of
+ * it is the wrong request to make.
+ */
+export const INVITE_CLAIM_MESSAGE: Record<Exclude<InviteClaimOutcome, "claimed">, string> = {
+  not_found: "This invite link is not valid. Ask your walker to send a fresh one.",
+  already_claimed: "This invite has already been claimed. Sign in instead.",
+  expired: "This invite has expired. Ask your walker to send a fresh one.",
+  revoked: "This invite was withdrawn by your walker. Ask them for a new one.",
+  email_mismatch:
+    "This invite was sent to a different email address. Sign up with the address your walker invited, or ask them to update it.",
+};
+
 export async function claimInvite(token: string): Promise<string> {
   const { data, error } = await supabase.rpc("fn_claim_invite", { p_token: token });
   if (error) throw new Error(error.message);
+  const row = (Array.isArray(data) ? data[0] : data) as
+    | { client_id: string | null; outcome: InviteClaimOutcome }
+    | undefined;
+  // A missing row is not a claim. Treating it as one would navigate a signed-up
+  // account into a portal it was never bound to.
+  if (!row) throw new InviteClaimError("not_found");
+  if (row.outcome !== "claimed" || !row.client_id) {
+    throw new InviteClaimError(
+      row.outcome === "claimed" ? "not_found" : row.outcome,
+    );
+  }
+  return row.client_id;
+}
+
+/** Reissue an invite: new token, fresh window, revocation cleared. */
+export async function rotateInvite(clientId: string): Promise<string> {
+  const { data, error } = await supabase.rpc("fn_rotate_invite", { p_client: clientId });
+  if (error) throw new Error(error.message);
   return data as string;
+}
+
+/** Withdraw an invite that should no longer be claimable. */
+export async function revokeInvite(clientId: string): Promise<void> {
+  const { error } = await supabase.rpc("fn_revoke_invite", { p_client: clientId });
+  if (error) throw new Error(error.message);
+}
+
+/** The one place the claim URL is built, so Roster and ClientDetail agree. */
+export function inviteUrlFor(token: string): string {
+  return `${window.location.origin}/claim/${token}`;
+}
+
+export type InviteState = "claimed" | "revoked" | "expired" | "active";
+
+/**
+ * One place that decides what an invite's state is, so the Roster chip and the
+ * ClientDetail panel cannot disagree. Order matters: a claimed invite is
+ * claimed regardless of what its expiry says, because the expiry stopped being
+ * consulted the moment an account was bound.
+ */
+export function inviteState(c: {
+  auth_user_id: string | null;
+  invite_revoked_at?: string | null;
+  invite_expires_at?: string | null;
+}): InviteState {
+  if (c.auth_user_id) return "claimed";
+  if (c.invite_revoked_at) return "revoked";
+  if (c.invite_expires_at && new Date(c.invite_expires_at).getTime() <= Date.now()) {
+    return "expired";
+  }
+  return "active";
 }
 
 /** Invite preview for /claim/:token — filtered select on invite_token. */

@@ -240,6 +240,46 @@ button.walk-card:hover,
   word-break: break-all;
 }
 
+/* Review H4. The operator's invite controls on ClientDetail. Every colour is a
+   CT-1 role, never a literal — a raw hex bypasses the palette and its
+   `prefers-contrast` overrides, which is the defect `no-raw-hex.test.ts`
+   exists to catch. */
+.invite-panel {
+  margin-top: var(--s-4);
+  padding: var(--s-4);
+  background: var(--sanpo-color-surface-raised);
+  border: var(--bw) solid var(--sanpo-color-border-subtle);
+  border-radius: var(--r-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.invite-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+}
+
+.invite-panel__detail {
+  margin: 0;
+  color: var(--sanpo-color-text-secondary);
+  font-size: var(--fs-14);
+}
+
+.invite-panel__expiry {
+  margin: 0;
+  color: var(--sanpo-color-text-secondary);
+  font-size: var(--fs-12);
+}
+
+.invite-panel__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
 .booking-cost { background: var(--sanpo-color-surface-canvas); box-shadow: none; }
 
 /* The overage branch changes colour, and deliberately. It was `--amber`, which

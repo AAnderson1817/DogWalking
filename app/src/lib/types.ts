@@ -66,6 +66,8 @@ export type Database = {
           updated_at: string;
           current_period_end: string | null;
           unsubscribe_token: string;
+          invite_expires_at: string | null;
+          invite_revoked_at: string | null;
         };
         Insert: {
           id?: string;
@@ -86,6 +88,8 @@ export type Database = {
           updated_at?: string;
           current_period_end?: string | null;
           unsubscribe_token?: string;
+          invite_expires_at?: string | null;
+          invite_revoked_at?: string | null;
         };
         Update: {
           id?: string;
@@ -106,6 +110,8 @@ export type Database = {
           updated_at?: string;
           current_period_end?: string | null;
           unsubscribe_token?: string;
+          invite_expires_at?: string | null;
+          invite_revoked_at?: string | null;
         };
         Relationships: [];
       };
@@ -217,6 +223,36 @@ export type Database = {
           operator_id?: string | null;
           notification_type?: Database["public"]["Enums"]["notification_type"] | null;
           reason?: string;
+          created_at?: string;
+        };
+        Relationships: [];
+      };
+      invite_claim_attempts: {
+        Row: {
+          id: string;
+          operator_id: string;
+          client_id: string;
+          attempted_by: string;
+          attempted_email: string | null;
+          outcome: Database["public"]["Enums"]["invite_claim_outcome"];
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          operator_id: string;
+          client_id: string;
+          attempted_by: string;
+          attempted_email?: string | null;
+          outcome: Database["public"]["Enums"]["invite_claim_outcome"];
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          operator_id?: string;
+          client_id?: string;
+          attempted_by?: string;
+          attempted_email?: string | null;
+          outcome?: Database["public"]["Enums"]["invite_claim_outcome"];
           created_at?: string;
         };
         Relationships: [];
@@ -1059,6 +1095,10 @@ export type Database = {
         Args: Record<string, never>;
         Returns: unknown;
       };
+      fn_block_invite_log_mutation: {
+        Args: Record<string, never>;
+        Returns: unknown;
+      };
       fn_book_walk: {
         Args: {
           p_property: string;
@@ -1086,7 +1126,7 @@ export type Database = {
         Args: {
           p_token: string;
         };
-        Returns: string;
+        Returns: Array<{ client_id: string; outcome: Database["public"]["Enums"]["invite_claim_outcome"] }>;
       };
       fn_credential_log_block_mutation: {
         Args: Record<string, never>;
@@ -1271,6 +1311,12 @@ export type Database = {
         };
         Returns: string;
       };
+      fn_revoke_invite: {
+        Args: {
+          p_client: string;
+        };
+        Returns: unknown;
+      };
       fn_rotate_credential: {
         Args: {
           p_id: string;
@@ -1280,6 +1326,12 @@ export type Database = {
           p_label: string;
           p_ip: string;
           p_user_agent: string;
+        };
+        Returns: string;
+      };
+      fn_rotate_invite: {
+        Args: {
+          p_client: string;
         };
         Returns: string;
       };
@@ -1398,6 +1450,7 @@ export type Database = {
       credential_action: "read" | "create" | "rotate" | "revoke" | "reauth_failed";
       email_delivery_status: "pending" | "sent" | "skipped" | "failed";
       entry_method: "key_on_file" | "lockbox" | "smart_lock" | "door_code" | "buzzer_fob";
+      invite_claim_outcome: "claimed" | "not_found" | "already_claimed" | "expired" | "revoked" | "email_mismatch";
       ledger_entry_type: "grant" | "debit" | "adjust" | "rollover" | "expiry";
       notification_type: "walk_complete" | "low_credit" | "renewal_upcoming" | "payment_failed" | "walk_scheduled" | "walk_cancelled" | "payment_refunded" | "payment_disputed" | "subscription_cancelled" | "plan_changed_externally" | "payment_taken";
       payment_status: "pending" | "succeeded" | "failed" | "refunded" | "disputed";
@@ -1417,6 +1470,7 @@ export type Clients = Database["public"]["Tables"]["clients"]["Row"];
 export type CredentialAccessLog = Database["public"]["Tables"]["credential_access_log"]["Row"];
 export type CreditLedger = Database["public"]["Tables"]["credit_ledger"]["Row"];
 export type EmailSuppressions = Database["public"]["Tables"]["email_suppressions"]["Row"];
+export type InviteClaimAttempts = Database["public"]["Tables"]["invite_claim_attempts"]["Row"];
 export type JobRuns = Database["public"]["Tables"]["job_runs"]["Row"];
 export type Notifications = Database["public"]["Tables"]["notifications"]["Row"];
 export type Operators = Database["public"]["Tables"]["operators"]["Row"];
@@ -1440,6 +1494,7 @@ export type ClientStatus = Database["public"]["Enums"]["client_status"];
 export type CredentialAction = Database["public"]["Enums"]["credential_action"];
 export type EmailDeliveryStatus = Database["public"]["Enums"]["email_delivery_status"];
 export type EntryMethod = Database["public"]["Enums"]["entry_method"];
+export type InviteClaimOutcome = Database["public"]["Enums"]["invite_claim_outcome"];
 export type LedgerEntryType = Database["public"]["Enums"]["ledger_entry_type"];
 export type NotificationType = Database["public"]["Enums"]["notification_type"];
 export type PaymentStatus = Database["public"]["Enums"]["payment_status"];

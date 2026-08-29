@@ -12,7 +12,12 @@ import { EmptyState } from "@/components/EmptyState";
 import { FormError, Input } from "@/components/fields";
 import { Spinner } from "@/components/Spinner";
 import { LoadingState, StateField } from "@/components/StateField";
-import { claimInvite, previewInviteAuthed, type InvitePreview } from "@/lib/api";
+import {
+  claimInvite,
+  InviteClaimError,
+  previewInviteAuthed,
+  type InvitePreview,
+} from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { supabase } from "@/lib/supabase";
 import { useDocumentTitle } from "@/lib/use-document-title";
@@ -116,10 +121,15 @@ export default function ClaimInvite() {
         setStage("claimed");
       }
     } catch (err) {
+      // Before H4 this matched the substring "claim" against the error message
+      // and reported "already claimed" for anything containing it — so an
+      // expired link, a withdrawn one and a genuine network failure all read as
+      // the same wrong sentence. The outcome is now a value, so the person is
+      // told which of those actually happened and what to do about it.
       setDeadEndReason(
-        err instanceof Error && err.message.includes("claim")
-          ? "This invite has already been claimed."
-          : "This invite could not be claimed. Ask your walker to send a fresh one.",
+        err instanceof InviteClaimError
+          ? err.message
+          : "This invite could not be claimed. Check your connection and try again.",
       );
       setStage("dead-end");
     } finally {
