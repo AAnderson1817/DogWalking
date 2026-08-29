@@ -128,6 +128,16 @@ failing gate — report SKIP, not FAIL:
 python3 scripts/gen-types.py && git diff --exit-code -- app/src/lib/types.ts
 ```
 
+## 10b. Deploy workflow gating
+```
+python3 scripts/verify-workflows.py
+```
+Three rules that YAML validity cannot express, each written after the thing it
+forbids shipped: no job may gate on its own result (it can then never run); a
+job whose `if` uses a status function must re-state every `needs` it dropped the
+implicit `success()` for; and a job that runs `git push` needs `fetch-depth: 0`,
+because git cannot prove a fast-forward from a shallow clone.
+
 ## 11. Secret-leak grep
 ```
 grep -RInE "(VAULT_MASTER_KEY|SERVICE_ROLE|sk_live|sk_test)" app/src supabase/functions --include='*.ts' --include='*.tsx' | grep -v 'Deno.env.get' | grep -v env.ts && echo "FAIL: literal secret reference" || echo "PASS: no secret literals"

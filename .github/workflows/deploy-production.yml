@@ -217,6 +217,19 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+        with:
+          # `fetch-depth: 0`, and it is load-bearing. actions/checkout defaults
+          # to depth 1, so the runner holds a single commit with no parents —
+          # and `git push <sha>:refs/heads/release/*` from a shallow clone
+          # CANNOT prove the push is a fast-forward, so the server rejects it as
+          # though history had diverged.
+          #
+          # The first push created the ref and succeeded, because creating a ref
+          # needs no ancestry check. Every push after it failed. Reproduced
+          # locally against a scratch remote: a depth-1 clone gives
+          # `! [rejected] (fetch first)` while a full clone fast-forwards, for a
+          # commit that is a descendant either way.
+          fetch-depth: 0
 
       - name: Advance release/production to the deployed commit
         run: |
@@ -229,7 +242,7 @@ jobs:
           if git push origin "${{ github.sha }}:refs/heads/release/production"; then
             echo "release/production -> ${{ github.sha }}"
           else
-            echo "::error title=Could not advance release/production::The push was rejected, which almost always means ${{ github.sha }} is not a descendant of the commit currently released. If you are intentionally rolling back, use Vercel's instant rollback instead of forcing this ref. See docs/dev/production-cutover.md."
+            echo "::error title=Could not advance release/production::The push of ${{ github.sha }} was rejected. FIRST check the clone is not shallow: git cannot prove a fast-forward from a single-commit clone, so a depth-1 checkout has the server reject an ordinary push as though history had diverged — that was the cause of every staging failure of this job. Only if the clone is deep does the other reading apply: ${{ github.sha }} is genuinely not a descendant of what is released. If you are intentionally rolling back, use Vercel's instant rollback rather than forcing this ref. See docs/dev/production-cutover.md."
             exit 1
           fi
 
