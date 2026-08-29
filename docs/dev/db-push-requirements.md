@@ -28,6 +28,31 @@ repository, and no amount of local modelling substitutes for asking the
 project. That is the checklist below, and it is a one-time task before the
 first production `db push`.
 
+## Why the deploy does not run this for you
+
+The obvious improvement is to make `deploy-production.yml` run the query itself
+and refuse when a column comes back `f` — the shape this repository prefers,
+and the same fail-closed treatment the vault-key verification already gets.
+
+It is deliberately **not** done, for one specific reason that someone should
+resolve before trying:
+
+The migrate job holds `SUPABASE_DB_PASSWORD` and runs `supabase link`, so it
+has the credentials. What it does not obviously have is a route. A direct
+connection is `db.{ref}.supabase.co:5432`, and Supabase has been moving direct
+connections to **IPv6-only**, with IPv4 served by the pooler on a different
+host whose region this repository does not hold as a secret. GitHub-hosted
+runners are IPv4-only. So the step might fail for a networking reason on a
+correctly-configured project — and a gate that blocks the first production
+deploy of this system with a connection error, on a path nobody has ever
+exercised, is worse than a checklist item.
+
+None of that is checkable from inside this repository, which is the same reason
+`config push` was declined in review H2. To close it: confirm from the project's
+dashboard which host and port the deploy can actually reach, then add the step
+with the staging-advisory / production-fatal split used elsewhere so it proves
+itself on staging before it ever gates production.
+
 ## The requirements
 
 Run this in the project's SQL editor **as the `postgres` role** — the role
