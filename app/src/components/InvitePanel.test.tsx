@@ -13,6 +13,7 @@ import type { Clients } from "@/lib/types";
 
 const rotateInvite = vi.fn();
 const revokeInvite = vi.fn();
+const unbindInvite = vi.fn();
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
@@ -24,6 +25,7 @@ vi.mock("@/lib/api", async () => {
     inviteUrlFor: actual.inviteUrlFor,
     rotateInvite: (...a: unknown[]) => rotateInvite(...a),
     revokeInvite: (...a: unknown[]) => revokeInvite(...a),
+    unbindInvite: (...a: unknown[]) => unbindInvite(...a),
   };
 });
 
@@ -44,14 +46,40 @@ function client(over: Partial<Clients> = {}): Clients {
 beforeEach(() => {
   rotateInvite.mockReset().mockResolvedValue("tok-fresh");
   revokeInvite.mockReset().mockResolvedValue(undefined);
+  unbindInvite.mockReset().mockResolvedValue("tok-reissued");
 });
 
 describe("InvitePanel", () => {
-  it("renders nothing once the client has claimed", () => {
-    const { container } = render(
-      <InvitePanel client={client({ auth_user_id: "user-9" })} onChanged={() => {}} />,
+  /**
+   * A claimed invite is the case H4 had no answer for: revoke and rotate both
+   * require an UNCLAIMED invite, and the row cannot be deleted because every
+   * child FK restricts. The operator's only route was the service role.
+   */
+  it("offers release, and only release, once the client has claimed", () => {
+    render(<InvitePanel client={client({ auth_user_id: "user-9" })} onChanged={() => {}} />);
+    expect(screen.getByText("Claimed")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Release this account" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Copy link" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Withdraw" })).toBeNull();
+    // No live link on screen for an account that already exists.
+    expect(screen.queryByText(/\/claim\//)).toBeNull();
+  });
+
+  it("releases a wrongly-claimed account and reissues", async () => {
+    const onChanged = vi.fn();
+    render(<InvitePanel client={client({ auth_user_id: "user-9" })} onChanged={onChanged} />);
+    await userEvent.click(screen.getByRole("button", { name: "Release this account" }));
+    await waitFor(() => expect(unbindInvite).toHaveBeenCalledWith("client-1"));
+    expect(onChanged).toHaveBeenCalled();
+  });
+
+  it("surfaces a refused release rather than appearing to succeed", async () => {
+    unbindInvite.mockRejectedValue(new Error("no claimed invite to release for this client"));
+    render(<InvitePanel client={client({ auth_user_id: "user-9" })} onChanged={() => {}} />);
+    await userEvent.click(screen.getByRole("button", { name: "Release this account" }));
+    await waitFor(() =>
+      expect(screen.getByText(/no claimed invite to release/)).toBeTruthy()
     );
-    expect(container).toBeEmptyDOMElement();
   });
 
   it("shows the live link and its expiry while the invite is active", () => {

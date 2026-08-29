@@ -3901,6 +3901,154 @@ begin
   raise notice 'no notice shown means no acceptance recorded (0041): OK';
 end $$;
 
+-- ═══ 0042: purge a client who CLAIMED, and release a wrong claim ══════════
+--
+-- The purge block above uses a client that never claimed, so its
+-- `delete from invite_claim_attempts` ran against an empty set and the
+-- append-only trigger was never reached. Every real client has a `claimed`
+-- row. This block is that case, and it fails against 0040/0041.
+do $$
+declare
+  v_op    uuid := '99999999-0000-4000-a000-000000000001';
+  v_cl    uuid := '99999999-0000-4000-c000-0000000000f1';
+  v_prop  uuid := '99999999-0000-4000-b000-0000000000f1';
+  v_user  uuid := '99999999-0000-4000-a000-0000000000f1';
+  v_other uuid := '99999999-0000-4000-a000-0000000000f2';
+  v_tok   uuid := '99999999-0000-4000-e000-0000000000f1';
+  v_new   uuid;
+  v_paths int;
+begin
+  reset session authorization;
+  insert into auth.users (id, email) values
+    (v_user,  'claimer@pawtrail.dev'),
+    (v_other, 'stranger@pawtrail.dev');
+  insert into clients (id, operator_id, full_name, status, invite_token)
+  values (v_cl, v_op, 'Claimed Then Purged', 'invited', v_tok);
+  insert into properties (id, operator_id, client_id, label)
+  values (v_prop, v_op, v_cl, 'Home');
+
+  -- claim it, which writes the attempt row the purge used to choke on
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated","email":"claimer@pawtrail.dev"}', v_user), true);
+  set local session authorization authenticated;
+  if (select c.outcome from fn_claim_invite(v_tok) c) <> 'claimed' then
+    raise exception 'FAIL: the fixture claim did not succeed';
+  end if;
+  reset session authorization;
+  if (select count(*) from invite_claim_attempts where client_id = v_cl) = 0 then
+    raise exception 'FAIL: fixture wrote no attempt row, so this proves nothing';
+  end if;
+
+  -- ── a stranger cannot release somebody else's client ──────────────────
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_other), true);
+  set local session authorization authenticated;
+  begin
+    perform fn_unbind_invite(v_cl);
+    raise exception 'FAIL: a stranger released another operator''s client';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%no claimed invite to release%' then
+      raise exception 'FAIL: foreign unbind refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  reset session authorization;
+
+  -- ── the operator can, and the old token dies in the same statement ────
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  set local session authorization authenticated;
+  select fn_unbind_invite(v_cl) into v_new;
+  reset session authorization;
+
+  if v_new = v_tok then
+    raise exception 'FAIL: unbind reissued the same token, so the holder can reclaim';
+  end if;
+  if (select auth_user_id from clients where id = v_cl) is not null then
+    raise exception 'FAIL: unbind left the account bound';
+  end if;
+  if (select status from clients where id = v_cl) <> 'invited' then
+    raise exception 'FAIL: unbind did not return the client to invited';
+  end if;
+  if (select notice_accepted_at from clients where id = v_cl) is not null then
+    raise exception 'FAIL: unbind left the wrong claimant''s consent on the record';
+  end if;
+  -- the old token must be dead, not merely replaced
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated","email":"claimer@pawtrail.dev"}', v_user), true);
+  set local session authorization authenticated;
+  if (select c.outcome from fn_claim_invite(v_tok) c) <> 'not_found' then
+    raise exception 'FAIL: the released token still resolves';
+  end if;
+  reset session authorization;
+
+  -- unbinding twice is refused: there is nothing bound to release
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  set local session authorization authenticated;
+  begin
+    perform fn_unbind_invite(v_cl);
+    raise exception 'FAIL: unbind succeeded on an unclaimed client';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%no claimed invite to release%' then
+      raise exception 'FAIL: second unbind refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- ── and the purge runs for a client carrying attempt rows ─────────────
+  select count(*) into v_paths from fn_purge_client(v_cl);
+  reset session authorization;
+  if exists (select 1 from invite_claim_attempts where client_id = v_cl) then
+    raise exception 'FAIL: the purge left the claim attempts behind';
+  end if;
+  if (select purged_at from clients where id = v_cl) is null then
+    raise exception 'FAIL: the purge did not stamp the tombstone';
+  end if;
+
+  raise notice 'a claimed invite can be released, and purged (0042): OK';
+end $$;
+
+-- ═══ 0042: the attempt log is still append-only for everyone else ═════════
+do $$
+declare
+  v_op uuid := '99999999-0000-4000-a000-000000000001';
+  v_id uuid;
+begin
+  reset session authorization;
+  select id into v_id from invite_claim_attempts
+   where operator_id = v_op
+     and client_id in (select id from clients where purged_at is null)
+   limit 1;
+  if v_id is null then
+    raise exception 'FAIL: no attempt row on a live client, so this proves nothing';
+  end if;
+
+  -- delete is permitted ONLY once the client is purged; this one is not
+  begin
+    delete from invite_claim_attempts where id = v_id;
+    raise exception 'FAIL: an attempt row was deleted for a live client';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%append-only%' then
+      raise exception 'FAIL: attempt delete blocked for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- update stays blocked unconditionally, purged or not
+  begin
+    update invite_claim_attempts set outcome = 'claimed' where id = v_id;
+    raise exception 'FAIL: an attempt row was rewritten';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%append-only%' then
+      raise exception 'FAIL: attempt update blocked for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+
+  raise notice 'the invite log is still append-only outside a purge (0042): OK';
+end $$;
+
 
 rollback;
 

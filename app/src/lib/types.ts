@@ -1408,6 +1408,12 @@ export type Database = {
         Args: Record<string, never>;
         Returns: unknown;
       };
+      fn_unbind_invite: {
+        Args: {
+          p_client: string;
+        };
+        Returns: string;
+      };
       fn_unsubscribe_by_token: {
         Args: {
           p_token: string;

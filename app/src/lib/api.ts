@@ -584,6 +584,25 @@ export function inviteUrlFor(token: string): string {
   return `${window.location.origin}/claim/${token}`;
 }
 
+/**
+ * Release an invite claimed by the wrong person, and reissue in one statement.
+ *
+ * H4's own scenario is a link that travelled. Expiry, revocation and email
+ * binding bound FUTURE claims; none of them helps once a wrong one has landed —
+ * `fn_revoke_invite` and `fn_rotate_invite` both require an UNCLAIMED invite,
+ * and the client row cannot be deleted because every child FK restricts. The
+ * operator's only route was the service role.
+ *
+ * Severing and reissuing together is the whole point: two statements leave a
+ * window where the client is unclaimed and the OLD token is still live, so
+ * whoever holds it simply claims again.
+ */
+export async function unbindInvite(clientId: string): Promise<string> {
+  const { data, error } = await supabase.rpc("fn_unbind_invite", { p_client: clientId });
+  if (error) throw new Error(error.message);
+  return data as string;
+}
+
 export type InviteState = "claimed" | "revoked" | "expired" | "active";
 
 /**
