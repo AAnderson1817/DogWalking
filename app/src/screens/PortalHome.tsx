@@ -10,6 +10,7 @@ import { AccessTrail } from "@/components/AccessTrail";
 import { NotificationBell, NotificationList } from "@/components/NotificationInbox";
 import { LoadingState } from "@/components/StateField";
 import { WalkCard } from "@/components/WalkCard";
+import { YourDataPanel } from "@/components/YourDataPanel";
 import {
   getMyClient,
   getMyOperatorView,
@@ -218,6 +219,12 @@ export default function PortalHome() {
           </div>
         </section>
       )}
+      <YourDataPanel
+        businessName={operator?.business_name ?? null}
+        noticeAcceptedAt={client.notice_accepted_at}
+        noticeVersion={client.notice_version}
+        gpsRetentionDays={operator?.gps_retention_days ?? null}
+      />
     </div>
   );
 }

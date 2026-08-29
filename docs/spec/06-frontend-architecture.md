@@ -47,6 +47,8 @@ come from.
 /signin            SignIn (email+password, magic-link option)
 /onboard           Onboard (first-run operator setup: business, defaults)
 /claim/:token      ClaimInvite (client signup → fn_claim_invite)
+/legal/:slug       Legal — privacy notice + terms (H6). PUBLIC: the people who
+                   most need the notice are the ones not signed in.
 -- operator (requires role=operator) --
 /                  Dashboard
 /calendar          Calendar (phase 06)

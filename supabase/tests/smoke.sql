@@ -3819,6 +3819,88 @@ begin
   raise notice 'GPS retention sweep drops only what it should (0040): OK';
 end $$;
 
+-- ═══ 0041: the consent record says WHAT was accepted, and cannot be forged ══
+do $$
+declare
+  v_op   uuid := '99999999-0000-4000-a000-000000000001';
+  v_cl   uuid := '99999999-0000-4000-c000-0000000000c1';
+  v_user uuid := '99999999-0000-4000-a000-0000000000c1';
+  v_res  record;
+begin
+  reset session authorization;
+  insert into auth.users (id, email) values (v_user, 'consent@pawtrail.dev');
+  insert into clients (id, operator_id, full_name, email, status, invite_token)
+  values (v_cl, v_op, 'Consent Case', 'consent@pawtrail.dev', 'invited',
+          '99999999-0000-4000-e000-0000000000c1');
+
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated","email":"consent@pawtrail.dev"}', v_user), true);
+  set local session authorization authenticated;
+
+  select * into v_res from fn_claim_invite('99999999-0000-4000-e000-0000000000c1', '2026-08-29');
+  if v_res.outcome <> 'claimed' then
+    raise exception 'FAIL: the claim did not succeed: %', v_res.outcome;
+  end if;
+  reset session authorization;
+
+  -- the acceptance landed in the SAME transaction as the binding
+  if (select notice_version from clients where id = v_cl) <> '2026-08-29' then
+    raise exception 'FAIL: the claim recorded no notice version';
+  end if;
+  if (select notice_accepted_at from clients where id = v_cl) is null then
+    raise exception 'FAIL: the claim recorded no acceptance time';
+  end if;
+
+  -- an operator cannot stamp consent onto a client's row
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  set local session authorization authenticated;
+  begin
+    update clients set notice_accepted_at = now(), notice_version = 'forged'
+     where id = v_cl;
+    raise exception 'FAIL: an operator forged a client''s consent record';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%permission denied%' then
+      raise exception 'FAIL: consent forgery refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  reset session authorization;
+
+  raise notice 'consent is recorded by the claim and cannot be forged (0041): OK';
+end $$;
+
+-- ═══ 0041: a claim that showed no notice records no acceptance ════════════
+-- The absence is the point: stamping now() with a null version would assert an
+-- acceptance of a document nobody can look up.
+do $$
+declare
+  v_op   uuid := '99999999-0000-4000-a000-000000000001';
+  v_cl   uuid := '99999999-0000-4000-c000-0000000000c2';
+  v_user uuid := '99999999-0000-4000-a000-0000000000c2';
+  v_res  record;
+begin
+  reset session authorization;
+  insert into auth.users (id, email) values (v_user, 'noversion@pawtrail.dev');
+  insert into clients (id, operator_id, full_name, status, invite_token)
+  values (v_cl, v_op, 'No Version', 'invited', '99999999-0000-4000-e000-0000000000c2');
+
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_user), true);
+  set local session authorization authenticated;
+  select * into v_res from fn_claim_invite('99999999-0000-4000-e000-0000000000c2');
+  reset session authorization;
+
+  if v_res.outcome <> 'claimed' then
+    raise exception 'FAIL: a one-argument claim stopped working: %', v_res.outcome;
+  end if;
+  if (select notice_accepted_at from clients where id = v_cl) is not null then
+    raise exception 'FAIL: an acceptance was recorded for a claim that showed no notice';
+  end if;
+
+  raise notice 'no notice shown means no acceptance recorded (0041): OK';
+end $$;
+
 
 rollback;
 

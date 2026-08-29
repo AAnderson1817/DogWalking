@@ -21,6 +21,8 @@ import {
 import { useAuth } from "@/lib/auth-context";
 import { supabase } from "@/lib/supabase";
 import { useDocumentTitle } from "@/lib/use-document-title";
+import { LegalLinks } from "@/components/LegalLinks";
+import { PRIVACY } from "@/lib/legal";
 
 type Stage = "loading" | "signup" | "confirm" | "dead-end" | "check-email" | "role-error" | "claimed";
 
@@ -109,7 +111,7 @@ export default function ClaimInvite() {
     setBusy(true);
     setError(null);
     try {
-      await claimInvite(token);
+      await claimInvite(token, PRIVACY.version);
       // The invite is now burned (fn_claim_invite is single-use). Branch on
       // the freshly resolved role instead of navigating blindly — but never
       // re-invoke claimInvite on retry (it would dead-end on the used token);
@@ -178,6 +180,7 @@ export default function ClaimInvite() {
               <Button type="submit" full disabled={busy}>
                 {busy ? <Spinner /> : "Create account"}
               </Button>
+              <LegalLinks variant="accept" />
             </form>
           </Card>
         )}

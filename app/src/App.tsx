@@ -8,6 +8,7 @@ import { RequireRole } from "@/components/RequireRole";
 import SignIn from "@/screens/SignIn";
 import Onboard from "@/screens/Onboard";
 import ClaimInvite from "@/screens/ClaimInvite";
+import Legal from "@/screens/Legal";
 import Dashboard from "@/screens/Dashboard";
 import Calendar from "@/screens/Calendar";
 import Roster from "@/screens/Roster";
@@ -69,6 +70,10 @@ export default function App() {
       <Route path="/signin" element={publicRoute(<SignIn />)} />
       <Route path="/onboard" element={publicRoute(<Onboard />)} />
       <Route path="/claim/:token" element={publicRoute(<ClaimInvite />)} />
+      {/* Review H6. Public: the people who most need the privacy notice are the
+          ones who have NOT signed in — somebody who got an email they did not
+          expect, or who is deciding whether to claim an invite at all. */}
+      <Route path="/legal/:slug" element={publicRoute(<Legal />)} />
 
       <Route path="/" element={operator(<Dashboard />)} />
       <Route path="/calendar" element={operator(<Calendar />)} />

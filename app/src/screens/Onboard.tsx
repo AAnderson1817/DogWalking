@@ -9,6 +9,8 @@ import { FormError, Input } from "@/components/fields";
 import { Spinner } from "@/components/Spinner";
 import { LoadingState, StateField } from "@/components/StateField";
 import { createOperator } from "@/lib/api";
+import { LegalLinks } from "@/components/LegalLinks";
+import { TERMS } from "@/lib/legal";
 import { useAuth } from "@/lib/auth-context";
 import { useDocumentTitle } from "@/lib/use-document-title";
 
@@ -75,6 +77,10 @@ export default function Onboard() {
           display_name: displayName.trim(),
           email: auth.session!.user.email ?? "",
           phone: phone.trim() || null,
+          // Review H6. Recorded in the same insert as the account, so an
+          // operator row without an acceptance is not a state that occurs.
+          terms_version: TERMS.version,
+          terms_accepted_at: new Date().toISOString(),
         });
       } catch (err) {
         // Idempotent retry: if a previous submit already created the row
@@ -138,6 +144,7 @@ export default function Onboard() {
             {busy ? <Spinner /> : "Start walking"}
           </Button>
         </form>
+        <LegalLinks variant="accept" />
       </Card>
     </div>
   );

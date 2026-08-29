@@ -539,8 +539,18 @@ export const INVITE_CLAIM_MESSAGE: Record<Exclude<InviteClaimOutcome, "claimed">
     "This invite was sent to a different email address. Sign up with the address your walker invited, or ask them to update it.",
 };
 
-export async function claimInvite(token: string): Promise<string> {
-  const { data, error } = await supabase.rpc("fn_claim_invite", { p_token: token });
+export async function claimInvite(token: string, noticeVersion: string): Promise<string> {
+  // The version travels with the claim so the acceptance and the account
+  // binding are one transaction — a claimed account with no consent record is
+  // then not a state that can occur (review H6).
+  // Required at this boundary, not optional. The SQL default exists so the
+  // function stays callable from a smoke block, but there is no product path
+  // that should claim an invite without having shown the notice — making the
+  // argument optional here is how that path gets added by accident.
+  const { data, error } = await supabase.rpc("fn_claim_invite", {
+    p_token: token,
+    p_notice_version: noticeVersion,
+  });
   if (error) throw new Error(error.message);
   const row = (Array.isArray(data) ? data[0] : data) as
     | { client_id: string | null; outcome: InviteClaimOutcome }
@@ -942,6 +952,9 @@ export async function createOperator(row: {
   display_name: string;
   email: string;
   phone?: string | null;
+  /** Which version of the terms was shown at signup (review H6). */
+  terms_version?: string;
+  terms_accepted_at?: string;
 }): Promise<Operators> {
   const { data, error } = await supabase.from("operators").insert(row).select().single();
   return must(data, error);
@@ -1153,13 +1166,15 @@ export interface MyOperatorView {
   display_name: string;
   business_name: string;
   cancellation_cutoff_hours: number;
+  /** So the portal can state the retention window the notice describes (H6). */
+  gps_retention_days: number;
 }
 
 /** The caller's operator identity + cutoff via v_my_operator (both personas). */
 export async function getMyOperatorView(): Promise<MyOperatorView | null> {
   const { data, error } = await supabase
     .from("v_my_operator")
-    .select("id, display_name, business_name, cancellation_cutoff_hours")
+    .select("id, display_name, business_name, cancellation_cutoff_hours, gps_retention_days")
     .maybeSingle();
   if (error) throw new Error(error.message);
   return data as MyOperatorView | null;
