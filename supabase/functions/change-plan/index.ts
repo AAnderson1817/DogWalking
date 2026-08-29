@@ -13,6 +13,7 @@ import {
   serveFunction,
 } from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
+import { STRIPE_META } from "../_lib/stripe_metadata.ts";
 import { stripeClient } from "../_lib/stripe.ts";
 import { type PeriodBounds, remainingFraction } from "./period.ts";
 
@@ -137,10 +138,27 @@ serveFunction(async (req) => {
       {
         items: [{ id: item.id, price: plan.stripe_price_id }],
         proration_behavior: "create_prorations",
+        // `sanpo_`, not `pawtrail_` (review L23). Stripe metadata is an
+        // external system of record: the operator sees these keys in their own
+        // dashboard, and under Connect Standard it is THEIR account, so a
+        // retired brand name written there is not an internal detail.
+        //
+        // Renamed outright with no dual-read, because nothing anywhere carries
+        // the old keys: `deploy-production.yml` has 0 workflow runs (checked
+        // against the Actions API, not remembered) and no workflow, smoke suite
+        // or e2e spec invokes `change-plan`, so every subscription that has
+        // ever been stamped was stamped by hand against a test account. A
+        // fallback read carried forever to serve rows that do not exist is the
+        // cost the review names for renaming LATER; this is the moment before
+        // that cost starts.
+        //
+        // The spread stays: under Connect Standard the operator may have set
+        // their own metadata on this subscription from their dashboard, and
+        // replacing the object wholesale would delete it.
         metadata: {
           ...sub.metadata,
-          pawtrail_plan_change_intent_id: intent.id,
-          pawtrail_plan_id: plan.id,
+          [STRIPE_META.planChangeIntentId]: intent.id,
+          [STRIPE_META.planId]: plan.id,
         },
       },
       // The idempotency key is scoped per account by Stripe, so it keeps its

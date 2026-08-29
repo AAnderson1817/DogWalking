@@ -64,6 +64,32 @@ Idempotent: re-POST on a completed walk returns the stored result, no re-billing
 Body: `{ client_id, plan_id }` → assert ownership → get/create Stripe customer (persist `stripe_customer_id`) → Checkout Session `mode=subscription`, `price = plans.stripe_price_id`, `payment_method_collection=always`, `subscription_data.metadata = { client_id, operator_id, plan_id }`, success/cancel URLs from `APP_BASE_URL`.
 Response: `{ url }`.
 
+**The billing address is collected and persisted (review L8).**
+`billing_address_collection: "required"` with `customer_update: { address:
+"auto", name: "auto" }`. Both halves are load-bearing and the second is the one
+that is easy to lose: without `customer_update.address` Checkout collects the
+address for the *payment* and never writes it to the Customer, so it would be
+asked for and thrown away.
+
+This does **not** enable tax. Sanpo calculates none, and doing it properly
+means `automatic_tax` plus restructuring overage from a raw PaymentIntent —
+which cannot carry tax at all — into an invoice. The address is collected now
+because it is the half with a deadline: Stripe Tax cannot be enabled
+retroactively for customers whose address was never captured, so the
+alternative is asking every existing client for it later through a surface that
+does not exist. `checkout_session_test.ts` pins both halves against each other.
+
+**Stripe metadata keys are `sanpo_*` (review L23).** `change-plan` writes
+`sanpo_plan_change_intent_id` and `sanpo_plan_id`; `stripe-webhook` reads them.
+Both sides import the names from `_lib/stripe_metadata.ts` rather than writing
+the literals, because these two functions never call each other — a rename
+applied to one side would not fail to compile and would not fail a test that
+mocks the other, it would silently stop matching, and a plan change the client
+paid for would never apply. They were `pawtrail_*` and were renamed with no
+dual-read: `deploy-production.yml` has never run, and no workflow, smoke suite
+or e2e spec invokes `change-plan`, so nothing in any account carries the old
+keys.
+
 ## create-plan — POST, operator JWT (review B6)
 Body `{ name, credits_per_cycle, price_pence, cycle, rollover_policy,
 rollover_cap?, rollover_expiry_days?, overage_rate_pence }` → validates,

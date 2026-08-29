@@ -111,6 +111,28 @@ serveFunction(async (req) => {
     customer: customerId,
     line_items: [{ price: plan.stripe_price_id, quantity: 1 }],
     payment_method_collection: "always",
+    /**
+     * Review L8: collect the billing address now, while it is free.
+     *
+     * Sanpo does not calculate tax and this does not turn it on — dog walking
+     * is untaxed in most US states, and doing it properly means `automatic_tax`
+     * plus restructuring overage from a raw PaymentIntent (which cannot carry
+     * tax at all) into an invoice. That is a project, not a line.
+     *
+     * The address is a different question from the tax, and it has a deadline:
+     * Stripe Tax cannot be enabled retroactively for customers whose address
+     * it never captured, so the alternative to collecting it at signup is
+     * asking every existing client for it later, one at a time, through a
+     * surface that does not exist. The cost today is one extra field in a form
+     * the client is already filling in with card details.
+     *
+     * `customer_update.address` is what makes it stick: without it Checkout
+     * collects the address for the payment and does NOT write it back to the
+     * Customer, so it would be captured and then thrown away — which is the
+     * same as not collecting it, but harder to notice.
+     */
+    billing_address_collection: "required",
+    customer_update: { address: "auto", name: "auto" },
     // Metadata on both the session (read by checkout.session.completed) and
     // the subscription (read by anything inspecting the subscription later).
     metadata,

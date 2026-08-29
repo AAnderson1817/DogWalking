@@ -12,7 +12,7 @@ import { sessionAssurance } from "../_lib/http.ts";
 import type { VaultBinding } from "../_lib/crypto.ts";
 import { chargeOverageForWalk, type OverageDeps } from "../_lib/overage.ts";
 
-const OP = { id: "op-1", email: "op@pawtrail.dev" };
+const OP = { id: "op-1", email: "op@sanpo.test" };
 
 function cred(overrides: Partial<CredentialMeta> = {}): CredentialMeta {
   return {

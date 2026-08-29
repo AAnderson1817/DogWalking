@@ -994,6 +994,8 @@ export type Database = {
           origin_date: string | null;
           cancel_reason: string | null;
           abandoned_at: string | null;
+          cost_credits: number | null;
+          overage_rate_pence: number | null;
         };
         Insert: {
           id?: string;
@@ -1022,6 +1024,8 @@ export type Database = {
           origin_date?: string | null;
           cancel_reason?: string | null;
           abandoned_at?: string | null;
+          cost_credits?: number | null;
+          overage_rate_pence?: number | null;
         };
         Update: {
           id?: string;
@@ -1050,6 +1054,8 @@ export type Database = {
           origin_date?: string | null;
           cancel_reason?: string | null;
           abandoned_at?: string | null;
+          cost_credits?: number | null;
+          overage_rate_pence?: number | null;
         };
         Relationships: [];
       };
@@ -1388,6 +1394,10 @@ export type Database = {
           p_schedule: string;
           p_pet_ids: string[];
         };
+        Returns: unknown;
+      };
+      fn_snapshot_walk_price: {
+        Args: Record<string, never>;
         Returns: unknown;
       };
       fn_supersede_settled_failures: {

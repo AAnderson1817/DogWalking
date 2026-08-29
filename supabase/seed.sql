@@ -1,4 +1,11 @@
 -- Dev-only demo data (never applied in production).
+--
+-- US Central and USD, matching the product (review L23): addresses and
+-- coordinates are Chicago, phones are in the +1 555-01xx fictional block and
+-- emails are under `.test`, which RFC 2606 reserves so it can never resolve —
+-- a seed row that reaches a mailer by accident cannot email a stranger, which
+-- `pawtrail.dev` (a registrable name in a live gTLD) did not guarantee.
+-- All names, streets and house numbers are invented.
 -- One operator, two clients (one subscribed with credits, one invited),
 -- properties, pets, a dummy-ciphertext credential, plans, a recurring
 -- schedule, and one completed walk with GPS points + a ledger history
@@ -8,13 +15,13 @@ begin;
 
 -- Auth users (operator + claimed client). Fixed uuids for dev ergonomics.
 insert into auth.users (id, email) values
-  ('00000000-0000-4000-a000-000000000001', 'demo-operator@pawtrail.dev'),
-  ('00000000-0000-4000-a000-000000000002', 'amelia@pawtrail.dev')
+  ('00000000-0000-4000-a000-000000000001', 'demo-operator@sanpo.test'),
+  ('00000000-0000-4000-a000-000000000002', 'amelia@sanpo.test')
 on conflict (id) do nothing;
 
 -- Operator (trigger seeds the two default service types).
 insert into operators (id, business_name, display_name, email, phone)
-values ('00000000-0000-4000-a000-000000000001', 'Pine & Paws', 'Sam', 'demo-operator@pawtrail.dev', '+44 7700 900001');
+values ('00000000-0000-4000-a000-000000000001', 'Pine & Paws', 'Sam', 'demo-operator@sanpo.test', '+1 312 555 0101');
 
 -- Plans.
 insert into plans (id, operator_id, name, credits_per_cycle, price_pence, cycle,
@@ -31,11 +38,11 @@ insert into clients (id, operator_id, auth_user_id, full_name, email, phone, sta
                      stripe_subscription_id)
 values
   ('00000000-0000-4000-c000-000000000001', '00000000-0000-4000-a000-000000000001',
-   '00000000-0000-4000-a000-000000000002', 'Amelia Hart', 'amelia@pawtrail.dev',
-   '+44 7700 900002', 'active', '11111111-1111-4111-a111-111111111111',
+   '00000000-0000-4000-a000-000000000002', 'Amelia Hart', 'amelia@sanpo.test',
+   '+1 312 555 0102', 'active', '11111111-1111-4111-a111-111111111111',
    'cus_demo_amelia', '00000000-0000-4000-b000-000000000001', 'active', 'sub_demo_amelia'),
   ('00000000-0000-4000-c000-000000000002', '00000000-0000-4000-a000-000000000001',
-   null, 'Ben Osei', 'ben@pawtrail.dev', '+44 7700 900003', 'invited',
+   null, 'Ben Osei', 'ben@sanpo.test', '+1 312 555 0103', 'invited',
    '22222222-2222-4222-a222-222222222222', null, null, 'none', null);
 
 -- Properties.
@@ -43,11 +50,11 @@ insert into properties (id, operator_id, client_id, label, address_line1, city, 
                         access_notes_public, lat, lng)
 values
   ('00000000-0000-4000-d000-000000000001', '00000000-0000-4000-a000-000000000001',
-   '00000000-0000-4000-c000-000000000001', 'Home', '14 Larchfield Road', 'London', 'SE23 2AB',
-   'Side gate sticks — lift while pushing.', 51.4419, -0.0533),
+   '00000000-0000-4000-c000-000000000001', 'Home', '1418 N Wexford Court', 'Chicago', '60610',
+   'Side gate sticks — lift while pushing.', 41.9074, -87.6386),
   ('00000000-0000-4000-d000-000000000002', '00000000-0000-4000-a000-000000000001',
-   '00000000-0000-4000-c000-000000000002', 'Flat', '2B Hillmore Court', 'London', 'SE6 4QT',
-   'Buzz flat 2B, lift on the left.', 51.4372, -0.0175);
+   '00000000-0000-4000-c000-000000000002', 'Flat', '2214 W Fenmore Court', 'Chicago', '60647',
+   'Buzz unit 2B, elevator on the left.', 41.9126, -87.6779);
 
 -- Pets.
 insert into pets (id, operator_id, client_id, name, breed, size, temperament,
@@ -119,7 +126,7 @@ select fn_debit_walk('00000000-0000-4000-2000-000000000001');
 insert into walk_gps_points (walk_id, operator_id, recorded_at, lat, lng, accuracy_m)
 select '00000000-0000-4000-2000-000000000001', '00000000-0000-4000-a000-000000000001',
        (current_date - 1) + time '12:05' + (n || ' seconds')::interval,
-       51.4419 + 0.0008 * sin(n / 60.0), -0.0533 + 0.0011 * cos(n / 60.0), 5.0
+       41.9074 + 0.0008 * sin(n / 60.0), -87.6386 + 0.0011 * cos(n / 60.0), 5.0
   from generate_series(0, 1800, 30) as n;
 
 -- A scheduled walk for today (dashboard fixture).

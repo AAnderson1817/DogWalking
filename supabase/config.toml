@@ -160,7 +160,20 @@ site_url = "http://127.0.0.1:3000"
 # The public URL that Auth serves on. Defaults to the API external URL with `/auth/v1` appended.
 # external_url = ""
 # A list of *exact* URLs that auth providers are permitted to redirect to post authentication.
-additional_redirect_urls = ["https://127.0.0.1:3000"]
+#
+# `/reset-password` is where a recovery email lands (review L16). The list is
+# EXACT, and `site_url` allows only itself, so a `redirectTo` carrying a path
+# has to be named here or GoTrue silently sends the person to `site_url`
+# instead — they arrive signed in on Today with no idea why the password form
+# never appeared. Both schemes, because the local stack is reachable on either.
+#
+# Staging and production have their own copy of this list in a dashboard no
+# file here can write; `docs/dev/owner-actions.md` carries it.
+additional_redirect_urls = [
+  "https://127.0.0.1:3000",
+  "http://127.0.0.1:3000/reset-password",
+  "https://127.0.0.1:3000/reset-password",
+]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
 # JWT issuer URL. If not set, defaults to auth.external_url.
