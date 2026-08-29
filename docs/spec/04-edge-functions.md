@@ -167,7 +167,26 @@ below, and spec 02 on why `uq_payments_subscription_invoice` had to widen.
 
 - `invoice.payment_failed`: `subscription_status='past_due'` + `payment_failed` notifications (client + operator) + payments row (failed). The status write happens on **every** delivery; the payments row and the notifications only on the first. Stripe retries a failed invoice on its own dunning schedule and each redelivery carries a *fresh event id*, so `stripe_events` cannot dedupe it — without a `failed`-row check the Money screen accrues one "Needs attention" entry per retry for a single unpaid invoice.
 - `invoice.upcoming`: `renewal_upcoming` notification (client).
-- `customer.subscription.updated`: map Stripe status/pause_collection → `subscription_status` (`paused` when pause_collection set).
+- `customer.subscription.updated`: map Stripe status/pause_collection → `subscription_status` (`paused` when pause_collection set), **and reconcile the plan against the subscription's price** (review H11).
+
+  `plan_id` used to be written only inside `if (intent)`, so a price changed in
+  the Stripe dashboard — which per B5/B6 is the only place a subscription's
+  price exists to be edited — left `clients.plan_id` on the old plan. The
+  divergence then self-perpetuated: `resolvePlan` short-circuited on the cached
+  id, so every renewal granted the OLD plan's credits while Stripe collected
+  the NEW price, with nothing flagging it.
+
+  **Stripe is the source of truth for what is being billed.** Precedence:
+  a matching plan-change intent wins (an in-app change carries the operator's
+  stated intention and its bookkeeping); otherwise a price-derived plan that
+  differs from the cache is written and the operator gets a
+  `plan_changed_externally` notification. A price with no local plan is
+  reported but **never** clobbers `plan_id` — nulling it would strand the
+  client with no credits, and there is nothing correct to point at.
+
+  The notification is self-limiting: it fires only when the ids differ, and the
+  same event writes the correction, so an ordinary status change or period roll
+  says nothing.
 - `customer.subscription.deleted`: `subscription_status='cancelled'`, **and clears `stripe_subscription_id` and `current_period_end`**, and raises a `subscription_cancelled` notification to the operator. Clearing the binding matters: a dead subscription id left in place makes `change-plan` take the Stripe path and fail *after* `fn_record_plan_change_intent` has already committed a pending intent, and a stale `current_period_end` prints a confident renewal date on the Money screen for a subscription that will never renew. The notification matters because after 0026 the walks actually stop.
 
 Reversals (0023, review B4). Sanpo cannot issue a refund — the Stripe
@@ -482,6 +501,15 @@ the new plan and Sanpo's database on the old one — a client billed at one rate
 and credited at another, with nothing to reconcile from.
 
 The order is therefore intent-first:
+
+**`resolvePlan` prefers the invoice line's price over `clients.plan_id`**
+(review H11). The cached id is the fallback for invoices carrying no resolvable
+line price, and for a price this operator has no plan for — granting the last
+known plan beats granting nothing, and the subscription arm has already told
+the operator. `invoice.paid` also corrects `plan_id` when the two disagree,
+which is the safety net for a dropped `customer.subscription.updated`; that
+line was unreachable before the precedence changed, because `resolvePlan`
+returned the cached plan and the ids could never differ.
 
 1. `fn_record_plan_change_intent` writes a `pending` row in
    `plan_change_intents` carrying `remaining_fraction` (computed from the

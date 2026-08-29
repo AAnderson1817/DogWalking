@@ -727,6 +727,28 @@ function stripBucket(path: string): string {
   return path.replace(/^(walk-photos|pet-photos)\//, "");
 }
 
+/**
+ * What a single walk was charged, if anything (review H12).
+ *
+ * The client's own RLS lets them read their payments, so this needs no new
+ * grant. Bounded and newest-first because a walk can carry more than one
+ * overage row — a declined attempt and a later successful re-charge — and the
+ * one worth showing is the succeeded one.
+ */
+export async function getWalkOverageCents(walkId: string): Promise<number | null> {
+  const { data, error } = await supabase
+    .from("payments")
+    .select("amount_pence, status")
+    .eq("walk_id", walkId)
+    .eq("type", "overage")
+    .eq("status", "succeeded")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  return data?.amount_pence ?? null;
+}
+
 // ── edge function invocations ──────────────────────────────────────────────
 interface Envelope<T> {
   ok: boolean;

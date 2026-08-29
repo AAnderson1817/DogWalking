@@ -64,7 +64,33 @@ against two real backends.
 ## Lifecycle
 - **Subscribe**: operator creates Stripe Checkout (subscription mode) for a client → `checkout.session.completed` links `stripe_subscription_id`, sets `subscription_status='active'` → first `invoice.paid` grants cycle credits.
 - **Renewal**: `invoice.paid` → **`fn_apply_invoice_paid(…, p_is_renewal => true)`**, which does the payment row, the rollover and the cycle grant in ONE transaction keyed on the Stripe invoice id (0013, extended in 0026). It is not `fn_apply_rollover` then `fn_grant_credits` — that sequence is what this line said until the H21 reconciliation, and running it as two calls is the bug 0013 fixed: a failure between them expires the old balance and never grants the new one. `p_is_renewal` gates the rollover, because a first invoice (`subscription_create`) has no prior cycle to carry — see `fn_apply_invoice_paid` above. `renewal_upcoming` is handled by the `invoice.upcoming` notification.
-- **Walk completion**: complete-walk edge fn → `fn_debit_walk` → `'overage'` ⇒ charge-overage (off-session PaymentIntent, whole walk at plan rate) → payment row → report card + `walk_complete` notification.
+- **Walk completion**: complete-walk edge fn → `fn_debit_walk` → `'overage'` ⇒ charge-overage (off-session PaymentIntent, whole walk at plan rate) → payment row → report card + `walk_complete` notification, **and on a succeeded charge a `payment_taken` notification carrying the amount and the receipt** (review H12).
+
+### Disclosing an off-session charge (review H12)
+
+An overage is charged at COMPLETION, with nobody present. Three things now make
+that visible rather than a surprise on a statement:
+
+1. **At subscribe.** Stripe Checkout carries `custom_text.submit.message`
+   naming the overage rate, so the mandate says what it authorises and Stripe
+   stores the session. Omitted entirely when the plan has no overage rate —
+   a disclosure with no figure in it is worse than none.
+2. **At booking.** `needsOverage` compared the walk's cost against the RAW
+   balance, so a client with two credits could book three walks and see the
+   confirmation on none: each is individually affordable at booking, and
+   billing happens later. `committedCredits` counts walks already booked and
+   not yet started, so the disclosure matches what will actually happen.
+   `scheduled` only — an `in_progress` walk has already been debited or
+   flagged, and counting it twice would warn about a charge that will not come.
+3. **At the moment money moves, and after.** `payment_taken` names the amount
+   and links the receipt; the report card shows what the walk cost.
+
+**Deliberately NOT built**: a sweep that notifies when a scheduled walk becomes
+unfunded because the balance dropped. It fires per walk per night, the state it
+warns about reverses at the next cycle grant, and a recurring "this will cost
+extra" message is the kind that gets muted — after which the charge is a
+surprise again, with the extra insult of having been "told". The disclosure
+sits where the client is already looking and where the money actually moves.
 - **Low credit**: after any successful debit, if `new_balance ≤ operators.low_credit_threshold` insert `low_credit` notifications (client + operator), deduped: skip if an unread `low_credit` for that client already exists.
 - **Pause**: Stripe `pause_collection` → webhook sets `subscription_status='paused'`; no grants; balance preserved; materializer (phase 06) skips schedules whose client is paused and any date inside `paused_from…paused_until` windows.
 - **Failed payment**: `invoice.payment_failed` → `subscription_status='past_due'` + `payment_failed` notifications; Stripe smart retries own the retry cadence.

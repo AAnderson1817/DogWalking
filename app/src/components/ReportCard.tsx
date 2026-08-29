@@ -1,7 +1,7 @@
 // Walk report card (spec 05): photo grid, route map, potty/fed facts, notes.
 import { Card } from "./Card";
 import { MapView, type MapPoint } from "./MapView";
-import { distanceMi } from "@/lib/format";
+import { distanceMi, money } from "@/lib/format";
 import { ApprovedIcon } from "./ApprovedIcon";
 
 export interface ReportCardData {
@@ -14,6 +14,16 @@ export interface ReportCardData {
   watered: boolean | null;
   notes: string | null;
   petNames: string[];
+  /**
+   * Review H12. What this walk cost, when it was not covered by credits.
+   *
+   * The charge is off-session — it happens at completion, with nobody
+   * present — so the report card is the first place the client sees the walk
+   * at all. Leaving the amount off it meant the only record was a line in
+   * billing history they had no reason to open and a figure on their card
+   * statement. Null for a credit-funded walk, which is most of them.
+   */
+  overageCents?: number | null;
 }
 
 function Fact({ label, value }: { label: string; value: boolean | null }) {
@@ -44,6 +54,13 @@ export function ReportCard({ report }: { report: ReportCardData }) {
       )}
 
       <MapView points={report.routePoints} />
+
+      {report.overageCents != null && report.overageCents > 0 && (
+        <p className="report-card__charge">
+          Not covered by your credits — <strong>{money(report.overageCents)}</strong> was
+          charged to the card on file.
+        </p>
+      )}
 
       <div className="report-card__facts">
         <span className="report-fact numeral" style={{ fontWeight: 600, color: "var(--text)" }}>

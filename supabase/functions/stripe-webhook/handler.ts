@@ -262,7 +262,22 @@ async function applyEvent(
       const plan = await resolvePlan(client, obj, deps);
       if (!plan) return { status: "ignored" };
       if (client.plan_id !== plan.id) {
+        // The safety net for H11, and until `resolvePlan` changed precedence
+        // this line was unreachable: resolvePlan returned the CACHED plan, so
+        // the ids could never differ. It now fires when a price change was
+        // missed by `customer.subscription.updated` — a dropped event, or a
+        // subscription created already on the new price — and reconciles at
+        // the moment the money actually moves.
         await deps.updateClient(client.id, { plan_id: plan.id }, operatorId);
+        await deps.insertNotification({
+          operator_id: client.operator_id,
+          client_id: null,
+          type: "plan_changed_externally",
+          title: `${client.full_name}'s plan was corrected from their invoice`,
+          body: "Stripe billed them for a different plan than Sanpo had on file, so their "
+            + "plan here now matches what was charged.",
+          walk_id: null,
+        });
       }
 
       await deps.applyInvoicePaid({
@@ -383,6 +398,50 @@ async function applyEvent(
       if (intent) {
         await deps.applyPlanChangeIntent(intent.id, event.id);
         fields.plan_id = intent.new_plan_id;
+      } else if (plan && plan.id !== client.plan_id) {
+        // Review H11. Until now `plan_id` was written ONLY inside the branch
+        // above, so a price change that did not originate in change-plan left
+        // `clients.plan_id` pointing at the old plan — and per B5/B6 the Stripe
+        // dashboard is the only place a subscription's price exists to be
+        // edited, which makes an out-of-band change the ordinary support
+        // action rather than an exotic one.
+        //
+        // The divergence then SELF-PERPETUATES: at the next `invoice.paid`,
+        // `resolvePlan` short-circuited on the cached id and granted the OLD
+        // plan's credits while Stripe collected the NEW price, every cycle,
+        // with nothing in the app or the ledger flagging it.
+        //
+        // **Stripe is the source of truth for what is being billed.** If the
+        // subscription is on this price, this is the plan, whatever we had
+        // cached. The intent branch still wins when it matches, because an
+        // in-app change carries the operator's stated intention and its
+        // bookkeeping.
+        fields.plan_id = plan.id;
+        await deps.insertNotification({
+          operator_id: client.operator_id,
+          client_id: null,
+          type: "plan_changed_externally",
+          title: `${client.full_name}'s plan changed outside Sanpo`,
+          body: "The subscription's price was changed in Stripe, so their plan here has been "
+            + "updated to match. Their next renewal grants the new plan's credits.",
+          walk_id: null,
+        });
+      } else if (priceId && !plan) {
+        // A price Sanpo has no plan for. This one CANNOT be reconciled — there
+        // is no local plan to point at — so `plan_id` is deliberately left
+        // alone rather than nulled, and the operator is told, because silently
+        // continuing to grant the old plan's credits against an unknown price
+        // is exactly the divergence H11 describes.
+        await deps.insertNotification({
+          operator_id: client.operator_id,
+          client_id: null,
+          type: "plan_changed_externally",
+          title: `${client.full_name} is on a price Sanpo does not know`,
+          body: "Their Stripe subscription uses a price that matches no plan here, so Sanpo "
+            + "cannot tell how many credits a renewal should grant. Until this is resolved "
+            + "they keep receiving their current plan's credits.",
+          walk_id: null,
+        });
       }
 
       await deps.updateClient(client.id, fields, operatorId);
@@ -570,17 +629,26 @@ function subscriptionPriceId(obj: Record<string, unknown>): string | null {
   return price?.id ?? null;
 }
 
+/**
+ * Which plan's credits does THIS invoice buy?
+ *
+ * Review H11 inverted the precedence. It used to short-circuit on
+ * `client.plan_id` and consult the invoice only when that was null — so once
+ * the cached id went stale (a price changed outside change-plan), every
+ * subsequent renewal granted the old plan's credits while Stripe collected the
+ * new price, and the cache was never consulted against reality again.
+ *
+ * The invoice line's price is what the client was actually charged for, so it
+ * decides. The cached `plan_id` is the fallback for invoices that carry no
+ * resolvable line price, and for a price this operator has no plan for — in
+ * which case granting the last known plan is better than granting nothing,
+ * and the subscription arm has already told the operator about it.
+ */
 async function resolvePlan(
   client: ClientRow,
   invoice: Record<string, unknown>,
   deps: WebhookDeps,
 ): Promise<PlanRow | null> {
-  if (client.plan_id) {
-    const plan = await deps.getPlan(client.plan_id);
-    if (plan) return plan;
-  }
-  // First invoice can arrive before checkout.session.completed binds the
-  // plan; fall back to matching the invoice line price against plans.
   const lines = (invoice.lines as { data?: Array<Record<string, unknown>> })?.data ?? [];
   for (const line of lines) {
     const price = (line.price as { id?: string })?.id ??
@@ -589,6 +657,10 @@ async function resolvePlan(
       const plan = await deps.findPlanByPriceId(client.operator_id, price);
       if (plan) return plan;
     }
+  }
+  if (client.plan_id) {
+    const plan = await deps.getPlan(client.plan_id);
+    if (plan) return plan;
   }
   return null;
 }

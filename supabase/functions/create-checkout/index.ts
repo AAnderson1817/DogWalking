@@ -10,6 +10,7 @@ import {
 } from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
 import { stripeClient } from "../_lib/stripe.ts";
+import { formatMoney } from "../_lib/money.ts";
 
 serveFunction(async (req) => {
   const operator = await requireOperator(req);
@@ -36,7 +37,7 @@ serveFunction(async (req) => {
 
   const { data: plan, error: pErr } = await db
     .from("plans")
-    .select("id, operator_id, name, stripe_price_id, active")
+    .select("id, operator_id, name, stripe_price_id, active, overage_rate_pence")
     .eq("id", body.plan_id)
     .maybeSingle();
   if (pErr) {
@@ -116,6 +117,30 @@ serveFunction(async (req) => {
     subscription_data: { metadata },
     success_url: `${base}/clients/${client.id}?checkout=success`,
     cancel_url: `${base}/clients/${client.id}?checkout=cancelled`,
+    /**
+     * Review H12: the overage mandate, on Stripe's record.
+     *
+     * A walk beyond the plan's credits is charged off-session — no one is
+     * present, and until this the client had agreed to a subscription and
+     * nothing else. Checkout is the moment the card is authorised, so it is
+     * where the authorisation has to say what it authorises. Stripe stores the
+     * session, which makes this evidence rather than copy on a page we own.
+     *
+     * Omitted rather than fudged when the operator has no overage rate set:
+     * "charged at your overage rate" with no figure is the kind of vague
+     * disclosure that is worse than none.
+     */
+    ...(typeof plan.overage_rate_pence === "number" && plan.overage_rate_pence > 0
+      ? {
+        custom_text: {
+          submit: {
+            message:
+              `Walks beyond the credits in this plan are charged to this card at `
+              + `${formatMoney(plan.overage_rate_pence)} each, after the walk is completed.`,
+          },
+        },
+      }
+      : {}),
   }, account);
 
   return jsonOk({ url: session.url });

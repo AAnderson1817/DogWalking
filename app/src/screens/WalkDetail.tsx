@@ -13,6 +13,7 @@ import { LoadingState } from "@/components/StateField";
 import { walkStatusTreatment } from "@/components/status-treatment";
 import {
   getWalk,
+  getWalkOverageCents,
   listWalkGpsPoints,
   listWalkPets,
   listWalkPhotos,
@@ -35,6 +36,8 @@ function WalkDetailInner({ walkId }: { walkId: string }) {
   const [pets, setPets] = useState<Pets[]>([]);
   const [photoUrls, setPhotoUrls] = useState<string[]>([]);
   const [storedPoints, setStoredPoints] = useState<Array<{ lat: number; lng: number }>>([]);
+  // Review H12: what this walk cost, if credits did not cover it.
+  const [overageCents, setOverageCents] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const channel = useWalkChannel(walkId, "subscribe");
@@ -54,6 +57,9 @@ function WalkDetailInner({ walkId }: { walkId: string }) {
           photos.map((p) => signedPhotoUrl(p.storage_path).catch(() => "")),
         );
         setPhotoUrls(urls.filter(Boolean));
+        // Best-effort: a missing charge lookup must not blank the report card
+        // the client came here to read.
+        setOverageCents(await getWalkOverageCents(walkId).catch(() => null));
       }
     } catch (loadError) {
       setError(loadErrorMessage(loadError));
@@ -134,6 +140,7 @@ function WalkDetailInner({ walkId }: { walkId: string }) {
               watered: walk.watered,
               notes: walk.notes,
               petNames: names,
+              overageCents,
             }}
           />
         </div>

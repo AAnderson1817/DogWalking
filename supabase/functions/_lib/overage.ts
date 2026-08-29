@@ -16,6 +16,8 @@
 //   4. Card errors mark the claim failed (re-chargeable); infra errors leave
 //      the claim pending and rethrow — the caller 500s and retries.
 
+import { formatMoney } from "./money.ts";
+
 export interface OverageWalk {
   id: string;
   operator_id: string;
@@ -252,6 +254,39 @@ export async function chargeOverageForWalk(
         stripe_payment_intent_id: pi.id,
         receipt_url: pi.receipt_url,
       });
+      /**
+       * Review H12. Until now a SUCCESSFUL off-session charge told nobody.
+       * `notifyFailure` existed with no counterpart, so the only message the
+       * client received was `walk_complete` — "Your walk report card is ready"
+       * — carrying no amount and no mention that money had moved. Their card
+       * was charged while they were not present, for a walk they were never
+       * quoted, and the first they could learn of it was the statement. An
+       * unannounced off-session charge is the highest-yield generator of
+       * chargebacks in consumer services, and this system has none of the
+       * machinery to contest one.
+       *
+       * Only on `succeeded`. A `pending` PaymentIntent has taken nothing yet,
+       * and announcing a charge that may still decline is worse than silence —
+       * it would be contradicted by the failure notification minutes later.
+       *
+       * `formatMoney`'s currency defaults to USD because the product is
+       * USD-only (CLAUDE.md) and the overage path carries no currency in
+       * scope; the parameter exists so the first multi-currency call site has
+       * somewhere to put it rather than a `$` glued to a number.
+       */
+      if (status === "succeeded") {
+        const money = formatMoney(amount);
+        await deps.insertNotification({
+          operator_id: walk.operator_id,
+          client_id: walk.client_id,
+          type: "payment_taken",
+          title: `${money} charged for your walk`,
+          body: "Your plan credits were used up, so this walk was charged at your walker's "
+            + `overage rate. ${money} was taken from the card on file.`
+            + (pi.receipt_url ? ` Receipt: ${pi.receipt_url}` : ""),
+          walk_id: walkId,
+        });
+      }
       return { payment, already_charged: false };
     } catch (err) {
       if (deps.isCardError(err)) {

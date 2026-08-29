@@ -32,6 +32,8 @@ function makeMockDeps(
     paymentType?: string;
     knownChargeId?: string | null;
     reversal?: ReversalResult;
+    /** Cached plan on the client row; defaults to the plan on price_1. */
+    clientPlanId?: string | null;
   } = {},
 ): { deps: WebhookDeps; calls: Call[] } {
   const calls: Call[] = [];
@@ -39,11 +41,17 @@ function makeMockDeps(
     id: "client-1",
     operator_id: "op-1",
     full_name: "Amelia Hart",
-    plan_id: "plan-1",
+    plan_id: opts.clientPlanId === undefined ? "plan-1" : opts.clientPlanId,
     subscription_status: "active",
     stripe_subscription_id: opts.subId === undefined ? "sub_1" : opts.subId,
   };
   const plan = { id: "plan-1", credits_per_cycle: 5, stripe_price_id: "price_1" };
+  // A SECOND plan on a second price, so "the Stripe price moved" is a state
+  // these tests can express at all (review H11). Different credits, because
+  // the whole defect is granting the wrong number of them.
+  const plan2 = { id: "plan-2", credits_per_cycle: 12, stripe_price_id: "price_2" };
+  const byId: Record<string, typeof plan> = { "plan-1": plan, "plan-2": plan2 };
+  const byPrice: Record<string, typeof plan> = { price_1: plan, price_2: plan2 };
   const deps: WebhookDeps = {
     claimEvent(id, type, payload) {
       calls.push({ fn: "claimEvent", args: [id, type, payload] });
@@ -67,11 +75,11 @@ function makeMockDeps(
     },
     getPlan(planId) {
       calls.push({ fn: "getPlan", args: [planId] });
-      return Promise.resolve(planId === "plan-1" ? plan : null);
+      return Promise.resolve(byId[planId] ?? null);
     },
     findPlanByPriceId(operatorId, priceId) {
       calls.push({ fn: "findPlanByPriceId", args: [operatorId, priceId] });
-      return Promise.resolve(priceId === "price_1" ? plan : null);
+      return Promise.resolve(byPrice[priceId] ?? null);
     },
     updateClient(id, fields, operatorId) {
       calls.push({ fn: "updateClient", args: [id, fields, operatorId] });
@@ -889,4 +897,148 @@ Deno.test("past_due is still set even when the failed row is deduped", async () 
   );
   const upd = calls.find((c) => c.fn === "updateClient");
   assertEquals((upd!.args[1] as { subscription_status: string }).subscription_status, "past_due");
+});
+
+// ── H11: an out-of-band price change must not diverge plan from price ──────
+//
+// `plan_id` used to be written ONLY inside `if (intent)`, so a price changed
+// in the Stripe dashboard — which per B5/B6 is the only place a subscription's
+// price exists to be edited — left the cached plan pointing at the old one.
+// `resolvePlan` then short-circuited on that cache, so every renewal granted
+// the OLD plan's credits while Stripe collected the NEW price, forever.
+
+/** A subscription sitting on `price`, bound to the client's current sub. */
+function subOnPrice(price: string, metadata?: Record<string, unknown>) {
+  return {
+    id: "sub_1",
+    customer: "cus_1",
+    status: "active",
+    items: { data: [{ price: { id: price } }] },
+    ...(metadata ? { metadata } : {}),
+  };
+}
+
+function fields(calls: Call[]): Record<string, unknown> {
+  return calls.find((c) => c.fn === "updateClient")!.args[1] as Record<string, unknown>;
+}
+
+function notifications(calls: Call[], type: string): Record<string, unknown>[] {
+  return calls
+    .filter((c) => c.fn === "insertNotification")
+    .map((c) => c.args[0] as Record<string, unknown>)
+    .filter((n) => n.type === type);
+}
+
+Deno.test("H11: a price change made outside Sanpo moves plan_id to match Stripe", async () => {
+  const { deps, calls } = makeMockDeps({ subId: "sub_1" });
+  const result = await handleStripeEvent(
+    event("customer.subscription.updated", subOnPrice("price_2")),
+    deps,
+  );
+  assertEquals(result.status, "processed");
+  // Stripe is the source of truth for what is being billed.
+  assertEquals(fields(calls).plan_id, "plan-2");
+  const notes = notifications(calls, "plan_changed_externally");
+  assertEquals(notes.length, 1);
+  // The operator hears about it; the client does not — they did not do this
+  // and there is nothing for them to act on.
+  assertEquals(notes[0].client_id, null);
+});
+
+Deno.test("H11: an in-app plan change still wins, and is not reported as external", async () => {
+  const { deps, calls } = makeMockDeps({ subId: "sub_1" });
+  await handleStripeEvent(
+    event(
+      "customer.subscription.updated",
+      subOnPrice("price_2", { pawtrail_plan_change_intent_id: "intent-9" }),
+    ),
+    deps,
+  );
+  // The mock's intent resolves to plan-1; the intent branch must take
+  // precedence over the price-derived plan, because an in-app change carries
+  // the operator's stated intention and its bookkeeping.
+  assertEquals(fields(calls).plan_id, "plan-1");
+  assert(calls.some((c) => c.fn === "applyPlanChangeIntent"));
+  assertEquals(notifications(calls, "plan_changed_externally").length, 0);
+});
+
+/**
+ * `customer.subscription.updated` fires for many reasons — a status change, a
+ * period roll, a metadata edit. Notifying on every one would make the alert
+ * worthless within a week.
+ */
+Deno.test("H11: no notification and no plan write when the price did not change", async () => {
+  const { deps, calls } = makeMockDeps({ subId: "sub_1" });
+  await handleStripeEvent(
+    event("customer.subscription.updated", subOnPrice("price_1")),
+    deps,
+  );
+  assertEquals(notifications(calls, "plan_changed_externally").length, 0);
+  assertFalse("plan_id" in fields(calls));
+});
+
+/**
+ * A price Sanpo has no plan for cannot be reconciled — there is no local plan
+ * to point at. Nulling `plan_id` would strand the client with no credits at
+ * all, so the row is left alone and the operator is told.
+ */
+Deno.test("H11: an unknown price notifies but never clobbers plan_id", async () => {
+  const { deps, calls } = makeMockDeps({ subId: "sub_1" });
+  await handleStripeEvent(
+    event("customer.subscription.updated", subOnPrice("price_99")),
+    deps,
+  );
+  assertFalse("plan_id" in fields(calls));
+  const notes = notifications(calls, "plan_changed_externally");
+  assertEquals(notes.length, 1);
+  assert(String(notes[0].title).includes("price Sanpo does not know"));
+});
+
+/**
+ * The half that costs money. `resolvePlan` now prefers the price actually
+ * invoiced over the cached id, so a renewal grants what was paid for.
+ */
+Deno.test("H11: a renewal grants the credits of the price actually invoiced", async () => {
+  const { deps, calls } = makeMockDeps();
+  await handleStripeEvent(
+    event("invoice.paid", {
+      ...PAID_CYCLE,
+      lines: { data: [{ price: { id: "price_2" } }] },
+    }),
+    deps,
+  );
+  const apply = calls.find((c) => c.fn === "applyInvoicePaid")!;
+  // plan-2 is 12 credits; the stale cache says plan-1, which is 5.
+  assertEquals((apply.args[0] as Record<string, unknown>).credits, 12);
+  // and the cache is reconciled at the moment the money moved
+  const update = calls.find((c) => c.fn === "updateClient")!;
+  assertEquals((update.args[1] as Record<string, unknown>).plan_id, "plan-2");
+  assertEquals(notifications(calls, "plan_changed_externally").length, 1);
+});
+
+/**
+ * The fallback must survive. An invoice with no resolvable line price still
+ * has to grant something, and the cached plan is the best available answer.
+ */
+Deno.test("H11: an invoice with no line price still grants the cached plan", async () => {
+  const { deps, calls } = makeMockDeps();
+  await handleStripeEvent(event("invoice.paid", PAID_CYCLE), deps);
+  const apply = calls.find((c) => c.fn === "applyInvoicePaid")!;
+  assertEquals((apply.args[0] as Record<string, unknown>).credits, 5);
+  assertEquals(notifications(calls, "plan_changed_externally").length, 0);
+});
+
+/** A client with no cached plan at all is still resolvable from the invoice. */
+Deno.test("H11: a first invoice with no cached plan resolves from the line price", async () => {
+  const { deps, calls } = makeMockDeps({ clientPlanId: null });
+  await handleStripeEvent(
+    event("invoice.paid", {
+      ...PAID_CYCLE,
+      billing_reason: "subscription_create",
+      lines: { data: [{ price: { id: "price_1" } }] },
+    }),
+    deps,
+  );
+  const apply = calls.find((c) => c.fn === "applyInvoicePaid")!;
+  assertEquals((apply.args[0] as Record<string, unknown>).credits, 5);
 });

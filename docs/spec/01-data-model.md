@@ -13,7 +13,7 @@ All `id` columns `uuid default gen_random_uuid() primary key` unless noted. All 
 - `pet_size`: small · medium · large · giant
 - `rollover_policy`: none · capped · unlimited
 - `billing_cycle`: weekly · monthly
-- `notification_type`: walk_complete · low_credit · renewal_upcoming · payment_failed · walk_scheduled · walk_cancelled
+- `notification_type`: walk_complete · low_credit · renewal_upcoming · payment_failed · walk_scheduled · walk_cancelled · payment_refunded · payment_disputed · subscription_cancelled · plan_changed_externally · payment_taken
 
 ## Tables (migration 0002)
 
