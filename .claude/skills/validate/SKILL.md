@@ -158,3 +158,34 @@ this list to stay complete:
 - DEV fixtures absent from the production bundle
 - the build stamps its commit, and `version.json` is excluded from the SPA rewrite
 - the nightly schedule is in a migration
+
+## 11. Every `var(--x)` names a property something defines
+
+```
+python3 - <<'PY'
+import re, pathlib, sys
+defined, used = set(), {}
+for f in pathlib.Path('app/src').rglob('*.css'):
+    t = re.sub(r'/\*.*?\*/', '', f.read_text(), flags=re.S)
+    for m in re.finditer(r'(--[A-Za-z0-9_-]+)\s*:', t): defined.add(m.group(1))
+    for m in re.finditer(r'var\(\s*(--[A-Za-z0-9_-]+)', t): used.setdefault(m.group(1), str(f))
+missing = sorted((k, v) for k, v in used.items() if k not in defined)
+for k, v in missing: print(f"FAIL: {k} is used but never defined ({v})")
+sys.exit(1 if missing else 0)
+PY
+```
+
+An undefined custom property makes the **whole declaration** invalid, and the
+element silently inherits instead — so the failure is a layout that looks
+subtly wrong rather than an error anyone sees. This gate shipped in CI with
+`feat(settings)`, after four colour tokens and `--fs-13` were written from
+memory and none of them existed.
+
+It was **missing from this file until H6**, which is the more interesting
+defect: the spacing scale is 1·2·3·4·6·8·12 with no `--s-5`, a `var(--s-5)`
+went in twice, `/validate` passed, and CI caught it. A local gate weaker than
+the CI gate is the same shape as the `deno test -A` mismatch recorded at the
+top of this file — it means "green locally" does not predict "green in CI",
+which is the only thing running these gates before committing is for.
+
+Keep this identical to `.github/workflows/ci.yml`'s step of the same name.
