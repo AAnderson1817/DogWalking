@@ -79,52 +79,6 @@ jobs:
   # on the ones that are load-bearing for a vault of other people's door codes.
   # It does not push anything: see the note in docs/dev/auth-posture.md for why
   # `config push` is not wired up yet.
-  auth-posture:
-    name: Read back the deployed auth settings
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
-    runs-on: ubuntu-latest
-    environment: staging
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
-
-      - name: Fetch and check the live auth config
-        run: |
-          cfg=$(mktemp)
-          status=$(curl -sS -o "$cfg" -w '%{http_code}' \
-            -H "Authorization: Bearer ${{ secrets.SUPABASE_ACCESS_TOKEN }}" \
-            "https://api.supabase.com/v1/projects/${{ secrets.SUPABASE_PROJECT_REF }}/config/auth")
-          if [ "$status" != "200" ]; then
-            echo "::error title=Could not read the auth config::Management API returned HTTP $status. If 401, SUPABASE_ACCESS_TOKEN has expired — see docs/dev/staging-setup.md Troubleshooting."
-            # Bounded on purpose. A non-200 body is normally a small error
-            # envelope, but this is an unexpected-response path by definition
-            # and the success body on this endpoint carries SMTP and provider
-            # secrets — so it is not the place for an unbounded dump.
-            head -c 400 "$cfg"; echo
-            exit 1
-          fi
-
-          # The checking lives in a script so it can be driven against fixtures
-          # (`app/scripts/auth-posture.test.ts`). Inline here it could be
-          # exercised by nothing, and it shipped a defect that survived until
-          # the first time it ran against a real project: `jq '.k // false'`
-          # renders an ABSENT key and a false one identically, so "flip a
-          # dashboard toggle" was indistinguishable from "this gate names a key
-          # that does not exist and can never go green".
-          #
-          # Printing the posture is most of the fix for "unknown from this
-          # repository" — but note it prints only the keys it checks, never the
-          # body: /config/auth carries SMTP and provider secrets.
-          {
-            echo "## Deployed auth posture (staging)"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          set +e
-          ./scripts/check-auth-posture.sh "$cfg" | tee -a "$GITHUB_STEP_SUMMARY"
-          rc=${PIPESTATUS[0]}
-          set -e
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          exit "$rc"
-
   onboard-repro:
     name: Replay operator onboard flow
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}

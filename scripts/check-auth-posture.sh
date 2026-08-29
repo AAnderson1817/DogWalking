@@ -97,6 +97,53 @@ require_true() {
   fail=1
 }
 
+# require_true_any <label> <why> <api key>...
+#
+# Passes when ANY of the named keys is true, and says which one it found.
+#
+# This exists because `config.toml` and the Management API do not use the same
+# names, and the mapping cannot be resolved from inside this repository — the
+# CLI is not installed here and supabase.com is blocked by the egress proxy. So
+# rather than guess one name, the check names every key the live response
+# actually carries that could govern this behaviour, and treats the setting as
+# satisfied if any of them is on.
+#
+# That is not a fudge, because the two keys are not equivalent and the message
+# says so: one closes the exploit and the other only narrows it. Accepting
+# either is still correct for a gate whose job is "is this better than nothing",
+# and the log names which one is doing the work.
+require_true_any() {
+  local label=$1 why=$2; shift 2
+  local -a keys=("$@")
+  local key val present=0
+  for key in "${keys[@]}"; do
+    jq -e --arg k "$key" 'has($k)' "$cfg" >/dev/null 2>&1 || continue
+    present=1
+    val=$(jq -r --arg k "$key" '.[$k]' "$cfg")
+    if [ "$val" = "true" ]; then
+      emit "  ok    $label is on (via $key)"
+      return
+    fi
+  done
+
+  if [ "$present" -eq 0 ]; then
+    # None of the names exists. That is a fault in THIS FILE, not a dashboard
+    # setting, and it is the case the whole header is about.
+    missing_key "${keys[0]}" "$label"
+    return
+  fi
+
+  local detail=""
+  for key in "${keys[@]}"; do
+    jq -e --arg k "$key" 'has($k)' "$cfg" >/dev/null 2>&1 || continue
+    val=$(jq -r --arg k "$key" '.[$k]' "$cfg")
+    [ "$val" = "null" ] && val="null (present, unset)"
+    detail="${detail}${key}=${val} "
+  done
+  emit "::error title=$label is OFF::Live values: ${detail%% }. $why"
+  fail=1
+}
+
 # require_at_least <api key> <label> <minimum> <why it matters>
 require_at_least() {
   local key=$1 label=$2 min=$3 why=$4 val
@@ -154,8 +201,23 @@ echo "== deployed auth posture =="
 # staging red over settings only the owner can change in a dashboard just
 # teaches everyone to ignore the colour.
 
-require_true secure_password_change_enabled "secure_password_change" \
-  "An attacker holding a live session can call updateUser({password}) with no knowledge of the current password, then satisfy the vault's password check with the one they just set. Turning this on narrows that window but does NOT close it: GoTrue only demands reauthentication when the session is not 'recently signed in', which means created more than 24h ago. Dashboard -> Authentication -> Providers -> Email."
+# `secure_password_change_enabled` until now — a name this API has never used.
+# The first real run reported exactly that, which is the header's whole point:
+# the gate could not be satisfied by any dashboard change, because it was
+# looking for a key that does not exist. The two names below are taken verbatim
+# from the key list that failing run printed.
+#
+# They are NOT equivalent, and the message says which is which:
+#   require_current_password  — the attacker must know the current password.
+#                               CLOSES the exploit.
+#   require_reauthentication  — GoTrue demands a nonce, but only when the
+#                               session is not "recently signed in" (>24h old).
+#                               NARROWS it. This is what config.toml's
+#                               `secure_password_change` is understood to mean.
+require_true_any "Secure password change" \
+  "An attacker holding a live session can call updateUser({password}) with no knowledge of the current password, then satisfy the vault's password check with the one they just set. security_update_password_require_current_password CLOSES this. security_update_password_require_reauthentication only narrows it — GoTrue demands reauthentication only when the session is not 'recently signed in', meaning older than 24h. Dashboard -> Authentication -> Providers -> Email." \
+  security_update_password_require_current_password \
+  security_update_password_require_reauthentication
 
 require_at_least password_min_length "Password floor" 12 \
   "config.toml asks for 12. This password is the only thing between a live session and every door code the operator holds."

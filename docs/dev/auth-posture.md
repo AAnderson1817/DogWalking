@@ -74,17 +74,26 @@ sessions that exist whenever the timebox is unset, as it is today.
 
 ## What now reads the deployed posture back
 
-`staging-smoke.yml` gained an **`auth-posture`** job. It fetches
+**`.github/workflows/auth-posture.yml`.** It fetches
 `/v1/projects/{ref}/config/auth` through the Management API (using the
-`SUPABASE_ACCESS_TOKEN` secret that workflow already holds), prints the live
-settings into the run summary, and then:
+`SUPABASE_ACCESS_TOKEN` secret), prints the live settings into the run summary,
+and then:
 
-- **fails** when `secure_password_change` is off, or the password floor is under 12
+- **fails** when secure password change is off, or the password floor is under 12
 - **warns** when there is no session timebox or inactivity timeout, or TOTP is off
 
 Printing it is most of the fix: "unknown from this repository" stops being true
 the moment a reader of the Actions log can see it. The two failures are the ones
 that decide whether the vault's re-auth means anything.
+
+It lived in `staging-smoke.yml` until it had run a few times, and the result was
+the failure this repository has already recorded once as `ops(gate-noise)`: that
+workflow was red on **every** run from the day the job landed, so the two
+regression jobs beside it — both passing — became invisible behind a red nobody
+could clear. Smoke answers "did the deploy break the product"; posture answers
+"is the owner's dashboard configuration where we want it". The second is
+expected to stay red until a person changes a setting, and it must not spend the
+first one's credibility saying so.
 
 ## What I deliberately did NOT do
 
@@ -148,14 +157,14 @@ no staging deploy succeeded in between. What it found:
 
 ```
 password_min_length            6      (intended 12)      FAIL
-secure_password_change         null   (intended true)    FAIL
+secure_password_change         ???    (intended true)    FAIL — see below
 sessions_timebox               0      (intended 12h)     warn
 sessions_inactivity_timeout    0      (intended 2h)      warn
 mfa_totp_enroll_enabled        true
 mfa_totp_verify_enabled        true
 ```
 
-Two of those are worth reading twice.
+Three of those are worth reading twice.
 
 **TOTP is already on.** This file previously recorded MFA as a Pro-plan purchase
 the owner had not made, and the `aal2` gate as inert pending that spend. Both
@@ -164,9 +173,35 @@ Nothing needs to be bought for an operator to enrol a factor, and doing so
 closes the only exploit path this document describes. That is the
 highest-value action available here, and it costs nothing.
 
-**`secure_password_change` came back `null`, not `false`.** The check could not
-originally tell those apart from a key that does not exist — see the header of
-`scripts/check-auth-posture.sh`. It now can, and reports which it saw.
+**`secure_password_change` was never read at all — the gate was asking for a
+key that does not exist.** This entry previously recorded it as "came back
+`null`, not `false`", and that was wrong: the value was never fetched under any
+name. `check-auth-posture.sh` asked for `secure_password_change_enabled`, which
+the Management API has never returned. The `// false` defect meant the first
+run rendered that as `null`/off, so the number written down here was an artifact
+of the bug rather than a reading of the project.
+
+The presence-vs-value split added when that defect was fixed is what caught it,
+on the first run after: the job reported, in its own words, that *"no dashboard
+change can satisfy the gate while it names a key that does not exist"*. It named
+the two keys the response actually carries, and the check now accepts either:
+
+| Key | What it does |
+| --- | --- |
+| `security_update_password_require_current_password` | The attacker must know the current password. **Closes** the exploit. |
+| `security_update_password_require_reauthentication` | GoTrue demands a nonce, but only for a session older than 24h. **Narrows** it. This is what `config.toml`'s `secure_password_change` is understood to mean. |
+
+Both are accepted because either is better than neither, and the log names which
+one it found — they are not equivalent and the difference matters. The mapping
+from the `config.toml` name to the API name could not be resolved from inside
+this repository: the CLI is not installed here and `supabase.com` is blocked by
+the egress proxy. Naming both is the honest response to that, not a guess
+dressed up as one.
+
+**Their live values on staging are still unknown.** The run that discovered the
+naming fault failed before reading them. The next run of
+`auth-posture.yml` is what fills them in, and `app/scripts/auth-posture.test.ts`
+records them as `null` in the live fixture rather than assuming.
 
 ## Open decisions (owner)
 

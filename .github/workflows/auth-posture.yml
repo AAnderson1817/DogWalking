@@ -1,0 +1,90 @@
+name: Auth posture (staging)
+
+# Reads the LIVE auth configuration back from the Management API and compares it
+# against the posture this repository intends (review H2,
+# `docs/dev/auth-posture.md`). `supabase/config.toml` governs `supabase start` on
+# a laptop and nothing deployed, so without this the deployed auth posture is
+# unknown from the repository.
+#
+# ── Why this is not part of "Staging smoke test" ─────────────────────────────
+#
+# It was, and the result was the failure mode this repository has already
+# recorded once under `ops(gate-noise)`: the workflow was red on EVERY run from
+# the day the job landed, so the two jobs beside it — a genuine onboard replay
+# and a genuine cron invocation, both passing — became invisible behind a red
+# nobody could clear.
+#
+# The two ask different questions and deserve different answers:
+#
+#   Staging smoke  — did the deploy break the product? A red here is a
+#                    regression and somebody should look now.
+#   Auth posture   — is the owner's dashboard configuration where we want it?
+#                    A red here is an open item on `docs/dev/owner-actions.md`,
+#                    it is expected to stay red until a person changes a
+#                    setting, and it is nobody's emergency.
+#
+# It stays FATAL rather than becoming a warning. The two settings it fails on
+# are load-bearing for a vault holding other people's door codes, and a check
+# that only ever warns about those is decoration. What it must not do is spend
+# another workflow's credibility saying so.
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Deploy staging (Supabase)"]
+    types: [completed]
+
+# `actions/checkout` on a private repository needs this and 403s without it.
+permissions:
+  contents: read
+
+concurrency:
+  group: auth-posture
+  cancel-in-progress: false
+
+jobs:
+  auth-posture:
+    name: Read back the deployed auth settings
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+
+      - name: Fetch and check the live auth config
+        run: |
+          cfg=$(mktemp)
+          status=$(curl -sS -o "$cfg" -w '%{http_code}' \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_ACCESS_TOKEN }}" \
+            "https://api.supabase.com/v1/projects/${{ secrets.SUPABASE_PROJECT_REF }}/config/auth")
+          if [ "$status" != "200" ]; then
+            echo "::error title=Could not read the auth config::Management API returned HTTP $status. If 401, SUPABASE_ACCESS_TOKEN has expired — see docs/dev/staging-setup.md Troubleshooting."
+            # Bounded on purpose. A non-200 body is normally a small error
+            # envelope, but this is an unexpected-response path by definition
+            # and the success body on this endpoint carries SMTP and provider
+            # secrets — so it is not the place for an unbounded dump.
+            head -c 400 "$cfg"; echo
+            exit 1
+          fi
+
+          # The checking lives in a script so it can be driven against fixtures
+          # (`app/scripts/auth-posture.test.ts`). Inline here it could be
+          # exercised by nothing, and it shipped a defect that survived until
+          # the first time it ran against a real project: `jq '.k // false'`
+          # renders an ABSENT key and a false one identically, so "flip a
+          # dashboard toggle" was indistinguishable from "this gate names a key
+          # that does not exist and can never go green".
+          #
+          # Printing the posture is most of the fix for "unknown from this
+          # repository" — but note it prints only the keys it checks, never the
+          # body: /config/auth carries SMTP and provider secrets.
+          {
+            echo "## Deployed auth posture (staging)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          set +e
+          ./scripts/check-auth-posture.sh "$cfg" | tee -a "$GITHUB_STEP_SUMMARY"
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
