@@ -328,7 +328,7 @@ button.walk-card:hover,
 }
 
 .legal-page__section {
-  margin-top: var(--s-5);
+  margin-top: var(--s-6);
 }
 
 .legal-page__section h2 {
@@ -363,7 +363,7 @@ button.walk-card:hover,
 }
 
 .your-data {
-  margin-top: var(--s-5);
+  margin-top: var(--s-6);
   padding: var(--s-4);
   background: var(--sanpo-color-surface-raised);
   border: var(--bw) solid var(--sanpo-color-border-subtle);
