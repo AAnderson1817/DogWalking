@@ -164,8 +164,14 @@ deploy.
 
 | Setting | Live | Intended | Confidence |
 | --- | --- | --- | --- |
-| Minimum password length | **6** | 12 | **Verified** — read from the API on 2026-08-29 |
-| Secure password change | **unknown** | on | *Not yet read* — see below |
+| Minimum password length | **6** | 12 | **Verified** 2026-08-29 |
+| `security_update_password_require_current_password` | **false** | true | **Verified** 2026-08-29 |
+| `security_update_password_require_reauthentication` | **false** | true | **Verified** 2026-08-29 |
+
+Turning on **either** satisfies the gate, and they are not equivalent: requiring
+the current password *closes* the stolen-session path, requiring
+reauthentication only *narrows* it (GoTrue asks only once a session is more than
+24h old). Turn on the first.
 
 **Correction to the previous version of this entry**, which stated the second
 row as "off". It was never measured. `check-auth-posture.sh` was asking the

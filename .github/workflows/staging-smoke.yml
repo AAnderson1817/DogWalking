@@ -61,24 +61,7 @@ jobs:
           cat "$body"; echo
           [ "$status" = "200" ] && grep -q '"ok":true' "$body"
 
-  # End-to-end replay of the Onboard flow with a throwaway user: password
-  # sign-in → the exact operators INSERT the app makes → the role-resolution
-  # SELECT → cleanup. Prints real PostgREST statuses/bodies (no tokens, no
-  # emails beyond the fixture address) so auth/RLS/grant regressions on the
-  # hosted project are visible instead of being swallowed by the UI.
-  # ── What auth settings does the deployed project ACTUALLY have? ──────────
-  # Before this, nothing in the repository could answer that (review H2).
-  # `supabase/config.toml` governs `supabase start` on a laptop: neither deploy
-  # workflow runs `supabase config push`, and that string appears in no
-  # workflow. So every auth decision in that file — signup policy, password
-  # rules, session lifetime, MFA, OTP expiry, rate limits — was fiction as far
-  # as staging and production were concerned, and the real settings lived in a
-  # dashboard no file records, no test asserts and no reviewer can see.
-  #
-  # This reads them back through the Management API and prints them, then FAILS
-  # on the ones that are load-bearing for a vault of other people's door codes.
-  # It does not push anything: see the note in docs/dev/auth-posture.md for why
-  # `config push` is not wired up yet.
+
   onboard-repro:
     name: Replay operator onboard flow
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
@@ -161,9 +144,24 @@ jobs:
           pass="Diag-$(date +%s)-pw"
           admin() { curl -sS -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY" "$@"; }
 
+          # Pages until it finds the address or runs out. It used to read
+          # `page=1&per_page=100` and stop: this function's job is to find THIS
+          # RUN's leftovers so they can be deleted before the fixtures are
+          # recreated, and once staging held more than 100 auth users they fell
+          # off page 1. Cleanup then found nothing, the create collided with the
+          # row it had failed to remove, and the job failed with a message that
+          # named neither cause. The bound is there so a project with a large
+          # user table cannot spin here forever.
           user_id_for() {
-            admin "$base/auth/v1/admin/users?page=1&per_page=100" \
-              | jq -r --arg e "$1" '.users[]? | select(.email==$e) | .id' | head -1
+            local page=1 body id
+            while [ "$page" -le 20 ]; do
+              body=$(admin "$base/auth/v1/admin/users?page=$page&per_page=200")
+              id=$(printf '%s' "$body" | jq -r --arg e "$1" '.users[]? | select(.email==$e) | .id' | head -1)
+              [ -n "$id" ] && { printf '%s' "$id"; return 0; }
+              [ "$(printf '%s' "$body" | jq -r '.users | length')" -lt 200 ] && return 0
+              page=$((page + 1))
+            done
+            return 0
           }
           cleanup() {
             [ -n "$2" ] && admin -X DELETE "$base/rest/v1/clients?id=eq.$2" >/dev/null || true
@@ -180,9 +178,23 @@ jobs:
           old_client_row=$(admin "$base/rest/v1/clients?select=id&operator_id=eq.${old_op:-00000000-0000-4000-8000-000000000000}" | jq -r '.[0].id // empty')
           cleanup "$old_op" "$old_client_row" "$old_cl"
 
-          op_uid=$(admin -X POST "$base/auth/v1/admin/users" -H "Content-Type: application/json" \
-            -d "{\"email\":\"$op_email\",\"password\":\"$pass\",\"email_confirm\":true}" | jq -r '.id')
-          [ -n "$op_uid" ] && [ "$op_uid" != "null" ] || { echo "FAIL: fixture operator user"; exit 1; }
+          # The body is kept, not piped straight into jq. `FAIL: fixture
+          # operator user` used to be the whole of the diagnosis — the status
+          # and GoTrue's own message went in the bin, so "already registered",
+          # "weak password" and "service key rejected" were one indistinguish-
+          # able red. Same defect as review H14, in the workflow that exists to
+          # tell us when staging is wrong.
+          mkuser=$(mktemp)
+          opcode=$(admin -o "$mkuser" -w '%{http_code}' -X POST "$base/auth/v1/admin/users" \
+            -H "Content-Type: application/json" \
+            -d "{\"email\":\"$op_email\",\"password\":\"$pass\",\"email_confirm\":true}")
+          op_uid=$(jq -r '.id // empty' "$mkuser")
+          if [ -z "$op_uid" ]; then
+            # `error_description`/`msg` only — never the whole body, and the
+            # password is this script's own throwaway, not a secret of anyone's.
+            echo "::error title=Could not create the fixture operator::HTTP $opcode — $(jq -r '.error_description // .msg // .message // "no message"' "$mkuser")"
+            exit 1
+          fi
           client_row=""; cl_uid=""
           trap 'cleanup "$op_uid" "$client_row" "$cl_uid"' EXIT
 
