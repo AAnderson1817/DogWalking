@@ -27,12 +27,12 @@ common default.
 | --- | --- | --- |
 | `minimum_password_length` | **12** | Was 6. This password is the only thing between a live session and every door code, lockbox combination and alarm sequence belonging to every one of the operator's clients. |
 | `password_requirements` | `lower_upper_letters_digits` | Was empty. |
-| `secure_password_change` | **true** | Was false. **This is the setting that closes the exploit chain** — see below. |
+| `secure_password_change` | **true** | Was false. Narrows the exploit chain but **does not close it** — see below. |
 | `sessions.timebox` | **12h** | Was commented out, so a session lived until its refresh token was revoked: an exfiltrated token was good indefinitely. An operator's working day is the unit; a phone left on a bus overnight should not still be signed in. |
 | `sessions.inactivity_timeout` | **2h** | As above. |
-| `mfa.totp.enroll_enabled` / `verify_enabled` | still `false` | **Requires the Supabase Pro plan.** A billing decision, not a config edit — see *Open decisions*. |
+| `mfa.totp.enroll_enabled` / `verify_enabled` | **true** | Both read `true` on staging — see *What the first read-back found*. |
 
-### Why `secure_password_change` is the load-bearing one
+### What `secure_password_change` actually buys
 
 With it off, an attacker holding **only a live session** — stolen phone, XSS,
 exfiltrated localStorage token — can call
@@ -42,7 +42,35 @@ password they just set.
 
 That reduces "compromise of one browser session" to "every entry code for every
 one of that operator's clients, plus a clean audit trail attributing the reads
-to the operator". The vault's re-auth is ceremony until this is on.
+to the operator".
+
+**This file used to say that turning the setting on closes that chain. It does
+not.** GoTrue demands reauthentication before a password change only when the
+session is *not* "recently signed in", and recently means **created within the
+last 24 hours**. A freshly stolen session — which is the overwhelmingly likely
+case for a lifted phone or a live XSS — is inside that window, so the password
+change succeeds and the chain runs exactly as before. The setting protects only
+sessions that have already aged past a day.
+
+There is a second-order consequence, and it points the opposite way from what
+you would guess:
+
+> **A session timebox at or under 24h makes `secure_password_change` inert.**
+> The timebox caps how old a session can get. Cap it at 12h and no session can
+> ever reach the 24h threshold, so the reauthentication branch can never be
+> taken. The two hardened values in the table above cancel each other out.
+
+Both halves follow from documented GoTrue behaviour rather than from an
+experiment run against this project; what would confirm them is a session held
+past the window with the setting on. `scripts/check-auth-posture.sh` emits a
+`::notice` the moment the timebox is set into that range, so the interaction
+announces itself rather than waiting to be rediscovered.
+
+**So the control that actually closes this path is the vault's own `aal2`
+gate**, described below — it cannot be satisfied by anything an attacker can do
+from a stolen session, because it requires the second factor itself. Keep
+`secure_password_change` on regardless: it is free, and it covers the aged
+sessions that exist whenever the timebox is unset, as it is today.
 
 ## What now reads the deployed posture back
 
@@ -98,10 +126,11 @@ The vault no longer accepts a password alone **when something better exists**.
 | `aal1_no_factor` | the account has no verified factor | **allowed** — where the product is today |
 | `insufficient` | a verified factor exists, this session did not use it | **refused**, `second_factor_required` |
 
-Graduated on purpose. Requiring `aal2` unconditionally would lock every
-operator out of the vault, because MFA needs the Pro plan and TOTP enrolment is
-off — the product would be unusable pending a billing decision. This way,
-**enrolling a factor is what closes the exploit, with no further code change.**
+Graduated on purpose. Requiring `aal2` unconditionally would lock out every
+operator who has not enrolled a factor, so the product would be unusable the
+moment the gate shipped. This way, **enrolling a factor is what closes the
+exploit, with no further code change** — and, per the section above, it is the
+*only* thing that closes it.
 
 An attacker cannot manufacture `aal2`: it needs the factor itself. So for any
 operator with MFA enrolled, the change-the-password trick stops working even
@@ -111,12 +140,38 @@ A **missing** `aal` claim is treated as `aal1`, never as strong. That is what a
 project with no MFA configured emits, and reading strength from an absent claim
 would be the whole gate failing open. There is a test for it.
 
+## What the first read-back found
+
+The `auth-posture` job was written in the H2 PR and then **ran for the first
+time on 2026-08-29**, months later: it fires on a successful staging deploy, and
+no staging deploy succeeded in between. What it found:
+
+```
+password_min_length            6      (intended 12)      FAIL
+secure_password_change         null   (intended true)    FAIL
+sessions_timebox               0      (intended 12h)     warn
+sessions_inactivity_timeout    0      (intended 2h)      warn
+mfa_totp_enroll_enabled        true
+mfa_totp_verify_enabled        true
+```
+
+Two of those are worth reading twice.
+
+**TOTP is already on.** This file previously recorded MFA as a Pro-plan purchase
+the owner had not made, and the `aal2` gate as inert pending that spend. Both
+claims were wrong for this project: enrolment and verification are both enabled.
+Nothing needs to be bought for an operator to enrol a factor, and doing so
+closes the only exploit path this document describes. That is the
+highest-value action available here, and it costs nothing.
+
+**`secure_password_change` came back `null`, not `false`.** The check could not
+originally tell those apart from a key that does not exist — see the header of
+`scripts/check-auth-posture.sh`. It now can, and reports which it saw.
+
 ## Open decisions (owner)
 
-1. **Supabase Pro, for MFA.** TOTP enrolment is a Pro feature. Until then the
-   vault runs at `aal1_no_factor` for everyone and the gate above is inert. This
-   is the single highest-value security purchase for this product, because the
-   vault *is* the product.
+1. **Enrol a TOTP factor** on each operator account. Free, available today, and
+   the only control that actually closes the stolen-session path.
 2. **Whether auth config is dashboard-managed or file-managed.** Pick one. If
    the dashboard, this file is the record and the readback job is the check. If
    the file, wire `config push` after verifying it, and the readback becomes a

@@ -642,9 +642,11 @@ Deno.test("an aal2 session is allowed and never has to count factors", async () 
 });
 
 Deno.test("an operator with NO factor still gets in — the gate is graduated", async () => {
-  // Requiring aal2 unconditionally would lock every operator out of the vault,
-  // because MFA needs the Supabase Pro plan and TOTP enrolment is off. The
-  // product would be unusable pending a billing decision.
+  // Requiring aal2 unconditionally would lock out every operator who has not
+  // enrolled a factor — which, the day the gate ships, is all of them.
+  // (An earlier version of this comment said MFA needed the Supabase Pro plan.
+  // The first live read-back of the auth config showed TOTP enrol and verify
+  // both already enabled, so enrolling is free and available today.)
   const { deps, calls } = makeVaultDeps({ factors: 0 });
   await handleVault(
     { ...OP, aal: "aal1" },

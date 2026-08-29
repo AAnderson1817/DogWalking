@@ -105,23 +105,35 @@ more since the `frontend` deploy job gained `contents: write`.
 and ruleset endpoints, so the setting is unreadable from here as well as
 unwritable.)*
 
-### 8. Compare the deployed auth posture to the intended one
-`staging-smoke.yml`'s `auth-posture` job prints the live settings into the run
-summary and fails on the two that decide whether the vault's re-auth means
-anything. Read one run, compare it to the table in `docs/dev/auth-posture.md`,
-and change what differs **in the dashboard**.
+### 8. Two auth settings in the dashboard
+The `auth-posture` job ran for the first time on 2026-08-29 and read the live
+staging config back. Two values sit below the intended posture, and both are
+dashboard-only:
+
+| Setting | Live | Intended | Where |
+| --- | --- | --- | --- |
+| Minimum password length | **6** | 12 | Authentication → Providers → Email |
+| Secure password change | **off** | on | Authentication → Providers → Email |
 
 `config.toml` governs `supabase start` on a laptop and nothing deployed. Wiring
-`config push` is deliberately not done, and that file says why at length.
+`config push` is deliberately not done, and `docs/dev/auth-posture.md` says why.
 
-### 9. Supabase Pro, for MFA
-TOTP enrolment is a Pro feature. The vault's assurance gate shipped in #48 is
-correct and **inert** without it: every operator sits at `aal1_no_factor`, so
-enrolling a factor is what closes the session-only-attacker exploit, with no
-further code change.
+Read the current values off the job summary rather than trusting this table to
+stay accurate — it is a snapshot of one run.
 
-This is the single highest-value security purchase for this product, because
-the vault *is* the product.
+### 9. Enrol a TOTP factor (free — this replaces "buy Supabase Pro")
+**Correction.** This entry previously said MFA required the Supabase Pro plan,
+and that the vault's assurance gate was inert pending that purchase. Both were
+wrong for this project: the read-back shows `mfa_totp_enroll_enabled` and
+`mfa_totp_verify_enabled` are **already true** on staging. Nothing needs buying.
+
+Enrol a second factor on each operator account. It is the **only** control that
+actually closes the session-only-attacker path against the vault — a stolen
+session can change the account password (see `auth-posture.md` for why
+`secure_password_change` does not stop that within 24h), but it cannot
+manufacture `aal2`, because that needs the factor itself.
+
+Highest-value action on this list, and it costs nothing.
 
 ---
 

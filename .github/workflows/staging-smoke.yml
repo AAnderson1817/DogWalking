@@ -95,58 +95,35 @@ jobs:
             "https://api.supabase.com/v1/projects/${{ secrets.SUPABASE_PROJECT_REF }}/config/auth")
           if [ "$status" != "200" ]; then
             echo "::error title=Could not read the auth config::Management API returned HTTP $status. If 401, SUPABASE_ACCESS_TOKEN has expired — see docs/dev/staging-setup.md Troubleshooting."
-            cat "$cfg"; echo
+            # Bounded on purpose. A non-200 body is normally a small error
+            # envelope, but this is an unexpected-response path by definition
+            # and the success body on this endpoint carries SMTP and provider
+            # secrets — so it is not the place for an unbounded dump.
+            head -c 400 "$cfg"; echo
             exit 1
           fi
 
-          # Print the posture. This alone is the fix for "unknown from this
-          # repository" — a reader of the Actions log can now see it.
-          echo "## Deployed auth posture (staging)" >> "$GITHUB_STEP_SUMMARY"
-          echo '```json' >> "$GITHUB_STEP_SUMMARY"
-          jq '{
-            password_min_length,
-            password_required_characters,
-            secure_password_change: .secure_password_change_enabled,
-            session_timebox: .sessions_timebox,
-            session_inactivity: .sessions_inactivity_timeout,
-            mfa_totp_enroll: .mfa_totp_enroll_enabled,
-            mfa_totp_verify: .mfa_totp_verify_enabled,
-            signup_enabled: .disable_signup | not,
-            jwt_expiry: .jwt_exp,
-            refresh_token_rotation: .refresh_token_rotation_enabled
-          }' "$cfg" | tee -a "$GITHUB_STEP_SUMMARY"
+          # The checking lives in a script so it can be driven against fixtures
+          # (`app/scripts/auth-posture.test.ts`). Inline here it could be
+          # exercised by nothing, and it shipped a defect that survived until
+          # the first time it ran against a real project: `jq '.k // false'`
+          # renders an ABSENT key and a false one identically, so "flip a
+          # dashboard toggle" was indistinguishable from "this gate names a key
+          # that does not exist and can never go green".
+          #
+          # Printing the posture is most of the fix for "unknown from this
+          # repository" — but note it prints only the keys it checks, never the
+          # body: /config/auth carries SMTP and provider secrets.
+          {
+            echo "## Deployed auth posture (staging)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          set +e
+          ./scripts/check-auth-posture.sh "$cfg" | tee -a "$GITHUB_STEP_SUMMARY"
+          rc=${PIPESTATUS[0]}
+          set -e
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-
-          # Then insist on the two that decide whether the vault's re-auth means
-          # anything. Warnings, not failures, for the rest: this job exists to
-          # make the posture visible, and turning staging red over settings only
-          # the owner can change in a dashboard would just teach everyone to
-          # ignore it.
-          fail=0
-          secure=$(jq -r '.secure_password_change_enabled // false' "$cfg")
-          if [ "$secure" != "true" ]; then
-            echo "::error title=secure_password_change is OFF::An attacker holding only a live session can call updateUser({password}) with no knowledge of the current password, then satisfy the vault's password check with the one they just set. The vault re-auth is ceremony until this is on. Set it in Dashboard -> Authentication -> Providers -> Email."
-            fail=1
-          fi
-          minlen=$(jq -r '.password_min_length // 0' "$cfg")
-          if [ "$minlen" -lt 12 ]; then
-            echo "::error title=Password floor is $minlen::config.toml asks for 12. This password is the only thing between a live session and every door code the operator holds."
-            fail=1
-          fi
-
-          for pair in "sessions_timebox:session timebox" "sessions_inactivity_timeout:inactivity timeout"; do
-            key=${pair%%:*}; label=${pair#*:}
-            val=$(jq -r ".${key} // empty" "$cfg")
-            if [ -z "$val" ] || [ "$val" = "0" ] || [ "$val" = "null" ]; then
-              echo "::warning title=No $label::An exfiltrated session token is valid until its refresh token is revoked. config.toml asks for 12h/2h."
-            fi
-          done
-
-          if [ "$(jq -r '.mfa_totp_verify_enabled // false' "$cfg")" != "true" ]; then
-            echo "::warning title=TOTP is not enabled::The vault accepts a password alone. MFA requires the Supabase Pro plan, so this is partly a billing decision — see docs/dev/auth-posture.md."
-          fi
-
-          exit $fail
+          exit "$rc"
 
   onboard-repro:
     name: Replay operator onboard flow
