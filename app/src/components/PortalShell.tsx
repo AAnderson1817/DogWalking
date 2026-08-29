@@ -4,6 +4,7 @@
 import type { ReactNode } from "react";
 import { AppMain, MAIN_ID } from "./AppMain";
 import { BottomNav, NAV_ID } from "./BottomNav";
+import { LegalLinks } from "./LegalLinks";
 
 export function PortalShell({ children }: { children: ReactNode }) {
   return (
@@ -21,7 +22,13 @@ export function PortalShell({ children }: { children: ReactNode }) {
       <a className="sr-only skip-link" href={`#${NAV_ID}`}>
         Skip to navigation
       </a>
-      <AppMain>{children}</AppMain>
+      <AppMain>
+        {children}
+        {/* Review H6: the client's standing route to the notice. It is the one
+            persona whose data was entered before they had any account, so the
+            portal is where "what is held about me" has to be reachable. */}
+        <LegalLinks />
+      </AppMain>
       <BottomNav persona="client" />
     </>
   );

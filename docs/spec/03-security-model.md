@@ -48,6 +48,27 @@ assertions.
 
 `anon` gets nothing except `EXECUTE` on `fn_claim_invite(token uuid)` (looks up client by invite_token, binds `auth_user_id`, flips status → active; called post-signup so effectively authenticated) — implement as authenticated-only; anon truly gets zero.
 
+### Notice and consent (review H6)
+
+`clients.notice_version` / `notice_accepted_at` and `operators.terms_version` /
+`terms_accepted_at` record what somebody was shown and when.
+
+**A timestamp alone is not a consent record.** On its own it says a person
+agreed to something and nothing about what, because the document can change
+underneath it. So the acceptance stores the document VERSION, and
+`app/scripts/legal-version.test.ts` hashes the text in `app/src/lib/legal.ts`
+and fails if it changed without the version changing. That guard is the whole
+mechanism by which the stored version is evidence; without it these columns are
+a more elaborate way of storing nothing.
+
+The client's acceptance is written **inside `fn_claim_invite`**, so the
+acceptance and the account binding are one transaction and a claimed account
+with no consent record is not a reachable state. A claim that supplies no
+version records no acceptance at all — stamping `now()` beside a null version
+would assert agreement to a document nobody can look up. Neither column carries
+an UPDATE grant for any API role: an operator able to stamp "this client
+accepted" would make the record worthless in the one direction that matters.
+
 ### Erasure and retention (review H5)
 
 A client's personal data can be exported (`fn_export_client_data`) and destroyed

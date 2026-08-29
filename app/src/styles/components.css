@@ -311,6 +311,81 @@ button.walk-card:hover,
   font-size: var(--fs-12);
 }
 
+/* Review H6. The legal pages and the links into them. Reading type, so the
+   measure is bounded and the leading is looser than the product surfaces. */
+.legal-page {
+  max-width: 68ch;
+}
+
+.legal-page__meta {
+  color: var(--sanpo-color-text-secondary);
+  font-size: var(--fs-12);
+}
+
+.legal-page__intro {
+  font-size: var(--fs-16);
+  color: var(--sanpo-color-text-primary);
+}
+
+.legal-page__section {
+  margin-top: var(--s-5);
+}
+
+.legal-page__section h2 {
+  font-size: var(--fs-20);
+  margin-bottom: var(--s-2);
+}
+
+.legal-page__section p,
+.legal-page__section li {
+  color: var(--sanpo-color-text-secondary);
+  font-size: var(--fs-14);
+  line-height: 1.6;
+}
+
+.legal-page__section ul {
+  margin: var(--s-2) 0 0;
+  padding-left: var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.legal-links {
+  margin: var(--s-4) 0 0;
+  text-align: center;
+  color: var(--sanpo-color-text-secondary);
+  font-size: var(--fs-12);
+}
+
+.legal-links--accept {
+  margin-top: var(--s-3);
+}
+
+.your-data {
+  margin-top: var(--s-5);
+  padding: var(--s-4);
+  background: var(--sanpo-color-surface-raised);
+  border: var(--bw) solid var(--sanpo-color-border-subtle);
+  border-radius: var(--r-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.your-data__detail {
+  margin: 0;
+  color: var(--sanpo-color-text-secondary);
+  font-size: var(--fs-14);
+  line-height: 1.5;
+}
+
+.your-data__meta {
+  margin: 0;
+  color: var(--sanpo-color-text-secondary);
+  font-size: var(--fs-12);
+}
+
 .booking-cost { background: var(--sanpo-color-surface-canvas); box-shadow: none; }
 
 /* The overage branch changes colour, and deliberately. It was `--amber`, which

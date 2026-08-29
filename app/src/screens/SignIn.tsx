@@ -8,6 +8,7 @@ import { Card } from "@/components/Card";
 import { FormError, Input } from "@/components/fields";
 import { Spinner } from "@/components/Spinner";
 import { StateField } from "@/components/StateField";
+import { LegalLinks } from "@/components/LegalLinks";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/lib/auth-context";
 import { useDocumentTitle } from "@/lib/use-document-title";
@@ -127,6 +128,7 @@ export default function SignIn() {
             </form>
           )}
         </Card>
+        <LegalLinks variant="accept" />
       </div>
     </div>
   );

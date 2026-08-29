@@ -135,11 +135,37 @@ manufacture `aal2`, because that needs the factor itself.
 
 Highest-value action on this list, and it costs nothing.
 
+### 10. Have the privacy notice and terms reviewed
+
+`app/src/lib/legal.ts` holds both documents, and they are live at
+`/legal/privacy` and `/legal/terms`.
+
+**What they are:** a factually accurate description of what this system does
+with data, written from the code — the tables, the edge functions, and the five
+services that receive it (Supabase, Stripe, Resend, Mapbox, Vercel). Every
+claim was checked against a call site, and a test fails the build if a
+subprocessor is dropped from the list.
+
+**What they are not:** reviewed by a lawyer. They have not been checked against
+CCPA/CPRA, against your state's requirements, or against what Stripe's live-mode
+review expects to see. Nothing in this repository can do that.
+
+Two specifics worth a professional eye: the notice says Sanpo processes data on
+the operator's instructions, which is a processor/controller split that should
+match whatever agreement you have with operators; and the terms disclaim any
+role in the walking arrangement itself, which is the position the product's
+architecture takes but not necessarily the one a court would.
+
+Changing the text means bumping the document's `version` — every consent
+already recorded points at the old version, which is what makes the record
+evidence. `app/scripts/legal-version.test.ts` enforces that and prints the new
+hash to paste in.
+
 ---
 
 ## Delivery
 
-### 10. `RESEND_API_KEY`
+### 11. `RESEND_API_KEY`
 Without it `send-notification` now returns 500 and logs what is missing — it
 used to report uniform success while sending zero email. The nightly ops check
 drains the backlog and goes red if one survives, so a missing key is loud
@@ -147,7 +173,7 @@ rather than silent. Client-facing mail does not leave until this is set.
 
 ---
 
-### 11. `NOTIFY_POSTAL_ADDRESS` — a physical address in the email footer
+### 12. `NOTIFY_POSTAL_ADDRESS` — a physical address in the email footer
 
 **Set the secret `NOTIFY_POSTAL_ADDRESS` on the Supabase project** to the
 business's real postal address, e.g. `Sanpo, 123 Example St, Chicago, IL 60601`.

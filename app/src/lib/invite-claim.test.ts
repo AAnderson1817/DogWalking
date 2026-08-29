@@ -26,15 +26,15 @@ beforeEach(() => rpc.mockReset());
 describe("claimInvite", () => {
   it("returns the client id on a successful claim", async () => {
     rpc.mockResolvedValue({ data: [{ client_id: "c-1", outcome: "claimed" }], error: null });
-    await expect(claimInvite("tok")).resolves.toBe("c-1");
+    await expect(claimInvite("tok", "v1")).resolves.toBe("c-1");
   });
 
   const refusals = ["not_found", "already_claimed", "expired", "revoked", "email_mismatch"] as const;
 
   it.each(refusals)("turns %s into its own actionable sentence", async (outcome) => {
     rpc.mockResolvedValue({ data: [{ client_id: null, outcome }], error: null });
-    await expect(claimInvite("tok")).rejects.toMatchObject({ outcome });
-    await claimInvite("tok").catch((e: unknown) => {
+    await expect(claimInvite("tok", "v1")).rejects.toMatchObject({ outcome });
+    await claimInvite("tok", "v1").catch((e: unknown) => {
       expect(e).toBeInstanceOf(InviteClaimError);
       expect((e as Error).message).toBe(INVITE_CLAIM_MESSAGE[outcome]);
     });
@@ -60,18 +60,18 @@ describe("claimInvite", () => {
    */
   it("refuses a 'claimed' outcome with no client id", async () => {
     rpc.mockResolvedValue({ data: [{ client_id: null, outcome: "claimed" }], error: null });
-    await expect(claimInvite("tok")).rejects.toBeInstanceOf(InviteClaimError);
+    await expect(claimInvite("tok", "v1")).rejects.toBeInstanceOf(InviteClaimError);
   });
 
   it("treats an empty result as not_found rather than as a claim", async () => {
     rpc.mockResolvedValue({ data: [], error: null });
-    await expect(claimInvite("tok")).rejects.toMatchObject({ outcome: "not_found" });
+    await expect(claimInvite("tok", "v1")).rejects.toMatchObject({ outcome: "not_found" });
   });
 
   /** A transport failure is not an invite verdict and must not be dressed as one. */
   it("passes a transport error through as a plain Error", async () => {
     rpc.mockResolvedValue({ data: null, error: { message: "JWT expired" } });
-    await expect(claimInvite("tok")).rejects.not.toBeInstanceOf(InviteClaimError);
+    await expect(claimInvite("tok", "v1")).rejects.not.toBeInstanceOf(InviteClaimError);
   });
 });
 

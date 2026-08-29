@@ -69,6 +69,8 @@ export type Database = {
           invite_expires_at: string | null;
           invite_revoked_at: string | null;
           purged_at: string | null;
+          notice_accepted_at: string | null;
+          notice_version: string | null;
         };
         Insert: {
           id?: string;
@@ -92,6 +94,8 @@ export type Database = {
           invite_expires_at?: string | null;
           invite_revoked_at?: string | null;
           purged_at?: string | null;
+          notice_accepted_at?: string | null;
+          notice_version?: string | null;
         };
         Update: {
           id?: string;
@@ -115,6 +119,8 @@ export type Database = {
           invite_expires_at?: string | null;
           invite_revoked_at?: string | null;
           purged_at?: string | null;
+          notice_accepted_at?: string | null;
+          notice_version?: string | null;
         };
         Relationships: [];
       };
@@ -360,6 +366,8 @@ export type Database = {
           stripe_details_submitted: boolean;
           stripe_account_connected_at: string | null;
           gps_retention_days: number;
+          terms_accepted_at: string | null;
+          terms_version: string | null;
         };
         Insert: {
           id: string;
@@ -379,6 +387,8 @@ export type Database = {
           stripe_details_submitted?: boolean;
           stripe_account_connected_at?: string | null;
           gps_retention_days?: number;
+          terms_accepted_at?: string | null;
+          terms_version?: string | null;
         };
         Update: {
           id?: string;
@@ -398,6 +408,8 @@ export type Database = {
           stripe_details_submitted?: boolean;
           stripe_account_connected_at?: string | null;
           gps_retention_days?: number;
+          terms_accepted_at?: string | null;
+          terms_version?: string | null;
         };
         Relationships: [];
       };
@@ -1049,6 +1061,7 @@ export type Database = {
           display_name: string | null;
           business_name: string | null;
           cancellation_cutoff_hours: number | null;
+          gps_retention_days: number | null;
         };
         Relationships: [];
       };
@@ -1131,6 +1144,7 @@ export type Database = {
       fn_claim_invite: {
         Args: {
           p_token: string;
+          p_notice_version: string;
         };
         Returns: Array<{ client_id: string; outcome: Database["public"]["Enums"]["invite_claim_outcome"] }>;
       };
