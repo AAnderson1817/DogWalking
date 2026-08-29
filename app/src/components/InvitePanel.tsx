@@ -12,7 +12,7 @@ import { useState } from "react";
 import { Badge, type BadgeStatus } from "./Badge";
 import { Button } from "./Button";
 import { FormError } from "./fields";
-import { inviteState, inviteUrlFor, revokeInvite, rotateInvite } from "@/lib/api";
+import { inviteState, inviteUrlFor, revokeInvite, rotateInvite, unbindInvite } from "@/lib/api";
 import { dateLocal } from "@/lib/format";
 import type { Clients } from "@/lib/types";
 
@@ -45,19 +45,20 @@ export function InvitePanel({
   onChanged: () => void;
 }) {
   const [token, setToken] = useState(client.invite_token);
-  const [busy, setBusy] = useState<"rotate" | "revoke" | null>(null);
+  const [busy, setBusy] = useState<"rotate" | "revoke" | "unbind" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   const state = inviteState(client);
-  if (state === "claimed") return null;
-  const copy = STATE_COPY[state];
+  const copy = state === "claimed" ? null : STATE_COPY[state];
 
-  async function act(kind: "rotate" | "revoke") {
+  async function act(kind: "rotate" | "revoke" | "unbind") {
     setBusy(kind);
     setError(null);
     try {
-      if (kind === "rotate") {
+      if (kind === "unbind") {
+        setToken(await unbindInvite(client.id));
+      } else if (kind === "rotate") {
         // The new token is returned rather than re-fetched, so the link on
         // screen is the one that was just minted. Re-reading the row would
         // race the operator pressing Copy.
@@ -74,6 +75,38 @@ export function InvitePanel({
   }
 
   const url = inviteUrlFor(token);
+
+  // A claimed invite gets one action and no link: release it, which severs the
+  // account and issues a fresh token in the same statement. Until H4 this was
+  // unreachable — the operator's only route to a wrongly-claimed client was the
+  // service role.
+  if (state === "claimed") {
+    return (
+      <section className="invite-panel" aria-labelledby="invite-panel-heading">
+        <div className="invite-panel__head">
+          <h2 id="invite-panel-heading" className="section-label">Invite</h2>
+          <Badge status="completed">Claimed</Badge>
+        </div>
+        <p className="invite-panel__detail">
+          This client has an account. If the wrong person claimed the link,
+          releasing it signs them out of this record for good and issues a new
+          invite.
+        </p>
+        <FormError message={error} />
+        <div className="invite-panel__actions">
+          <Button
+            variant="ghost"
+            disabled={busy !== null}
+            onClick={() => void act("unbind")}
+          >
+            {busy === "unbind" ? "Releasing…" : "Release this account"}
+          </Button>
+        </div>
+      </section>
+    );
+  }
+
+  if (!copy) return null;
 
   return (
     <section className="invite-panel" aria-labelledby="invite-panel-heading">
