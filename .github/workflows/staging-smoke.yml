@@ -85,7 +85,17 @@ jobs:
       - name: Replay onboard (signup → insert operators → role select)
         run: |
           base="https://${{ secrets.SUPABASE_PROJECT_REF }}.supabase.co"
-          email="diag-onboard@sanpo.test"; pass="Diag-$(date +%s)-pw"
+          # Unique per run. A throwaway fixture has no reason to hold a
+          # stable address, and a stable one makes cleanup a PRECONDITION: if
+          # the previous run failed to delete its user, this run cannot even
+          # start. That is what happened — every `on delete restrict` in the
+          # schema means the operators row survives while any dependent row
+          # does, so the auth user could not be deleted and the next run
+          # collided on 422 forever.
+          #
+          # A run-scoped address makes the collision structurally impossible
+          # and demotes cleanup from a precondition to housekeeping.
+          email="diag-onboard-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}@sanpo.test"; pass="Diag-$(date +%s)-pw"
           admin() { curl -sS -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY" "$@"; }
 
           cleanup() {
@@ -140,7 +150,9 @@ jobs:
       - name: Replay invite-claim flow (fixture operator + client)
         run: |
           base="https://${{ secrets.SUPABASE_PROJECT_REF }}.supabase.co"
-          op_email="diag-claim-op@sanpo.test"; cl_email="diag-claim-client@sanpo.test"
+          # Run-scoped, for the reason given in the onboard step above.
+          op_email="diag-claim-op-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}@sanpo.test"
+          cl_email="diag-claim-client-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}@sanpo.test"
           pass="Diag-$(date +%s)-pw"
           admin() { curl -sS -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY" "$@"; }
 
@@ -176,19 +188,37 @@ jobs:
             done
             return 0
           }
+          # Failures are REPORTED, not swallowed. Every `|| true` here used to
+          # hide a refused delete, which is how leftovers accumulated silently
+          # until a run could no longer start. They stay non-fatal — cleanup is
+          # housekeeping now, not a precondition — but a warning means the
+          # accumulation is visible while it is still cheap to fix.
+          del() {
+            local code
+            code=$(admin -o /dev/null -w '%{http_code}' -X DELETE "$1")
+            case "$code" in
+              2*) return 0 ;;
+              *) echo "::warning title=Fixture cleanup left something behind::DELETE $2 -> HTTP $code. Rows accumulate in staging until this is fixed." ;;
+            esac
+          }
           cleanup() {
-            [ -n "$2" ] && admin -X DELETE "$base/rest/v1/clients?id=eq.$2" >/dev/null || true
+            local c
+            for c in $2; do [ -n "$c" ] && del "$base/rest/v1/clients?id=eq.$c" "client $c"; done
             if [ -n "$1" ]; then
-              admin -X DELETE "$base/rest/v1/service_types?operator_id=eq.$1" >/dev/null || true
-              admin -X DELETE "$base/rest/v1/operators?id=eq.$1" >/dev/null || true
-              admin -X DELETE "$base/auth/v1/admin/users/$1" >/dev/null || true
+              del "$base/rest/v1/service_types?operator_id=eq.$1" "service_types of $1"
+              del "$base/rest/v1/operators?id=eq.$1" "operator $1"
+              del "$base/auth/v1/admin/users/$1" "auth user $1"
             fi
-            [ -n "$3" ] && admin -X DELETE "$base/auth/v1/admin/users/$3" >/dev/null || true
+            [ -n "$3" ] && del "$base/auth/v1/admin/users/$3" "auth user $3"
             return 0
           }
           # leftovers from a previous run
           old_op=$(user_id_for "$op_email"); old_cl=$(user_id_for "$cl_email")
-          old_client_row=$(admin "$base/rest/v1/clients?select=id&operator_id=eq.${old_op:-00000000-0000-4000-8000-000000000000}" | jq -r '.[0].id // empty')
+          # `.[0].id` until now, so an operator that had accumulated more than
+          # one client kept the rest — and every `clients.operator_id` is
+          # `on delete restrict`, so the operators row then survived, and so did
+          # the auth user. Deletes them all.
+          old_client_row=$(admin "$base/rest/v1/clients?select=id&operator_id=eq.${old_op:-00000000-0000-4000-8000-000000000000}" | jq -r '.[].id' | tr '\n' ' ')
           cleanup "$old_op" "$old_client_row" "$old_cl"
 
           # The body is kept, not piped straight into jq. `FAIL: fixture
