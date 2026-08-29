@@ -20,14 +20,14 @@ Staging stays exactly as it is — it remains your test bed. Production is a
 
 ## 1. Domain
 
-1. Buy the domain (e.g. `pawtrail.example`). You'll create two DNS records
+1. Buy the domain (e.g. `sanpo.example`). You'll create two DNS records
    for Vercel (step 6) and a few TXT/CNAME records for Resend (step 5).
 2. Decide the app hostname now — `app.yourdomain.com` is the usual choice —
    because Stripe, Supabase auth, and email templates all embed it.
 
 ## 2. Supabase: production project
 
-1. supabase.com → **New project** — name it clearly (e.g. `pawtrail-prod`),
+1. supabase.com → **New project** — name it clearly (e.g. `sanpo-prod`),
    pick the region closest to your clients (US Central customers → a US
    region), set a strong DB password, and choose the **Pro** plan.
 2. Note the Project Ref, URL, and anon key (Settings → API).
@@ -162,7 +162,7 @@ and will silently strand client invites) and **notifications** (the
 ## 6. Vercel: production frontend
 
 1. vercel.com → **Add New Project** → import the same GitHub repo again —
-   this is a second Vercel project (e.g. `pawtrail-prod`); the existing one
+   this is a second Vercel project (e.g. `sanpo-prod`); the existing one
    stays as staging.
 2. Root Directory `app`, framework auto-detects Vite.
 3. Environment variables (Production):

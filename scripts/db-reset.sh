@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Local stand-in for `supabase db reset` on machines without Docker.
-# Recreates the pawtrail database on the local cluster, applies the
+# Recreates the sanpo database on the local cluster, applies the
 # Supabase-compatibility shim, then all migrations in order, then seed.sql.
 #
 # Requires: a Postgres 17 server on 127.0.0.1:54322 (scripts/db-start.sh)

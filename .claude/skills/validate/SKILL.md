@@ -57,7 +57,7 @@ production.
 ## 6. Edge functions
 ```
 deno check supabase/functions/**/index.ts
-deno test --allow-read=supabase/migrations ./supabase/functions/_tests/
+deno test --allow-read=supabase/migrations,supabase/functions ./supabase/functions/_tests/
 ```
 The permission is exactly CI's — not `-A`. Widening it locally means a test can
 pass here and fail there, which has already happened once. Widen only in the
@@ -143,23 +143,7 @@ because git cannot prove a fast-forward from a shallow clone.
 grep -RInE "(VAULT_MASTER_KEY|SERVICE_ROLE|sk_live|sk_test)" app/src supabase/functions --include='*.ts' --include='*.tsx' | grep -v 'Deno.env.get' | grep -v env.ts && echo "FAIL: literal secret reference" || echo "PASS: no secret literals"
 ```
 
-## 12. The rest of CI's invariant checks
-These live in `ci.yml` and are cheap to run by hand when touching their
-subject; run them when relevant, and read the workflow rather than trusting
-this list to stay complete:
-
-- invariant 1 — `credit_balance` written only by `fn_ledger_apply` (a
-  `pg_proc` catalogue assertion, not a grep over migration text)
-- every `var(--x)` names a property something defines
-- errors go through `FormError`, never a bare `field__error` span
-- exactly one `<main>`, owned by `AppMain`
-- the walk channel is private, and is the only channel
-- every `new HttpError(5xx, …)` carries its cause
-- DEV fixtures absent from the production bundle
-- the build stamps its commit, and `version.json` is excluded from the SPA rewrite
-- the nightly schedule is in a migration
-
-## 11. Every `var(--x)` names a property something defines
+## 12. Every `var(--x)` names a property something defines
 
 ```
 python3 - <<'PY'
@@ -189,3 +173,18 @@ top of this file — it means "green locally" does not predict "green in CI",
 which is the only thing running these gates before committing is for.
 
 Keep this identical to `.github/workflows/ci.yml`'s step of the same name.
+
+## 13. The rest of CI's invariant checks
+These live in `ci.yml` and are cheap to run by hand when touching their
+subject; run them when relevant, and read the workflow rather than trusting
+this list to stay complete:
+
+- invariant 1 — `credit_balance` written only by `fn_ledger_apply` (a
+  `pg_proc` catalogue assertion, not a grep over migration text)
+- errors go through `FormError`, never a bare `field__error` span
+- exactly one `<main>`, owned by `AppMain`
+- the walk channel is private, and is the only channel
+- every `new HttpError(5xx, …)` carries its cause
+- DEV fixtures absent from the production bundle
+- the build stamps its commit, and `version.json` is excluded from the SPA rewrite
+- the nightly schedule is in a migration

@@ -212,5 +212,8 @@ Each costs money, a credential, or both.
 ## Related
 
 - `vault-key-rotation.md` — key custody, rotation, and `key_mismatch`
+- `secret-rotation.md` — every other secret: where each copy lives, what
+  breaks between steps, and how to confirm. The first thing to reach for after
+  a suspected leak.
 - `production-cutover.md` — first production stand-up
 - `staging-setup.md` — staging project setup and deploy troubleshooting

@@ -121,6 +121,23 @@ dashboard-only:
 Read the current values off the job summary rather than trusting this table to
 stay accurate — it is a snapshot of one run.
 
+**Also on that page: the redirect allow-list.** Password recovery (review L16)
+sends people to `{site}/reset-password`, and the list is matched **exactly** —
+`site_url` on its own permits `site_url` and nothing under it. Add, under
+**Authentication → URL Configuration → Redirect URLs**, for each environment:
+
+```
+https://<staging-host>/reset-password
+https://<production-host>/reset-password
+```
+
+Until this is done the flow fails in the way that is hardest to report:
+GoTrue accepts the reset request, sends a perfectly good email, and then
+redirects to `site_url` instead — so the person arrives *signed in on Today*
+with no password form and no error, and has no idea why. The local
+`config.toml` has the equivalent entries; nothing in this repository can write
+the deployed ones.
+
 ### 9. Enrol a TOTP factor (free — this replaces "buy Supabase Pro")
 **Correction.** This entry previously said MFA required the Supabase Pro plan,
 and that the vault's assurance gate was inert pending that purchase. Both were
