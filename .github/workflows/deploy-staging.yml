@@ -151,8 +151,37 @@ jobs:
 
       # Deploys every function directory; config.toml carries
       # verify_jwt=false for stripe-webhook and the materializer cron note.
+      # Bounded retry, added after the staging deploy of `db741c8` died with
+      # `failed to bundle function: exit 135` on `change-plan` — 135 is 128+7,
+      # a SIGBUS, i.e. the bundler process was killed rather than reporting a
+      # diagnostic. The same source had bundled successfully in the deploy 45
+      # minutes earlier and `deno check supabase/functions/**/index.ts` passed
+      # on that commit, so the input was not the problem.
+      #
+      # Safe to retry, unlike the two steps either side of it. This uploads
+      # function bundles: it moves no money, migrates no data and mutates no
+      # customer record, and the artifact is a pure function of the source, so
+      # running it twice cannot produce a state one run would not. `db push`
+      # gets no retry for exactly the opposite reason.
+      #
+      # Bounded and LOUD on purpose. Three attempts, each printed, and a
+      # `::warning` whenever a retry was needed — a bundler that fails
+      # intermittently is worth knowing about, and a silent retry would turn a
+      # recurring fault into a slightly slower green.
       - name: Deploy all functions
-        run: supabase functions deploy --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
+        run: |
+          for attempt in 1 2 3; do
+            if supabase functions deploy --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"; then
+              if [ "$attempt" -gt 1 ]; then
+                echo "::warning title=Function deploy needed $attempt attempts::The function deploy failed $((attempt - 1)) time(s) before succeeding. The bundler has died of a signal before (exit 135 on change-plan, 2026-08-29). If this recurs, stop treating it as noise."
+              fi
+              exit 0
+            fi
+            echo "attempt $attempt failed"
+            [ "$attempt" -lt 3 ] && sleep $((attempt * 10))
+          done
+          echo "::error title=Function deploy failed three times::Not a transient failure. Re-run with --debug and read the bundler output before assuming infrastructure."
+          exit 1
 
       # The vault key must be able to read THIS project's data, and the place
       # to discover otherwise is here, not at a client's front door (B2).
