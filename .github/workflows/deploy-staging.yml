@@ -205,7 +205,13 @@ jobs:
   verify-functions:
     name: Verify the deployed functions
     needs: [migrate, deploy-functions]
-    if: ${{ !cancelled() && needs.migrate.result == 'success' && needs.deploy-functions.result == 'success' && needs.verify-functions.result == 'success' }}
+    # `needs.verify-functions.result` used to be in this condition — its OWN
+    # name, which is not in its `needs` and therefore always evaluates empty.
+    # The job could never run, so the M4 boot probe was inert from the day it
+    # merged: a verification step that verified nothing, which is the exact
+    # failure it exists to prevent. `scripts/verify-workflows.py` now refuses a
+    # self-referential condition.
+    if: ${{ !cancelled() && needs.migrate.result == 'success' && needs.deploy-functions.result == 'success' }}
     runs-on: ubuntu-latest
     environment: staging
     steps:
@@ -249,7 +255,7 @@ jobs:
     # deploy-functions DIRECTLY, not assert-deployed — that job exits
     # 0 when migrate failed, so keying off it would release a frontend onto a
     # database that never migrated.
-    if: ${{ !cancelled() && needs.migrate.result == 'success' && needs.deploy-functions.result == 'success' }}
+    if: ${{ !cancelled() && needs.migrate.result == 'success' && needs.deploy-functions.result == 'success' && needs.verify-functions.result == 'success' }}
     runs-on: ubuntu-latest
     environment: staging
     permissions:
@@ -257,6 +263,18 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
         with:
+          # `fetch-depth: 0`, and it is load-bearing. actions/checkout defaults
+          # to depth 1, so the runner holds a single commit with no parents —
+          # and `git push <sha>:refs/heads/release/*` from a shallow clone
+          # CANNOT prove the push is a fast-forward, so the server rejects it as
+          # though history had diverged.
+          #
+          # The first push created the ref and succeeded, because creating a ref
+          # needs no ancestry check. Every push after it failed. Reproduced
+          # locally against a scratch remote: a depth-1 clone gives
+          # `! [rejected] (fetch first)` while a full clone fast-forwards, for a
+          # commit that is a descendant either way.
+          fetch-depth: 0
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Advance release/staging to the deployed commit
@@ -269,7 +287,7 @@ jobs:
           if git push origin "$SHA:refs/heads/release/staging"; then
             echo "release/staging -> $SHA"
           else
-            echo "::error title=Could not advance release/staging::The push was rejected — $SHA is probably not a descendant of the commit currently released. Re-run this workflow on the newest commit on main."
+            echo "::error title=Could not advance release/staging::The push of $SHA was rejected. FIRST check the clone is not shallow: this job needs fetch-depth 0, because git cannot prove a fast-forward from a single-commit clone and the server then rejects a perfectly ordinary push as though history had diverged. That was the cause every time this failed before. Only if the clone is deep does the other reading apply — that $SHA is genuinely not a descendant of what is released, i.e. somebody is deploying an older commit."
             exit 1
           fi
 
