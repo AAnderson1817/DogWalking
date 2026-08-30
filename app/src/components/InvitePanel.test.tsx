@@ -50,6 +50,17 @@ beforeEach(() => {
 });
 
 describe("InvitePanel", () => {
+  it("renders nothing for a purged client", () => {
+    // "Send a new invite" on an erased record mints a live 14-day token whose
+    // client row has a NULL email — the rung that admits ANY address — so one
+    // click would make a purged client claimable. The database does not refuse
+    // it: fn_unbind_invite has a purged_at guard, fn_rotate_invite does not.
+    const { container } = render(
+      <InvitePanel client={client({ purged_at: "2026-08-02T00:00:00Z" })} onChanged={() => {}} />,
+    );
+    expect(container.innerHTML).toBe("");
+  });
+
   /**
    * A claimed invite is the case H4 had no answer for: revoke and rotate both
    * require an UNCLAIMED invite, and the row cannot be deleted because every

@@ -93,7 +93,7 @@ describe("emailEditEffect", () => {
 
   it("says nothing when the address did not change", () => {
     const c = client();
-    expect(emailEditEffect(c, form(c, "amelia@sanpo.test"))).toBe("unchanged");
+    expect(emailEditEffect(c, form(c, "amelia@sanpo.test"), "active")).toBe("unchanged");
   });
 
   it("does not cry wolf over capitalisation", () => {
@@ -101,14 +101,14 @@ describe("emailEditEffect", () => {
     // strings admit exactly the same claimant. Warning here would train the
     // operator to ignore the warning that matters.
     const c = client();
-    expect(emailEditEffect(c, form(c, "Amelia@Sanpo.TEST"))).toBe("unchanged");
+    expect(emailEditEffect(c, form(c, "Amelia@Sanpo.TEST"), "active")).toBe("unchanged");
   });
 
   it("is contact-only once the client has an account", () => {
     // The ladder stops at `already_claimed` and never reaches the email rung;
     // the login is auth.users.email, which nothing here writes.
     const c = client({ auth_user_id: "user-9" });
-    expect(emailEditEffect(c, form(c, "moved@sanpo.test"))).toBe("contact-only");
+    expect(emailEditEffect(c, form(c, "moved@sanpo.test"), "active")).toBe("contact-only");
   });
 
   it("stays contact-only for a claimed client who never had an address", () => {
@@ -119,22 +119,22 @@ describe("emailEditEffect", () => {
     // `email` still NULL. Telling that operator they are "binding an invite" on
     // an account that already exists is simply false.
     const c = client({ auth_user_id: "user-9", email: null });
-    expect(emailEditEffect(c, form(c, "amelia@sanpo.test"))).toBe("contact-only");
+    expect(emailEditEffect(c, form(c, "amelia@sanpo.test"), "active")).toBe("contact-only");
   });
 
   it("stays contact-only when a claimed client's address is cleared", () => {
     const c = client({ auth_user_id: "user-9" });
-    expect(emailEditEffect(c, form(c, ""))).toBe("contact-only");
+    expect(emailEditEffect(c, form(c, ""), "active")).toBe("contact-only");
   });
 
   it("binds an unbound invite when an address is added", () => {
     const c = client({ email: null });
-    expect(emailEditEffect(c, form(c, "amelia@sanpo.test"))).toBe("binds-invite");
+    expect(emailEditEffect(c, form(c, "amelia@sanpo.test"), "active")).toBe("binds-invite");
   });
 
   it("transfers the invite when the address changes", () => {
     const c = client();
-    expect(emailEditEffect(c, form(c, "typo-fixed@sanpo.test"))).toBe("rebinds-invite");
+    expect(emailEditEffect(c, form(c, "typo-fixed@sanpo.test"), "active")).toBe("rebinds-invite");
   });
 
   it("re-opens the invite to anyone holding the link when the address is cleared", () => {
@@ -142,8 +142,32 @@ describe("emailEditEffect", () => {
     // a NULL email admits ANY address, and fn_invite_signup_check then
     // reserves whichever one arrives first.
     const c = client();
-    expect(emailEditEffect(c, form(c, ""))).toBe("opens-invite");
-    expect(emailEditEffect(c, form(c, "   "))).toBe("opens-invite");
+    expect(emailEditEffect(c, form(c, ""), "active")).toBe("opens-invite");
+    expect(emailEditEffect(c, form(c, "   "), "active")).toBe("opens-invite");
+  });
+
+  it("says the invite is dormant rather than claiming the link still works", () => {
+    // The three invite sentences are all false of a revoked or expired invite:
+    // the ladder refuses at an earlier rung. Telling an operator who has just
+    // withdrawn a forwarded link that "anyone who has the invite link can
+    // claim" contradicts the Withdrawn badge on the panel directly above.
+    const c = client();
+    expect(emailEditEffect(c, form(c, ""), "revoked")).toBe("dormant-invite");
+    expect(emailEditEffect(c, form(c, "other@sanpo.test"), "expired")).toBe("dormant-invite");
+    expect(emailEditEffect(client({ email: null }), { ...clientFormOf(client({ email: null })), email: "x@sanpo.test" }, "revoked"))
+      .toBe("dormant-invite");
+  });
+
+  it("a claimed account still outranks the invite lifecycle", () => {
+    const c = client({ auth_user_id: "user-9" });
+    expect(emailEditEffect(c, form(c, "moved@sanpo.test"), "claimed")).toBe("contact-only");
+  });
+
+  it("an unchanged address says nothing whatever the invite state", () => {
+    const c = client();
+    for (const st of ["active", "expired", "revoked", "claimed"] as const) {
+      expect(emailEditEffect(c, form(c, "amelia@sanpo.test"), st)).toBe("unchanged");
+    }
   });
 });
 

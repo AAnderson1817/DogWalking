@@ -142,11 +142,27 @@ export function propertyPatch(
 export type EmailEditEffect =
   | "unchanged"
   | "contact-only"
+  | "dormant-invite"
   | "binds-invite"
   | "rebinds-invite"
   | "opens-invite";
 
-export function emailEditEffect(c: ClientEditable, form: ClientEditForm): EmailEditEffect {
+/**
+ * The invite's lifecycle state, passed in rather than derived here.
+ *
+ * `inviteState` lives in `api.ts`, and this module is claimed by the `node`
+ * vitest project — importing `api.ts` drags `window` and the bundler's module
+ * resolution into a nodenext project and fails to typecheck. Passing the state
+ * keeps this function pure and keeps ONE implementation of the predicate,
+ * which is the thing that would otherwise drift.
+ */
+export type InviteLifecycle = "claimed" | "active" | "expired" | "revoked";
+
+export function emailEditEffect(
+  c: ClientEditable,
+  form: ClientEditForm,
+  invite: InviteLifecycle,
+): EmailEditEffect {
   const next = nullIfBlank(form.email);
   const current = c.email ?? null;
   // Case-insensitively equal is not a change the ladder can see: it compares
@@ -157,6 +173,13 @@ export function emailEditEffect(c: ClientEditable, form: ClientEditForm): EmailE
     || (next !== null && current !== null && next.toLowerCase() === current.toLowerCase());
   if (same) return "unchanged";
   if (c.auth_user_id) return "contact-only";
+  // A revoked or expired invite is refused at an EARLIER rung than email, so
+  // none of the three sentences below is true of it: nothing can be claimed
+  // with that link whatever this column says. Saying "anyone who has the link
+  // can claim" to an operator who has just withdrawn it — the H4 flow, whose
+  // panel sits directly above this form — would contradict the badge on screen
+  // and tell them to do the thing they already did.
+  if (invite === "expired" || invite === "revoked") return "dormant-invite";
   if (current === null) return "binds-invite";
   if (next === null) return "opens-invite";
   return "rebinds-invite";

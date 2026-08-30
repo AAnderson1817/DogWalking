@@ -76,7 +76,7 @@ export const WALK_DETAIL_PAGE = 5000;
  * invariant 2) and simply never followed the second table to acquire the same
  * shape.
  *
- * Keep this list in step with the grants. `scripts/client-columns.test.ts`
+ * Keep this list in step with the grants. `app/scripts/column-grants.test.ts`
  * derives the expected set from the migrations and fails if the two drift in
  * either direction — a column granted later and not listed here is invisible
  * to the product, and a column listed here but not granted is a 42501.

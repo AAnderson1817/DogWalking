@@ -13,7 +13,7 @@ import { Button } from "./Button";
 import { FormError, Input } from "./fields";
 import { Sheet } from "./Sheet";
 import { Spinner } from "./Spinner";
-import { updateClient, type ClientRecord } from "@/lib/api";
+import { inviteState, updateClient, type ClientRecord } from "@/lib/api";
 import {
   clientFormError,
   clientFormOf,
@@ -33,6 +33,10 @@ import {
  * field alone.
  */
 const EMAIL_EFFECT_COPY: Record<Exclude<EmailEditEffect, "unchanged">, string> = {
+  "dormant-invite":
+    "This client's invite isn't live, so nothing can be claimed with the old "
+    + "link whatever this says. This is the address that will apply when you "
+    + "send a new invite.",
   "contact-only":
     "This changes where their emails go. It does not change how they sign in — "
     + "their login keeps the address they signed up with.",
@@ -65,7 +69,7 @@ export function ClientEditSheet({
   const set = (k: keyof typeof form, v: string) => setForm((f) => ({ ...f, [k]: v }));
 
   const invalid = clientFormError(form);
-  const effect = emailEditEffect(client, form);
+  const effect = emailEditEffect(client, form, inviteState(client));
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -105,11 +109,15 @@ export function ClientEditSheet({
           value={form.email}
           onChange={(e) => set("email", e.target.value)}
         />
-        {effect !== "unchanged" && (
-          // role="status" rather than an alert: this is a consequence of what
-          // they are typing, not a failure, and it changes as they type.
-          <p className="form-note" role="status">{EMAIL_EFFECT_COPY[effect]}</p>
-        )}
+        {/* Always mounted, for the same reason `FormError` is: a live region
+            that appears together with its text is announced far less reliably
+            than one that already exists when the text arrives. `:empty` takes
+            it out of flow, so it costs no `gap` while there is nothing to say.
+            role="status" rather than alert — this is a consequence of what the
+            operator is typing, not a failure. */}
+        <p className="form-note" role="status">
+          {effect === "unchanged" ? null : EMAIL_EFFECT_COPY[effect]}
+        </p>
         <Input
           label="Phone"
           type="tel"
