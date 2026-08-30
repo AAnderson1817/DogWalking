@@ -287,12 +287,21 @@ server would refuse — a verified factor exists and the session is still
 request is never made (the M2 shape, one rung up). Three rules are pinned by
 tests: only **verified** TOTP factors gate anything (an abandoned enrolment
 must not lock anyone out — the server's own rule, mirrored); the client
-check fails **open** to password-only on any transport error (the server
-still refuses an insufficient session — failing closed here would wall the
-vault off on a flaky connection); and turning the factor off requires a
-current code, because a session-only attacker must not be able to delete the
-control that exists to contain stolen sessions. A lost authenticator is
-therefore recoverable only via the dashboard (`docs/dev/owner-actions.md`
+check fails **open** to password-only when the factor LIST is unreadable
+(the server still refuses an insufficient session — failing closed here
+would wall the vault off on a flaky connection), while an unreadable
+*assurance level* still prompts: the fresh factor list is the load-bearing
+input, and the cached session's `nextLevel` is never consulted — it lags
+enrolment on another device by up to a token lifetime, and gating on it
+re-created the doomed request for exactly the newest factors (adversarial
+review). Turning the factor off requires a current code, because a
+session-only attacker must not be able to delete the control that exists to
+contain stolen sessions — scoped honestly: that code requirement is
+**client-side**. GoTrue itself unenrolls a verified factor for any aal2
+*session*, so a token stolen while already at aal2 can remove the factor by
+direct API; it is also already past the factor, which is why the session
+timebox, not this control, is what bounds that window. A lost authenticator
+is therefore recoverable only via the dashboard (`docs/dev/owner-actions.md`
 §9).
 
 `aal2` is not merely the strongest available control here, it is the **only**
