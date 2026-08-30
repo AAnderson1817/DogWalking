@@ -4149,6 +4149,221 @@ begin
   raise notice 'price snapshot, private columns, credential delete (0043): OK';
 end $$;
 
+-- ═══ 0044: visit price — snapshot, stamping, and the top-up RPC ═══════════
+do $$
+declare
+  v_op   uuid := '99999999-0000-4000-a000-000000000001';
+  v_cl   uuid := '99999999-0000-4000-c000-0000000000b1';
+  v_prop uuid := '99999999-0000-4000-b000-0000000000b1';
+  v_svc  uuid := '99999999-0000-4000-d000-0000000000b1';
+  v_w1   uuid := '99999999-0000-4000-f000-0000000000b1';
+  v_w2   uuid := '99999999-0000-4000-f000-0000000000b2';
+  v_w3   uuid := '99999999-0000-4000-f000-0000000000b3';
+  v_w4   uuid := '99999999-0000-4000-f000-0000000000b4';
+begin
+  reset session authorization;
+
+  insert into clients (id, operator_id, full_name, status)
+  values (v_cl, v_op, 'Visit Price Client', 'active');
+  insert into properties (id, operator_id, client_id, label)
+  values (v_prop, v_op, v_cl, 'Home');
+  -- A dedicated service so mutating its price cannot disturb other blocks'
+  -- fixtures the way sharing the seeded one would.
+  insert into service_types (id, operator_id, name, duration_minutes, credit_cost)
+  values (v_svc, v_op, 'PPV smoke walk', 30, 1);
+
+  -- ── Walks created before any price exists carry no snapshot ────────────
+  insert into walks (id, operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status, origin_date)
+  values (v_w1, v_op, v_cl, v_prop, v_svc, current_date + 1, '09:00', '10:00',
+          'scheduled', current_date + 1),
+         (v_w2, v_op, v_cl, v_prop, v_svc, current_date - 1, '09:00', '10:00',
+          'completed', current_date - 1);
+  if (select count(*) from walks
+       where id in (v_w1, v_w2) and visit_price_pence is not null) <> 0 then
+    raise exception 'FAIL: a walk snapshotted a visit price that did not exist';
+  end if;
+
+  -- ── Setting the price prices the queue — scheduled, unpriced rows only ──
+  update service_types set visit_price_pence = 2500 where id = v_svc;
+  if (select visit_price_pence from walks where id = v_w1) is distinct from 2500 then
+    raise exception 'FAIL: setting a visit price did not price the scheduled walk';
+  end if;
+  if (select visit_price_pence from walks where id = v_w2) is not null then
+    raise exception 'FAIL: setting a visit price re-priced a walk that already happened';
+  end if;
+
+  -- ── A new walk snapshots at INSERT, and later edits do not touch it ─────
+  insert into walks (id, operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status, origin_date)
+  values (v_w3, v_op, v_cl, v_prop, v_svc, current_date + 2, '09:00', '10:00',
+          'scheduled', current_date + 2);
+  if (select visit_price_pence from walks where id = v_w3) is distinct from 2500 then
+    raise exception 'FAIL: the walk did not snapshot the visit price at creation';
+  end if;
+  update service_types set visit_price_pence = 3500 where id = v_svc;
+  if (select visit_price_pence from walks where id = v_w1) is distinct from 2500
+     or (select visit_price_pence from walks where id = v_w3) is distinct from 2500 then
+    raise exception 'FAIL: editing the visit price rewrote an agreed snapshot';
+  end if;
+
+  -- ── Clearing and re-setting fills only what was never priced ───────────
+  update service_types set visit_price_pence = null where id = v_svc;
+  insert into walks (id, operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status, origin_date)
+  values (v_w4, v_op, v_cl, v_prop, v_svc, current_date + 3, '09:00', '10:00',
+          'scheduled', current_date + 3);
+  update service_types set visit_price_pence = 3000 where id = v_svc;
+  if (select visit_price_pence from walks where id = v_w4) is distinct from 3000 then
+    raise exception 'FAIL: re-setting the price left an unpriced scheduled walk unpriced';
+  end if;
+  if (select visit_price_pence from walks where id = v_w1) is distinct from 2500 then
+    raise exception 'FAIL: re-setting the price rewrote a walk priced at the old rate';
+  end if;
+
+  -- ── A zero price is a misconfiguration, not "free" (0026 precedent) ─────
+  begin
+    update service_types set visit_price_pence = 0 where id = v_svc;
+    raise exception 'FAIL: a zero visit price was accepted';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%visit_price_pence_check%' then
+      raise exception 'FAIL: zero price rejected for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- ── Privileges: Settings can set the price; nobody can rewrite a snapshot ─
+  if not has_column_privilege('authenticated', 'public.service_types',
+                              'visit_price_pence', 'UPDATE') then
+    raise exception 'FAIL: the operator cannot set a visit price from Settings';
+  end if;
+  if has_column_privilege('authenticated', 'public.walks',
+                          'visit_price_pence', 'UPDATE') then
+    raise exception 'FAIL: an API role can rewrite a walk''s visit-price snapshot';
+  end if;
+
+  raise notice 'visit price snapshot + queue pricing (0044): OK';
+end $$;
+
+-- ═══ 0044: fn_apply_topup — one transaction, one key, reversible ══════════
+do $$
+declare
+  v_op   uuid := '99999999-0000-4000-a000-000000000001';
+  v_cl   uuid := '99999999-0000-4000-c000-0000000000b2';
+  v_pay  uuid;
+  v_applied boolean;
+  v_bal  int;
+  v_out  record;
+begin
+  reset session authorization;
+
+  insert into clients (id, operator_id, full_name, status)
+  values (v_cl, v_op, 'Topup Client', 'active');
+
+  -- ── An API role cannot reach it at all ─────────────────────────────────
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  set local session authorization authenticated;
+  begin
+    perform fn_apply_topup(v_cl, 5, 'pi_smoke_denied', 1000);
+    raise exception 'FAIL: an API role applied a top-up';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%permission denied%' then
+      raise exception 'FAIL: API-role top-up refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  reset session authorization;
+
+  -- ── Happy path: payment row + grant, atomically ────────────────────────
+  v_applied := fn_apply_topup(v_cl, 10, 'pi_smoke_topup_1', 5000);
+  if not v_applied then
+    raise exception 'FAIL: a fresh top-up reported duplicate';
+  end if;
+  select id into v_pay from payments
+   where stripe_payment_intent_id = 'pi_smoke_topup_1' and type = 'topup';
+  if v_pay is null then
+    raise exception 'FAIL: the top-up wrote no payments row';
+  end if;
+  if (select status from payments where id = v_pay) <> 'succeeded'
+     or (select amount_pence from payments where id = v_pay) <> 5000
+     or (select stripe_invoice_id from payments where id = v_pay) <> 'pi_smoke_topup_1' then
+    raise exception 'FAIL: the top-up payments row is wrong (status/amount/trace)';
+  end if;
+  select credit_balance into v_bal from clients where id = v_cl;
+  if v_bal <> 10 then
+    raise exception 'FAIL: the top-up granted % credits, expected 10', v_bal;
+  end if;
+  if (select count(*) from credit_ledger
+       where client_id = v_cl and entry_type = 'grant'
+         and stripe_invoice_id = 'pi_smoke_topup_1') <> 1 then
+    raise exception 'FAIL: the top-up grant is not traceable to its payment intent';
+  end if;
+
+  -- ── Replay: Stripe redelivers for three days ───────────────────────────
+  v_applied := fn_apply_topup(v_cl, 10, 'pi_smoke_topup_1', 5000);
+  if v_applied then
+    raise exception 'FAIL: a replayed top-up applied twice';
+  end if;
+  if (select count(*) from payments
+       where stripe_payment_intent_id = 'pi_smoke_topup_1' and type = 'topup') <> 1
+     or (select credit_balance from clients where id = v_cl) <> 10 then
+    raise exception 'FAIL: the replay wrote a second payment or grant';
+  end if;
+
+  -- ── A dashboard refund claws the credits back with no topup-specific code
+  --    in fn_reverse_payment: the PI id in stripe_invoice_id IS the
+  --    grant↔money trace 0023 built. This assertion is what guards that
+  --    design decision — drop the trace and the clawback silently stops. ───
+  select * into v_out from fn_reverse_payment(v_pay, 'refund', 5000, 'smoke');
+  if v_out.outcome <> 'reversed' or v_out.credits_reversed <> 10
+     or v_out.needs_review then
+    raise exception 'FAIL: top-up refund did not claw back (outcome %, reversed %, review %)',
+      v_out.outcome, v_out.credits_reversed, v_out.needs_review;
+  end if;
+  if (select credit_balance from clients where id = v_cl) <> 0 then
+    raise exception 'FAIL: refunded top-up left the credits in the balance';
+  end if;
+
+  -- ── Replay AFTER the refund: the 0023 lesson — a reversed row must keep
+  --    holding its idempotency slot, or redelivery grants a second batch. ──
+  v_applied := fn_apply_topup(v_cl, 10, 'pi_smoke_topup_1', 5000);
+  if v_applied or (select credit_balance from clients where id = v_cl) <> 0 then
+    raise exception 'FAIL: a redelivery after refund granted a second batch';
+  end if;
+
+  -- ── Malformed calls fail before any effect ─────────────────────────────
+  begin
+    perform fn_apply_topup(v_cl, 0, 'pi_smoke_topup_2', 1000);
+    raise exception 'FAIL: a zero-credit top-up was accepted';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%credits must be positive%' then
+      raise exception 'FAIL: zero credits rejected for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  begin
+    perform fn_apply_topup(v_cl, 5, '', 1000);
+    raise exception 'FAIL: an empty payment intent id was accepted';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%payment intent id required%' then
+      raise exception 'FAIL: empty PI rejected for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  begin
+    perform fn_apply_topup('99999999-0000-4000-c000-00000000dead', 5, 'pi_x', 1000);
+    raise exception 'FAIL: a top-up for an unknown client was accepted';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%unknown client%' then
+      raise exception 'FAIL: unknown client rejected for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+
+  raise notice 'fn_apply_topup: idempotent, reversible, service-role only (0044): OK';
+end $$;
+
 
 rollback;
 
