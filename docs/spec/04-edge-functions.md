@@ -196,8 +196,18 @@ carry **no** `stripeAccount` (asserted over every call by
   days); under the floor the field is omitted. Refused `already_subscribed`
   (409) while a subscription is bound and not `cancelled` — a past_due one
   is fixed in the portal, not replaced.
+
+  The whole mint — customer creation included — runs inside a per-operator
+  **lease** (`operators.checkout_mint_claimed_at`, claimed by one
+  conditional UPDATE where null-or-expired, released after; Codex review on
+  PR #77): the open-session sweep only ever protected against *sequential*
+  re-clicks, and two concurrent requests could both pass it and mint two
+  completable sessions — two $49/month subscriptions with a manual refund
+  as the only exit. The loser is refused 409 `checkout_in_progress` before
+  touching Stripe; a crashed mint's lease lapses after
+  `CHECKOUT_MINT_LEASE_MS` (2 min).
 - `{ "action": "portal" }` → `{ url }` — platform billing portal session;
-  409 `no_billing` before the first checkout.
+  409 `no_billing` before the first checkout. Never takes the mint lease.
 
 No `payments` rows are written for operator payments, deliberately:
 `payments` is tenant-scoped (`client_id NOT NULL`) and records client money
@@ -234,7 +244,23 @@ collide):
 - `customer.subscription.deleted` → `cancelled`; `invoice.payment_failed` →
   `past_due`. Both ring the operator's bell **once**, gated on the status
   transition — Stripe redelivers dunning failures with fresh event ids the
-  claim ledger cannot dedupe (the H13 lesson).
+  claim ledger cannot dedupe (the H13 lesson). An `updated` event carrying
+  `canceled`/`incomplete_expired` gets the same terminal write and the same
+  gated bell as the deleted arm.
+
+Every rule above is enforced **in the write itself**, not only at the read
+(Codex review on PR #77): deliveries overlap, and a rule applied by reading
+the row and deciding in memory evaporates in the gap before the write — a
+`deleted` landing inside `payment_failed`'s gap used to resurrect the row to
+grace. Each `updateOperator` carries an `OperatorWriteGuard` whose predicates
+PostgREST evaluates atomically inside the UPDATE: `whileBoundTo` (the write
+belongs to this binding — a late event of a replaced subscription no-ops
+instead of mutating its successor's row), `bindableTo` (the row may take
+this binding: null, dead-and-different, or same-and-live — refusing both a
+live rival and a same-id resurrection), and `unlessStatusIn` (the terminal
+and bell gates). `guardAdmits` in the handler is the executable
+specification; the test double evaluates it and the PostgREST translation is
+pinned against it.
 
 ## claim-signup — public, unauthenticated (review H31)
 
@@ -270,9 +296,13 @@ whether an account may exist.
 
 Abuse bound, stated: account creation requires a LIVE invite token
 (unguessable, 14-day expiry, revocable — 0039), and a token bound to an
-email admits only that email. A live *unbound* token can mint accounts for
-arbitrary addresses until it expires or is revoked — strictly narrower than
-the public signup it replaces, which needed no token at all.
+email admits only that email. An *unbound* token (client row with no
+recorded email) **reserves the first address it admits** — the pre-flight
+binds `clients.email` with one atomic conditional UPDATE (Codex review on
+PR #77), so a token is worth at most ONE account, and the claim then
+enforces the reserved address like any operator-recorded one. A mistyped
+first address is recoverable the ordinary way: the operator edits the
+client's email in the roster, or reissues the invite.
 
 Three further residuals, accepted and recorded rather than silently carried
 (adversarial review):

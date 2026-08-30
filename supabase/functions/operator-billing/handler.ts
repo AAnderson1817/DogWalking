@@ -74,6 +74,12 @@ export interface PlatformStripe {
  * incomplete states are safely "not subscribed". */
 const LIVE_STRIPE_STATUSES = new Set(["active", "trialing", "past_due", "unpaid", "paused"]);
 
+/** How long a checkout-mint claim holds before a crashed request's lease is
+ * considered abandoned. Generous against the few hundred ms the guarded
+ * Stripe calls take; short enough that a crash mid-mint delays the
+ * operator's retry, not their evening. */
+export const CHECKOUT_MINT_LEASE_MS = 2 * 60_000;
+
 export interface OperatorBillingDeps {
   getOperator(id: string): Promise<OperatorBillingRow | null>;
   /** Persist the Stripe customer id iff the column is still null, then
@@ -81,6 +87,16 @@ export interface OperatorBillingDeps {
    * loser of a concurrent race adopts the winner's customer and its own
    * becomes an inert orphan. */
   claimCustomerId(operatorId: string, customerId: string): Promise<string>;
+  /** Atomic per-operator mint lease (operators.checkout_mint_claimed_at,
+   * conditional single-statement UPDATE): true = this request holds the
+   * claim. The whole mint — customer creation included — runs inside it, so
+   * two concurrent Subscribe clicks cannot both reach sessions.create
+   * (Codex review on PR #77): the open-session sweep only ever protected
+   * against SEQUENTIAL re-clicks, every await before create being a seam a
+   * rival request advances through. */
+  claimCheckoutMint(operatorId: string): Promise<boolean>;
+  /** Best-effort: must not throw (the lease expiry is the backstop). */
+  releaseCheckoutMint(operatorId: string): Promise<void>;
   stripe: PlatformStripe;
   /** APP_BASE_URL. */
   base: string;
@@ -153,61 +169,83 @@ export async function handleOperatorBilling(
     );
   }
 
-  let customerId = op.platform_customer_id;
-  let freshCustomer = false;
-  if (!customerId) {
-    const customer = await deps.stripe.customers.create({
-      email: op.email ?? undefined,
-      name: op.business_name ?? undefined,
-      metadata: { operator_id: operatorId },
-    });
-    // Persisted BEFORE the session is minted (the connect-onboarding rule):
-    // losing the checkout link is recoverable, losing which customer is ours
-    // is not.
-    customerId = await deps.claimCustomerId(operatorId, customer.id);
-    freshCustomer = customerId === customer.id;
+  // One mint at a time, claimed BEFORE the customer is created so the
+  // first-ever checkout's double-customer race sits inside the lease too.
+  // The refusal is honest and cheap: the rival request is seconds from
+  // handing the operator a working link, and this one retrying immediately
+  // would only expire it from under them.
+  if (!(await deps.claimCheckoutMint(operatorId))) {
+    throw new HttpError(
+      409,
+      "checkout_in_progress",
+      "Another checkout is already being prepared for your account — try again in a moment.",
+    );
   }
+  try {
+    let customerId = op.platform_customer_id;
+    let freshCustomer = false;
+    if (!customerId) {
+      const customer = await deps.stripe.customers.create({
+        email: op.email ?? undefined,
+        name: op.business_name ?? undefined,
+        metadata: { operator_id: operatorId },
+      });
+      // Persisted BEFORE the session is minted (the connect-onboarding rule):
+      // losing the checkout link is recoverable, losing which customer is ours
+      // is not.
+      customerId = await deps.claimCustomerId(operatorId, customer.id);
+      freshCustomer = customerId === customer.id;
+    }
 
-  if (!freshCustomer) {
-    // The DB row can be BEHIND Stripe — the binding webhook not yet
-    // delivered, or (owner-actions §1a) failing while its secret is
-    // missing — and during that window the Subscribe button is still on
-    // screen after a successful payment. Stripe is the truth at mint time:
-    // any subscription it could still collect for means the answer is the
-    // portal, not a second checkout (adversarial review: the pay-twice
-    // path).
-    const existing = await deps.stripe.subscriptions.list({
-      customer: customerId,
-      status: "all",
-      limit: 10,
-    });
-    if (existing.data.some((s) => LIVE_STRIPE_STATUSES.has(s.status))) {
-      throw new HttpError(
-        409,
-        "already_subscribed",
-        "Stripe already holds a live Sanpo subscription for you — use Manage billing. If the app disagrees, it catches up as soon as Stripe's confirmation lands.",
-      );
+    if (!freshCustomer) {
+      // The DB row can be BEHIND Stripe — the binding webhook not yet
+      // delivered, or (owner-actions §1a) failing while its secret is
+      // missing — and during that window the Subscribe button is still on
+      // screen after a successful payment. Stripe is the truth at mint time:
+      // any subscription it could still collect for means the answer is the
+      // portal, not a second checkout (adversarial review: the pay-twice
+      // path).
+      const existing = await deps.stripe.subscriptions.list({
+        customer: customerId,
+        status: "all",
+        limit: 10,
+      });
+      if (existing.data.some((s) => LIVE_STRIPE_STATUSES.has(s.status))) {
+        throw new HttpError(
+          409,
+          "already_subscribed",
+          "Stripe already holds a live Sanpo subscription for you — use Manage billing. If the app disagrees, it catches up as soon as Stripe's confirmation lands.",
+        );
+      }
+      // Sequential re-clicks: sessions stay completable for 24h, so
+      // back-out-and-click-again would otherwise leave two sessions that can
+      // BOTH complete into two $49 subscriptions. (The CONCURRENT version of
+      // the same double-mint is what the claim above refuses.)
+      const open = await deps.stripe.checkout.sessions.list({
+        customer: customerId,
+        status: "open",
+        limit: 10,
+      });
+      for (const stale of open.data) {
+        await deps.stripe.checkout.sessions.expire(stale.id);
+      }
     }
-    // One completable checkout at a time. Sessions stay completable for
-    // 24h, so back-out-and-click-again would otherwise leave two sessions
-    // that can BOTH complete into two $49 subscriptions.
-    const open = await deps.stripe.checkout.sessions.list({
-      customer: customerId,
-      status: "open",
-      limit: 10,
-    });
-    for (const stale of open.data) {
-      await deps.stripe.checkout.sessions.expire(stale.id);
-    }
+
+    const priceId = await ensurePrice(deps.stripe);
+    const session = await deps.stripe.checkout.sessions.create(operatorCheckoutParams({
+      customerId,
+      operatorId,
+      priceId,
+      trialEnd: trialEndSeconds(op.trial_ends_at, deps.now()),
+      base: deps.base,
+    }));
+    return { url: session.url };
+  } finally {
+    // Released on success AND failure: a failed mint must not block the
+    // operator's own retry for the lease length, and a successful one is
+    // done — the NEXT request's sweep expires this session if the operator
+    // backs out and clicks again. The dep contract says release never
+    // throws; the lease expiry is the backstop if it lied.
+    await deps.releaseCheckoutMint(operatorId);
   }
-
-  const priceId = await ensurePrice(deps.stripe);
-  const session = await deps.stripe.checkout.sessions.create(operatorCheckoutParams({
-    customerId,
-    operatorId,
-    priceId,
-    trialEnd: trialEndSeconds(op.trial_ends_at, deps.now()),
-    base: deps.base,
-  }));
-  return { url: session.url };
 }

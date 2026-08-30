@@ -31,6 +31,17 @@
 //      checkout.session.completed was lost — and never when it is live:
 //      a live binding is only ever replaced by nothing.
 //
+// Both rules are enforced IN THE WRITE, not only at the read (Codex review
+// on PR #77): deliveries overlap, so a rule applied by reading the row and
+// deciding in memory evaporates in the gap before the write — a deleted
+// landing inside payment_failed's gap used to resurrect the row to grace.
+// Every updateOperator call therefore carries an OperatorWriteGuard whose
+// predicates PostgREST evaluates atomically inside the UPDATE itself; the
+// in-memory checks remain only as cheap short-circuits and to pick which
+// bell to ring. `guardAdmits` below is the single specification of what a
+// guard means — the index.ts translation to PostgREST filters and the test
+// double both answer to it.
+//
 // Known residual, accepted: two subscriptions created AND cancelled inside
 // Stripe's ~3-day redelivery window, followed by a redelivered stale live
 // event of the older one, could rebind the older dead id. That needs three
@@ -61,6 +72,63 @@ export interface OperatorBillingRef {
   platform_subscription_status: string;
 }
 
+/**
+ * Predicates a status write carries INTO the UPDATE statement, so the rule
+ * they express holds against writes landing after this arm's read. All are
+ * ANDed. `guardAdmits` is the executable specification.
+ */
+export interface OperatorWriteGuard {
+  /** The write belongs to this binding: apply only while
+   * platform_subscription_id still equals it. A late event of a replaced
+   * subscription then no-ops instead of mutating its successor's row. */
+  whileBoundTo?: string;
+  /** The row may TAKE this binding (rule 2, atomically): binding is null,
+   * or dead and different (rebind over a tombstone), or already this id and
+   * not dead (idempotent re-write). Refuses both a live different binding
+   * (duplicate subscription) and a same-id resurrection (rule 1). */
+  bindableTo?: string;
+  /** Refuse when the row's status is any of these. Carries the terminal
+   * 'cancelled' rule and the bell transition-gates ('past_due' on dunning
+   * writes) — the returned count is then the transition signal. */
+  unlessStatusIn?: string[];
+}
+
+/** What a guard MEANS, one place. The stateful test double evaluates this,
+ * and index.ts's PostgREST translation is pinned against it. */
+export function guardAdmits(
+  guard: OperatorWriteGuard | undefined,
+  row: { platform_subscription_id: string | null; platform_subscription_status: string },
+): boolean {
+  if (!guard) return true;
+  for (const s of guard.unlessStatusIn ?? []) {
+    if (row.platform_subscription_status === s) return false;
+  }
+  if (guard.whileBoundTo !== undefined && row.platform_subscription_id !== guard.whileBoundTo) {
+    return false;
+  }
+  if (guard.bindableTo !== undefined) {
+    const id = row.platform_subscription_id;
+    const dead = row.platform_subscription_status === "cancelled";
+    const admits = id === null ||
+      (dead && id !== guard.bindableTo) ||
+      (id === guard.bindableTo && !dead);
+    if (!admits) return false;
+  }
+  return true;
+}
+
+/**
+ * The bindableTo guard reaches PostgREST as an or-filter with the id
+ * embedded in the filter STRING, so the id must not carry filter syntax.
+ * Stripe ids are `[A-Za-z0-9_]+`; anything else on a signature-verified
+ * platform event is malformed enough to refuse outright.
+ */
+export function assertFilterSafeId(id: string): void {
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) {
+    throw new Error(`subscription id unsafe for a PostgREST filter: ${JSON.stringify(id)}`);
+  }
+}
+
 export interface PlatformWebhookDeps {
   /** Same stripe_events claim ledger as stripe-webhook — event ids are
    * globally unique, so the two endpoints cannot collide. */
@@ -69,14 +137,13 @@ export interface PlatformWebhookDeps {
   findOperatorById(id: string): Promise<OperatorBillingRef | null>;
   findOperatorBySubscription(subscriptionId: string): Promise<OperatorBillingRef | null>;
   findOperatorByCustomer(customerId: string): Promise<OperatorBillingRef | null>;
-  /** Update the operator's platform billing fields. When `unlessStatus` is
-   * given, rows already in that status are left untouched — the returned
-   * count is then the transition signal that gates notifications, so a
-   * redelivered dunning event does not ring the bell twice. */
+  /** Update the operator's platform billing fields, guarded atomically —
+   * the guard's predicates run inside the UPDATE, and the returned count is
+   * both the race outcome and the transition signal that gates bells. */
   updateOperator(
     id: string,
     fields: Record<string, unknown>,
-    unlessStatus?: string,
+    guard?: OperatorWriteGuard,
   ): Promise<number>;
   insertNotification(row: Record<string, unknown>): Promise<void>;
 }
@@ -166,17 +233,13 @@ async function applyEvent(
       const op = await deps.findOperatorById(operatorId);
       if (!op) return { status: "ignored" };
 
-      if (
-        op.platform_subscription_id !== null &&
-        op.platform_subscription_id !== subscriptionId &&
-        !bindingReplaceable(op)
-      ) {
+      const duplicateBell = () =>
         // A second completed session while a LIVE subscription is bound:
         // two subscriptions now bill at Stripe. Never clobber the binding —
         // the sibling subscription arm has always refused this — but never
         // stay silent either: an invisible duplicate is $49/month the
         // operator cannot see from inside the product.
-        await deps.insertNotification({
+        deps.insertNotification({
           operator_id: op.id,
           client_id: null,
           type: "payment_taken",
@@ -184,6 +247,13 @@ async function applyEvent(
           body:
             "A checkout completed while you already had a live Sanpo subscription, so Stripe now holds two. Open Settings → Manage billing and cancel the extra one.",
         });
+
+      if (
+        op.platform_subscription_id !== null &&
+        op.platform_subscription_id !== subscriptionId &&
+        !bindingReplaceable(op)
+      ) {
+        await duplicateBell();
         return { status: "processed" };
       }
 
@@ -193,10 +263,26 @@ async function applyEvent(
       // may never arrive. A trial's first session is 'no_payment_required'.
       const paid = obj.payment_status === "paid" ||
         obj.payment_status === "no_payment_required";
-      await deps.updateOperator(op.id, {
+      const wrote = await deps.updateOperator(op.id, {
         platform_subscription_id: subscriptionId,
         ...(paid ? { platform_subscription_status: "active" } : {}),
-      });
+      }, { bindableTo: subscriptionId });
+      if (wrote === 0) {
+        // The read above raced a concurrent write. Re-read to tell WHICH
+        // refusal this was: a rival session's binding won the gap (ring the
+        // duplicate bell the pre-check would have rung), or this same
+        // subscription was cancelled before its completed event landed
+        // (rule 1 — stay silent, the row is correct as it stands).
+        const now = await deps.findOperatorById(operatorId);
+        if (
+          now &&
+          now.platform_subscription_id !== null &&
+          now.platform_subscription_id !== subscriptionId &&
+          !bindingReplaceable(now)
+        ) {
+          await duplicateBell();
+        }
+      }
       return { status: "processed" };
     }
 
@@ -211,18 +297,20 @@ async function applyEvent(
       let op = await deps.findOperatorBySubscription(subscriptionId);
       if (op) {
         // Rule 1: the id it died with is terminal. A redelivered or late
-        // event of the dead subscription must not revive it; only the
-        // deleted arm's own idempotent write may touch a cancelled row.
+        // event of the dead subscription must not revive it — the cheap
+        // read-time short-circuit; the write guard below re-enforces it
+        // atomically for the delivery that races the deletion.
         if (op.platform_subscription_status === "cancelled" && mapped !== "cancelled") {
           return { status: "ignored" };
         }
-      } else if (customerId) {
+      } else if (customerId && mapped !== "cancelled") {
         // subscription.created can beat checkout.session.completed — and a
         // resubscribe's completed event can be lost outright — so a NEW
         // subscription binds through the customer wherever the existing
         // binding is null or dead (rule 2). A row bound to a DIFFERENT live
         // subscription is never clobbered by some other subscription's
-        // event.
+        // event. A DEAD subscription claims nothing: stamping a tombstone
+        // onto a never-subscribed row is excluded before the lookup.
         const byCustomer = await deps.findOperatorByCustomer(customerId);
         if (byCustomer && bindingReplaceable(byCustomer)) op = byCustomer;
       }
@@ -240,7 +328,7 @@ async function applyEvent(
             platform_subscription_id: subscriptionId,
             platform_subscription_status: "past_due",
           },
-          "past_due",
+          { bindableTo: subscriptionId, unlessStatusIn: ["past_due"] },
         );
         if (changed > 0) {
           await deps.insertNotification({ operator_id: op.id, client_id: null, ...PAST_DUE_BELL });
@@ -248,10 +336,33 @@ async function applyEvent(
         return { status: "processed" };
       }
 
+      if (mapped === "cancelled") {
+        // subscription.updated can carry `canceled`/`incomplete_expired`
+        // itself. Same terminal write and same transition-gated bell as the
+        // deleted arm — whichever of the two deliveries lands first tells
+        // the operator once, and the loser's write is refused by the guard.
+        const changed = await deps.updateOperator(
+          op.id,
+          { platform_subscription_status: "cancelled" },
+          { whileBoundTo: subscriptionId, unlessStatusIn: ["cancelled"] },
+        );
+        if (changed > 0) {
+          await deps.insertNotification({
+            operator_id: op.id,
+            client_id: null,
+            type: "subscription_cancelled",
+            title: "Your Sanpo subscription has ended",
+            body:
+              "Your Sanpo subscription is cancelled. Subscribe again from Settings to keep using Sanpo.",
+          });
+        }
+        return { status: "processed" };
+      }
+
       await deps.updateOperator(op.id, {
         platform_subscription_id: subscriptionId,
         platform_subscription_status: mapped,
-      });
+      }, { bindableTo: subscriptionId });
       return { status: "processed" };
     }
 
@@ -263,10 +374,13 @@ async function applyEvent(
       // platform_subscription_id is deliberately KEPT: it is the tombstone
       // rule 1 reads. Nulling it here would let a redelivered live event of
       // this same subscription rebind through the customer fallback.
+      // whileBoundTo pins the cancel to the binding it belongs to: if a
+      // rebind won the gap since the read, this late deleted must miss the
+      // successor's row rather than cancel a subscription that is alive.
       const changed = await deps.updateOperator(
         op.id,
         { platform_subscription_status: "cancelled" },
-        "cancelled",
+        { whileBoundTo: subscriptionId, unlessStatusIn: ["cancelled"] },
       );
       if (changed > 0) {
         await deps.insertNotification({
@@ -289,14 +403,16 @@ async function applyEvent(
       const op = await deps.findOperatorBySubscription(subscriptionId);
       if (!op) return { status: "ignored" };
       // Rule 1 again: dunning exhaustion delivers this and deleted in
-      // either order, and after deleted the row must stay cancelled.
+      // either order, and after deleted the row must stay cancelled. The
+      // read-time check is the cheap path; 'cancelled' in the write guard
+      // is what holds when the deleted lands inside this arm's gap.
       if (op.platform_subscription_status === "cancelled") {
         return { status: "ignored" };
       }
       const changed = await deps.updateOperator(
         op.id,
         { platform_subscription_status: "past_due" },
-        "past_due",
+        { whileBoundTo: subscriptionId, unlessStatusIn: ["past_due", "cancelled"] },
       );
       if (changed > 0) {
         await deps.insertNotification({ operator_id: op.id, client_id: null, ...PAST_DUE_BELL });

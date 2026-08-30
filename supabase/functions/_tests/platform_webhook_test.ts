@@ -5,10 +5,13 @@
 // an unfinished checkout never downgrades a live subscription.
 import { assert, assertEquals, assertRejects } from "./asserts.ts";
 import {
+  assertFilterSafeId,
+  guardAdmits,
   handlePlatformEvent,
   InFlightError,
   mapPlatformSubscriptionStatus,
   type OperatorBillingRef,
+  type OperatorWriteGuard,
   type PlatformEventLike,
   type PlatformWebhookDeps,
 } from "../platform-webhook/handler.ts";
@@ -76,8 +79,24 @@ function makeStatefulDeps(row: {
   customer: string;
   platform_subscription_id: string | null;
   platform_subscription_status: string;
-}): { deps: PlatformWebhookDeps; row: typeof row; bells: Array<Record<string, unknown>> } {
+}, opts: {
+  /** Fires ONCE, after the first find resolves — the seam where a
+   * concurrent event's write lands between this arm's read and its write.
+   * The TOCTOU races Codex found on PR #77 live exactly there. */
+  afterFirstFind?: (row: {
+    platform_subscription_id: string | null;
+    platform_subscription_status: string;
+  }) => void;
+} = {}): { deps: PlatformWebhookDeps; row: typeof row; bells: Array<Record<string, unknown>> } {
   const bells: Array<Record<string, unknown>> = [];
+  let findSeen = false;
+  const raced = <T>(v: T): T => {
+    if (!findSeen) {
+      findSeen = true;
+      opts.afterFirstFind?.(row);
+    }
+    return v;
+  };
   const ref = (): OperatorBillingRef => ({
     id: row.id,
     platform_subscription_id: row.platform_subscription_id,
@@ -89,16 +108,22 @@ function makeStatefulDeps(row: {
     deps: {
       claimEvent: () => Promise.resolve("fresh"),
       markProcessed: () => Promise.resolve(),
-      findOperatorById: (id) => Promise.resolve(id === row.id ? ref() : null),
+      // Each finder computes its answer from the row BEFORE raced() fires the
+      // hook — the returned ref is the stale read, and the hook is the
+      // concurrent write landing just after it.
+      findOperatorById: (id) => Promise.resolve(raced(id === row.id ? ref() : null)),
       findOperatorBySubscription: (subId) =>
-        Promise.resolve(row.platform_subscription_id === subId ? ref() : null),
+        Promise.resolve(raced(row.platform_subscription_id === subId ? ref() : null)),
       findOperatorByCustomer: (customerId) =>
-        Promise.resolve(row.customer === customerId ? ref() : null),
-      updateOperator(id, fields, unlessStatus) {
+        Promise.resolve(raced(row.customer === customerId ? ref() : null)),
+      updateOperator(id, fields, guard) {
         if (id !== row.id) return Promise.resolve(0);
-        if (unlessStatus && row.platform_subscription_status === unlessStatus) {
-          return Promise.resolve(0);
-        }
+        // The double evaluates guardAdmits — the exported specification the
+        // real PostgREST translation is pinned against — at write time,
+        // against the row as it stands NOW, which is what makes the raced
+        // tests mean something: a stale read cannot satisfy a guard the row
+        // no longer admits.
+        if (!guardAdmits(guard, row)) return Promise.resolve(0);
         if ("platform_subscription_id" in fields) {
           row.platform_subscription_id = fields.platform_subscription_id as string;
         }
@@ -308,7 +333,7 @@ Deno.test("subscription.deleted cancels and tells the operator — once", async 
   );
   const upd = first.recorded.find((r) => r.call === "updateOperator");
   assertEquals(upd?.args[1], { platform_subscription_status: "cancelled" });
-  assertEquals(upd?.args[2], "cancelled");
+  assertEquals(upd?.args[2], { whileBoundTo: "sub_1", unlessStatusIn: ["cancelled"] });
   const note = first.recorded.find((r) => r.call === "insertNotification");
   assert(note, "no cancellation notification");
   const row = note.args[0] as Record<string, unknown>;
@@ -339,7 +364,7 @@ Deno.test("invoice.payment_failed marks past_due and notifies the OPERATOR — t
   );
   const upd = first.recorded.find((r) => r.call === "updateOperator");
   assertEquals(upd?.args[1], { platform_subscription_status: "past_due" });
-  assertEquals(upd?.args[2], "past_due");
+  assertEquals(upd?.args[2], { whileBoundTo: "sub_1", unlessStatusIn: ["past_due", "cancelled"] });
   const note = first.recorded.find((r) => r.call === "insertNotification");
   assert(note, "no payment-failed notification");
   const row = note.args[0] as Record<string, unknown>;
@@ -514,6 +539,202 @@ Deno.test("invoice.payment_failed reads BOTH invoice shapes — Basil moved the 
   const upd = recorded.find((r) => r.call === "updateOperator");
   assertEquals(upd?.args[1], { platform_subscription_status: "past_due" });
   assert(recorded.some((r) => r.call === "insertNotification"));
+});
+
+// ── Atomic write guards (Codex review on PR #77): the TOCTOU races ─────────
+//
+// The sequence tests above run events one after another, so every read sees
+// the previous write. Real deliveries OVERLAP: two edge invocations for two
+// different event ids interleave freely, and a rule enforced by reading the
+// row and deciding in memory evaporates in the gap before the write. These
+// four pin that every rule the sequence tests establish still holds when the
+// conflicting write lands INSIDE that gap — which is only true if the rule
+// lives in the write's own predicate.
+
+Deno.test("RACE: deleted landing between payment_failed's read and write cannot resurrect", async () => {
+  const s = makeStatefulDeps({
+    id: OP_ID,
+    customer: "cus_1",
+    platform_subscription_id: "sub_1",
+    platform_subscription_status: "active",
+  }, {
+    // The concurrent deleted arm's write: terminal, after our read.
+    afterFirstFind: (row) => {
+      row.platform_subscription_status = "cancelled";
+    },
+  });
+  await handlePlatformEvent(
+    event("invoice.payment_failed", { id: "in_1", subscription: "sub_1" }),
+    s.deps,
+  );
+  assertEquals(
+    s.row.platform_subscription_status,
+    "cancelled",
+    "a raced payment_failed resurrected a cancelled row to grace",
+  );
+  assertEquals(s.bells.length, 0, "a dunning bell rang for a subscription that is already dead");
+});
+
+Deno.test("RACE: deleted landing between subscription.updated's read and write cannot resurrect", async () => {
+  const s = makeStatefulDeps({
+    id: OP_ID,
+    customer: "cus_1",
+    platform_subscription_id: "sub_1",
+    platform_subscription_status: "active",
+  }, {
+    afterFirstFind: (row) => {
+      row.platform_subscription_status = "cancelled";
+    },
+  });
+  await handlePlatformEvent(
+    event("customer.subscription.updated", { id: "sub_1", customer: "cus_1", status: "active" }),
+    s.deps,
+  );
+  assertEquals(
+    s.row.platform_subscription_status,
+    "cancelled",
+    "a raced subscription.updated resurrected a cancelled row to active",
+  );
+});
+
+Deno.test("RACE: a LATE deleted for the OLD id cannot kill a rebind that won the gap", async () => {
+  // deleted(sub_old) reads the row while it is still bound to sub_old; the
+  // resubscribe's rebind then lands; the cancel must miss, because the
+  // binding it belongs to is gone. Without pinning the write to its own
+  // subscription id, the new $49/month subscription is marked cancelled and
+  // the operator is locked out while paying.
+  const s = makeStatefulDeps({
+    id: OP_ID,
+    customer: "cus_1",
+    platform_subscription_id: "sub_old",
+    platform_subscription_status: "cancelled",
+  }, {
+    afterFirstFind: (row) => {
+      row.platform_subscription_id = "sub_new";
+      row.platform_subscription_status = "active";
+    },
+  });
+  // A redelivered deleted for the old subscription (fresh event id, so the
+  // claim ledger does not dedupe it).
+  await handlePlatformEvent(
+    event("customer.subscription.deleted", { id: "sub_old", status: "canceled" }, { id: "evt_late_del" }),
+    s.deps,
+  );
+  assertEquals(s.row.platform_subscription_id, "sub_new");
+  assertEquals(
+    s.row.platform_subscription_status,
+    "active",
+    "a late deleted for the old subscription cancelled the freshly rebound one",
+  );
+  assertEquals(s.bells.length, 0, "a cancellation bell rang against the live rebound subscription");
+});
+
+Deno.test("RACE: two completed checkouts — the loser's write is refused atomically and rings the duplicate bell", async () => {
+  const s = makeStatefulDeps({
+    id: OP_ID,
+    customer: "cus_1",
+    platform_subscription_id: null,
+    platform_subscription_status: "none",
+  }, {
+    // The winning session's completed arm binds first, inside our gap.
+    afterFirstFind: (row) => {
+      row.platform_subscription_id = "sub_winner";
+      row.platform_subscription_status = "active";
+    },
+  });
+  await handlePlatformEvent(
+    event("checkout.session.completed", {
+      mode: "subscription",
+      subscription: "sub_loser",
+      payment_status: "paid",
+      metadata: { operator_id: OP_ID },
+    }),
+    s.deps,
+  );
+  assertEquals(
+    s.row.platform_subscription_id,
+    "sub_winner",
+    "the losing session's write clobbered the winner's binding",
+  );
+  assertEquals(s.row.platform_subscription_status, "active");
+  const titles = s.bells.map((b) => String(b.title).toLowerCase());
+  assertEquals(titles.filter((t) => t.includes("second")).length, 1,
+    "the raced duplicate subscription rang no bell — $49/month invisible");
+});
+
+Deno.test("guardAdmits truth table — the one specification both the double and the PostgREST translation answer to", () => {
+  const row = (id: string | null, status: string) => ({
+    platform_subscription_id: id,
+    platform_subscription_status: status,
+  });
+  // No guard admits everything.
+  assert(guardAdmits(undefined, row("sub_1", "cancelled")));
+
+  // unlessStatusIn refuses exactly the listed statuses.
+  const unless: OperatorWriteGuard = { unlessStatusIn: ["past_due", "cancelled"] };
+  assert(!guardAdmits(unless, row("sub_1", "past_due")));
+  assert(!guardAdmits(unless, row("sub_1", "cancelled")));
+  assert(guardAdmits(unless, row("sub_1", "active")));
+
+  // whileBoundTo: the write belongs to its binding and no other.
+  const bound: OperatorWriteGuard = { whileBoundTo: "sub_1" };
+  assert(guardAdmits(bound, row("sub_1", "active")));
+  assert(!guardAdmits(bound, row("sub_2", "active")), "a replaced binding still accepted the old id's write");
+  assert(!guardAdmits(bound, row(null, "none")));
+
+  // bindableTo: null binds, dead-different rebinds, same-live re-writes;
+  // live-different (duplicate) and same-dead (resurrection) refuse.
+  const bind: OperatorWriteGuard = { bindableTo: "sub_new" };
+  assert(guardAdmits(bind, row(null, "none")), "an unbound row refused its first binding");
+  assert(guardAdmits(bind, row("sub_old", "cancelled")), "a tombstone refused a legitimate rebind");
+  assert(guardAdmits(bind, row("sub_new", "active")), "an idempotent same-id re-write refused");
+  assert(!guardAdmits(bind, row("sub_old", "active")), "a live binding admitted a rival subscription");
+  assert(!guardAdmits(bind, row("sub_new", "cancelled")), "a dead same-id binding admitted its own resurrection");
+});
+
+Deno.test("assertFilterSafeId refuses anything that could smuggle PostgREST filter syntax", () => {
+  assertFilterSafeId("sub_1AbC-x");
+  for (const bad of ["sub,or", "a.b", "x(y)", "", "a b", 'q"t']) {
+    let threw = false;
+    try {
+      assertFilterSafeId(bad);
+    } catch {
+      threw = true;
+    }
+    assert(threw, `accepted unsafe id ${JSON.stringify(bad)}`);
+  }
+});
+
+Deno.test("index.ts translates the guard into the write's OWN predicate — the atomicity lives there", async () => {
+  // No seam reaches makeDeps without a live PostgREST, so the source is the
+  // contract, same as the secret pin above: the or-filter must express
+  // exactly guardAdmits' bindableTo clause, and the loop/eq lines the other
+  // two. A drift here is the double passing while the deploy races for real.
+  const src = await Deno.readTextFile(
+    new URL("../platform-webhook/index.ts", import.meta.url),
+  );
+  assert(
+    src.includes('query = query.neq("platform_subscription_status", s)'),
+    "unlessStatusIn no longer reaches the UPDATE predicate",
+  );
+  assert(
+    src.includes('query = query.eq("platform_subscription_id", guard.whileBoundTo)'),
+    "whileBoundTo no longer reaches the UPDATE predicate",
+  );
+  assert(
+    src.includes('"platform_subscription_id.is.null,"') &&
+      src.includes(
+        "`and(platform_subscription_status.eq.cancelled,platform_subscription_id.neq.${guard.bindableTo}),`",
+      ) &&
+      src.includes(
+        "`and(platform_subscription_id.eq.${guard.bindableTo},platform_subscription_status.neq.cancelled)`",
+      ),
+    "the bindableTo or-filter drifted from guardAdmits' three clauses",
+  );
+  assert(
+    src.includes("assertFilterSafeId(guard.bindableTo)"),
+    "the id reaches the filter string unvalidated",
+  );
 });
 
 Deno.test("subscription.updated(past_due) and invoice.payment_failed ring ONE bell between them, whoever wins", async () => {

@@ -372,6 +372,7 @@ export type Database = {
           platform_customer_id: string | null;
           platform_subscription_id: string | null;
           platform_subscription_status: Database["public"]["Enums"]["subscription_status"];
+          checkout_mint_claimed_at: string | null;
         };
         Insert: {
           id: string;
@@ -397,6 +398,7 @@ export type Database = {
           platform_customer_id?: string | null;
           platform_subscription_id?: string | null;
           platform_subscription_status?: Database["public"]["Enums"]["subscription_status"];
+          checkout_mint_claimed_at?: string | null;
         };
         Update: {
           id?: string;
@@ -422,6 +424,7 @@ export type Database = {
           platform_customer_id?: string | null;
           platform_subscription_id?: string | null;
           platform_subscription_status?: Database["public"]["Enums"]["subscription_status"];
+          checkout_mint_claimed_at?: string | null;
         };
         Relationships: [];
       };
