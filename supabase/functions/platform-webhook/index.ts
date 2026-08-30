@@ -14,6 +14,7 @@ import { logServerError, requestId } from "../_lib/observe.ts";
 import { adminClient } from "../_lib/admin.ts";
 import { verifyStripeSignature } from "../_lib/stripe.ts";
 import {
+  assertFilterSafeId,
   handlePlatformEvent,
   InFlightError,
   type PlatformEventLike,
@@ -96,10 +97,25 @@ function makeDeps(): PlatformWebhookDeps {
       return data;
     },
 
-    async updateOperator(id, fields, unlessStatus) {
+    async updateOperator(id, fields, guard) {
+      // Translation of OperatorWriteGuard into PostgREST filters, all ANDed
+      // into the UPDATE's own predicate — guardAdmits in handler.ts is the
+      // specification this must match, and the test suite pins both the
+      // truth table and these exact filter strings.
       let query = db.from("operators").update(fields).eq("id", id);
-      if (unlessStatus) {
-        query = query.neq("platform_subscription_status", unlessStatus);
+      for (const s of guard?.unlessStatusIn ?? []) {
+        query = query.neq("platform_subscription_status", s);
+      }
+      if (guard?.whileBoundTo !== undefined) {
+        query = query.eq("platform_subscription_id", guard.whileBoundTo);
+      }
+      if (guard?.bindableTo !== undefined) {
+        assertFilterSafeId(guard.bindableTo);
+        query = query.or(
+          "platform_subscription_id.is.null," +
+            `and(platform_subscription_status.eq.cancelled,platform_subscription_id.neq.${guard.bindableTo}),` +
+            `and(platform_subscription_id.eq.${guard.bindableTo},platform_subscription_status.neq.cancelled)`,
+        );
       }
       const { data, error } = await query.select("id");
       if (error) throw new Error("operator update failed", { cause: error });

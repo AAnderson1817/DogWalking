@@ -4594,18 +4594,20 @@ begin
           'H31 Bound', 'h31-a@sanpo.test', 'invited', '99999999-0000-4000-e000-000000003103'),
          ('99999999-0000-4000-c000-000000003104', '99999999-0000-4000-a000-000000000001',
           'H31 Open', 'h31-a@sanpo.test', 'invited', '99999999-0000-4000-e000-000000003104');
-  -- Email NULL is an ordinary product state (Roster stores '' as null), and
-  -- both ladders must ADMIT any address for it. Undriven, this was the one
-  -- refuse-vs-admit divergence smoke could not see: a drifted guard (plain
-  -- `is distinct from` without the not-null wrapper) turns every email-less
-  -- invite into email_mismatch at signup while the claim accepts it
-  -- (adversarial review).
+  -- Email NULL is an ordinary product state (Roster stores '' as null): the
+  -- FIRST address the pre-flight admits RESERVES the invite (Codex review on
+  -- PR #77 — unreserved, one leaked token minted an auth account per address
+  -- until expiry), and every later address refuses as email_mismatch on both
+  -- sides of the parity. A drifted guard (plain `is distinct from` without
+  -- the not-null wrapper) still has its own cell below: it would refuse the
+  -- FIRST address too (adversarial review).
   insert into clients (id, operator_id, full_name, status, invite_token)
   values ('99999999-0000-4000-c000-000000003105', '99999999-0000-4000-a000-000000000001',
           'H31 Unbound', 'invited', '99999999-0000-4000-e000-000000003105');
   insert into auth.users (id, email) values
     ('99999999-0000-4000-a000-000000003111', 'h31-a@sanpo.test'),
-    ('99999999-0000-4000-a000-000000003112', 'h31-b@sanpo.test');
+    ('99999999-0000-4000-a000-000000003112', 'h31-b@sanpo.test'),
+    ('99999999-0000-4000-a000-000000003113', 'anyone@sanpo.test');
 
   -- Parity on every refusal: check as the service session, then the real
   -- claim as a signed-in user with the same email, and the answers match.
@@ -4646,22 +4648,55 @@ begin
     raise exception 'FAIL: an unknown token was not not_found';
   end if;
 
-  -- The unbound invite admits ANY address, on both sides of the parity.
+  -- The unbound invite admits its FIRST address — and reserves it.
   v_check := fn_invite_signup_check('99999999-0000-4000-e000-000000003105', 'anyone@sanpo.test');
   if v_check <> 'claimed' then
     raise exception 'FAIL: an email-less invite was refused at signup as %', v_check;
   end if;
+  if (select email from clients where id = '99999999-0000-4000-c000-000000003105')
+       is distinct from 'anyone@sanpo.test' then
+    raise exception 'FAIL: the admitted address was not reserved — one leaked token still mints an account per address';
+  end if;
+  -- The same address again is an idempotent retry (a failed createUser must
+  -- be retryable); a DIFFERENT address is the mint hole, closed.
+  if fn_invite_signup_check('99999999-0000-4000-e000-000000003105', 'anyone@sanpo.test')
+       <> 'claimed' then
+    raise exception 'FAIL: the reserved address cannot retry its own signup';
+  end if;
+  v_check := fn_invite_signup_check('99999999-0000-4000-e000-000000003105', 'else@sanpo.test');
+  if v_check <> 'email_mismatch' then
+    raise exception 'FAIL: a second address on a reserved invite was admitted as % — unlimited account minting', v_check;
+  end if;
+  if (select count(*) from invite_claim_attempts
+       where client_id = '99999999-0000-4000-c000-000000003105'
+         and attempted_by is null
+         and outcome = 'email_mismatch'
+         and attempted_email = 'else@sanpo.test') <> 1 then
+    raise exception 'FAIL: the refused second address left no pre-account log row';
+  end if;
+  -- Parity holds THROUGH the reservation: the claim now enforces the address
+  -- the pre-flight reserved, on the account the pre-flight admitted.
   perform set_config('request.jwt.claims',
     '{"sub":"99999999-0000-4000-a000-000000003112","role":"authenticated","email":"h31-b@sanpo.test"}', true);
   set local session authorization authenticated;
   select c.outcome into v_claim from fn_claim_invite('99999999-0000-4000-e000-000000003105') c;
   reset session authorization;
+  if v_claim <> 'email_mismatch' then
+    raise exception 'FAIL: reservation parity broke — check refused else@, claim admitted a third party as %', v_claim;
+  end if;
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000003113","role":"authenticated","email":"anyone@sanpo.test"}', true);
+  set local session authorization authenticated;
+  select c.outcome into v_claim from fn_claim_invite('99999999-0000-4000-e000-000000003105') c;
+  reset session authorization;
   if v_claim <> 'claimed' then
-    raise exception 'FAIL: email-less parity broke — check said claimed, claim said %', v_claim;
+    raise exception 'FAIL: the reserved address itself could not claim — reservation over-closed, %', v_claim;
   end if;
 
   -- The happy path, case- and whitespace-insensitive like the claim — and
-  -- the check BINDS NOTHING: it predicts, the claim decides.
+  -- on a BOUND invite the check binds no ACCOUNT: it predicts, the claim
+  -- decides. (The one thing it may bind is the email of an UNBOUND invite —
+  -- the reservation cell above.)
   v_check := fn_invite_signup_check('99999999-0000-4000-e000-000000003104', '  H31-A@Sanpo.Test ');
   if v_check <> 'claimed' then
     raise exception 'FAIL: a live invite for the invited address was refused as %', v_check;

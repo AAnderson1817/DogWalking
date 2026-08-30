@@ -108,6 +108,12 @@ function makeStripeDouble(
   };
 }
 
+/** An in-memory checkout-mint lease shared between deps instances — the
+ * mutex two CONCURRENT requests contend on, exactly what the DB column is. */
+function makeMint(): { held: boolean } {
+  return { held: false };
+}
+
 function makeDeps(
   row: OperatorBillingRow | null,
   recorded: Recorded[],
@@ -117,9 +123,13 @@ function makeDeps(
     claimWinner?: string;
     liveSubscriptions?: Array<{ id: string; status: string }>;
     openSessions?: Array<{ id: string }>;
+    /** Share one across two makeDeps calls to model two concurrent requests
+     * against the one operators row. */
+    mint?: { held: boolean };
   } = {},
 ): OperatorBillingDeps & { claims: string[] } {
   const claims: string[] = [];
+  const mint = opts.mint ?? makeMint();
   return {
     claims,
     getOperator: () => Promise.resolve(row),
@@ -127,6 +137,17 @@ function makeDeps(
       claims.push(customerId);
       recorded.push({ call: "db.claimCustomerId", args: [customerId] });
       return Promise.resolve(opts.claimWinner ?? customerId);
+    },
+    claimCheckoutMint(operatorId) {
+      recorded.push({ call: "db.claimCheckoutMint", args: [operatorId] });
+      if (mint.held) return Promise.resolve(false);
+      mint.held = true;
+      return Promise.resolve(true);
+    },
+    releaseCheckoutMint(operatorId) {
+      recorded.push({ call: "db.releaseCheckoutMint", args: [operatorId] });
+      mint.held = false;
+      return Promise.resolve();
     },
     stripe: makeStripeDouble(recorded, opts),
     base: "https://app.sanpo.test",
@@ -417,6 +438,106 @@ Deno.test("stale OPEN sessions are expired before a new one is minted — one co
     order.lastIndexOf("checkout.sessions.expire") < order.indexOf("checkout.sessions.create"),
     "the new session was minted before the stale ones were expired",
   );
+});
+
+// ── One completable session per operator (Codex review on PR #77) ──────────
+
+Deno.test("RACE: two concurrent checkout requests mint exactly ONE completable session", async () => {
+  // Both requests used to pass the open-session sweep and the
+  // live-subscription check before either created — every await is a seam
+  // where the other request advances one step, so the sweep protects
+  // nothing against a concurrent rival, only against sequential re-clicks.
+  // Two completable sessions are two $49/month subscriptions with a manual
+  // refund as the only way out. The shared mint lease is what the two
+  // requests now contend on, and the loser is refused before it touches
+  // Stripe at all.
+  const recorded: Recorded[] = [];
+  const row = operatorRow({ platform_customer_id: "cus_have" });
+  const mint = makeMint();
+  const results = await Promise.allSettled([
+    handleOperatorBilling(OP_ID, { action: "checkout" }, makeDeps(row, recorded, { mint })),
+    handleOperatorBilling(OP_ID, { action: "checkout" }, makeDeps(row, recorded, { mint })),
+  ]);
+  assertEquals(
+    recorded.filter((r) => r.call === "checkout.sessions.create").length,
+    1,
+    "two concurrent checkout requests minted two completable sessions",
+  );
+  const won = results.filter((r) => r.status === "fulfilled");
+  const lost = results.filter((r) => r.status === "rejected");
+  assertEquals(won.length, 1);
+  assertEquals(lost.length, 1);
+  const err = (lost[0] as PromiseRejectedResult).reason;
+  assert(err instanceof HttpError && err.status === 409, `loser got ${String(err)}`);
+  assertEquals((err as HttpError).code, "checkout_in_progress");
+});
+
+Deno.test("index.ts implements the lease as ONE conditional UPDATE — the atomicity lives in the predicate", async () => {
+  // Same contract style as the platform-webhook source pins: no seam
+  // reaches makeDeps without a live PostgREST, and a lease implemented as
+  // read-then-write would be the exact TOCTOU it exists to close.
+  const src = await Deno.readTextFile(
+    new URL("../operator-billing/index.ts", import.meta.url),
+  );
+  assert(
+    src.includes("checkout_mint_claimed_at.is.null,checkout_mint_claimed_at.lt."),
+    "the claim no longer carries its lease predicate inside the UPDATE",
+  );
+  assert(
+    src.includes(".update({ checkout_mint_claimed_at: new Date().toISOString() })"),
+    "the claim no longer writes the lease timestamp",
+  );
+});
+
+Deno.test("the mint claim comes BEFORE the customer is created — the first-checkout race is inside the lease", async () => {
+  const recorded: Recorded[] = [];
+  await handleOperatorBilling(OP_ID, { action: "checkout" }, makeDeps(operatorRow(), recorded));
+  const order = recorded.map((r) => r.call);
+  const claim = order.indexOf("db.claimCheckoutMint");
+  const customer = order.indexOf("customers.create");
+  assert(claim !== -1 && customer !== -1, `calls: ${order.join(", ")}`);
+  assert(claim < customer, `the customer was created outside the lease: ${order.join(", ")}`);
+});
+
+Deno.test("the mint lease is released on success AND on a failed mint — a Stripe error must not block the retry", async () => {
+  // Success path: released after the session exists.
+  const recorded: Recorded[] = [];
+  const mint = makeMint();
+  await handleOperatorBilling(
+    OP_ID,
+    { action: "checkout" },
+    makeDeps(operatorRow({ platform_customer_id: "cus_have" }), recorded, { mint }),
+  );
+  const order = recorded.map((r) => r.call);
+  assert(
+    order.indexOf("checkout.sessions.create") < order.indexOf("db.releaseCheckoutMint"),
+    "released before the session existed",
+  );
+  assertEquals(mint.held, false, "the lease survived a successful mint");
+
+  // Failure path: sessions.create throws; the lease must still be released
+  // (the operator's own immediate retry sweeps the maybe-created session and
+  // mints exactly one).
+  const failMint = makeMint();
+  const failRecorded: Recorded[] = [];
+  const deps = makeDeps(
+    operatorRow({ platform_customer_id: "cus_have" }),
+    failRecorded,
+    { mint: failMint },
+  );
+  deps.stripe.checkout.sessions.create = () => Promise.reject(new Error("stripe unreachable"));
+  await assertRejects(() => handleOperatorBilling(OP_ID, { action: "checkout" }, deps));
+  assertEquals(failMint.held, false, "a failed mint left the lease held for the full lease length");
+});
+
+Deno.test("portal never takes the mint lease — managing billing is not minting", async () => {
+  const recorded: Recorded[] = [];
+  await handleOperatorBilling(
+    OP_ID,
+    { action: "portal" },
+    makeDeps(operatorRow({ platform_customer_id: "cus_1" }), recorded),
+  );
+  assert(!recorded.some((r) => r.call === "db.claimCheckoutMint"));
 });
 
 Deno.test("a FRESH customer skips the Stripe-truth checks — it can hold nothing yet", async () => {

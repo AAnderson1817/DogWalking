@@ -72,6 +72,21 @@ create unique index uq_operators_platform_customer
   on operators (platform_customer_id)
   where platform_customer_id is not null;
 
+-- The per-operator checkout-mint lease (Codex review on PR #77). Two
+-- concurrent Subscribe requests both passed operator-billing's open-session
+-- sweep before either created its session — two completable sessions, two
+-- $49/month subscriptions. operator-billing claims this column with one
+-- conditional UPDATE (null or expired → now()) before ANY Stripe call and
+-- clears it after, so the whole mint is serialized per operator; a crashed
+-- request's lease expires on its own. Written only by the service role: the
+-- column is simply absent from the API grant lists below, and the refuse
+-- block pins that.
+alter table operators
+  add column checkout_mint_claimed_at timestamptz null;
+
+comment on column operators.checkout_mint_claimed_at is
+  'Lease for operator-billing''s checkout mint: one completable Checkout Session per operator at a time (Codex review on PR #77). Claimed by a single conditional UPDATE where null-or-expired; cleared on completion; a crashed mint''s lease lapses after the edge function''s CHECKOUT_MINT_LEASE_MS. Service role only.';
+
 -- ── 2. The INSERT grant becomes a column list ──────────────────────────────
 --
 -- 0004 granted TABLE-LEVEL insert on operators to authenticated, which
@@ -129,11 +144,22 @@ comment on column invite_claim_attempts.attempted_by is
 -- (0041). If the claim ladder changes, change this one in the same
 -- migration or the pre-flight starts admitting signups the claim refuses.
 --
--- No FOR UPDATE, unlike the claim: this is an advisory pre-flight, binds
--- nothing, and the claim re-decides under its own row lock — while a lock
+-- No FOR UPDATE, unlike the claim: this is an advisory pre-flight, binds no
+-- ACCOUNT, and the claim re-decides under its own row lock — while a lock
 -- here would hand the public claim-signup endpoint a way to serialise
 -- writes against a client row it will never own. The price of the unlocked
 -- read is the foreign_key_violation handler below.
+--
+-- It does bind one thing (Codex review on PR #77): an invite whose client
+-- has NO recorded email RESERVES the first address it admits, with a single
+-- conditional UPDATE (`where email is null` — atomic, so two concurrent
+-- first addresses cannot both pass). Unreserved, one leaked token minted an
+-- auth account for every address anyone cared to send until the invite
+-- expired; reserved, a token is worth at most ONE account, and the parity
+-- with the claim holds by construction, because the claim then enforces the
+-- reserved address like any operator-recorded one. A mistyped first address
+-- is recoverable the ordinary way: the operator edits the client's email in
+-- the roster (or reissues), exactly as for an address they typed themselves.
 --
 -- Only REFUSALS are logged. A passing check is followed within moments by
 -- the real authenticated claim, which writes the 'claimed' row; logging the
@@ -150,6 +176,7 @@ as $$
 declare
   v_client  clients%rowtype;
   v_email   text;
+  v_current text;
   v_outcome invite_claim_outcome;
 begin
   if not fn_is_service_session() then
@@ -182,6 +209,25 @@ begin
     v_outcome := 'claimed';
   end if;
 
+  -- Reserve an unbound invite for the first admitted address (see the
+  -- header). The `email is null` predicate makes the reservation atomic;
+  -- losing it means someone bound an address between our read and this
+  -- write — a concurrent signup-check, or the operator typing one — so
+  -- re-read and re-decide exactly as the ladder would have.
+  if v_outcome = 'claimed' and v_client.email is null and v_email is not null then
+    update clients
+       set email = v_email
+     where id = v_client.id
+       and email is null;
+    if not found then
+      select email into v_current from clients where id = v_client.id;
+      if v_current is not null
+         and lower(trim(v_current)) is distinct from v_email then
+        v_outcome := 'email_mismatch';
+      end if;
+    end if;
+  end if;
+
   if v_outcome <> 'claimed' then
     begin
       insert into invite_claim_attempts
@@ -203,7 +249,7 @@ end;
 $$;
 
 comment on function fn_invite_signup_check(uuid, text) is
-  'Pre-account invite validation for the claim-signup edge function (review H31): returns what fn_claim_invite would return for this token + email, so a dead invite is refused before any auth account is created. Service role only; logs refusals to invite_claim_attempts with a null attempted_by.';
+  'Pre-account invite validation for the claim-signup edge function (review H31): returns what fn_claim_invite would return for this token + email, so a dead invite is refused before any auth account is created. An invite with no recorded email atomically reserves the first admitted address (Codex review on PR #77), so a token mints at most one account. Service role only; logs refusals to invite_claim_attempts with a null attempted_by.';
 
 revoke all on function fn_invite_signup_check(uuid, text)
   from public, anon, authenticated;
@@ -226,13 +272,19 @@ begin
   if has_column_privilege('authenticated', 'operators', 'stripe_charges_enabled', 'insert') then
     raise exception '0045: an operator can still forge stripe_charges_enabled at signup — refusing';
   end if;
-  -- ...and none of the four is updatable either (the UPDATE grant was
-  -- already a column list; this pins that it stays one).
+  -- ...and none of the five is updatable either (the UPDATE grant was
+  -- already a column list; this pins that it stays one). The mint lease is
+  -- in the set: an operator who could write their own lease could wedge or
+  -- un-serialize their checkout mints.
   if has_column_privilege('authenticated', 'operators', 'trial_ends_at', 'update')
      or has_column_privilege('authenticated', 'operators', 'platform_subscription_status', 'update')
      or has_column_privilege('authenticated', 'operators', 'platform_customer_id', 'update')
-     or has_column_privilege('authenticated', 'operators', 'platform_subscription_id', 'update') then
+     or has_column_privilege('authenticated', 'operators', 'platform_subscription_id', 'update')
+     or has_column_privilege('authenticated', 'operators', 'checkout_mint_claimed_at', 'update') then
     raise exception '0045: an operator can rewrite platform billing state — refusing';
+  end if;
+  if has_column_privilege('authenticated', 'operators', 'checkout_mint_claimed_at', 'insert') then
+    raise exception '0045: an operator can seed their own checkout-mint lease — refusing';
   end if;
 
   -- The other direction: signup must still work — checked for EVERY column
