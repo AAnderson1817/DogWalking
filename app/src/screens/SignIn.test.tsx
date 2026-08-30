@@ -36,6 +36,7 @@ const authState: AuthState = {
   role: null,
   operatorId: null,
   clientId: null,
+  operatorBilling: null,
   loading: false,
   roleError: false,
   reauth: vi.fn(async () => null),
@@ -147,5 +148,50 @@ describe("SignIn", () => {
     await user.click(screen.getByRole("button", { name: "Email me a link" }));
     await waitFor(() => expect(AUTH.otp).toHaveBeenCalledTimes(1));
     expect(await screen.findByText("Check your email")).toBeTruthy();
+  });
+
+  // ── Review H31: the magic link signs in, it does not sign up ─────────────
+
+  it("the magic link never creates an account", async () => {
+    // shouldCreateUser defaults TRUE, and before H31 this line passed no
+    // options at all — so the magic link silently minted an account for any
+    // typed address, which was the only operator account-creation path and
+    // the reason the GoTrue signup toggle could never be turned off.
+    renderScreen();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Use a magic link instead" }));
+    await user.type(screen.getByLabelText("Email"), "sam@sanpo.test");
+    await user.click(screen.getByRole("button", { name: "Email me a link" }));
+    await waitFor(() => expect(AUTH.otp).toHaveBeenCalledTimes(1));
+    expect(AUTH.otp).toHaveBeenCalledWith({
+      email: "sam@sanpo.test",
+      options: { shouldCreateUser: false },
+    });
+  });
+
+  it("an unknown address gets the same confirmation, not GoTrue's signup refusal", async () => {
+    // With shouldCreateUser off, GoTrue answers an unknown address with
+    // "Signups not allowed for otp" — surfacing that verbatim would make the
+    // magic link an account-existence oracle, the disclosure the reset mode
+    // already refuses to make.
+    AUTH.otp.mockResolvedValueOnce({
+      error: { code: "otp_disabled", message: "Signups not allowed for otp" },
+    } as never);
+    renderScreen();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Use a magic link instead" }));
+    await user.type(screen.getByLabelText("Email"), "stranger@example.com");
+    await user.click(screen.getByRole("button", { name: "Email me a link" }));
+    expect(await screen.findByText("Check your email")).toBeTruthy();
+    expect(screen.queryByText(/signups not allowed/i)).not.toBeInTheDocument();
+  });
+
+  it("offers the operator front door", () => {
+    // The /signup link is also what makes the route reachable for
+    // route-reachability.test.ts — a person, not just the router, can get
+    // there.
+    renderScreen();
+    expect(screen.getByRole("link", { name: /start your free trial/i }))
+      .toHaveAttribute("href", "/signup");
   });
 });

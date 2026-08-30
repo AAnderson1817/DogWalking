@@ -3,6 +3,12 @@
 // account → /portal. Invalid or already-claimed tokens hit a styled
 // dead-end. Pre-signup, no client data is shown (anon has zero access —
 // spec 03).
+//
+// Since review H31 the ACCOUNT is created by the public claim-signup edge
+// function, not browser signUp: the invite is validated server-side before
+// any account exists, which is what lets the GoTrue signup toggle be turned
+// off without breaking this screen. The claim itself stays the
+// authenticated fn_claim_invite call below, carrying the notice version.
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Button } from "@/components/Button";
@@ -14,6 +20,7 @@ import { Spinner } from "@/components/Spinner";
 import { LoadingState, StateField } from "@/components/StateField";
 import {
   claimInvite,
+  claimSignup,
   InviteClaimError,
   previewInviteAuthed,
   type InvitePreview,
@@ -86,21 +93,47 @@ export default function ClaimInvite() {
 
   async function signUp(e: FormEvent) {
     e.preventDefault();
+    if (!token) {
+      setStage("dead-end");
+      return;
+    }
     setError(null);
     setBusy(true);
     try {
-      const { data, error: err } = await supabase.auth.signUp({ email, password });
+      // Server-side account creation (H31): the invite is checked BEFORE the
+      // account exists, so a dead link dead-ends with its 0039 sentence here
+      // instead of leaving a fresh account with nothing to claim.
+      await claimSignup(token, email, password);
+      // The account exists (or already did — claim-signup deliberately
+      // reports both as success). Sign in with what was just typed; a wrong
+      // password on an existing account gets GoTrue's ordinary, rate-limited
+      // sign-in answer below.
+      const { data, error: err } = await supabase.auth.signInWithPassword({ email, password });
       if (err) {
+        if ((err as { code?: string }).code === "email_not_confirmed" || /confirm/i.test(err.message)) {
+          // Confirmations are on and the admin-created account is
+          // unconfirmed — admin creation sends no email, so ask GoTrue to
+          // send the confirmation now. The claim resumes when they return
+          // signed in.
+          await supabase.auth.resend({ type: "signup", email });
+          setStage("check-email");
+          return;
+        }
         setError(err.message);
         return;
       }
       if (!data.session) {
-        // Email confirmation is on: the claim continues after they verify
-        // and return signed in.
         setStage("check-email");
         return;
       }
       await loadPreview();
+    } catch (err) {
+      if (err instanceof InviteClaimError) {
+        setDeadEndReason(err.message);
+        setStage("dead-end");
+        return;
+      }
+      setError(err instanceof Error ? err.message : "Could not create the account.");
     } finally {
       setBusy(false);
     }
@@ -172,7 +205,9 @@ export default function ClaimInvite() {
                 type="password"
                 autoComplete="new-password"
                 required
-                minLength={8}
+                // claim-signup refuses under 12 (its PASSWORD_MIN_LENGTH,
+                // mirroring config.toml); saying so here beats a round trip.
+                minLength={12}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 error={error ?? undefined}
