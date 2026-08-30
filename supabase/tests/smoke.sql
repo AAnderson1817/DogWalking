@@ -4086,7 +4086,15 @@ declare
   v_cost int;
 begin
   reset session authorization;
-  select id into v_svc from service_types where operator_id = v_op limit 1;
+  -- A dedicated service, NOT `limit 1` over the operator's services: op 1
+  -- also owns 'Smoke weekend walk' (surcharge 1), the walk below is
+  -- scheduled `current_date`, and fn_walk_cost adds the surcharge on
+  -- Sat/Sun — so an unordered pick made this block red on weekends
+  -- whenever the scan happened to return the surcharged row first
+  -- (observed live on 2026-08-30, a Sunday; passed on the very next run).
+  insert into service_types (id, operator_id, name, duration_minutes, credit_cost)
+  values ('99999999-0000-4000-3000-000000000043', v_op, '0043 snapshot walk', 30, 2)
+  returning id into v_svc;
 
   insert into clients (id, operator_id, full_name, status, notes)
   values (v_cl, v_op, 'Snapshot Client', 'active', 'private operator note');
@@ -4452,6 +4460,254 @@ begin
   end;
 
   raise notice 'fn_apply_topup: idempotent, reversible, service-role only (0044): OK';
+end $$;
+
+
+-- ═══ 0045: platform billing state is not self-servable ═════════════════════
+--
+-- The INSERT grant on operators became a column list, because the table-level
+-- grant let a new operator create their own row with trial_ends_at in 2099 or
+-- platform_subscription_status = 'active' and never pay — and, pre-existing,
+-- forge stripe_charges_enabled at signup. Driven LIVE as authenticated, not
+-- read from the catalog: the migration's refuse block already asks
+-- has_column_privilege, and asking the same function twice proves nothing.
+do $$
+declare
+  v_trial timestamptz;
+begin
+  reset session authorization;
+  insert into auth.users (id, email) values
+    ('99999999-0000-4000-a000-000000003101', 'h31-op1@sanpo.test'),
+    ('99999999-0000-4000-a000-000000003102', 'h31-op2@sanpo.test');
+
+  -- Signup in Onboard's exact shape still works under the narrowed grant —
+  -- including the terms pair, whose loss would silently stop recording
+  -- consent (H6).
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000003101","role":"authenticated","email":"h31-op1@sanpo.test"}', true);
+  set local session authorization authenticated;
+  begin
+    insert into operators (id, business_name, display_name, email, terms_version, terms_accepted_at)
+    values ('99999999-0000-4000-a000-000000003101', 'H31 Walks', 'H31', 'h31-op1@sanpo.test',
+            '2026-08-29', now());
+  exception when others then
+    raise exception 'FAIL: the operators INSERT list broke signup in Onboard''s shape: % (%)', sqlerrm, sqlstate;
+  end;
+  reset session authorization;
+
+  -- The row they got carries the defaulted 14-day trial, not one they chose.
+  select trial_ends_at into v_trial from operators
+   where id = '99999999-0000-4000-a000-000000003101';
+  if v_trial is null
+     or v_trial < now() + interval '13 days'
+     or v_trial > now() + interval '15 days' then
+    raise exception 'FAIL: a fresh operator did not get a 14-day trial (got %)', v_trial;
+  end if;
+
+  -- The forbidden columns, one live attempt each. 42501 specifically: a
+  -- refusal for any other reason (RLS, constraint) would pass a broken grant.
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000003102","role":"authenticated","email":"h31-op2@sanpo.test"}', true);
+  set local session authorization authenticated;
+  begin
+    insert into operators (id, business_name, display_name, email, trial_ends_at)
+    values ('99999999-0000-4000-a000-000000003102', 'Cheat', 'Cheat', 'h31-op2@sanpo.test',
+            now() + interval '73 years');
+    raise exception 'FAIL: an operator inserted their own trial_ends_at';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlstate <> '42501' then
+      raise exception 'FAIL: trial_ends_at insert refused for the wrong reason: % (%)', sqlerrm, sqlstate;
+    end if;
+  end;
+  begin
+    insert into operators (id, business_name, display_name, email, platform_subscription_status)
+    values ('99999999-0000-4000-a000-000000003102', 'Cheat', 'Cheat', 'h31-op2@sanpo.test', 'active');
+    raise exception 'FAIL: an operator inserted their own subscription status';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlstate <> '42501' then
+      raise exception 'FAIL: subscription-status insert refused for the wrong reason: % (%)', sqlerrm, sqlstate;
+    end if;
+  end;
+  begin
+    insert into operators (id, business_name, display_name, email, stripe_charges_enabled)
+    values ('99999999-0000-4000-a000-000000003102', 'Cheat', 'Cheat', 'h31-op2@sanpo.test', true);
+    raise exception 'FAIL: an operator forged stripe_charges_enabled at signup (pre-0045 hole)';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlstate <> '42501' then
+      raise exception 'FAIL: charges-enabled insert refused for the wrong reason: % (%)', sqlerrm, sqlstate;
+    end if;
+  end;
+
+  -- ...and the honest shape still goes through for that same user.
+  begin
+    insert into operators (id, business_name, display_name, email)
+    values ('99999999-0000-4000-a000-000000003102', 'H31 Walks 2', 'H31-2', 'h31-op2@sanpo.test');
+  exception when others then
+    raise exception 'FAIL: the minimal signup shape was refused: % (%)', sqlerrm, sqlstate;
+  end;
+
+  -- UPDATE was already a column list; pin that the new columns stayed out.
+  begin
+    update operators set platform_subscription_status = 'active'
+     where id = '99999999-0000-4000-a000-000000003102';
+    raise exception 'FAIL: an operator rewrote their own subscription status';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlstate <> '42501' then
+      raise exception 'FAIL: subscription-status update refused for the wrong reason: % (%)', sqlerrm, sqlstate;
+    end if;
+  end;
+  reset session authorization;
+
+  raise notice 'operator billing state is not self-servable (0045): OK';
+end $$;
+
+-- ═══ 0045: the signup pre-flight answers exactly what the claim would ══════
+--
+-- fn_invite_signup_check exists so claim-signup can refuse a dead invite
+-- BEFORE creating an auth account. Its whole contract is parity: for every
+-- outcome, the check's answer equals fn_claim_invite's answer for the same
+-- token and email. Driven across both functions here, because the two
+-- ladders live in different migrations and nothing else stops them drifting.
+do $$
+declare
+  v_check invite_claim_outcome;
+  v_claim invite_claim_outcome;
+begin
+  reset session authorization;
+  insert into clients (id, operator_id, full_name, status, invite_token, invite_expires_at)
+  values ('99999999-0000-4000-c000-000000003101', '99999999-0000-4000-a000-000000000001',
+          'H31 Expired', 'invited', '99999999-0000-4000-e000-000000003101',
+          now() - interval '1 day');
+  insert into clients (id, operator_id, full_name, status, invite_token, invite_revoked_at)
+  values ('99999999-0000-4000-c000-000000003102', '99999999-0000-4000-a000-000000000001',
+          'H31 Revoked', 'invited', '99999999-0000-4000-e000-000000003102', now());
+  insert into clients (id, operator_id, full_name, email, status, invite_token)
+  values ('99999999-0000-4000-c000-000000003103', '99999999-0000-4000-a000-000000000001',
+          'H31 Bound', 'h31-a@sanpo.test', 'invited', '99999999-0000-4000-e000-000000003103'),
+         ('99999999-0000-4000-c000-000000003104', '99999999-0000-4000-a000-000000000001',
+          'H31 Open', 'h31-a@sanpo.test', 'invited', '99999999-0000-4000-e000-000000003104');
+  insert into auth.users (id, email) values
+    ('99999999-0000-4000-a000-000000003111', 'h31-a@sanpo.test'),
+    ('99999999-0000-4000-a000-000000003112', 'h31-b@sanpo.test');
+
+  -- Parity on every refusal: check as the service session, then the real
+  -- claim as a signed-in user with the same email, and the answers match.
+  v_check := fn_invite_signup_check('99999999-0000-4000-e000-000000003101', 'h31-a@sanpo.test');
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000003111","role":"authenticated","email":"h31-a@sanpo.test"}', true);
+  set local session authorization authenticated;
+  select c.outcome into v_claim from fn_claim_invite('99999999-0000-4000-e000-000000003101') c;
+  reset session authorization;
+  if v_check <> 'expired' or v_check <> v_claim then
+    raise exception 'FAIL: expired parity broke — check said %, claim said %', v_check, v_claim;
+  end if;
+
+  v_check := fn_invite_signup_check('99999999-0000-4000-e000-000000003102', 'h31-a@sanpo.test');
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000003111","role":"authenticated","email":"h31-a@sanpo.test"}', true);
+  set local session authorization authenticated;
+  select c.outcome into v_claim from fn_claim_invite('99999999-0000-4000-e000-000000003102') c;
+  reset session authorization;
+  if v_check <> 'revoked' or v_check <> v_claim then
+    raise exception 'FAIL: revoked parity broke — check said %, claim said %', v_check, v_claim;
+  end if;
+
+  -- The forwarded link: the pre-flight refuses the wrong address before an
+  -- account exists, exactly as the claim would after.
+  v_check := fn_invite_signup_check('99999999-0000-4000-e000-000000003103', 'h31-b@sanpo.test');
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000003112","role":"authenticated","email":"h31-b@sanpo.test"}', true);
+  set local session authorization authenticated;
+  select c.outcome into v_claim from fn_claim_invite('99999999-0000-4000-e000-000000003103') c;
+  reset session authorization;
+  if v_check <> 'email_mismatch' or v_check <> v_claim then
+    raise exception 'FAIL: mismatch parity broke — check said %, claim said %', v_check, v_claim;
+  end if;
+
+  if fn_invite_signup_check('99999999-0000-4000-e000-0000000dead1', 'h31-a@sanpo.test')
+       <> 'not_found' then
+    raise exception 'FAIL: an unknown token was not not_found';
+  end if;
+
+  -- The happy path, case- and whitespace-insensitive like the claim — and
+  -- the check BINDS NOTHING: it predicts, the claim decides.
+  v_check := fn_invite_signup_check('99999999-0000-4000-e000-000000003104', '  H31-A@Sanpo.Test ');
+  if v_check <> 'claimed' then
+    raise exception 'FAIL: a live invite for the invited address was refused as %', v_check;
+  end if;
+  if (select auth_user_id from clients
+       where id = '99999999-0000-4000-c000-000000003104') is not null then
+    raise exception 'FAIL: the pre-flight bound an account';
+  end if;
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000003111","role":"authenticated","email":"h31-a@sanpo.test"}', true);
+  set local session authorization authenticated;
+  select c.outcome into v_claim from fn_claim_invite('99999999-0000-4000-e000-000000003104') c;
+  reset session authorization;
+  if v_claim <> 'claimed' then
+    raise exception 'FAIL: the claim the pre-flight approved was refused as %', v_claim;
+  end if;
+  -- ...and now the check reports what the claim made true.
+  if fn_invite_signup_check('99999999-0000-4000-e000-000000003104', 'h31-a@sanpo.test')
+       <> 'already_claimed' then
+    raise exception 'FAIL: a claimed invite did not read already_claimed from the pre-flight';
+  end if;
+
+  -- The log: refusals leave pre-account rows (attempted_by null, naming the
+  -- address that tried), and the pass leaves none — the real claim writes
+  -- the 'claimed' row moments later, and double-logging every legitimate
+  -- signup would bury the probes this trail exists to surface.
+  -- The pass check comes FIRST: an over-logging implementation trips the
+  -- row count too, and this is the sentence that names its actual defect.
+  if exists (select 1 from invite_claim_attempts
+       where client_id = '99999999-0000-4000-c000-000000003104'
+         and attempted_by is null
+         and outcome = 'claimed') then
+    raise exception 'FAIL: a passing pre-flight was logged — every signup now double-logs';
+  end if;
+  if (select count(*) from invite_claim_attempts
+       where attempted_by is null
+         and client_id in ('99999999-0000-4000-c000-000000003101',
+                           '99999999-0000-4000-c000-000000003102',
+                           '99999999-0000-4000-c000-000000003103',
+                           '99999999-0000-4000-c000-000000003104')) <> 4 then
+    raise exception 'FAIL: pre-flight refusals were not all logged (expected 4 pre-account rows, got %)',
+      (select count(*) from invite_claim_attempts
+        where attempted_by is null
+          and client_id in ('99999999-0000-4000-c000-000000003101',
+                            '99999999-0000-4000-c000-000000003102',
+                            '99999999-0000-4000-c000-000000003103',
+                            '99999999-0000-4000-c000-000000003104'));
+  end if;
+  if (select count(*) from invite_claim_attempts
+       where client_id = '99999999-0000-4000-c000-000000003103'
+         and attempted_by is null
+         and outcome = 'email_mismatch'
+         and attempted_email = 'h31-b@sanpo.test') <> 1 then
+    raise exception 'FAIL: the pre-account mismatch row does not name the address that tried';
+  end if;
+
+  -- Service session only: the ladder answers questions about other people's
+  -- invites, so an authenticated caller must be refused at the door.
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000003111","role":"authenticated","email":"h31-a@sanpo.test"}', true);
+  set local session authorization authenticated;
+  begin
+    perform fn_invite_signup_check('99999999-0000-4000-e000-000000003104', 'h31-a@sanpo.test');
+    raise exception 'FAIL: an authenticated caller ran the signup pre-flight';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlstate <> '42501' and sqlerrm not like '%service role required%' then
+      raise exception 'FAIL: pre-flight refused for the wrong reason: % (%)', sqlerrm, sqlstate;
+    end if;
+  end;
+  reset session authorization;
+
+  raise notice 'signup pre-flight mirrors the claim ladder (0045): OK';
 end $$;
 
 
