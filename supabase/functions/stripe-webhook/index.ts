@@ -160,6 +160,17 @@ function makeDeps(): WebhookDeps {
       return Boolean(data);
     },
 
+    async applyTopup({ clientId, credits, paymentIntentId, amountPence }) {
+      const { data, error } = await db.rpc("fn_apply_topup", {
+        p_client: clientId,
+        p_credits: credits,
+        p_payment_intent_id: paymentIntentId,
+        p_amount_pence: amountPence,
+      });
+      if (error) throw new Error("top-up effects failed", { cause: error });
+      return Boolean(data);
+    },
+
     async hasPaymentForInvoice(invoiceId) {
       // Only rows that represent money actually taken. Without the status
       // predicate a 'failed' row from invoice.payment_failed made this true,

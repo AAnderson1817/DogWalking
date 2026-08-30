@@ -25,9 +25,11 @@ export function makeOverageDeps(
   return {
     resolveAccount,
     async getWalk(id) {
+      // The two snapshot columns are the price source (H32): what was agreed
+      // when the walk was created, never what the tables say now.
       const { data, error } = await db
         .from("walks")
-        .select("id, operator_id, client_id, status, is_overage")
+        .select("id, operator_id, client_id, status, is_overage, overage_rate_pence, visit_price_pence")
         .eq("id", id)
         .maybeSingle();
       if (error) throw new Error("walk lookup failed");
@@ -84,7 +86,9 @@ export function makeOverageDeps(
       };
     },
 
-    async createOffSessionPaymentIntent({ customerId, amountPence, walkId, clientId, attemptKey }) {
+    async createOffSessionPaymentIntent(
+      { customerId, amountPence, walkId, clientId, attemptKey, pricing },
+    ) {
       // Resolve a chargeable payment method: the customer default, else the
       // first card on file.
       //
@@ -118,7 +122,11 @@ export function makeOverageDeps(
           payment_method: paymentMethod,
           off_session: true,
           confirm: true,
-          description: "Sanpo walk (overage)",
+          // On the client's statement/receipt. "Overage" on a pay-per-visit
+          // client's charge would name a plan they are not on.
+          description: pricing === "visit_price"
+            ? "Sanpo walk (per-visit)"
+            : "Sanpo walk (overage)",
           metadata: { walk_id: walkId, client_id: clientId },
           expand: ["latest_charge"],
         },

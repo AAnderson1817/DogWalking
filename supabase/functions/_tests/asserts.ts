@@ -17,6 +17,30 @@ export function assertEquals<T>(actual: T, expected: T, msg?: string): void {
   }
 }
 
+export function assertThrows(
+  fn: () => unknown,
+  // deno-lint-ignore no-explicit-any
+  errorClass?: new (...args: any[]) => Error,
+  msgIncludes?: string,
+  msg = "expected function to throw",
+): Error {
+  try {
+    fn();
+  } catch (e) {
+    const err = e instanceof Error ? e : new Error(String(e));
+    if (errorClass && !(err instanceof errorClass)) {
+      // `err` narrows to `never` inside this branch, so name the thrown
+      // value off the original exception instead.
+      throw new Error(`${msg}: threw ${String(e)}, expected ${errorClass.name}`);
+    }
+    if (msgIncludes && !err.message.includes(msgIncludes)) {
+      throw new Error(`${msg}: message ${JSON.stringify(err.message)} lacks ${msgIncludes}`);
+    }
+    return err;
+  }
+  throw new Error(msg);
+}
+
 export async function assertRejects(
   fn: () => Promise<unknown>,
   msg = "expected promise to reject",

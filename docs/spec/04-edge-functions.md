@@ -61,7 +61,31 @@ Response: `{ walk, billing: { outcome: 'debited'|'overage', cost_credits?, charg
 Idempotent: re-POST on a completed walk returns the stored result, no re-billing.
 
 ## create-checkout — POST, operator JWT
-Body: `{ client_id, plan_id }` → assert ownership → get/create Stripe customer (persist `stripe_customer_id`) → Checkout Session `mode=subscription`, `price = plans.stripe_price_id`, `payment_method_collection=always`, `subscription_data.metadata = { client_id, operator_id, plan_id }`, success/cancel URLs from `APP_BASE_URL`.
+Body is exactly one of three shapes (review H32); the session params live in
+`create-checkout/params.ts` as pure builders, and index.ts sends whichever one
+through the **single** `checkout.sessions.create` call —
+`checkout_session_test.ts` pins both the built objects and that wiring.
+
+- `{ client_id, plan_id }` → `mode=subscription`, `price =
+  plans.stripe_price_id`, `payment_method_collection=always`,
+  `subscription_data.metadata = { client_id, operator_id, plan_id }`. The
+  one-live-subscription guard applies to this shape only.
+- `{ client_id, topup: { credits, amount_pence } }` → `mode=payment` with an
+  ad-hoc `price_data` line item ("N walk credits"), metadata carrying
+  `STRIPE_META.topupCredits`, and `payment_intent_data.setup_future_usage =
+  'off_session'` — the paying card is saved, so one top-up makes a cash
+  client fully chargeable. Credits and amount must be positive integers.
+- `{ client_id, setup: true }` → `mode=setup`: card on file for a
+  pay-per-visit client, under a `custom_text` mandate naming each priced
+  service and its figure. Refused with `409 visit_price_missing` when no
+  service has a visit price — a card saved under no stated terms is an
+  off-session charge waiting to surprise somebody (H12), so the mandate is a
+  precondition, not decoration. A top-up with nothing priced still runs (its
+  own line item is its disclosure) and simply states no per-visit promise.
+
+Common to all three: ownership asserts, `requireAccount`, get/create the
+Stripe customer on the connected account (persist `stripe_customer_id`),
+success/cancel URLs from `APP_BASE_URL`.
 Response: `{ url }`.
 
 **The billing address is collected and persisted (review L8).**
@@ -181,7 +205,19 @@ the lease, closing the race where two deliveries both saw an unclaimed row.
 
 Setting `payment_status` to `refunded` interacts with this — see *Status sets*
 below, and spec 02 on why `uq_payments_subscription_invoice` had to widen.
-- `checkout.session.completed`: bind `stripe_subscription_id`, `subscription_status='active'`, `plan_id` from metadata.
+- `checkout.session.completed`, by session `mode` (review H32):
+  - `subscription`: bind `stripe_subscription_id`, `subscription_status='active'`, `plan_id` from metadata.
+  - `payment`: a Sanpo top-up, recognised by the `STRIPE_META.topupCredits`
+    metadata key — any other payment-mode session is ignored. The client is
+    resolved through the session's **customer** scoped to the event's
+    operator, never through the metadata (which any operator can forge in
+    their own dashboard); the credit count is validated as a positive
+    integer; then `fn_apply_topup` records the payment and grants atomically,
+    keyed on the PaymentIntent. Notifications (`payment_taken`, client and
+    operator) fire only when this delivery actually granted — a redelivery
+    must not re-announce.
+  - `setup`: a card was saved. One operator-only `card_saved` bell row —
+    the moment a pay-per-visit client becomes chargeable.
 - `invoice.paid` (subscription): **scoped to the client's bound subscription** — an invoice for any other subscription on the same customer is ignored, exactly as the two `customer.subscription.*` arms already did. A customer can carry more than one live subscription and their invoices have *different* ids, so `uq_payments_subscription_invoice` does not catch it: the result was two cycle grants and two rollovers. An *unbound* client is still applied, because `checkout.session.completed` and `invoice.paid` race and refusing would drop the first cycle of every new subscription. `create-checkout` now also refuses to start a second subscription for a client who has one.
 
   **Rollover runs on renewals only.** `fn_apply_invoice_paid` takes `p_is_renewal`, true for `subscription_cycle` and false for `subscription_create`. Rollover carries what is left of the cycle that just ended; a first invoice has no prior cycle, and on `rollover_policy='none'` running it books an expiry for the entire balance — destroying credit the operator granted before billing started.
@@ -252,6 +288,7 @@ identical:
 | --- | --- | --- |
 | `uq_overage_payment_per_walk` | succeeded, pending, refunded, disputed | `getLiveOveragePayment` |
 | `uq_payments_subscription_invoice` | succeeded, refunded, disputed | `hasPaymentForInvoice` |
+| `uq_topup_payment_per_intent` (0044) | succeeded, refunded, disputed | `fn_apply_topup`'s own check — SQL-side, same migration file as the index, pinned by the smoke replay-after-refund block rather than by `payment_status_test.ts` |
 
 Too **narrow** in code and the read misses a row, the caller falls through to
 an insert, the index raises, and the operator sees an unexplained internal
@@ -270,7 +307,18 @@ load-bearing: 0012 created `uq_overage_payment_per_walk` with the narrow list
 the code was still using, so a first-match parser would have confirmed the bug.)
 
 ## charge-overage — POST, operator JWT (also invoked in-process by complete-walk)
-Body: `{ walk_id }` → assert walk `is_overage=true` and no live overage payment exists (idempotency, per *Status sets* above) → PaymentIntent `off_session=true, confirm=true`, amount = client's `plans.overage_rate_pence`, customer default payment method → payments row (`type='overage'`, walk_id, status from PI). The walk stays completed in every failure case; the debt is visible in the billing console.
+Body: `{ walk_id }` → assert walk `is_overage=true` and no live overage payment exists (idempotency, per *Status sets* above) → PaymentIntent `off_session=true, confirm=true`, customer default payment method → payments row (`type='overage'`, walk_id, status from PI). The walk stays completed in every failure case; the debt is visible in the billing console.
+
+**Amount = the snapshot, not the live tables (H32, completing 0043/L7).**
+`walks.overage_rate_pence` (the plan rate agreed when the walk was created),
+else `walks.visit_price_pence` (the service's cash price at creation — the
+pay-per-visit case; same `type='overage'` row and claim machinery, different
+wording and PI description), else the live `plans.overage_rate_pence` for
+pre-snapshot rows only. This line used to say "amount = client's
+`plans.overage_rate_pence`" and that was the code: 0043's money-side snapshot
+had zero readers, so a Settings edit re-priced every walk already on the
+calendar. All three null → `failWithoutAttempt`, operator-only, naming the
+Settings fix.
 Response: `{ payment }`.
 
 **Failures are three classes, not two.** Which one a failure falls into decides

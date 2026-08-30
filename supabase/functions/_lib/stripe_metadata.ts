@@ -22,4 +22,11 @@ export const STRIPE_META = {
   planChangeIntentId: "sanpo_plan_change_intent_id",
   /** `plans.id` — the target plan, for a human reading the Stripe dashboard. */
   planId: "sanpo_plan_id",
+  /** Credits a payment-mode Checkout Session buys (review H32) — written by
+   * create-checkout, read back by stripe-webhook off checkout.session.completed.
+   * Its PRESENCE is also the discriminator: a payment-mode session without it
+   * is not a Sanpo top-up and is ignored. The value is attacker-controlled on
+   * a Connect endpoint like all session metadata; the webhook validates it and
+   * scopes the client by the event's account before granting anything. */
+  topupCredits: "sanpo_topup_credits",
 } as const;

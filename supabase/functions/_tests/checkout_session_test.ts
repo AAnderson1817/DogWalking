@@ -1,62 +1,178 @@
-import { assert, assertEquals } from "./asserts.ts";
+import { assert, assertEquals, assertThrows } from "./asserts.ts";
+import {
+  parseCheckoutRequest,
+  setupSessionParams,
+  subscriptionSessionParams,
+  topupSessionParams,
+  visitPriceMandate,
+} from "../create-checkout/params.ts";
+import { STRIPE_META } from "../_lib/stripe_metadata.ts";
+import { HttpError } from "../_lib/http.ts";
 
 /**
- * Review L8. `create-checkout` has no injected handler seam — it builds one
- * Stripe call and returns the URL — so this reads the source rather than
- * driving the code. That is the same idiom as `payment_status_test.ts`, which
- * parses the migrations rather than restating them, and it is why this suite's
- * read permission now covers `supabase/functions` as well.
+ * Review L8, extended by H32. This file used to regex create-checkout's
+ * source, because index.ts had no seam — and a source regex could pin "the
+ * text mentions billing_address_collection" for exactly one call. H32 gave
+ * the function three session kinds, so the params moved into pure builders
+ * (create-checkout/params.ts) and the same rules are now asserted on the
+ * OBJECTS — for every kind, not whichever call the parser found first.
  *
- * The rule worth pinning is not "we collect an address". It is that collecting
- * one and keeping one are two different options, and Stripe's default is to
- * collect it for the payment and NOT write it back to the Customer. A session
- * with `billing_address_collection` and no `customer_update.address` therefore
- * asks every client for their address and then throws it away — indis-
- * tinguishable, six months later, from never having asked, except that the
- * form was longer. The whole point of L8 is having the address on the Customer
- * when Stripe Tax is eventually turned on.
+ * The rule worth pinning is unchanged: collecting an address and keeping one
+ * are two different options, and Stripe's default is to collect it for the
+ * payment and NOT write it back to the Customer. A session with
+ * `billing_address_collection` and no `customer_update.address` asks every
+ * client for their address and throws it away.
  */
+
+const COMMON = {
+  customerId: "cus_1",
+  clientId: "client-1",
+  operatorId: "op-1",
+  base: "https://app.example",
+};
+
+const SERVICES = [
+  { name: "Private walk 30", visit_price_pence: 2500 },
+  { name: "Private walk 60", visit_price_pence: 4000 },
+];
+
+function subscription(overage: number | null = 2200) {
+  return subscriptionSessionParams({
+    ...COMMON,
+    planId: "plan-1",
+    stripePriceId: "price_1",
+    overageRatePence: overage,
+  });
+}
+
+function topup(mandate: string | null = visitPriceMandate(SERVICES)) {
+  return topupSessionParams({ ...COMMON, credits: 10, amountPence: 5000, mandate });
+}
+
+function setup() {
+  return setupSessionParams({ ...COMMON, mandate: visitPriceMandate(SERVICES)! });
+}
+
+Deno.test("EVERY session kind collects a billing address and persists it", () => {
+  // The pair, per kind. One un-paired builder re-opens L8 for that kind only,
+  // which is exactly what a single-call source regex could never see.
+  for (
+    const [kind, params] of [
+      ["subscription", subscription()],
+      ["topup", topup()],
+      ["setup", setup()],
+    ] as const
+  ) {
+    assertEquals(params.billing_address_collection, "required", `${kind} does not collect`);
+    assertEquals(params.customer_update?.address, "auto", `${kind} collects and discards (L8)`);
+  }
+});
+
+Deno.test("subscription params: shape, metadata on both objects, overage mandate", () => {
+  const p = subscription();
+  assertEquals(p.mode, "subscription");
+  assertEquals(p.payment_method_collection, "always");
+  assertEquals(p.line_items, [{ price: "price_1", quantity: 1 }]);
+  // Metadata on the session (read by checkout.session.completed) AND the
+  // subscription (read by anything inspecting the subscription later).
+  const expected = { client_id: "client-1", operator_id: "op-1", plan_id: "plan-1" };
+  assertEquals(p.metadata, expected);
+  assertEquals(p.subscription_data, { metadata: expected });
+  assert(p.custom_text?.submit.message.includes("$22.00"), "the mandate names the figure");
+  assertEquals(p.success_url, "https://app.example/clients/client-1?checkout=success");
+});
+
+Deno.test("the overage mandate is omitted, not fudged, when the plan has no rate", () => {
+  const p = subscription(null);
+  assertEquals("custom_text" in p, false);
+});
+
+Deno.test("topup params: payment mode, ad-hoc price, credits marker, card saved", () => {
+  const p = topup();
+  assertEquals(p.mode, "payment");
+  assertEquals(p.line_items[0].quantity, 1);
+  assertEquals(p.line_items[0].price_data.unit_amount, 5000);
+  assertEquals(p.line_items[0].price_data.currency, "usd");
+  // The webhook reads the credit count back off the completed session; the
+  // key comes from STRIPE_META because a halfway rename must be impossible,
+  // not merely detectable (L23).
+  assertEquals(p.metadata[STRIPE_META.topupCredits], "10");
+  // One checkout makes a cash client fully chargeable: the paying card is
+  // saved for off-session visit charges.
+  assertEquals(p.payment_intent_data.setup_future_usage, "off_session");
+  assert(p.custom_text?.submit.message.includes("$25.00"), "priced services are disclosed");
+});
+
+Deno.test("a topup with nothing priced states no per-visit promise", () => {
+  const p = topup(null);
+  assertEquals("custom_text" in p, false);
+});
+
+Deno.test("setup params: setup mode, and the mandate is not optional", () => {
+  const p = setup();
+  assertEquals(p.mode, "setup");
+  const message = p.custom_text.submit.message;
+  assert(message.includes("Private walk 30 $25.00"), "each priced service, with its figure");
+  assert(message.includes("Private walk 60 $40.00"));
+});
+
+Deno.test("visitPriceMandate: null on nothing priced, capped on many services", () => {
+  assertEquals(visitPriceMandate([]), null);
+  const many = Array.from({ length: 9 }, (_, i) => ({
+    name: `Service ${i}`,
+    visit_price_pence: 1000 + i,
+  }));
+  const text = visitPriceMandate(many)!;
+  assert(text.includes("and 3 more priced services"), "the cap must say what it dropped");
+  assert(text.length < 1200, "Checkout rejects custom_text over 1200 chars");
+});
+
+Deno.test("parseCheckoutRequest: exactly one kind, and money fields are validated", () => {
+  assertEquals(parseCheckoutRequest({ client_id: "c", plan_id: "p" }).kind, "subscription");
+  assertEquals(
+    parseCheckoutRequest({ client_id: "c", topup: { credits: 3, amount_pence: 900 } }).kind,
+    "topup",
+  );
+  assertEquals(parseCheckoutRequest({ client_id: "c", setup: true }).kind, "setup");
+
+  const bad: unknown[] = [
+    {}, // no client
+    { client_id: "c" }, // no kind
+    { client_id: "c", plan_id: "p", setup: true }, // two kinds
+    { client_id: "c", plan_id: "p", topup: { credits: 1, amount_pence: 1 } },
+    { client_id: "c", topup: { credits: 0, amount_pence: 900 } },
+    { client_id: "c", topup: { credits: 2.5, amount_pence: 900 } },
+    { client_id: "c", topup: { credits: "3", amount_pence: 900 } },
+    { client_id: "c", topup: { credits: 3, amount_pence: 0 } },
+    { client_id: "c", topup: { credits: 3, amount_pence: -100 } },
+  ];
+  for (const body of bad) {
+    assertThrows(
+      () => parseCheckoutRequest(body),
+      HttpError,
+      undefined,
+      `accepted: ${JSON.stringify(body)}`,
+    );
+  }
+});
+
+// ── The wiring half: the builders must be what actually reaches Stripe ─────
+// Object tests on builders nobody calls would pass forever. index.ts must
+// have exactly ONE sessions.create, fed by the builders, with the account as
+// its options — a second literal call would be a session these tests never
+// see, which is the failure mode the old source-regex suite had.
 const SRC = await Deno.readTextFile(
   new URL("../create-checkout/index.ts", import.meta.url),
 );
 
-/** The session object, from `checkout.sessions.create({` to its matching brace. */
-function sessionOptions(): string {
-  const at = SRC.indexOf("checkout.sessions.create({");
-  assert(at > -1, "create-checkout no longer calls checkout.sessions.create");
-  const open = SRC.indexOf("{", at);
-  let depth = 0;
-  for (let i = open; i < SRC.length; i++) {
-    if (SRC[i] === "{") depth++;
-    else if (SRC[i] === "}" && --depth === 0) return SRC.slice(open, i + 1);
-  }
-  throw new Error("unbalanced session options");
-}
-
-Deno.test("checkout collects a billing address", () => {
+Deno.test("index.ts sends exactly one session, built by the builders, on the account", () => {
+  const calls = SRC.match(/checkout\.sessions\.create\(/g) ?? [];
+  assertEquals(calls.length, 1, "every session kind must flow through the one call");
   assert(
-    /billing_address_collection:\s*"required"/.test(sessionOptions()),
-    "the session no longer requires a billing address (review L8)",
+    /checkout\.sessions\.create\(params,\s*account\)/.test(SRC),
+    "the call must send the built params and carry the connected account",
   );
-});
-
-Deno.test("an address that is collected is also persisted to the Customer", () => {
-  const opts = sessionOptions();
-  const collects = /billing_address_collection:\s*"(required|auto)"/.test(opts);
-  const persists = /customer_update:\s*\{[^}]*address:\s*"auto"/.test(opts);
-  assertEquals(
-    collects && !persists,
-    false,
-    "billing_address_collection without customer_update.address collects the "
-      + "address for the payment and never writes it to the Customer — the "
-      + "address is asked for and discarded",
-  );
-});
-
-Deno.test("the source parser found the real call", () => {
-  // Without this, both assertions above would pass vacuously against an empty
-  // string if `sessionOptions()` ever started returning one.
-  const opts = sessionOptions();
-  assert(opts.includes("mode:"), "parsed something that is not the session options");
-  assert(opts.length > 200, `session options implausibly short (${opts.length})`);
+  for (const builder of ["subscriptionSessionParams", "topupSessionParams", "setupSessionParams"]) {
+    assert(SRC.includes(builder + "("), `${builder} is never called from index.ts`);
+  }
 });

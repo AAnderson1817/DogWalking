@@ -10,10 +10,11 @@
 // claimant could still fail is how grants got lost. A claim stuck in
 // 'processing' past its lease is taken over by the next retry.
 
-// The only import in this module: `handler.ts` is otherwise entirely
-// dependency-injected. These are constants, not a dependency — and sharing
-// them with the writer is the point (review L23).
+// The only imports in this module: `handler.ts` is otherwise entirely
+// dependency-injected. Constants and a pure formatter, not dependencies —
+// and sharing the metadata keys with their writer is the point (review L23).
 import { STRIPE_META } from "../_lib/stripe_metadata.ts";
+import { formatMoney } from "../_lib/money.ts";
 
 export interface StripeEventLike {
   id: string;
@@ -95,6 +96,16 @@ export interface WebhookDeps {
    * invoice.payment_failed on every dunning retry, each with a fresh event id
    * the claim ledger cannot dedupe. */
   hasFailedPaymentForInvoice(invoiceId: string): Promise<boolean>;
+  /** Atomic + idempotent top-up effects (fn_apply_topup RPC, 0044): payment
+   * row + credit grant in one transaction keyed on the PaymentIntent id.
+   * Returns false when this intent was already applied — including a
+   * redelivery after the payment was refunded, which must not grant again. */
+  applyTopup(args: {
+    clientId: string;
+    credits: number;
+    paymentIntentId: string;
+    amountPence: number;
+  }): Promise<boolean>;
   insertPayment(row: Record<string, unknown>): Promise<void>;
   insertNotification(row: Record<string, unknown>): Promise<void>;
 
@@ -204,8 +215,83 @@ async function applyEvent(
 
     case "checkout.session.completed": {
       const meta = (obj.metadata ?? {}) as Record<string, string>;
+      const mode = (obj.mode ?? "subscription") as string;
+
+      // ── Payment mode: a top-up (review H32) ─────────────────────────────
+      // Only sessions carrying our credits marker are Sanpo top-ups; any
+      // other payment-mode session on the account is not ours to act on.
+      // Everything read off the session is attacker-controlled (any operator
+      // can mint a session in their own dashboard), so the client is resolved
+      // through the session's CUSTOMER scoped to THIS event's operator — a
+      // crafted session naming another tenant's customer resolves to nothing
+      // — and the credits are validated before they reach the RPC. An
+      // operator inflating credits for their own client gains nothing they
+      // do not already have through fn_adjust_credits.
+      if (mode === "payment") {
+        const creditsRaw = meta[STRIPE_META.topupCredits];
+        if (!creditsRaw) return { status: "ignored" };
+        const credits = Number(creditsRaw);
+        if (!Number.isInteger(credits) || credits <= 0) return { status: "ignored" };
+        const pi = typeof obj.payment_intent === "string" ? obj.payment_intent : null;
+        if (!pi) return { status: "ignored" };
+        const client = await deps.findClientByCustomer(String(obj.customer ?? ""), operatorId);
+        if (!client) return { status: "ignored" };
+
+        const applied = await deps.applyTopup({
+          clientId: client.id,
+          credits,
+          paymentIntentId: pi,
+          amountPence: (obj.amount_total as number) ?? 0,
+        });
+        // Notify only when this delivery actually granted: Stripe redelivers
+        // for three days, and a bell row per redelivery would announce one
+        // payment several times.
+        if (applied) {
+          const money = formatMoney((obj.amount_total as number) ?? 0);
+          const plural = credits === 1 ? "credit" : "credits";
+          await deps.insertNotification({
+            operator_id: operatorId,
+            client_id: client.id,
+            type: "payment_taken",
+            title: `Top-up received — ${credits} ${plural} added`,
+            body: `Your ${money} top-up went through and ${credits} ${plural} ` +
+              "were added to your balance.",
+            walk_id: null,
+          });
+          await deps.insertNotification({
+            operator_id: operatorId,
+            client_id: null,
+            type: "payment_taken",
+            title: `${client.full_name} topped up ${credits} ${plural}`,
+            body: `${money} was collected by card. The credits are already on their balance.`,
+            walk_id: null,
+          });
+        }
+        return { status: "processed" };
+      }
+
+      // ── Setup mode: a card was saved (review H32) ───────────────────────
+      // The moment a pay-per-visit client becomes chargeable. Operator-only:
+      // card_saved is not in CLIENT_FACING, so no email is attempted, and the
+      // client was present for the save.
+      if (mode === "setup") {
+        const client = await deps.findClientByCustomer(String(obj.customer ?? ""), operatorId);
+        if (!client) return { status: "ignored" };
+        await deps.insertNotification({
+          operator_id: operatorId,
+          client_id: null,
+          type: "card_saved",
+          title: `${client.full_name} saved a card`,
+          body: "Their card is on file now, so completed walks beyond their credits " +
+            "can be charged per visit.",
+          walk_id: null,
+        });
+        return { status: "processed" };
+      }
+
+      // ── Subscription mode: unchanged ────────────────────────────────────
       const clientId = meta.client_id;
-      if (!clientId || (obj.mode ?? "subscription") !== "subscription") {
+      if (!clientId || mode !== "subscription") {
         return { status: "ignored" };
       }
       const fields: Record<string, unknown> = {

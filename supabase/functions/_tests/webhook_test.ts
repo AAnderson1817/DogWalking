@@ -34,6 +34,8 @@ function makeMockDeps(
     reversal?: ReversalResult;
     /** Cached plan on the client row; defaults to the plan on price_1. */
     clientPlanId?: string | null;
+    /** What fn_apply_topup reports: false = this intent was already applied. */
+    topupApplied?: boolean;
   } = {},
 ): { deps: WebhookDeps; calls: Call[] } {
   const calls: Call[] = [];
@@ -106,6 +108,10 @@ function makeMockDeps(
     hasFailedPaymentForInvoice(invoiceId) {
       calls.push({ fn: "hasFailedPaymentForInvoice", args: [invoiceId] });
       return Promise.resolve(opts.hasFailedInvoicePayment ?? false);
+    },
+    applyTopup(args) {
+      calls.push({ fn: "applyTopup", args: [args] });
+      return Promise.resolve(opts.topupApplied ?? true);
     },
     insertPayment(row) {
       calls.push({ fn: "insertPayment", args: [row] });
@@ -287,6 +293,126 @@ Deno.test("checkout.session.completed binds subscription + plan from metadata", 
     plan_id: "plan-1",
     stripe_customer_id: "cus_1",
   });
+});
+
+// ── payment-mode completions: top-ups (0044, review H32) ──────────────────
+
+/** A completed payment-mode top-up session as Stripe delivers it. */
+const TOPUP_SESSION = {
+  mode: "payment",
+  customer: "cus_1",
+  payment_intent: "pi_topup_1",
+  amount_total: 5000,
+  metadata: { client_id: "client-1", operator_id: "op-1", sanpo_topup_credits: "10" },
+};
+
+Deno.test("a completed top-up applies atomically and tells both personas once", async () => {
+  const { deps, calls } = makeMockDeps();
+  const result = await handleStripeEvent(
+    event("checkout.session.completed", TOPUP_SESSION),
+    deps,
+  );
+  assertEquals(result.status, "processed");
+  const apply = calls.find((c) => c.fn === "applyTopup")!;
+  assertEquals(apply.args[0], {
+    clientId: "client-1",
+    credits: 10,
+    paymentIntentId: "pi_topup_1",
+    amountPence: 5000,
+  });
+  // The client is resolved through the session's CUSTOMER scoped to the
+  // event's operator — never through the metadata, which any operator can
+  // forge in their own dashboard.
+  const lookup = calls.find((c) => c.fn === "findClientByCustomer")!;
+  assertEquals(lookup.args, ["cus_1", "op-1"]);
+  const notifs = calls.filter((c) => c.fn === "insertNotification")
+    .map((c) => c.args[0] as Record<string, unknown>);
+  assertEquals(notifs.length, 2);
+  const targets = notifs.map((n) => n.client_id);
+  assert(targets.includes("client-1") && targets.includes(null));
+  for (const n of notifs) {
+    assertEquals(n.type, "payment_taken");
+    assert(String(n.title).includes("10"), "the credit count is the message");
+  }
+  assert(
+    notifs.some((n) => String(n.body).includes("$50.00")),
+    "the amount is part of the disclosure (H12)",
+  );
+});
+
+Deno.test("a redelivered top-up applies nothing and re-announces nothing", async () => {
+  // fn_apply_topup returns false when the intent was already applied —
+  // including after a refund. Stripe redelivers for three days, and a bell
+  // row per redelivery would announce one payment several times.
+  const { deps, calls } = makeMockDeps({ topupApplied: false });
+  const result = await handleStripeEvent(
+    event("checkout.session.completed", TOPUP_SESSION),
+    deps,
+  );
+  assertEquals(result.status, "processed");
+  assert(calls.some((c) => c.fn === "applyTopup"));
+  assertFalse(calls.some((c) => c.fn === "insertNotification"));
+});
+
+Deno.test("a crafted top-up naming another tenant's customer grants nothing", async () => {
+  // Session metadata AND the customer id are attacker-controlled on a
+  // Connect endpoint; the scoped customer lookup is the control.
+  const { deps, calls } = makeMockDeps();
+  const result = await handleStripeEvent(
+    event("checkout.session.completed", { ...TOPUP_SESSION, customer: "cus_foreign" }),
+    deps,
+  );
+  assertEquals(result.status, "ignored");
+  assertFalse(calls.some((c) => c.fn === "applyTopup"));
+  assertFalse(calls.some((c) => c.fn === "insertNotification"));
+});
+
+Deno.test("malformed or missing credit counts never reach the RPC", async () => {
+  for (const credits of ["0", "-3", "2.5", "ten", ""]) {
+    const { deps, calls } = makeMockDeps();
+    const meta = { ...TOPUP_SESSION.metadata, sanpo_topup_credits: credits };
+    const result = await handleStripeEvent(
+      event("checkout.session.completed", { ...TOPUP_SESSION, metadata: meta }),
+      deps,
+    );
+    assertEquals(result.status, "ignored", `credits=${JSON.stringify(credits)}`);
+    assertFalse(calls.some((c) => c.fn === "applyTopup"));
+  }
+  // No marker at all: an ordinary payment-mode session that is not ours.
+  const { deps, calls } = makeMockDeps();
+  const result = await handleStripeEvent(
+    event("checkout.session.completed", {
+      ...TOPUP_SESSION,
+      metadata: { client_id: "client-1" },
+    }),
+    deps,
+  );
+  assertEquals(result.status, "ignored");
+  assertFalse(calls.some((c) => c.fn === "applyTopup"));
+});
+
+Deno.test("a completed card-save (setup mode) tells the operator only", async () => {
+  const { deps, calls } = makeMockDeps();
+  const result = await handleStripeEvent(
+    event("checkout.session.completed", { mode: "setup", customer: "cus_1" }),
+    deps,
+  );
+  assertEquals(result.status, "processed");
+  const notifs = calls.filter((c) => c.fn === "insertNotification")
+    .map((c) => c.args[0] as Record<string, unknown>);
+  assertEquals(notifs.length, 1);
+  assertEquals(notifs[0].client_id, null);
+  assertEquals(notifs[0].type, "card_saved");
+});
+
+Deno.test("a card-save for an unknown customer is ignored", async () => {
+  const { deps, calls } = makeMockDeps();
+  const result = await handleStripeEvent(
+    event("checkout.session.completed", { mode: "setup", customer: "cus_foreign" }),
+    deps,
+  );
+  assertEquals(result.status, "ignored");
+  assertFalse(calls.some((c) => c.fn === "insertNotification"));
 });
 
 Deno.test("invoice.payment_failed marks past_due, stamps currency, notifies both personas", async () => {

@@ -232,12 +232,19 @@ interface OverageOpts {
   piStatus?: string;
   /** Receipt URL on the PaymentIntent, if any. */
   receiptUrl?: string | null;
+  /** walks.overage_rate_pence — the plan rate snapshotted at creation (0043).
+   * Defaults to null, i.e. a pre-snapshot row, which is what every test
+   * written before H32 encodes. */
+  walkRatePence?: number | null;
+  /** walks.visit_price_pence — the cash price snapshotted at creation (0044). */
+  walkVisitPence?: number | null;
 }
 
 function makeODeps(opts: OverageOpts = {}) {
   const calls: string[] = [];
   const updates: Array<Record<string, unknown>> = [];
   const notes: Array<Record<string, unknown>> = [];
+  const piArgs: Array<{ amountPence: number; pricing: string }> = [];
   let attemptKey = "";
   const NOW = 1_700_000_000_000;
   const deps: OverageDeps = {
@@ -248,6 +255,8 @@ function makeODeps(opts: OverageOpts = {}) {
         client_id: "client-1",
         status: "completed",
         is_overage: true,
+        overage_rate_pence: opts.walkRatePence ?? null,
+        visit_price_pence: opts.walkVisitPence ?? null,
       }),
     getLiveOveragePayment: (walkId) => {
       calls.push("getLive");
@@ -280,6 +289,7 @@ function makeODeps(opts: OverageOpts = {}) {
     createOffSessionPaymentIntent: (args) => {
       calls.push("createPI");
       attemptKey = args.attemptKey;
+      piArgs.push(args);
       if (opts.declines) {
         return Promise.reject({ type: "StripeCardError", message: "declined" });
       }
@@ -327,7 +337,7 @@ function makeODeps(opts: OverageOpts = {}) {
     },
     now: () => NOW,
   };
-  return { deps, calls, updates, notes, attemptKey: () => attemptKey };
+  return { deps, calls, updates, notes, piArgs, attemptKey: () => attemptKey };
 }
 
 Deno.test("existing succeeded overage payment short-circuits (no new charge)", async () => {
@@ -496,6 +506,90 @@ Deno.test("a declined CARD still tells both — that one is the client's to fix"
   await chargeOverageForWalk("walk-1", deps);
   assert(calls.includes("notify:client"), "a card decline is the client's to act on");
   assert(calls.includes("notify:operator"));
+});
+
+// ── Price resolution: the snapshot, not the live tables (0043/0044, H32) ───
+// 0043 wrote walks.overage_rate_pence at creation and NOTHING read it — the
+// charge billed the live plan rate, so a Settings edit re-priced every walk
+// already on the calendar, which is the exact defect 0043 was recorded as
+// closing. These pin the order: plan-rate snapshot, then visit-price
+// snapshot, then the live plan rate for pre-snapshot rows only.
+
+Deno.test("the snapshotted plan rate wins over the live plan rate", async () => {
+  // The walk was created when the rate was $22; the plan now says $99.
+  // The client agreed $22.
+  const { deps, piArgs } = makeODeps({ walkRatePence: 2200 });
+  // Live plan in the mock is 2200 too — make the divergence explicit:
+  deps.getClientBilling = () =>
+    Promise.resolve({
+      stripe_customer_id: "cus_1",
+      plan: { overage_rate_pence: 9900 },
+      full_name: "Amelia Hart",
+    });
+  await chargeOverageForWalk("walk-1", deps);
+  assertEquals(piArgs.length, 1);
+  assertEquals(piArgs[0].amountPence, 2200);
+  assertEquals(piArgs[0].pricing, "plan_rate");
+});
+
+Deno.test("a no-plan walk with a visit-price snapshot charges the visit price", async () => {
+  const { deps, calls, piArgs, notes } = makeODeps({ noPlan: true, walkVisitPence: 2500 });
+  const result = await chargeOverageForWalk("walk-1", deps);
+  assertEquals(result.payment.status, "succeeded");
+  assertEquals(piArgs.length, 1);
+  assertEquals(piArgs[0].amountPence, 2500);
+  assertEquals(piArgs[0].pricing, "visit_price");
+  assert(calls.includes("notify:client"), "H12: a successful off-session charge announces itself");
+  const note = notes.find((n) => n.type === "payment_taken")!;
+  assert(
+    String(note.body).includes("per-visit price"),
+    "the disclosure names the promise that priced the charge",
+  );
+  assertFalse(
+    String(note.body).includes("plan credits"),
+    "a pay-per-visit client has no plan credits to have used up",
+  );
+});
+
+Deno.test("a plan-rate charge keeps the plan wording", async () => {
+  const { deps, notes } = makeODeps({ walkRatePence: 2200 });
+  await chargeOverageForWalk("walk-1", deps);
+  const note = notes.find((n) => n.type === "payment_taken")!;
+  assert(String(note.body).includes("plan credits were used up"));
+});
+
+Deno.test("a plan client's walk never falls to the visit price", async () => {
+  // The snapshot trigger fills visit_price_pence whenever the service has
+  // one, plan client or not — the resolution ORDER is the only thing keeping
+  // a plan client off the cash price.
+  const { deps, piArgs } = makeODeps({ walkRatePence: 2200, walkVisitPence: 9999 });
+  await chargeOverageForWalk("walk-1", deps);
+  assertEquals(piArgs[0].amountPence, 2200);
+  assertEquals(piArgs[0].pricing, "plan_rate");
+});
+
+Deno.test("a pre-snapshot walk still charges the live plan rate", async () => {
+  // Both snapshots null = a row from before 0043. The live fallback IS the
+  // behaviour those rows shipped with; refusing them would strand every
+  // in-flight overage at deploy time.
+  const { deps, piArgs } = makeODeps({});
+  await chargeOverageForWalk("walk-1", deps);
+  assertEquals(piArgs.length, 1);
+  assertEquals(piArgs[0].amountPence, 2200); // the mock's live plan rate
+  assertEquals(piArgs[0].pricing, "plan_rate");
+});
+
+Deno.test("no plan, no snapshots → refusal names the fix and the operator only", async () => {
+  const { deps, calls, notes } = makeODeps({ noPlan: true });
+  const result = await chargeOverageForWalk("walk-1", deps);
+  assertEquals(result.payment.status, "failed");
+  assert(calls.includes("notify:operator"));
+  assertFalse(calls.includes("notify:client"));
+  const note = notes.find((n) => n.client_id === null)!;
+  assert(
+    String(note.body).includes("visit price"),
+    "the operator's message must name the setting that fixes this",
+  );
 });
 
 // ── Three-way error taxonomy (review H13) ──────────────────────────────────
