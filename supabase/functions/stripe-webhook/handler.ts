@@ -21,8 +21,9 @@ export interface StripeEventLike {
   type: string;
   data: { object: Record<string, unknown> };
   /** Set on every Connect event: the acct_… the event happened on. Absent on
-   * platform-account events, which Sanpo has none of — operators are the
-   * merchant of record (review B5). */
+   * platform-account events, which belong to platform-webhook (the operator's
+   * own Sanpo subscription, review H31) and are ignored here — operators are
+   * the merchant of record for client money (review B5). */
   account?: string;
 }
 
@@ -270,10 +271,12 @@ async function applyEvent(
   // resolves to, so one operator's Stripe account can never drive an effect
   // on another operator's client.
   //
-  // No account at all means a platform-account event. Sanpo takes no money on
-  // the platform account — operators are the merchant of record — so there is
-  // nothing legitimate to do with one, and processing it would mean guessing
-  // which operator it belonged to.
+  // No account at all means a platform-account event — the operator's own
+  // Sanpo subscription, which belongs to platform-webhook (review H31), a
+  // separate endpoint with its own signing secret. The ignore stays: this
+  // endpoint's Stripe configuration should never deliver one, and processing
+  // it here would put attacker-influenceable Connect metadata adjacent to
+  // platform billing state.
   if (!event.account) return { status: "ignored" };
   const operatorId = await deps.resolveOperatorByAccount(event.account);
   if (!operatorId) return { status: "ignored" };

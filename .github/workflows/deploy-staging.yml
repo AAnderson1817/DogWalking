@@ -9,7 +9,8 @@ name: Deploy staging (Supabase)
 #   SUPABASE_PROJECT_REF    the project's ref (Settings → General)
 #   SUPABASE_DB_PASSWORD    the project's database password
 # For the optional "sync edge secrets" step:
-#   STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, VAULT_MASTER_KEY, APP_BASE_URL
+#   STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PLATFORM_WEBHOOK_SECRET,
+#   VAULT_MASTER_KEY, APP_BASE_URL
 #   and optionally RESEND_API_KEY, NOTIFY_FROM_EMAIL
 
 # Deploy only after CI passes on main (workflow_run gate) — a red commit
@@ -411,6 +412,7 @@ jobs:
           add() { if [ -n "$2" ]; then args+=("$1=$2"); else echo "skip: $1 not set"; fi; }
           add STRIPE_SECRET_KEY   "${{ secrets.STRIPE_SECRET_KEY }}"
           add STRIPE_WEBHOOK_SECRET "${{ secrets.STRIPE_WEBHOOK_SECRET }}"
+          add STRIPE_PLATFORM_WEBHOOK_SECRET "${{ secrets.STRIPE_PLATFORM_WEBHOOK_SECRET }}"
           add VAULT_MASTER_KEY    "${{ secrets.VAULT_MASTER_KEY }}"
           add APP_BASE_URL        "${{ secrets.APP_BASE_URL }}"
           add RESEND_API_KEY      "${{ secrets.RESEND_API_KEY }}"

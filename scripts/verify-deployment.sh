@@ -145,6 +145,9 @@ contract_for() {
     # Its own Deno.serve (verify_jwt=false, bare text bodies, its own 409), so
     # no envelope and no request id — see the note in stripe-webhook/index.ts.
     stripe-webhook) printf '405|POST only|no' ;;
+    # Same bare Deno.serve shape as stripe-webhook, for the platform-account
+    # endpoint (review H31).
+    platform-webhook) printf '405|POST only|no' ;;
     # Accepts GET by design. Probed with no token: no database, no write.
     unsubscribe) printf "200|You're unsubscribed|no" ;;
     *) printf '405|method_not_allowed|yes' ;;
@@ -153,7 +156,7 @@ contract_for() {
 
 # Any name with a bespoke contract must still be a function this repo ships,
 # or the exception is silently excusing nothing.
-for special in stripe-webhook unsubscribe; do
+for special in stripe-webhook platform-webhook unsubscribe; do
   if ! printf '%s\n' "$expected" | grep -qx -- "$special"; then
     bad "contract_for names '$special', which is not a function in $FUNCTIONS_DIR — a stale exception hides a real probe"
   fi

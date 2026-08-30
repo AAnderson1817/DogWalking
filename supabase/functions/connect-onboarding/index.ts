@@ -1,9 +1,9 @@
 // connect-onboarding — POST, operator JWT (review B5).
 //
-// Creates and resumes the operator's Stripe Connect *Standard* account. This
-// is the only function that talks to the platform account for anything other
-// than webhook verification, because creating a connected account is by
-// definition a platform operation.
+// Creates and resumes the operator's Stripe Connect *Standard* account —
+// a platform operation by definition. (The platform account also carries the
+// operator's own Sanpo subscription since review H31, via operator-billing;
+// everything CLIENT-facing stays on the connected account.)
 //
 // Standard, not Express or Custom, because the operator is the merchant of
 // record: they own the Stripe account outright, their business is on the

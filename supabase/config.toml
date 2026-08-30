@@ -478,3 +478,24 @@ verify_jwt = false
 
 [functions.materialize-walks]
 verify_jwt = true
+
+# Review H31. Public because its caller does not have a JWT yet — creating
+# the account is the point. The invite token is the credential: the function
+# refuses a dead invite BEFORE creating anything (fn_invite_signup_check),
+# and a token bound to an email admits only that email. This is what lets
+# the GoTrue "allow new users to sign up" toggle finally be turned off
+# without breaking client invites.
+[functions.claim-signup]
+verify_jwt = false
+
+# The operator's own $49/month Sanpo subscription (review H31). Ordinary
+# operator JWT.
+[functions.operator-billing]
+verify_jwt = true
+
+# The PLATFORM-account Stripe endpoint ("Your account", not Connected
+# accounts — the mirror of stripe-webhook). Authenticates via the Stripe
+# signature header against STRIPE_PLATFORM_WEBHOOK_SECRET, its OWN signing
+# secret, never the Connect endpoint's.
+[functions.platform-webhook]
+verify_jwt = false
