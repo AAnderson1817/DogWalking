@@ -178,6 +178,41 @@ function sourceFiles(dir: string): string[] {
   });
 }
 
+/**
+ * The first argument of the next `.select(` — captured with a balanced scan.
+ *
+ * A `/\.select\(([^)]*)\)/` stops at the FIRST `)`, so
+ * `.select("*, client:clients(*)")` yields the truncated `"*, client:clients(*`
+ * and the embed inside it is never seen. That is the exact query this guard
+ * exists to catch, so the cheap regex was a hole in the middle of it.
+ */
+export function firstSelectArg(region: string): string | null {
+  const at = region.indexOf(".select(");
+  if (at === -1) return null;
+  let depth = 0;
+  let quote: string | null = null;
+  let out = "";
+  for (let i = at + ".select(".length; i < region.length; i++) {
+    const ch = region[i];
+    if (quote) {
+      if (ch === quote && region[i - 1] !== "\\") quote = null;
+      out += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") { quote = ch; out += ch; continue; }
+    if (ch === "(") depth++;
+    if (ch === ")") {
+      if (depth === 0) return out.trim();
+      depth--;
+    }
+    // Only the FIRST argument: `.select(cols, { head: true })` must not let an
+    // options object mask the wildcard in front of it.
+    if (ch === "," && depth === 0) return out.trim();
+    out += ch;
+  }
+  return out.trim();
+}
+
 /** Every `from("<table>") … .select(<arg>)` reachable in the app source. */
 function selectsByTable(): Array<{ file: string; table: string; arg: string }> {
   const found: Array<{ file: string; table: string; arg: string }> = [];
@@ -189,8 +224,8 @@ function selectsByTable(): Array<{ file: string; table: string; arg: string }> {
       // The first `.select(` after this `.from(` and before the next one.
       const nextFrom = src.indexOf('.from("', m.index + 1);
       const region = src.slice(m.index, nextFrom === -1 ? undefined : nextFrom);
-      const sel = /\.select\(([^)]*)\)/.exec(region);
-      if (sel) found.push({ file, table: m[1], arg: sel[1].trim() });
+      const sel = firstSelectArg(region);
+      if (sel !== null) found.push({ file, table: m[1], arg: sel });
     }
   }
   return found;
@@ -207,20 +242,55 @@ function selectsByTable(): Array<{ file: string; table: string; arg: string }> {
  * Embedded resources are their own tables and are handled by their own entry
  * in the scan, so everything inside parentheses is dropped before splitting.
  */
-export function selectsWildcard(arg: string): boolean {
-  const inner = arg.trim().replace(/^["'`]|["'`]$/g, "");
-  if (inner === "") return true; // `.select()` — postgrest-js sends `*`
+/** Top-level terms of a select string, with embeds left intact. */
+function topLevelTerms(inner: string): string[] {
   let depth = 0;
   let term = "";
   const terms: string[] = [];
   for (const ch of inner) {
     if (ch === "(") depth++;
-    else if (ch === ")") depth--;
-    else if (ch === "," && depth === 0) { terms.push(term); term = ""; continue; }
-    if (depth === 0 && ch !== "(" && ch !== ")") term += ch;
+    if (ch === ")") depth--;
+    if (ch === "," && depth === 0) { terms.push(term); term = ""; continue; }
+    term += ch;
   }
   terms.push(term);
-  return terms.some((t) => t.trim() === "*");
+  return terms.map((t) => t.trim()).filter(Boolean);
+}
+
+const unquote = (arg: string) => arg.trim().replace(/^["'`]|["'`]$/g, "");
+
+/**
+ * Embedded resources named in a select, as `[table, innerSelect]`.
+ *
+ * `client:clients(full_name)` is an embed of `clients` — a table this scan
+ * would otherwise never look at, because the query's `.from()` names something
+ * else entirely. `client:clients(*)` is one character away and expands to the
+ * same `SELECT clients.*` that broke the Clients tab.
+ */
+export function embedsOf(arg: string): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  for (const term of topLevelTerms(unquote(arg))) {
+    const m = /^(?:[a-z_]+:)?([a-z_]+)\s*\(([\s\S]*)\)$/i.exec(term);
+    if (m) {
+      out.push([m[1], m[2]]);
+      for (const nested of embedsOf(m[2])) out.push(nested);
+    }
+  }
+  return out;
+}
+
+/** Column names a select names explicitly at the top level (embeds excluded). */
+export function namedColumns(arg: string): string[] {
+  return topLevelTerms(unquote(arg))
+    .filter((t) => !/\(/.test(t))
+    .map((t) => t.replace(/^[a-z_]+:/i, "").trim())
+    .filter((t) => t && t !== "*");
+}
+
+export function selectsWildcard(arg: string): boolean {
+  const inner = unquote(arg);
+  if (inner === "") return true; // `.select()` — postgrest-js sends `*`
+  return topLevelTerms(inner).some((t) => t === "*");
 }
 
 describe("column-level SELECT grants and wildcard selects", () => {
@@ -246,9 +316,46 @@ describe("column-level SELECT grants and wildcard selects", () => {
 
   it("never selects * from a table with column-level grants", () => {
     const restricted = columnRestrictedTables();
-    const offenders = selectsByTable()
-      .filter((s) => restricted.has(s.table) && selectsWildcard(s.arg))
-      .map((s) => `${s.file.replace(/.*\/src\//, "src/")}: .from("${s.table}").select(${s.arg || ""})`);
+    const short = (f: string) => f.replace(/.*\/src\//, "src/");
+    const offenders: string[] = [];
+    for (const s of selectsByTable()) {
+      if (restricted.has(s.table) && selectsWildcard(s.arg)) {
+        offenders.push(`${short(s.file)}: .from("${s.table}").select(${s.arg || ""})`);
+      }
+      // An EMBED of a restricted table expands the same way, and the query's
+      // own `.from()` names something else — so nothing else in this file
+      // would look at it. `client:clients(full_name)` appears four times in
+      // api.ts already; `client:clients(*)` is one character away.
+      for (const [table, innerSel] of embedsOf(s.arg)) {
+        if (restricted.has(table) && selectsWildcard(innerSel)) {
+          offenders.push(`${short(s.file)}: embed ${table}(${innerSel})`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("never names a column the grants withhold", () => {
+    // The other half of the same question. A wildcard is the loud way to ask
+    // for an ungranted column; naming one explicitly is the quiet way, and it
+    // fails identically. `previewInvite` is the one `clients` read that does
+    // not go through CLIENT_COLUMNS, and its return type is still keyed off
+    // the un-narrowed `Clients`, so widening it would compile cleanly.
+    const restricted = columnRestrictedTables();
+    const offenders: string[] = [];
+    const check = (file: string, table: string, arg: string) => {
+      const granted = restricted.get(table);
+      if (!granted) return;
+      for (const col of namedColumns(arg)) {
+        if (!granted.has(col)) {
+          offenders.push(`${file.replace(/.*\/src\//, "src/")}: ${table}.${col}`);
+        }
+      }
+    };
+    for (const s of selectsByTable()) {
+      if (s.arg.startsWith('"') || s.arg.startsWith("'")) check(s.file, s.table, s.arg);
+      for (const [table, innerSel] of embedsOf(s.arg)) check(s.file, table, innerSel);
+    }
     expect(offenders).toEqual([]);
   });
 
@@ -266,6 +373,21 @@ describe("column-level SELECT grants and wildcard selects", () => {
     expect(selectsWildcard('"pets(*), id"')).toBe(false); // the embed is its own table
     expect(selectsWildcard('"id, full_name"')).toBe(false);
     expect(selectsWildcard("CLIENT_COLUMNS")).toBe(false);
+  });
+
+  it("captures a select argument containing parentheses", () => {
+    // The cheap regex truncated at the first `)`, which is precisely where an
+    // embed opens — so the guard read `"*, client:clients(*` and saw nothing.
+    expect(firstSelectArg('.select("*, client:clients(*)")')).toBe('"*, client:clients(*)"');
+    expect(firstSelectArg('.select(CLIENT_COLUMNS)')).toBe("CLIENT_COLUMNS");
+    expect(firstSelectArg('.select("id", { head: true })')).toBe('"id"');
+    expect(firstSelectArg(".select()")).toBe("");
+  });
+
+  it("sees an embedded restricted table that the .from() never mentions", () => {
+    expect(embedsOf('"*, client:clients(full_name)"')).toEqual([["clients", "full_name"]]);
+    expect(embedsOf('"*, client:clients(*)"')).toEqual([["clients", "*"]]);
+    expect(namedColumns('"id, full_name, client:clients(x)"')).toEqual(["id", "full_name"]);
   });
 
   it("CLIENT_COLUMNS names exactly the columns the grants allow", () => {

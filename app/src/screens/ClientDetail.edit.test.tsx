@@ -1,5 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useEffect, useState } from "react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -53,9 +54,19 @@ vi.mock("@/lib/auth-context", () => ({
 vi.mock("@/components/InvitePanel", () => ({ InvitePanel: () => null }));
 vi.mock("@/components/ClientDataPanel", () => ({ ClientDataPanel: () => null }));
 vi.mock("@/components/ScheduleEditor", () => ({ ScheduleTab: () => null }));
+// Records a mount per open, so the `key` that remounts it is testable at all.
+// The real sheet holds a DOOR CODE in local state; without a key it is the same
+// element across property cards and keeps the previous property's draft.
+const credMounts = vi.hoisted(() => ({ ids: [] as Array<string | undefined> }));
 vi.mock("@/components/VaultFlows", () => ({
   CredentialRow: () => null,
-  PutCredentialSheet: () => null,
+  PutCredentialSheet: ({ open, propertyId }: { open: boolean; propertyId?: string }) => {
+    const [mountedFor] = useState(propertyId);
+    useEffect(() => {
+      credMounts.ids.push(mountedFor);
+    }, [mountedFor]);
+    return open ? <div data-testid="cred-sheet">{String(mountedFor)}</div> : null;
+  },
 }));
 
 const { default: ClientDetail } = await import("./ClientDetail");
@@ -148,7 +159,7 @@ describe("ClientDetail edit affordances", () => {
     await waitFor(() => expect(screen.getByText("Removed")).toBeTruthy());
     expect(screen.queryByRole("button", { name: "Add property" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Edit Removed" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Add secret" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add secret for Removed" })).toBeNull();
   });
 
   it("still offers all of them on an ordinary client", async () => {
@@ -161,7 +172,11 @@ describe("ClientDetail edit affordances", () => {
     await user.click(screen.getByRole("tab", { name: "Access" }));
     expect(await screen.findByRole("button", { name: "Add property" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Edit Old Town loop" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Add secret" })).toBeTruthy();
+    // Named per property like its Edit sibling: a rotor listing three
+    // identical "Add secret" buttons makes the door-code action the ambiguous
+    // one, and picking the wrong one files an entry code against the wrong
+    // address.
+    expect(screen.getByRole("button", { name: "Add secret for Old Town loop" })).toBeTruthy();
   });
 
   it("opens the client sheet with the record's current values", async () => {
@@ -195,6 +210,33 @@ describe("ClientDetail edit affordances", () => {
     // And the note is silent again, rather than warning about a draft that no
     // longer exists.
     expect(sheet().getByRole("status").textContent).toBe("");
+  });
+
+  it("opens Add secret on a fresh form for each property", async () => {
+    // The sheet holds a door code. Two actions per property card made moving
+    // between cards the ordinary flow this change created, so without a key an
+    // operator interrupted while entering the lockbox code for one property
+    // opens "Add secret" on the next and finds the first property's secret
+    // already in the field. Asserted as a REMOUNT, which is what the key buys.
+    const user = userEvent.setup();
+    state.properties = [
+      { ...PROPERTY },
+      { ...PROPERTY, id: "p-2", label: "Lakeview" },
+    ];
+    await show();
+    await user.click(screen.getByRole("tab", { name: "Access" }));
+
+    credMounts.ids.length = 0;
+    await user.click(await screen.findByRole("button", { name: "Add secret for Old Town loop" }));
+    expect(await screen.findByTestId("cred-sheet")).toHaveProperty("textContent", "p-1");
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Add secret for Lakeview" }));
+    expect(await screen.findByTestId("cred-sheet")).toHaveProperty("textContent", "p-2");
+
+    // A mount per open. Without the key the element persists and the second
+    // open reuses the first property's state.
+    expect(credMounts.ids).toContain("p-1");
+    expect(credMounts.ids).toContain("p-2");
   });
 
   it("edits a property in place, sending only what changed", async () => {

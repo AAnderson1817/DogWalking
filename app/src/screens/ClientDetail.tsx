@@ -735,20 +735,35 @@ function AccessTab({ client, editable }: { client: ClientRecord; editable: boole
   const [editingProp, setEditingProp] = useState<Properties | "new" | null>(null);
   const [addCredFor, setAddCredFor] = useState<string | null>(null);
 
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   const load = useCallback(async () => {
-    const [props, creds] = await Promise.all([listProperties(client.id), listCredentials()]);
-    setProperties(props);
-    setCredentials(creds.filter((c) => props.some((p) => p.id === c.property_id)));
+    try {
+      const [props, creds] = await Promise.all([listProperties(client.id), listCredentials()]);
+      setProperties(props);
+      setCredentials(creds.filter((c) => props.some((p) => p.id === c.property_id)));
+      setLoadError(null);
+    } catch (e) {
+      // A bare `void load()` after a save meant a successful edit could leave
+      // the OLD address on the card with nothing said — so the operator either
+      // repeats the edit or, worse, trusts the stale address on their way to
+      // the property.
+      setLoadError(loadErrorMessage(e));
+    }
   }, [client.id]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
+  if (properties === null && loadError) {
+    return <LoadError title="Couldn't load properties" message={loadError} onRetry={() => void load()} />;
+  }
   if (properties === null) return <LoadingState label="Loading properties" compact />;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-3)" }}>
+      <FormError message={loadError} />
       {editable && (
         <div>
           <Button variant="accent" onClick={() => setEditingProp("new")}>Add property</Button>
@@ -783,7 +798,13 @@ function AccessTab({ client, editable }: { client: ClientRecord; editable: boole
                   >
                     Edit
                   </Button>
-                  <Button variant="ghost" onClick={() => setAddCredFor(property.id)}>Add secret</Button>
+                  <Button
+                    variant="ghost"
+                    aria-label={`Add secret for ${property.label}`}
+                    onClick={() => setAddCredFor(property.id)}
+                  >
+                    Add secret
+                  </Button>
                 </div>
               )}
             </div>
@@ -809,6 +830,13 @@ function AccessTab({ client, editable }: { client: ClientRecord; editable: boole
       />
 
       <PutCredentialSheet
+        // The same remount idiom as the two sheets above, and the reason is
+        // sharper here: this form holds a DOOR CODE. Two actions per property
+        // card made moving between cards the ordinary flow, so without a key
+        // an operator interrupted while entering the lockbox code for one
+        // property opens "Add secret" on the next one to find it pre-filled
+        // with the first property's secret.
+        key={addCredFor ?? "closed"}
         open={addCredFor !== null}
         onClose={() => setAddCredFor(null)}
         propertyId={addCredFor ?? undefined}
@@ -826,11 +854,16 @@ function AccessTab({ client, editable }: { client: ClientRecord; editable: boole
  * from props on every open — `useState(initial)` reads its argument once, so a
  * sheet reused across two rows would show the first row's values.
  *
- * `address_line2` is deliberately in neither shape. The create form has never
+ * `address_line2` is deliberately in neither shape: the create form has never
  * collected it, so no property in the product has one, and offering it on edit
- * alone would make the two forms disagree about what a property is. It is also
- * the one address column with no UPDATE grant for `authenticated`, so a field
- * for it would fail on save.
+ * alone would make the two forms disagree about what a property is.
+ *
+ * An earlier version of this comment also claimed the column has no UPDATE
+ * grant. That is false — `authenticated` may update it (checked with
+ * `has_column_privilege`, which is the authority; `information_schema`
+ * .column_privileges, where the claim came from, filters by currently-enabled
+ * role and is misleading when read as superuser). The symmetry reason above is
+ * the whole reason, and it stands on its own.
  */
 function PropertySheet({
   open,
