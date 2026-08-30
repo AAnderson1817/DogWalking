@@ -241,7 +241,7 @@ export type Database = {
           id: string;
           operator_id: string;
           client_id: string;
-          attempted_by: string;
+          attempted_by: string | null;
           attempted_email: string | null;
           outcome: Database["public"]["Enums"]["invite_claim_outcome"];
           created_at: string;
@@ -250,7 +250,7 @@ export type Database = {
           id?: string;
           operator_id: string;
           client_id: string;
-          attempted_by: string;
+          attempted_by?: string | null;
           attempted_email?: string | null;
           outcome: Database["public"]["Enums"]["invite_claim_outcome"];
           created_at?: string;
@@ -259,7 +259,7 @@ export type Database = {
           id?: string;
           operator_id?: string;
           client_id?: string;
-          attempted_by?: string;
+          attempted_by?: string | null;
           attempted_email?: string | null;
           outcome?: Database["public"]["Enums"]["invite_claim_outcome"];
           created_at?: string;
@@ -368,6 +368,10 @@ export type Database = {
           gps_retention_days: number;
           terms_accepted_at: string | null;
           terms_version: string | null;
+          trial_ends_at: string;
+          platform_customer_id: string | null;
+          platform_subscription_id: string | null;
+          platform_subscription_status: Database["public"]["Enums"]["subscription_status"];
         };
         Insert: {
           id: string;
@@ -389,6 +393,10 @@ export type Database = {
           gps_retention_days?: number;
           terms_accepted_at?: string | null;
           terms_version?: string | null;
+          trial_ends_at?: string;
+          platform_customer_id?: string | null;
+          platform_subscription_id?: string | null;
+          platform_subscription_status?: Database["public"]["Enums"]["subscription_status"];
         };
         Update: {
           id?: string;
@@ -410,6 +418,10 @@ export type Database = {
           gps_retention_days?: number;
           terms_accepted_at?: string | null;
           terms_version?: string | null;
+          trial_ends_at?: string;
+          platform_customer_id?: string | null;
+          platform_subscription_id?: string | null;
+          platform_subscription_status?: Database["public"]["Enums"]["subscription_status"];
         };
         Relationships: [];
       };
@@ -1247,6 +1259,13 @@ export type Database = {
       fn_guard_walks_client_update: {
         Args: Record<string, never>;
         Returns: unknown;
+      };
+      fn_invite_signup_check: {
+        Args: {
+          p_token: string;
+          p_email: string;
+        };
+        Returns: Database["public"]["Enums"]["invite_claim_outcome"];
       };
       fn_is_service_session: {
         Args: Record<string, never>;
