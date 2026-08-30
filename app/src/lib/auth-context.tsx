@@ -86,7 +86,7 @@ const realQueries = {
     // path would have surfaced as roleError.
     const { data, error } = await supabase
       .from("operators")
-      .select("id, trial_ends_at, platform_subscription_status")
+      .select("id, trial_ends_at, platform_subscription_status, platform_customer_id")
       .eq("id", id)
       .maybeSingle();
     if (error) throw error;
@@ -94,6 +94,7 @@ const realQueries = {
     return {
       trialEndsAt: data.trial_ends_at,
       platformSubscriptionStatus: data.platform_subscription_status,
+      hasBilling: data.platform_customer_id !== null,
     };
   },
   async clientIdFor(userId: string): Promise<string | null> {

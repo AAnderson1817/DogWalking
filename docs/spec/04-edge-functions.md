@@ -270,6 +270,27 @@ email admits only that email. A live *unbound* token can mint accounts for
 arbitrary addresses until it expires or is revoked — strictly narrower than
 the public signup it replaces, which needed no token at all.
 
+Three further residuals, accepted and recorded rather than silently carried
+(adversarial review):
+- **No rate limit.** A REAL token's refusals each append an
+  `invite_claim_attempts` row (probe visibility is the point), so a holder
+  can grow the log without an account; and on a live *bound* token the
+  claimed/email_mismatch split confirms a guessed address at one anonymous
+  request per guess — the same fact `fn_preview_invite` gives any
+  authenticated holder, minus the sign-in. The 0016 vault limiter is the
+  shape a fix would take if either is ever observed in the trail.
+- **The signup toggle narrows, not seals, operator acquisition.** An
+  invite-minted account is an ordinary authenticated user: nothing stops it
+  skipping the claim and creating an *operators* row at /onboard. With
+  GoTrue signups off, every outstanding invite is therefore still a door to
+  a 14-day-trial operator account. Bounded (a real invite is required, the
+  trial gate still applies), and the honest description of what the toggle
+  governs is "strangers", not "everyone without an operator account".
+- **A vanished client mid-check answers `not_found`** — the pre-flight reads
+  without a lock, so a concurrent client DELETE between its read and its
+  refusal log lands in a `foreign_key_violation` handler that returns
+  `not_found`, which by then is true (0045).
+
 ## stripe-webhook — POST from Stripe
 **Register it as a Connect endpoint**, not an account endpoint — connected
 accounts are where every payment now happens, and an account-level endpoint

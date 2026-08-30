@@ -147,7 +147,15 @@ describe("ClaimInvite signup (H31)", () => {
     await fillAndSubmit(user);
 
     expect(await screen.findByText(/confirm your email/i)).toBeInTheDocument();
-    expect(SUPA.resend).toHaveBeenCalledWith({ type: "signup", email: "amelia@sanpo.test" });
+    // The redirect points BACK AT THE INVITE: without it the confirmation
+    // link lands on site_url ("/"), a role-less user is routed to the
+    // OPERATOR onboarding form, and completing it dead-ends the invite for
+    // good (adversarial review).
+    expect(SUPA.resend).toHaveBeenCalledWith({
+      type: "signup",
+      email: "amelia@sanpo.test",
+      options: { emailRedirectTo: expect.stringContaining(`/claim/${TOKEN}`) },
+    });
   });
 
   it("a wrong password on an existing account surfaces GoTrue's answer in place", async () => {

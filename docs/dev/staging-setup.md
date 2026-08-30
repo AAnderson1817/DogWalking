@@ -125,6 +125,12 @@ at once.
    are never interchangeable. (No dashboard Product/Price is needed: the
    $49/month Price is created lazily by `operator-billing` under the lookup
    key `sanpo_operator_monthly_4900`.)
+
+   And leave Settings → Billing → Subscriptions and emails → "if all
+   retries fail" at the default **cancel the subscription**. The handler
+   maps Stripe's `unpaid` status to past_due, which the app treats as
+   grace — under "mark as unpaid", a subscription whose retries exhausted
+   would sit in grace forever, i.e. a non-payer with full access.
 4. Settings → Billing → Customer portal → activate it (used by
    `/portal/billing`) — and activate it on the PLATFORM account too, for the
    operator's own subscription portal (`operator-billing` action `portal`).

@@ -43,7 +43,11 @@ function authState(over: Partial<AuthState>): AuthState {
 }
 
 /** Renders the guard inside a real router and reports where it lands. */
-function renderGuard(state: AuthState, role: "operator" | "client" = "operator") {
+function renderGuard(
+  state: AuthState,
+  role: "operator" | "client" = "operator",
+  deferLock = false,
+) {
   AUTH_MOCK.value = state;
   return render(
     <MemoryRouter initialEntries={["/protected"]}>
@@ -51,7 +55,7 @@ function renderGuard(state: AuthState, role: "operator" | "client" = "operator")
         <Route
           path="/protected"
           element={
-            <RequireRole role={role}>
+            <RequireRole role={role} deferLock={deferLock}>
               <div>protected content</div>
             </RequireRole>
           }
@@ -137,6 +141,7 @@ describe("RequireRole", () => {
       operatorBilling: {
         trialEndsAt: "2020-01-01T00:00:00Z",
         platformSubscriptionStatus: "none",
+        hasBilling: false,
       },
     }));
     expect(screen.queryByText("protected content")).not.toBeInTheDocument();
@@ -153,6 +158,7 @@ describe("RequireRole", () => {
       operatorBilling: {
         trialEndsAt: "2020-01-01T00:00:00Z",
         platformSubscriptionStatus: "past_due",
+        hasBilling: true,
       },
     }));
     expect(screen.getByText("protected content")).toBeInTheDocument();
@@ -167,6 +173,7 @@ describe("RequireRole", () => {
       operatorBilling: {
         trialEndsAt: "2099-01-01T00:00:00Z",
         platformSubscriptionStatus: "none",
+        hasBilling: false,
       },
     }));
     expect(screen.getByText("protected content")).toBeInTheDocument();
@@ -195,11 +202,49 @@ describe("RequireRole", () => {
         operatorBilling: {
           trialEndsAt: "2020-01-01T00:00:00Z",
           platformSubscriptionStatus: "none",
+          hasBilling: false,
         },
       }),
       "client",
     );
     expect(screen.getByText("protected content")).toBeInTheDocument();
     expect(screen.queryByText(/free trial has ended/i)).not.toBeInTheDocument();
+  });
+});
+
+describe("RequireRole deferLock (Walk Mode)", () => {
+  const EXPIRED = {
+    trialEndsAt: "2020-01-01T00:00:00Z",
+    platformSubscriptionStatus: "none",
+    hasBilling: false,
+  };
+
+  it("a locked operator's bare route still renders — the walk in progress can be ended and billed", () => {
+    // The gate re-runs on every auth event (a token refresh lands ~hourly),
+    // so a trial ending MID-WALK would otherwise swap Walk Mode for the
+    // wall: GPS stops silently and END WALK — the billing moment — becomes
+    // unreachable, converting the operator's lapse into the client's harm.
+    renderGuard(
+      authState({ session: SESSION, role: "operator", operatorId: "u1", operatorBilling: EXPIRED }),
+      "operator",
+      true,
+    );
+    expect(screen.getByText("protected content")).toBeInTheDocument();
+    expect(screen.queryByText(/free trial has ended/i)).not.toBeInTheDocument();
+  });
+
+  it("no grace banner above the bare route — a router link over a walk is an unguarded exit", () => {
+    renderGuard(
+      authState({
+        session: SESSION,
+        role: "operator",
+        operatorId: "u1",
+        operatorBilling: { ...EXPIRED, platformSubscriptionStatus: "past_due", hasBilling: true },
+      }),
+      "operator",
+      true,
+    );
+    expect(screen.getByText("protected content")).toBeInTheDocument();
+    expect(screen.queryByText(/payment failed/i)).not.toBeInTheDocument();
   });
 });

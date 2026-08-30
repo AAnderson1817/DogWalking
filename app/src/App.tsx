@@ -46,9 +46,11 @@ function operator(el: React.ReactNode) {
 }
 
 // Walk Mode owns the full viewport — no nav chrome, but still a landmark.
+// deferLock: the subscription gate must never interrupt a walk in progress
+// (see RequireRole) — the lock lands on the next navigation instead.
 function operatorBare(el: React.ReactNode) {
   return (
-    <RequireRole role="operator">
+    <RequireRole role="operator" deferLock>
       <AppMain>{el}</AppMain>
     </RequireRole>
   );

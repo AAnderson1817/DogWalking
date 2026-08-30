@@ -10,6 +10,7 @@ import type { OperatorBillingState } from "./operator-access";
 const BILLING: OperatorBillingState = {
   trialEndsAt: "2026-09-13T00:00:00Z",
   platformSubscriptionStatus: "none",
+  hasBilling: false,
 };
 
 function queries(opts: { operator?: boolean; clientId?: string | null }) {
