@@ -156,6 +156,23 @@ comment on function fn_rotate_unsubscribe_token() is
 -- address change whoever made it. `fn_purge_client` rotates the token itself
 -- and also nulls the email, so this fires there as well and simply rotates a
 -- second time — harmless, and cheaper than an exception nobody would maintain.
+-- ORDERING LIMIT, stated because it is real and cannot be closed here.
+-- Postgres fires BEFORE ROW triggers in NAME order, and a BEFORE trigger sees
+-- only the row image as it stands when it runs. So a trigger sorting AFTER
+-- this one that assigns `new.email` would change the address after the
+-- comparison has already been made, and the token would not rotate — measured
+-- on this schema, not reasoned about. Removing the `OF` clause below narrows
+-- the hole (a statement that never names `email` is now covered) but does not
+-- close it.
+--
+-- It cannot be closed by construction: an AFTER trigger could observe the final
+-- value, but only by issuing a second UPDATE on every address change, forever,
+-- to defend against a trigger nobody has written. So the precondition is made
+-- EXECUTABLE instead — `smoke.sql` fails if any BEFORE UPDATE trigger on
+-- `clients` other than this one assigns `new.email`. That check lives in smoke
+-- rather than here on purpose: a deploy-time assertion in 0046 runs once and
+-- would never see the trigger a later migration adds.
+--
 -- `before update` and NOT `before update of email`, deliberately. The `OF`
 -- clause is evaluated against the columns the STATEMENT names, not against
 -- what the row image actually ends up holding — measured here: with a second
@@ -191,8 +208,13 @@ declare
   -- against a real purged client and then asserts end to end that the
   -- tombstone's token admits nobody. This is the deploy-time structural
   -- backstop, and it is honest about being only that.
+  -- BOTH comment forms. Stripping only `--` left `/* purged_at is null */`
+  -- satisfying the match — the same defect one layer down, found by the Codex
+  -- review on PR #80 in the fix for the first version of it.
   v_def text := regexp_replace(
-    pg_get_functiondef('fn_rotate_invite(uuid)'::regprocedure), '--[^\n]*', '', 'g');
+    regexp_replace(
+      pg_get_functiondef('fn_rotate_invite(uuid)'::regprocedure), '/\*.*?\*/', '', 'gs'),
+    '--[^\n]*', '', 'g');
 begin
   if position('purged_at is null' in v_def) = 0 then
     raise exception '0046: fn_rotate_invite did not gain the purged_at guard — refusing';

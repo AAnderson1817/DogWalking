@@ -4933,6 +4933,53 @@ begin
   raise notice 'the unsubscribe token dies with the address it was sent to (0046): OK';
 end $$;
 
+-- ═══ 0046: nothing else may rewrite clients.email in a BEFORE trigger ═════
+--
+-- The precondition the rotation trigger rests on, made executable (Codex
+-- review, PR #80). Postgres fires BEFORE ROW triggers in NAME order and a
+-- BEFORE trigger sees only the row image as it stands when it runs, so a
+-- trigger sorting after `trg_clients_rotate_unsubscribe_token` that assigns
+-- `new.email` would change the address AFTER the comparison and the token
+-- would not rotate — a stranger's one-click link would then survive the
+-- correction that was supposed to kill it.
+--
+-- That cannot be closed by construction without an AFTER trigger issuing a
+-- second UPDATE on every address change, so it is a precondition instead, and
+-- this is what stops it being a precondition nobody checks. It fails the build
+-- the moment such a trigger appears, which is the point at which somebody can
+-- still choose a different design.
+--
+-- Honest about what it is: a heuristic over `prosrc`, matching the assignment
+-- forms PL/pgSQL actually offers (`new.email :=` and `into ... new.email`). It
+-- is not a proof that no trigger can reach the column; it is a tripwire on the
+-- ways one plausibly would.
+do $$
+declare
+  v_offenders text;
+begin
+  reset session authorization;
+  select string_agg(p.proname || ' (via ' || tg.tgname || ')', ', ')
+    into v_offenders
+    from pg_trigger tg
+    join pg_proc p on p.oid = tg.tgfoid
+   where tg.tgrelid = 'clients'::regclass
+     and not tg.tgisinternal
+     -- 2 = BEFORE, 4 = ROW  (tgtype bitmask)
+     and (tg.tgtype & 2) = 2
+     and (tg.tgtype & 1) = 1
+     and tg.tgname <> 'trg_clients_rotate_unsubscribe_token'
+     and (p.prosrc ~* 'new\s*\.\s*email\s*:='
+       or p.prosrc ~* 'into\s+new\s*\.\s*email');
+
+  if v_offenders is not null then
+    raise exception
+      'FAIL: a BEFORE UPDATE trigger on clients assigns new.email (%) — it may sort after trg_clients_rotate_unsubscribe_token, in which case the unsubscribe token stops rotating on an address change (0046)',
+      v_offenders;
+  end if;
+
+  raise notice 'nothing else rewrites clients.email in a BEFORE trigger (0046): OK';
+end $$;
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;
