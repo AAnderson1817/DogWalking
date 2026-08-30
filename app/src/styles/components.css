@@ -130,6 +130,7 @@ button.walk-card:hover,
 .walk-billing,
 .walk-billing--overage,
 .walk-hazards,
+.billing-grace,
 .install-prompt,
 .access-trail__row--attention {
   --sanpo-color-text-secondary: var(--sanpo-color-text-secondary-on-tint);
@@ -155,6 +156,11 @@ button.walk-card:hover,
   width: min(96px, 28vw);
   margin-bottom: var(--s-4);
 }
+
+/* `.btn` also dresses a real <Link> where the action is navigation (Pricing →
+   /signup): a button nested in an anchor is invalid HTML, so the anchor takes
+   the class instead and sheds link styling here. */
+a.btn { text-decoration: none; }
 
 .btn {
   display: inline-flex;
@@ -438,6 +444,17 @@ button.walk-card:hover,
    measurable, and if it should be quieter it should say so with a role. */
 .walk-billing__detail { font-size: var(--fs-14); margin-top: var(--s-1); }
 .walk-hazards { background: var(--sanpo-color-surface-attention); border-color: var(--sanpo-color-border-attention); }
+/* The H31 past_due banner: a nag, never a wall — RequireRole renders it above
+   the operator shell while Stripe is still dunning the card. Kaki attention
+   tint per spec 05:99; the link inside inherits the on-tint escalation from
+   the list above. */
+.billing-grace {
+  background: var(--sanpo-color-surface-attention);
+  border-bottom: 2px solid var(--sanpo-color-border-attention);
+  padding: var(--s-2) var(--s-4);
+  font-size: var(--fs-14);
+  text-align: center;
+}
 .install-prompt {
   display: flex;
   align-items: center;

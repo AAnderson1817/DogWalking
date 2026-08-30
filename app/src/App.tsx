@@ -6,6 +6,8 @@ import { OperatorShell } from "@/components/OperatorShell";
 import { PortalShell } from "@/components/PortalShell";
 import { RequireRole } from "@/components/RequireRole";
 import SignIn from "@/screens/SignIn";
+import Signup from "@/screens/Signup";
+import Pricing from "@/screens/Pricing";
 import Onboard from "@/screens/Onboard";
 import ClaimInvite from "@/screens/ClaimInvite";
 import Legal from "@/screens/Legal";
@@ -69,6 +71,10 @@ export default function App() {
   return (
     <Routes>
       <Route path="/signin" element={publicRoute(<SignIn />)} />
+      {/* The explicit operator front door + the page that states the price
+          (review H31). Public: both exist for people with no account yet. */}
+      <Route path="/signup" element={publicRoute(<Signup />)} />
+      <Route path="/pricing" element={publicRoute(<Pricing />)} />
       <Route path="/onboard" element={publicRoute(<Onboard />)} />
       <Route path="/claim/:token" element={publicRoute(<ClaimInvite />)} />
       {/* Review L16. Public and NOT behind RequireRole: the recovery link

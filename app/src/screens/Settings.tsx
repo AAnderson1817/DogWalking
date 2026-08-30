@@ -20,6 +20,8 @@ import { FormError, Input, Select } from "@/components/fields";
 import { Spinner } from "@/components/Spinner";
 import { EmptyState } from "@/components/EmptyState";
 import {
+  createOperatorCheckout,
+  createOperatorPortal,
   createPlan,
   createServiceType,
   deleteServiceType,
@@ -31,7 +33,8 @@ import {
   updateServiceType,
 } from "@/lib/api";
 import type { Operators, Plans, ServiceTypes } from "@/lib/types";
-import { money } from "@/lib/format";
+import { dateLocal, money } from "@/lib/format";
+import { PLATFORM_PRICE_PENCE } from "@/lib/operator-access";
 import { parseVisitPriceInput } from "@/lib/visit-price";
 import { useDocumentTitle } from "@/lib/use-document-title";
 import { useAuth } from "@/lib/auth-context";
@@ -112,6 +115,8 @@ export default function Settings() {
         }}
         onError={setError}
       />
+
+      {operator && <SubscriptionSection operator={operator} onError={setError} />}
     </div>
   );
 }
@@ -540,6 +545,89 @@ function PlansSection({
       >
         {busy ? <Spinner /> : "Create plan"}
       </Button>
+    </section>
+  );
+}
+
+// ── Sanpo subscription (review H31) ────────────────────────────────────────
+//
+// The operator's own $49/month. Reads the columns the 0045 migration made
+// service-role-only to WRITE — the row is self-readable, so the screen can
+// say what is true without another endpoint. Both launchers use the H32
+// persistent-link pattern: window.open with "noopener" returns null even on
+// success, so the rendered link is the reliable surface.
+function SubscriptionSection({
+  operator,
+  onError,
+}: {
+  operator: Operators;
+  onError: (m: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [payLink, setPayLink] = useState<{ label: string; url: string } | null>(null);
+
+  const status = operator.platform_subscription_status;
+  const trialEndsMs = operator.trial_ends_at ? Date.parse(operator.trial_ends_at) : NaN;
+  const inTrial = Number.isFinite(trialEndsMs) && Date.now() < trialEndsMs;
+  const hasBilling = Boolean(operator.platform_customer_id);
+  const live = status === "active" || status === "past_due" || status === "paused";
+
+  const statusLine = status === "active"
+    ? `Active — ${money(PLATFORM_PRICE_PENCE)}/month.`
+    : status === "past_due"
+    ? "Payment failed — Stripe is retrying your card. Update it in Manage billing."
+    : status === "paused"
+    ? "Paused. Resume it from Manage billing."
+    : status === "cancelled"
+    ? "Cancelled."
+    : inTrial
+    ? `Free trial until ${dateLocal(operator.trial_ends_at)} — subscribe any time; your trial days are kept.`
+    : "Your free trial has ended.";
+
+  async function open(kind: "checkout" | "portal") {
+    setBusy(true);
+    try {
+      const { url } = kind === "checkout"
+        ? await createOperatorCheckout()
+        : await createOperatorPortal();
+      if (!url) throw new Error("Stripe did not return a link");
+      setPayLink({
+        label: kind === "checkout" ? "Subscription checkout" : "Billing portal",
+        url,
+      });
+      window.open(url, "_blank", "noopener");
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Could not open Stripe.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="settings-section" aria-labelledby="settings-subscription">
+      <h2 id="settings-subscription" className="section-label">Sanpo subscription</h2>
+      <p>{statusLine}</p>
+      <div style={{ display: "flex", gap: "var(--s-3)", flexWrap: "wrap" }}>
+        {!live && (
+          <Button onClick={() => void open("checkout")} disabled={busy}>
+            {busy ? <Spinner /> : "Subscribe"}
+          </Button>
+        )}
+        {hasBilling && (
+          <Button variant="ghost" onClick={() => void open("portal")} disabled={busy}>
+            {busy ? <Spinner /> : "Manage billing"}
+          </Button>
+        )}
+      </div>
+      {payLink && (
+        <p style={{ fontSize: "var(--fs-14)" }}>
+          {payLink.label}:{" "}
+          <a href={payLink.url} target="_blank" rel="noreferrer">
+            open or copy this link
+          </a>{" "}
+          if nothing opened.
+        </p>
+      )}
     </section>
   );
 }

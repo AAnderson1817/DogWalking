@@ -22,6 +22,7 @@ import { Sheet } from "@/components/Sheet";
 import { FormError, Input } from "@/components/fields";
 import { LoadingState } from "@/components/StateField";
 import { accountHasPassword } from "./api";
+import type { OperatorBillingState } from "./operator-access";
 import { Button } from "@/components/Button";
 
 export type Role = "operator" | "client" | null;
@@ -31,6 +32,10 @@ export interface AuthState {
   role: Role;
   operatorId: string | null;
   clientId: string | null;
+  /** The operator's trial/subscription state, fetched with role resolution
+   * so the subscription gate (review H31) cannot need a second request that
+   * fails separately. Null for clients and for a null role. */
+  operatorBilling: OperatorBillingState | null;
   loading: boolean;
   /** True when role resolution FAILED (query error) rather than resolving to
    * a genuine null persona. Guards keep a signed-in user off the onboarding
@@ -52,26 +57,44 @@ const AuthContext = createContext<AuthState | null>(null);
 export async function resolveRole(
   userId: string,
   queries: {
-    operatorExists(id: string): Promise<boolean>;
+    /** The operators row's billing state, or null when no row exists. */
+    operatorBilling(id: string): Promise<OperatorBillingState | null>;
     clientIdFor(userId: string): Promise<string | null>;
   },
-): Promise<{ role: Role; operatorId: string | null; clientId: string | null }> {
-  if (await queries.operatorExists(userId)) {
-    return { role: "operator", operatorId: userId, clientId: null };
+): Promise<{
+  role: Role;
+  operatorId: string | null;
+  clientId: string | null;
+  billing: OperatorBillingState | null;
+}> {
+  const billing = await queries.operatorBilling(userId);
+  if (billing) {
+    return { role: "operator", operatorId: userId, clientId: null, billing };
   }
   const clientId = await queries.clientIdFor(userId);
-  if (clientId) return { role: "client", operatorId: null, clientId };
-  return { role: null, operatorId: null, clientId: null };
+  if (clientId) return { role: "client", operatorId: null, clientId, billing: null };
+  return { role: null, operatorId: null, clientId: null, billing: null };
 }
 
 const realQueries = {
-  async operatorExists(id: string): Promise<boolean> {
+  async operatorBilling(id: string): Promise<OperatorBillingState | null> {
     // Throw on a real query error instead of swallowing it: a transient
     // failure must NOT read as "no operators row", which would resolve an
     // existing operator to role=null and strand them on the onboarding form.
-    const { data, error } = await supabase.from("operators").select("id").eq("id", id).maybeSingle();
+    // The same discipline covers the billing fields — fetched IN the role
+    // query, so the H31 gate can never see "no data" from a failure this
+    // path would have surfaced as roleError.
+    const { data, error } = await supabase
+      .from("operators")
+      .select("id, trial_ends_at, platform_subscription_status")
+      .eq("id", id)
+      .maybeSingle();
     if (error) throw error;
-    return Boolean(data);
+    if (!data) return null;
+    return {
+      trialEndsAt: data.trial_ends_at,
+      platformSubscriptionStatus: data.platform_subscription_status,
+    };
   },
   async clientIdFor(userId: string): Promise<string | null> {
     const { data, error } = await supabase
@@ -86,6 +109,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [role, setRole] = useState<Role>(null);
   const [operatorId, setOperatorId] = useState<string | null>(null);
   const [clientId, setClientId] = useState<string | null>(null);
+  const [operatorBilling, setOperatorBilling] = useState<OperatorBillingState | null>(null);
   const [loading, setLoading] = useState(true);
   const [roleError, setRoleError] = useState(false);
   const resolvedFor = useRef<string | null>(null);
@@ -98,6 +122,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setRole(resolved.role);
     setOperatorId(resolved.operatorId);
     setClientId(resolved.clientId);
+    setOperatorBilling(resolved.billing);
     return resolved.role;
   }, []);
 
@@ -114,6 +139,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setRole(null);
         setOperatorId(null);
         setClientId(null);
+        setOperatorBilling(null);
         setLoading(false);
         return;
       }
@@ -193,12 +219,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setRole(null);
     setOperatorId(null);
     setClientId(null);
+    setOperatorBilling(null);
     setRoleError(false);
   }, []);
 
   const value = useMemo(
-    () => ({ session, role, operatorId, clientId, loading, roleError, reauth, refreshRole, signOut }),
-    [session, role, operatorId, clientId, loading, roleError, reauth, refreshRole, signOut],
+    () => ({
+      session,
+      role,
+      operatorId,
+      clientId,
+      operatorBilling,
+      loading,
+      roleError,
+      reauth,
+      refreshRole,
+      signOut,
+    }),
+    [session, role, operatorId, clientId, operatorBilling, loading, roleError, reauth, refreshRole, signOut],
   );
 
   return (
@@ -213,11 +251,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
  * Confirm-it's-you, and — since review M2 — set-a-password-first when there is
  * no password to confirm with.
  *
- * `SignIn` offers a magic link, `signInWithOtp` creates the account, and no
- * operator path anywhere sets a password. So an operator could hold a
- * perfectly valid session and be unable to open the vault at all: every
- * attempt answered "password verification failed", which reads as a typo to
- * somebody who has nothing to mistype, and five of them returned 429.
+ * `SignIn`'s magic link CREATED accounts until review H31 (shouldCreateUser
+ * defaulted true), and no operator path forced a password — so operators
+ * exist who hold a perfectly valid session and no password at all. Every
+ * vault attempt answered "password verification failed", which reads as a
+ * typo to somebody who has nothing to mistype, and five of them returned
+ * 429. /signup collects a password now, but the accounts minted before it
+ * are why this path stays.
  *
  * The check lives HERE rather than in each `reauth()` caller for two reasons.
  * There are four call sites and a fifth will exist; and this way the operator

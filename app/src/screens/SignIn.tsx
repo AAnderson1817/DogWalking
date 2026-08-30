@@ -1,7 +1,7 @@
 // SignIn (phase 04): email+password with a magic-link option; redirects to
 // the persona home once auth-context resolves the role.
 import { useEffect, useState, type FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/Button";
 import { BrandLogo } from "@/components/BrandLogo";
 import { Card } from "@/components/Card";
@@ -48,9 +48,28 @@ export default function SignIn() {
         const { error: err } = await supabase.auth.signInWithPassword({ email, password });
         if (err) setError(err.message);
       } else if (mode === "magic") {
-        const { error: err } = await supabase.auth.signInWithOtp({ email });
-        if (err) setError(err.message);
-        else setMagicSent(true);
+        // shouldCreateUser:false (review H31): the magic link signs in, it
+        // does not SIGN UP. Its default is true, so before this the link
+        // silently minted an account for any typed address — which was the
+        // only operator account-creation path, and the reason the GoTrue
+        // signup toggle could never be turned off. Operators now start at
+        // /signup; clients at their invite link.
+        const { error: err } = await supabase.auth.signInWithOtp({
+          email,
+          options: { shouldCreateUser: false },
+        });
+        // With shouldCreateUser off, GoTrue answers an UNKNOWN address with
+        // "Signups not allowed for otp" — surfacing that would make this an
+        // account-existence oracle, the exact thing describeResetOutcome
+        // exists to prevent one mode over. Same confirmation either way;
+        // real failures (rate limit, network) still surface.
+        if (err && ((err as { code?: string }).code === "otp_disabled" || /signup/i.test(err.message))) {
+          setMagicSent(true);
+        } else if (err) {
+          setError(err.message);
+        } else {
+          setMagicSent(true);
+        }
       } else {
         const { error: err } = await supabase.auth.resetPasswordForEmail(email, {
           redirectTo: resetRedirectUrl(window.location.origin),
@@ -195,6 +214,9 @@ export default function SignIn() {
             </form>
           )}
         </Card>
+        <p style={{ textAlign: "center", fontSize: "var(--fs-14)", marginTop: "var(--s-4)" }}>
+          New to Sanpo? <Link to="/signup">Start your free trial</Link>
+        </p>
         <LegalLinks variant="accept" />
       </div>
     </div>

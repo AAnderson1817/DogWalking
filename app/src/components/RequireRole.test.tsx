@@ -32,6 +32,7 @@ function authState(over: Partial<AuthState>): AuthState {
     role: null,
     operatorId: null,
     clientId: null,
+    operatorBilling: null,
     loading: false,
     roleError: false,
     reauth: vi.fn(async () => null),
@@ -124,5 +125,81 @@ describe("RequireRole", () => {
     expect(screen.queryByText("sign in screen")).not.toBeInTheDocument();
     expect(screen.queryByText("onboarding form")).not.toBeInTheDocument();
     expect(screen.getByText(/loading your account/i)).toBeInTheDocument();
+  });
+
+  // ── The subscription gate (review H31) ───────────────────────────────────
+
+  it("locks an operator whose trial ended with no subscription — in place, no route", () => {
+    renderGuard(authState({
+      session: SESSION,
+      role: "operator",
+      operatorId: "u1",
+      operatorBilling: {
+        trialEndsAt: "2020-01-01T00:00:00Z",
+        platformSubscriptionStatus: "none",
+      },
+    }));
+    expect(screen.queryByText("protected content")).not.toBeInTheDocument();
+    expect(screen.getByText(/your free trial has ended/i)).toBeInTheDocument();
+    // No redirect happened: the wall renders where the screen would have.
+    expect(screen.queryByText("sign in screen")).not.toBeInTheDocument();
+  });
+
+  it("a past_due operator gets the app WITH a banner, never a wall", () => {
+    renderGuard(authState({
+      session: SESSION,
+      role: "operator",
+      operatorId: "u1",
+      operatorBilling: {
+        trialEndsAt: "2020-01-01T00:00:00Z",
+        platformSubscriptionStatus: "past_due",
+      },
+    }));
+    expect(screen.getByText("protected content")).toBeInTheDocument();
+    expect(screen.getByText(/payment failed/i)).toBeInTheDocument();
+  });
+
+  it("an in-trial operator passes with no banner", () => {
+    renderGuard(authState({
+      session: SESSION,
+      role: "operator",
+      operatorId: "u1",
+      operatorBilling: {
+        trialEndsAt: "2099-01-01T00:00:00Z",
+        platformSubscriptionStatus: "none",
+      },
+    }));
+    expect(screen.getByText("protected content")).toBeInTheDocument();
+    expect(screen.queryByText(/payment failed/i)).not.toBeInTheDocument();
+  });
+
+  it("missing billing state fails OPEN — absence of data is never a lockout", () => {
+    renderGuard(authState({
+      session: SESSION,
+      role: "operator",
+      operatorId: "u1",
+      operatorBilling: null,
+    }));
+    expect(screen.getByText("protected content")).toBeInTheDocument();
+  });
+
+  it("the client persona is never gated on operator billing", () => {
+    // A pet owner must not be locked out of walks they paid their walker for
+    // because the walker's own Sanpo bill lapsed — the same component guards
+    // both personas, so this is the case that keeps the branch scoped.
+    renderGuard(
+      authState({
+        session: SESSION,
+        role: "client",
+        clientId: "c1",
+        operatorBilling: {
+          trialEndsAt: "2020-01-01T00:00:00Z",
+          platformSubscriptionStatus: "none",
+        },
+      }),
+      "client",
+    );
+    expect(screen.getByText("protected content")).toBeInTheDocument();
+    expect(screen.queryByText(/free trial has ended/i)).not.toBeInTheDocument();
   });
 });

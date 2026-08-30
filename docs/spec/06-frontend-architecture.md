@@ -44,9 +44,18 @@ suite run green *under 6* before the version moved. A major upgrade that
 carries a behaviour change inside it gives a regression two places to have
 come from.
 ```
-/signin            SignIn (email+password, magic-link option)
+/signin            SignIn (email+password, magic-link option — the link signs
+                   IN only; shouldCreateUser:false since H31)
+/signup            Signup (H31: the explicit operator front door — the ONE
+                   public supabase.auth.signUp, which is what the GoTrue
+                   signup toggle governs)
+/pricing           Pricing (H31: public, states $49/month + 14-day trial from
+                   the same constant the checkout charges)
 /onboard           Onboard (first-run operator setup: business, defaults)
-/claim/:token      ClaimInvite (client signup → fn_claim_invite)
+/claim/:token      ClaimInvite (client signup via the claim-signup edge
+                   function → sign in → fn_claim_invite; H31)
+/reset-password    ResetPassword (L16; public deliberately — the person
+                   arriving holds a recovery link, not a session)
 /legal/:slug       Legal — privacy notice + terms (H6). PUBLIC: the people who
                    most need the notice are the ones not signed in.
 -- operator (requires role=operator) --
@@ -57,14 +66,22 @@ come from.
 /walks/:id/live    WalkMode  (.walkmode theme)
 /vault             AccessVault
 /billing           BillingConsole (phase 07: renewals, failed payments, plan changes)
+/settings          Settings (B6; reached from Money, NOT the locked 4-item nav)
 -- portal (requires role=client) --
 /portal            PortalHome
 /portal/book       Booking (phase 07)
+/portal/walks      PortalWalks
 /portal/walks/:id  WalkDetail (live map while in_progress, report card after)
 /portal/billing    PortalBilling (phase 07)
 /portal/pets       PetProfiles (self-manage care fields)
 ```
-`RequireRole` wrapper redirects to `/signin`, then to the persona home.
+`RequireRole` wrapper redirects to `/signin`, then to the persona home — and,
+for the operator persona only, applies the H31 subscription gate: trial over
+with no live platform subscription renders `BillingLocked` IN PLACE (no
+route, the LoadError precedent), `past_due` renders the app under a grace
+banner, and every unreadable input fails OPEN (`operatorAccess` in
+`lib/operator-access.ts`) so bad data can never masquerade as a lapsed
+subscription. The client persona is never gated on their walker's bill.
 
 ### Operator navigation
 
@@ -456,6 +473,14 @@ Before this there was no recovery path. A grep for `resetPasswordForEmail` and
 presented as an *alternative way to sign in* rather than as recovery, so
 somebody who had forgotten their password had to work that out for themselves.
 For an operator, that account holds every client's entry codes.
+
+Since review H31 the magic link is sign-in ONLY (`shouldCreateUser: false`) —
+it used to silently create an account for any typed address, which was the
+de-facto operator signup and the reason the GoTrue signup toggle could never
+be closed. GoTrue's refusal for an unknown address ("Signups not allowed for
+otp") is deliberately collapsed into the same "check your email" confirmation,
+for the same anti-oracle reason `describeResetOutcome` exists; and the screen
+links `/signup`, where operator accounts are now created on purpose.
 
 - **SignIn gains a third mode**, `reset`, rather than a separate route — the
   person is already on the screen with their email in the field, and bouncing

@@ -800,22 +800,42 @@ export async function unwrapEdgeResult<T>(
   const { data, error, response } = result;
   if (error) {
     let detail: string | undefined;
+    let code: string | undefined;
     if (response) {
       try {
         const envelope = (await response.json()) as Envelope<T> | null;
         const message = envelope?.error?.message;
         if (typeof message === "string" && message.trim() !== "") detail = message;
+        const envCode = envelope?.error?.code;
+        if (typeof envCode === "string" && envCode !== "") code = envCode;
       } catch {
         // No body, or not JSON. Fall back to the SDK's message rather than
         // masking the failure with a parse error.
       }
     }
-    throw new Error(detail ?? error.message);
+    throw new EdgeError(detail ?? error.message, code);
   }
   if (!data?.ok || data.data === undefined) {
-    throw new Error(data?.error?.message ?? `${name} failed`);
+    throw new EdgeError(data?.error?.message ?? `${name} failed`, data?.error?.code);
   }
   return data.data;
+}
+
+/**
+ * An edge failure with the envelope's machine-readable `code` attached. Still
+ * an ordinary Error — every existing `err.message` catch keeps working — but
+ * a caller that needs to BRANCH on the failure (claim-signup mapping invite
+ * outcomes back onto the H4 dead-ends) finally has something better than
+ * matching sentence text.
+ */
+export class EdgeError extends Error {
+  readonly code?: string;
+
+  constructor(message: string, code?: string) {
+    super(message);
+    this.name = "EdgeError";
+    this.code = code;
+  }
 }
 
 async function invokeEdge<T>(name: string, body: Record<string, unknown>): Promise<T> {
@@ -869,6 +889,42 @@ export function createTopupCheckout(
  * visit_price_missing) until a visit price exists to name. */
 export function createSetupCheckout(clientId: string): Promise<{ url: string }> {
   return invokeEdge("create-checkout", { client_id: clientId, setup: true });
+}
+
+/** The operator's own $49/month Sanpo subscription checkout (review H31) —
+ * platform account, not Connect. */
+export function createOperatorCheckout(): Promise<{ url: string | null }> {
+  return invokeEdge("operator-billing", { action: "checkout" });
+}
+
+/** Platform billing portal for the operator's Sanpo subscription. */
+export function createOperatorPortal(): Promise<{ url: string }> {
+  return invokeEdge("operator-billing", { action: "portal" });
+}
+
+/**
+ * Create the auth account for an invited client via the public claim-signup
+ * edge function (review H31) — the invite is validated server-side BEFORE
+ * any account exists, so ClaimInvite no longer depends on public signUp and
+ * the GoTrue signup toggle can be off. A refused invite comes back with the
+ * 0039 outcome as the envelope code, remapped here onto the same
+ * InviteClaimError the RPC path throws so the dead-end sentences stay
+ * differentiated (H4).
+ */
+export async function claimSignup(
+  token: string,
+  email: string,
+  password: string,
+): Promise<void> {
+  try {
+    await invokeEdge("claim-signup", { token, email, password });
+  } catch (e) {
+    const code = e instanceof EdgeError ? e.code : undefined;
+    if (code && code !== "claimed" && code in INVITE_CLAIM_MESSAGE) {
+      throw new InviteClaimError(code as Exclude<InviteClaimOutcome, "claimed">);
+    }
+    throw e;
+  }
 }
 
 /**
