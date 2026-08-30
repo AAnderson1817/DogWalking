@@ -13,7 +13,7 @@
 // a lost authenticator cannot be removed from inside the product — is
 // stated in the copy rather than papered over; recovery is the owner's
 // dashboard (docs/dev/auth-posture.md).
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Button } from "@/components/Button";
 import { FormError, Input } from "@/components/fields";
 import { Spinner } from "@/components/Spinner";
@@ -40,6 +40,12 @@ export function MfaSection() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Focus target for view transitions that unmount the control being
+  // pressed: without it, completing (or cancelling) an action drops
+  // keyboard and screen-reader focus to <body> at the bottom of a long
+  // Settings page (adversarial review). The role=status notice covers the
+  // announcement; this covers where the keyboard IS.
+  const headingRef = useRef<HTMLHeadingElement | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -90,6 +96,7 @@ export function MfaSection() {
       "Two-factor authentication is on. Opening the vault now requires a code from your app.",
     );
     setView({ kind: "on", factorId: enrolment.factorId });
+    headingRef.current?.focus();
   }
 
   async function remove(e: FormEvent, factorId: string) {
@@ -114,22 +121,28 @@ export function MfaSection() {
     setCode("");
     setNotice("Two-factor authentication is off.");
     setView({ kind: "off" });
+    headingRef.current?.focus();
   }
 
   return (
     <section className="settings-section" aria-labelledby="settings-mfa">
-      <h2 id="settings-mfa" className="section-label">Two-factor authentication</h2>
+      <h2 id="settings-mfa" className="section-label" tabIndex={-1} ref={headingRef}>
+        Two-factor authentication
+      </h2>
       <p role="status" className="settings-notice">{notice}</p>
+      {/* One always-mounted error region for the whole section: a failed
+          'Turn on two-factor' click used to store an error the off view had
+          nowhere to render — the spinner stopped and nothing else happened
+          (adversarial review) — and FormError's own contract wants the live
+          region mounted BEFORE its text arrives. */}
+      <FormError message={view.kind === "unavailable" ? view.message : error} />
 
       {view.kind === "loading" && <Spinner />}
 
       {view.kind === "unavailable" && (
-        <>
-          <FormError message={view.message} />
-          <Button variant="ghost" onClick={() => { setView({ kind: "loading" }); void load(); }}>
-            Try again
-          </Button>
-        </>
+        <Button variant="ghost" onClick={() => { setView({ kind: "loading" }); void load(); }}>
+          Try again
+        </Button>
       )}
 
       {view.kind === "off" && (
@@ -169,8 +182,10 @@ export function MfaSection() {
             }}
           />
           <p style={{ fontSize: "var(--fs-14)" }}>
-            Can't scan? Enter this key by hand:{" "}
-            <code style={{ userSelect: "all", overflowWrap: "anywhere" }}>
+            On this device?{" "}
+            <a href={view.enrolment.uri}>Open in your authenticator app</a> —
+            a phone can't scan its own screen. Or enter this key by hand:{" "}
+            <code style={{ userSelect: "all", WebkitUserSelect: "all", overflowWrap: "anywhere" }}>
               {view.enrolment.secret}
             </code>
           </p>
@@ -180,8 +195,8 @@ export function MfaSection() {
             autoComplete="one-time-code"
             value={code}
             onChange={(e) => setCode(e.target.value)}
+            autoFocus
           />
-          <FormError message={error} />
           <Button type="submit" disabled={busy || !code.trim()}>
             {busy ? <Spinner /> : "Verify and turn on"}
           </Button>
@@ -189,7 +204,12 @@ export function MfaSection() {
             type="button"
             variant="ghost"
             disabled={busy}
-            onClick={() => { setCode(""); setError(null); setView({ kind: "off" }); }}
+            onClick={() => {
+              setCode("");
+              setError(null);
+              setView({ kind: "off" });
+              headingRef.current?.focus();
+            }}
           >
             Cancel
           </Button>
@@ -201,7 +221,8 @@ export function MfaSection() {
           <p>
             Two-factor authentication is <strong>on</strong>. Opening the vault
             requires a code from your authenticator app. If you lose the app,
-            it can't be removed from here — keep it backed up.
+            it can't be removed from here — contact Sanpo support, who will
+            remove it after verifying it's really you. Keep the app backed up.
           </p>
           <Button
             variant="ghost"
@@ -227,8 +248,8 @@ export function MfaSection() {
             autoComplete="one-time-code"
             value={code}
             onChange={(e) => setCode(e.target.value)}
+            autoFocus
           />
-          <FormError message={error} />
           <Button type="submit" disabled={busy || !code.trim()}>
             {busy ? <Spinner /> : "Turn off"}
           </Button>

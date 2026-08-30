@@ -329,6 +329,16 @@ function ReauthSheet({
     if (!mfaGate) return true;
     const err = await stepUpWithCode(mfaGate.factorId, code.trim());
     if (err) {
+      // A factor deleted since this sheet opened (dashboard recovery, or
+      // another tab) makes this gate stale forever — GoTrue's raw "Factor
+      // not found" names no remedy, and without clearing the gate every
+      // retry re-challenges a factor that no longer exists.
+      if (/factor.*not.*found/i.test(err)) {
+        setMfaGate(null);
+        setCode("");
+        setError("Two-factor was changed on another device — press the button again to continue.");
+        return false;
+      }
       setError(err);
       return false;
     }

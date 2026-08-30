@@ -152,7 +152,10 @@ and verifies a TOTP factor — verifying upgrades that session to `aal2` on
 the spot — and the vault's re-auth sheet collects the code and upgrades the
 session exactly when this table would otherwise refuse `insufficient`, so
 older sessions and magic-link sessions step up in place rather than being
-told to sign in again. Turning the factor off requires a current code; a
+told to sign in again. Turning the factor off requires a current code — a
+**client-side** rule, honestly scoped: GoTrue itself unenrolls for any aal2
+session, and a token stolen while already at aal2 is already past the
+factor, which is why the session timebox is what bounds that window. A
 **lost authenticator** is removed in the dashboard (Authentication → Users →
 the account → delete the factor) after you satisfy yourself it is really the
 operator asking — that judgement is deliberately not automatable from here.

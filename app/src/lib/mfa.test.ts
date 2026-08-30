@@ -37,6 +37,18 @@ describe("resolveMfaGate", () => {
     expect(resolveMfaGate({ currentLevel: "aal2", nextLevel: "aal2" }, [VERIFIED])).toBeNull();
   });
 
+  it("a STALE session (enrolment happened elsewhere) still gets the prompt — the factor list is the authority", () => {
+    // getAuthenticatorAssuranceLevel computes nextLevel from the CACHED
+    // session's user.factors with no network call, so a session minted
+    // before enrolment on another device reports nextLevel aal1 for up to a
+    // token lifetime — while listFactors is a fresh GET /user. Gating on
+    // nextLevel therefore made the doomed request exactly when the factor
+    // was newest (adversarial review). The fresh list decides; nextLevel
+    // decides nothing.
+    expect(resolveMfaGate({ currentLevel: "aal1", nextLevel: "aal1" }, [VERIFIED]))
+      .toEqual({ factorId: "f1" });
+  });
+
   it("no verified factor means no step-up: an abandoned enrolment must not lock anyone out", () => {
     expect(resolveMfaGate({ currentLevel: "aal1", nextLevel: "aal1" }, [UNVERIFIED])).toBeNull();
     // Even if the levels claim aal2 is reachable, an unverified factor is not
@@ -44,9 +56,17 @@ describe("resolveMfaGate", () => {
     expect(resolveMfaGate({ currentLevel: "aal1", nextLevel: "aal2" }, [UNVERIFIED])).toBeNull();
   });
 
-  it("unknown state is 'no step-up' — the fail-open direction the server backstops", () => {
-    expect(resolveMfaGate(null, [VERIFIED])).toBeNull();
-    expect(resolveMfaGate({ currentLevel: null, nextLevel: null }, [VERIFIED])).toBeNull();
+  it("unknown LEVELS with a known verified factor still prompts — only proof of aal2 suppresses", () => {
+    // The server reads a missing aal claim as aal1, never as strong; the
+    // client mirror is the same: not-known-to-be-aal2 plus a verified
+    // factor means the password-only request is doomed, and asking for a
+    // code the operator provably holds costs at worst one extra field.
+    expect(resolveMfaGate(null, [VERIFIED])).toEqual({ factorId: "f1" });
+    expect(resolveMfaGate({ currentLevel: null, nextLevel: null }, [VERIFIED]))
+      .toEqual({ factorId: "f1" });
+  });
+
+  it("an unknown FACTOR LIST is 'no step-up' — the one fail-open, backstopped by the server", () => {
     expect(resolveMfaGate({ currentLevel: "aal1", nextLevel: "aal2" }, null)).toBeNull();
   });
 });
@@ -81,9 +101,18 @@ describe("fetchMfaGate", () => {
     expect(await fetchMfaGate()).toBeNull();
   });
 
-  it("fails OPEN on an error envelope too", async () => {
+  it("a failed LEVELS read with a fresh verified factor still gates — factors are the load-bearing input", async () => {
     auth.getAuthenticatorAssuranceLevel.mockResolvedValue({ data: null, error: { message: "x" } });
     auth.listFactors.mockResolvedValue({ data: { all: [VERIFIED] }, error: null });
+    expect(await fetchMfaGate()).toEqual({ factorId: "f1" });
+  });
+
+  it("a failed FACTOR read is the fail-open", async () => {
+    auth.getAuthenticatorAssuranceLevel.mockResolvedValue({
+      data: { currentLevel: "aal1", nextLevel: "aal2" },
+      error: null,
+    });
+    auth.listFactors.mockResolvedValue({ data: null, error: { message: "x" } });
     expect(await fetchMfaGate()).toBeNull();
   });
 });
@@ -96,6 +125,11 @@ describe("stepUpWithCode", () => {
     auth.challengeAndVerify.mockResolvedValueOnce({ error: { message: "Invalid TOTP code" } });
     expect(await stepUpWithCode("f1", "000000")).toMatch(/invalid/i);
   });
+
+  it("a THROWN failure comes back as a message too — auth-js rethrows non-AuthErrors, and a throw here strands the form busy", async () => {
+    auth.challengeAndVerify.mockRejectedValueOnce(new Error("fetch failed"));
+    expect(await stepUpWithCode("f1", "123456")).toMatch(/fetch failed/);
+  });
 });
 
 describe("beginTotpEnrolment", () => {
@@ -105,15 +139,28 @@ describe("beginTotpEnrolment", () => {
     auth.unenroll.mockReset();
   });
 
-  it("removes abandoned UNVERIFIED factors first, never a verified one", async () => {
+  it("removes abandoned UNVERIFIED totp factors first — never a verified one, never another type", async () => {
     // GoTrue cannot re-show an unverified factor's secret, so an abandoned
     // enrolment is unfinishable — cleanup is the only honest continuation.
     // Deleting a VERIFIED factor here would silently turn two-factor OFF as
-    // a side effect of opening the setup sheet.
-    auth.listFactors.mockResolvedValue({ data: { all: [VERIFIED, UNVERIFIED] }, error: null });
+    // a side effect of opening the setup sheet; a non-totp factor mid-
+    // enrolment elsewhere is not this surface's to sweep.
+    auth.listFactors.mockResolvedValue({
+      data: {
+        all: [VERIFIED, UNVERIFIED, { id: "p9", factor_type: "phone", status: "unverified" }],
+      },
+      error: null,
+    });
     auth.unenroll.mockResolvedValue({ error: null });
     auth.enroll.mockResolvedValue({
-      data: { id: "f3", totp: { qr_code: "data:image/svg+xml;utf-8,<svg/>", secret: "S3CRET" } },
+      data: {
+        id: "f3",
+        totp: {
+          qr_code: "data:image/svg+xml;utf-8,<svg/>",
+          secret: "S3CRET",
+          uri: "otpauth://totp/sanpo?secret=S3CRET",
+        },
+      },
       error: null,
     });
     const enrolment = await beginTotpEnrolment();
@@ -123,6 +170,7 @@ describe("beginTotpEnrolment", () => {
       factorId: "f3",
       qrCode: "data:image/svg+xml;utf-8,<svg/>",
       secret: "S3CRET",
+      uri: "otpauth://totp/sanpo?secret=S3CRET",
     });
   });
 
@@ -130,5 +178,39 @@ describe("beginTotpEnrolment", () => {
     auth.listFactors.mockResolvedValue({ data: { all: [] }, error: null });
     auth.enroll.mockResolvedValue({ data: null, error: { message: "MFA is not enabled" } });
     await expect(beginTotpEnrolment()).rejects.toThrow(/not enabled/i);
+  });
+
+  it("a failed sweep is named at the step that failed — auth-js returns envelopes, never throws", async () => {
+    // Unchecked, the sweep silently skips, enroll refuses (name conflict /
+    // factor cap), and the surfaced error misattributes the cause — on
+    // every retry, identically.
+    auth.listFactors.mockResolvedValue({ data: { all: [UNVERIFIED] }, error: null });
+    auth.unenroll.mockResolvedValue({ error: { message: "factor locked" } });
+    await expect(beginTotpEnrolment()).rejects.toThrow(/unfinished two-factor setup.*factor locked/i);
+    expect(auth.enroll).not.toHaveBeenCalled();
+  });
+
+  it("a failed factor listing refuses up front instead of sweeping blind", async () => {
+    auth.listFactors.mockResolvedValue({ data: null, error: { message: "network" } });
+    await expect(beginTotpEnrolment()).rejects.toThrow(/existing two-factor setup/i);
+    expect(auth.enroll).not.toHaveBeenCalled();
+  });
+});
+
+describe("fetchVerifiedFactor", () => {
+  beforeEach(() => {
+    auth.listFactors.mockReset();
+  });
+
+  it("returns the verified factor, and THROWS on a failed read — 'unavailable' and 'off' must stay distinct", async () => {
+    // The fail-open convention of the sibling wrappers is deliberately NOT
+    // used here: rendering the setup button on a failed read invites an
+    // enrolment attempt that fails worse one step later, against an account
+    // whose live factor we simply could not see.
+    auth.listFactors.mockResolvedValueOnce({ data: { all: [UNVERIFIED, VERIFIED] }, error: null });
+    const { fetchVerifiedFactor } = await import("./mfa");
+    expect((await fetchVerifiedFactor())?.id).toBe("f1");
+    auth.listFactors.mockResolvedValueOnce({ data: null, error: { message: "network down" } });
+    await expect(fetchVerifiedFactor()).rejects.toThrow(/network down/);
   });
 });

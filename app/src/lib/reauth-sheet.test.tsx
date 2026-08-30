@@ -191,6 +191,89 @@ describe("ReauthSheet", () => {
     expect(CALLS.order).toEqual(["stepUp", "updateUser"]);
   });
 
+  it("holds the loading state until the MFA check answers — a form shown early is the doomed request back", async () => {
+    // If the form renders before fetchMfaGate resolves, an operator with an
+    // enrolled factor can submit password-only in the gap: the vault refuses
+    // second_factor_required AFTER verifying the password and spending a
+    // rate slot — the exact behavior this sheet exists to prevent.
+    hasPassword.mockResolvedValue(true);
+    let release!: (g: { factorId: string } | null) => void;
+    mfa.fetchMfaGate.mockReturnValue(
+      new Promise<{ factorId: string } | null>((resolve) => { release = resolve; }),
+    );
+    await openSheet();
+    expect(await screen.findByText("Checking your account")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Password")).toBeNull();
+    release({ factorId: "f1" });
+    expect(await screen.findByLabelText("Two-factor code")).toBeInTheDocument();
+  });
+
+  it("a refused code does NOT clear the gate — the retry is challenged again", async () => {
+    // The plausible wrong edit clears the gate on any step-up exit, after
+    // which the retry settles password-only and hands the vault a session
+    // the server is guaranteed to refuse.
+    hasPassword.mockResolvedValue(true);
+    mfa.fetchMfaGate.mockResolvedValue({ factorId: "f1" });
+    mfa.stepUpWithCode.mockResolvedValueOnce("Invalid TOTP code entered");
+    const { user, onResolve } = await openSheet();
+    await screen.findByLabelText("Two-factor code");
+    await user.type(screen.getByLabelText("Password"), "hunter2");
+    await user.type(screen.getByLabelText("Two-factor code"), "000000");
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+    await screen.findByText(/invalid totp code/i);
+    await user.clear(screen.getByLabelText("Two-factor code"));
+    await user.type(screen.getByLabelText("Two-factor code"), "123456");
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+    await waitFor(() => expect(onResolve).toHaveBeenCalledWith("hunter2"));
+    expect(mfa.stepUpWithCode).toHaveBeenCalledTimes(2);
+    expect(mfa.stepUpWithCode).toHaveBeenLastCalledWith("f1", "123456");
+  });
+
+  it("a PASSED step-up is not demanded twice: a later failure retries without a second code", async () => {
+    // Set-password flow: the step-up succeeds, the password write fails
+    // (secure_password_change wants a recent sign-in, say). The session is
+    // aal2 now — demanding a fresh code to retry the WRITE would be
+    // ceremony, and the disabled-until-code clause would otherwise wedge
+    // the form with the consumed code.
+    hasPassword.mockResolvedValue(false);
+    mfa.fetchMfaGate.mockResolvedValue({ factorId: "f1" });
+    updateUser
+      .mockResolvedValueOnce({ error: { message: "please sign in again" } })
+      .mockResolvedValueOnce({ error: null });
+    const { user, onResolve } = await openSheet();
+    await screen.findByLabelText("New password");
+    await user.type(screen.getByLabelText("New password"), "correct-horse-battery");
+    await user.type(screen.getByLabelText("Confirm password"), "correct-horse-battery");
+    await user.type(screen.getByLabelText("Two-factor code"), "123456");
+    await user.click(screen.getByRole("button", { name: "Set password and continue" }));
+    await screen.findByText(/please sign in again/i);
+    await user.click(screen.getByRole("button", { name: "Set password and continue" }));
+    await waitFor(() => expect(onResolve).toHaveBeenCalledWith("correct-horse-battery"));
+    expect(mfa.stepUpWithCode).toHaveBeenCalledTimes(1);
+    expect(updateUser).toHaveBeenCalledTimes(2);
+  });
+
+  it("a factor deleted since the sheet opened clears the stale gate with an honest sentence", async () => {
+    // Dashboard recovery or another tab removed the factor: GoTrue answers
+    // 'Factor not found', which names no remedy, and re-challenging the
+    // dead factor forever is a wall. The gate clears, the sentence says
+    // what happened, and the next press proceeds password-only — which the
+    // server now accepts, since the factor is gone.
+    hasPassword.mockResolvedValue(true);
+    mfa.fetchMfaGate.mockResolvedValue({ factorId: "f1" });
+    mfa.stepUpWithCode.mockResolvedValueOnce("Factor not found");
+    const { user, onResolve } = await openSheet();
+    await screen.findByLabelText("Two-factor code");
+    await user.type(screen.getByLabelText("Password"), "hunter2");
+    await user.type(screen.getByLabelText("Two-factor code"), "123456");
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+    expect(await screen.findByText(/changed on another device/i)).toBeInTheDocument();
+    expect(onResolve).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+    await waitFor(() => expect(onResolve).toHaveBeenCalledWith("hunter2"));
+    expect(mfa.stepUpWithCode).toHaveBeenCalledTimes(1);
+  });
+
   it("falls back to the password form when the check itself fails", async () => {
     // Failing OPEN is deliberate. The vault still refuses safely on the
     // server, and assuming "no password" on a lookup failure would push every

@@ -213,7 +213,12 @@ export async function handleVault(
     throw new HttpError(
       401,
       "second_factor_required",
-      "Your account has two-factor authentication enabled, so the vault needs it for this session. Sign in again and complete the second step.",
+      // The named remedy matches what the product actually does now: the
+      // re-auth sheet collects the code and upgrades the session in place —
+      // there is deliberately no step-up at sign-in, so "sign in again"
+      // (this message's first wording) instructed a flow that does not
+      // exist (adversarial review).
+      "Your account has two-factor authentication enabled, so the vault needs it for this session. Try again and enter the code from your authenticator app when asked.",
     );
   }
 

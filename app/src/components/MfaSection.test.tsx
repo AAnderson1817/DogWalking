@@ -17,6 +17,7 @@ const mfa = vi.hoisted(() => ({
     factorId: "f-new",
     qrCode: "data:image/svg+xml;utf-8,%3Csvg%3E%3C/svg%3E",
     secret: "S3CRETKEY",
+    uri: "otpauth://totp/Sanpo?secret=S3CRETKEY",
   })),
   confirmTotpEnrolment: vi.fn(async (_f: string, _c: string): Promise<string | null> => null),
   stepUpWithCode: vi.fn(async (_f: string, _c: string): Promise<string | null> => null),
@@ -58,6 +59,10 @@ describe("MfaSection", () => {
     expect(await screen.findByAltText(/QR code/i)).toBeInTheDocument();
     // The manual key is not decoration: a desktop browser cannot scan itself.
     expect(screen.getByText("S3CRETKEY")).toBeInTheDocument();
+    // ...and the otpauth link is the SAME-device path: a phone cannot scan
+    // its own screen either.
+    expect(screen.getByRole("link", { name: /open in your authenticator/i }))
+      .toHaveAttribute("href", "otpauth://totp/Sanpo?secret=S3CRETKEY");
   });
 
   it("verifying the code is what turns it ON — a scanned-but-unverified factor is not 'on'", async () => {
@@ -122,6 +127,43 @@ describe("MfaSection", () => {
     await user.click(screen.getByRole("button", { name: "Turn off" }));
     expect(await screen.findByText(/invalid totp code/i)).toBeInTheDocument();
     expect(mfa.removeTotpFactor).not.toHaveBeenCalled();
+  });
+
+  it("cancelling mid-enrolment lands OFF with a fresh QR next time — never 'on'", async () => {
+    // The most plausible wrong edit of the verify-before-on rule is a cancel
+    // that lands on 'on'; and a cancel that reuses the abandoned enrolment
+    // hands out a QR whose factor the next begin() sweep deletes.
+    render(<MfaSection />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Turn on two-factor" }));
+    await user.type(await screen.findByLabelText("Six-digit code"), "12");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(await screen.findByRole("button", { name: "Turn on two-factor" })).toBeInTheDocument();
+    expect(screen.queryByText(/two-factor authentication is on/i)).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Turn on two-factor" }));
+    await screen.findByLabelText("Six-digit code");
+    expect(mfa.beginTotpEnrolment).toHaveBeenCalledTimes(2);
+    // The half-typed code did not leak into the fresh attempt.
+    expect(screen.getByLabelText("Six-digit code")).toHaveValue("");
+  });
+
+  it("neither submit fires on an empty code — a blank verify burns a GoTrue attempt for nothing", async () => {
+    render(<MfaSection />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Turn on two-factor" }));
+    await screen.findByLabelText("Six-digit code");
+    expect(screen.getByRole("button", { name: "Verify and turn on" })).toBeDisabled();
+    expect(mfa.confirmTotpEnrolment).not.toHaveBeenCalled();
+  });
+
+  it("a failed 'Turn on two-factor' shows its error in the OFF view — not a spinner that stops silently", async () => {
+    mfa.beginTotpEnrolment.mockRejectedValueOnce(new Error("MFA is not enabled"));
+    render(<MfaSection />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Turn on two-factor" }));
+    expect(await screen.findByText(/not enabled/i)).toBeInTheDocument();
+    // Still off, still retryable.
+    expect(screen.getByRole("button", { name: "Turn on two-factor" })).toBeInTheDocument();
   });
 
   it("a failed status read is 'unavailable' with a retry — never 'off'", async () => {

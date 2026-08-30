@@ -32,14 +32,22 @@ export interface MfaFactorLike {
 
 export interface MfaLevelsLike {
   currentLevel: string | null;
-  nextLevel: string | null;
+  nextLevel?: string | null;
 }
 
 /** The factor a step-up should challenge: the first VERIFIED TOTP factor.
  * Unverified factors are abandoned enrolments — the server deliberately does
  * not count them (an abandoned setup must not lock anyone out), so
  * challenging one here would demand a code the person may never have added
- * to any app. */
+ * to any app.
+ *
+ * TOTP-only is a deliberate scope pin: the server's verifiedFactorCount is
+ * type-blind, but phone and webauthn factors are off in every environment
+ * (config.toml [auth.mfa.phone], and no enrolment surface for them exists
+ * anywhere) — a verified non-TOTP factor is unreachable through the
+ * product. If either type is ever enabled, this filter must widen in the
+ * same change or the vault dead-ends with no prompt (adversarial review,
+ * recorded rather than built for a state that cannot occur). */
 export function verifiedTotpFactor(
   factors: MfaFactorLike[] | null | undefined,
 ): MfaFactorLike | null {
@@ -54,45 +62,67 @@ export function verifiedTotpFactor(
  *
  * The aal2 short-circuit mirrors the server exactly: resolveAssurance
  * returns "aal2" before ever counting factors, so a session that already
- * presented the factor is never asked twice.
+ * presented the factor is never asked twice. The claim is trustworthy in a
+ * way the rest of `levels` is NOT: currentLevel comes from the same JWT the
+ * vault will see, while nextLevel is computed from the CACHED session's
+ * user.factors with no network call — a session minted before enrolment on
+ * another device reports nextLevel aal1 for up to a token lifetime. An
+ * earlier version gated on nextLevel and therefore made the doomed request
+ * exactly when the factor was newest (adversarial review); the FRESH factor
+ * list is the only other input this decision may read.
  */
 export function resolveMfaGate(
   levels: MfaLevelsLike | null | undefined,
   factors: MfaFactorLike[] | null | undefined,
 ): { factorId: string } | null {
-  if (!levels || levels.currentLevel === "aal2") return null;
-  if (levels.nextLevel !== "aal2") return null;
+  // Unknown levels do NOT suppress: the server reads a missing aal claim as
+  // aal1, never as strong, and prompting an operator who provably holds the
+  // app costs one field. Only proof of aal2 short-circuits.
+  if (levels?.currentLevel === "aal2") return null;
   const factor = verifiedTotpFactor(factors);
   return factor ? { factorId: factor.id } : null;
 }
 
-/** resolveMfaGate against the live session; any transport failure is "no
- * step-up" (fail open — the server refuses safely). */
+/** resolveMfaGate against the live session. The FACTOR LIST is the
+ * load-bearing input: its failure is the one fail-open (no step-up — the
+ * server refuses safely), while a failed levels read merely loses the aal2
+ * short-circuit, costing at worst one extra code entry from an operator who
+ * provably holds the app. */
 export async function fetchMfaGate(): Promise<{ factorId: string } | null> {
   try {
-    const [{ data: levels, error: lvlErr }, { data: factors, error: facErr }] = await Promise
-      .all([
-        supabase.auth.mfa.getAuthenticatorAssuranceLevel(),
-        supabase.auth.mfa.listFactors(),
-      ]);
-    if (lvlErr || facErr) return null;
-    return resolveMfaGate(levels, factors?.all);
+    const [levelsRes, factorsRes] = await Promise.all([
+      supabase.auth.mfa.getAuthenticatorAssuranceLevel(),
+      supabase.auth.mfa.listFactors(),
+    ]);
+    if (factorsRes.error) return null;
+    return resolveMfaGate(levelsRes.error ? null : levelsRes.data, factorsRes.data?.all);
   } catch {
     return null;
   }
 }
 
 /** Challenge + verify in one step; a success upgrades the current session to
- * aal2 in place. Returns the error message, or null on success. */
+ * aal2 in place. Returns the error message, or null on success — for EVERY
+ * failure path: auth-js returns GoTrue refusals as envelopes but rethrows
+ * non-AuthError exceptions, and a throw escaping here would strand the
+ * calling form on a permanent busy spinner (adversarial review). */
 export async function stepUpWithCode(factorId: string, code: string): Promise<string | null> {
-  const { error } = await supabase.auth.mfa.challengeAndVerify({ factorId, code });
-  return error ? error.message : null;
+  try {
+    const { error } = await supabase.auth.mfa.challengeAndVerify({ factorId, code });
+    return error ? error.message : null;
+  } catch (e) {
+    return e instanceof Error ? e.message : "The two-factor check failed — try again.";
+  }
 }
 
 export interface TotpEnrolment {
   factorId: string;
   qrCode: string;
   secret: string;
+  /** otpauth:// — the same-device enrolment path: a phone cannot scan its
+   * own screen, and typing the secret by hand is the fallback, not the
+   * plan. */
+  uri: string;
 }
 
 /**
@@ -105,17 +135,37 @@ export interface TotpEnrolment {
  * verified ones), so removing them is cleanup, not a security action.
  */
 export async function beginTotpEnrolment(): Promise<TotpEnrolment> {
-  const { data: existing } = await supabase.auth.mfa.listFactors();
+  // Each step names its OWN failure rather than letting it surface one step
+  // deeper as an enroll refusal (name conflict / factor cap) that
+  // misattributes the cause — auth-js returns every API failure as an
+  // envelope, never a throw, so an unchecked envelope here is a silently
+  // skipped sweep (adversarial review).
+  const { data: existing, error: listErr } = await supabase.auth.mfa.listFactors();
+  if (listErr) {
+    throw new Error("Could not check your existing two-factor setup — try again.");
+  }
   for (const f of existing?.all ?? []) {
-    if (f.status !== "verified") {
-      await supabase.auth.mfa.unenroll({ factorId: f.id });
+    // TOTP only: another factor type mid-enrolment on another device is not
+    // this surface's to sweep.
+    if (f.factor_type === "totp" && f.status !== "verified") {
+      const { error: sweepErr } = await supabase.auth.mfa.unenroll({ factorId: f.id });
+      if (sweepErr) {
+        throw new Error(
+          `Could not clear an unfinished two-factor setup (${sweepErr.message}) — try again.`,
+        );
+      }
     }
   }
   const { data, error } = await supabase.auth.mfa.enroll({ factorType: "totp" });
   if (error || !data) {
     throw new Error(error?.message ?? "Could not start two-factor setup.");
   }
-  return { factorId: data.id, qrCode: data.totp.qr_code, secret: data.totp.secret };
+  return {
+    factorId: data.id,
+    qrCode: data.totp.qr_code,
+    secret: data.totp.secret,
+    uri: data.totp.uri,
+  };
 }
 
 /** Confirm the enrolment with a code from the app — the moment the factor
