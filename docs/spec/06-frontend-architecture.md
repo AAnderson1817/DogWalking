@@ -66,7 +66,10 @@ come from.
 /walks/:id/live    WalkMode  (.walkmode theme)
 /vault             AccessVault
 /billing           BillingConsole (phase 07: renewals, failed payments, plan changes)
-/settings          Settings (B6; reached from Money, NOT the locked 4-item nav)
+/settings          Settings (B6; reached from Money, NOT the locked 4-item nav.
+                   Sections: business, services, plans, Sanpo subscription
+                   (H31), and two-factor authentication — TOTP enrolment whose
+                   verify upgrades the session to aal2 in place; spec 03)
 -- portal (requires role=client) --
 /portal            PortalHome
 /portal/book       Booking (phase 07)

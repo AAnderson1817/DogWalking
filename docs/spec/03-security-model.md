@@ -278,6 +278,23 @@ manufacture `aal2`, since it needs the factor itself. A *missing* claim counts a
 `aal1`, never as strong; reading strength from an absent claim would be the gate
 failing open.
 
+The client surfaces for that enrolment (`app/src/lib/mfa.ts`) mirror the
+table above exactly. Settings → *Two-factor authentication* runs
+enroll → scan → `challengeAndVerify`, which upgrades the current session to
+`aal2` in place; the vault's re-auth sheet asks for a code precisely when the
+server would refuse — a verified factor exists and the session is still
+`aal1` — and upgrades the session *before* the vault call, so the refused
+request is never made (the M2 shape, one rung up). Three rules are pinned by
+tests: only **verified** TOTP factors gate anything (an abandoned enrolment
+must not lock anyone out — the server's own rule, mirrored); the client
+check fails **open** to password-only on any transport error (the server
+still refuses an insufficient session — failing closed here would wall the
+vault off on a flaky connection); and turning the factor off requires a
+current code, because a session-only attacker must not be able to delete the
+control that exists to contain stolen sessions. A lost authenticator is
+therefore recoverable only via the dashboard (`docs/dev/owner-actions.md`
+§9).
+
 `aal2` is not merely the strongest available control here, it is the **only**
 one that closes this path. Turning on `secure_password_change` — the obvious
 remedy, and what an earlier version of this section prescribed — does not:

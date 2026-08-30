@@ -340,9 +340,13 @@ auth_token = "env(SUPABASE_AUTH_SMS_TWILIO_AUTH_TOKEN)"
 max_enrolled_factors = 10
 
 # Control MFA via App Authenticator (TOTP)
+# Both ON: the deployed projects already have them on (measured by the
+# auth-posture read-back), and Settings → Two-factor authentication cannot be
+# exercised locally with them off. Governs `supabase start` only (review H2 —
+# no workflow pushes this file), so this is local-dev parity, not deployment.
 [auth.mfa.totp]
-enroll_enabled = false
-verify_enabled = false
+enroll_enabled = true
+verify_enabled = true
 
 # Configure MFA via Phone Messaging
 [auth.mfa.phone]

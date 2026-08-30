@@ -145,6 +145,18 @@ An attacker cannot manufacture `aal2`: it needs the factor itself. So for any
 operator with MFA enrolled, the change-the-password trick stops working even
 while `secure_password_change` is still off.
 
+**Enrolment is now in the product** (it used to be impossible: no
+`supabase.auth.mfa.*` call existed anywhere in the tree, so owner action #9
+had no way to be performed). Settings → *Two-factor authentication* enrols
+and verifies a TOTP factor — verifying upgrades that session to `aal2` on
+the spot — and the vault's re-auth sheet collects the code and upgrades the
+session exactly when this table would otherwise refuse `insufficient`, so
+older sessions and magic-link sessions step up in place rather than being
+told to sign in again. Turning the factor off requires a current code; a
+**lost authenticator** is removed in the dashboard (Authentication → Users →
+the account → delete the factor) after you satisfy yourself it is really the
+operator asking — that judgement is deliberately not automatable from here.
+
 A **missing** `aal` claim is treated as `aal1`, never as strong. That is what a
 project with no MFA configured emits, and reading strength from an absent claim
 would be the whole gate failing open. There is a test for it.
