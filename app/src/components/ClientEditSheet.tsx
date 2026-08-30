@@ -8,7 +8,7 @@
 // `fn_unbind_invite` (0042) deliberately leaves `email` set when it releases a
 // wrongly-claimed account, so the reissued invite stays bound to the wrong
 // person until somebody edits it.
-import { useState, type FormEvent } from "react";
+import { useId, useState, type FormEvent } from "react";
 import { Button } from "./Button";
 import { FormError, Input } from "./fields";
 import { Sheet } from "./Sheet";
@@ -62,6 +62,7 @@ export function ClientEditSheet({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const noteId = useId();
   const [form, setForm] = useState(() => clientFormOf(client));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -95,7 +96,16 @@ export function ClientEditSheet({
   }
 
   return (
-    <Sheet open={open} onClose={onClose} title={`Edit ${client.full_name}`}>
+    <Sheet
+      open={open}
+      // Refuse dismissal while the write is in flight. The only confirmation a
+      // save worked is the header re-rendering, which an operator who tapped
+      // the backdrop is not watching — so a PATCH that failed after dismissal
+      // was indistinguishable from one that succeeded, on the field that
+      // decides who may claim the invite.
+      onClose={() => { if (!busy) onClose(); }}
+      title={`Edit ${client.full_name}`}
+    >
       <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: "var(--s-3)" }}>
         <Input
           label="Full name"
@@ -107,6 +117,7 @@ export function ClientEditSheet({
           label="Email"
           type="email"
           value={form.email}
+          aria-describedby={noteId}
           onChange={(e) => set("email", e.target.value)}
         />
         {/* Always mounted, for the same reason `FormError` is: a live region
@@ -115,7 +126,7 @@ export function ClientEditSheet({
             it out of flow, so it costs no `gap` while there is nothing to say.
             role="status" rather than alert — this is a consequence of what the
             operator is typing, not a failure. */}
-        <p className="form-note" role="status">
+        <p id={noteId} className="form-note" role="status">
           {effect === "unchanged" ? null : EMAIL_EFFECT_COPY[effect]}
         </p>
         <Input

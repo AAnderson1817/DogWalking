@@ -1,5 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ClientEditSheet } from "./ClientEditSheet";
 import type { ClientRecord } from "@/lib/api";
@@ -49,6 +50,19 @@ function open(over: Partial<ClientRecord> = {}) {
 }
 
 const field = (name: string) => screen.getByLabelText(name);
+
+/** Owns `open` for real, so a dismissal that IS allowed actually closes. */
+function Host() {
+  const [isOpen, setIsOpen] = useState(true);
+  return (
+    <ClientEditSheet
+      open={isOpen}
+      client={client()}
+      onClose={() => setIsOpen(false)}
+      onSaved={() => setIsOpen(false)}
+    />
+  );
+}
 
 beforeEach(() => {
   updateClient.mockReset().mockResolvedValue({});
@@ -159,6 +173,37 @@ describe("ClientEditSheet", () => {
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     expect(await screen.findByText(/permission denied/i)).toBeTruthy();
     expect(onSaved).not.toHaveBeenCalled();
+  });
+
+  it("cannot be dismissed while the save is in flight", async () => {
+    // Rendered with a real `open` owner: with a no-op `onClose` the sheet
+    // never closes whatever the guard does, and the assertion below could not
+    // fail. (It could not, in the first version of this test.)
+    // The only confirmation a save worked is the header re-rendering, which an
+    // operator who tapped the backdrop is not watching — so a PATCH that failed
+    // after dismissal was indistinguishable from one that succeeded, on the
+    // column that decides who may claim the invite.
+    const user = userEvent.setup();
+    let release: (v: unknown) => void = () => {};
+    updateClient.mockImplementation(() => new Promise((r) => { release = r; }));
+    render(<Host />);
+    await user.clear(field("Phone"));
+    await user.type(field("Phone"), "+1 555-0000");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(updateClient).toHaveBeenCalled());
+
+    await user.keyboard("{Escape}");
+    expect(screen.getByLabelText("Phone")).toBeTruthy(); // still open
+    release({});
+  });
+
+  it("points the email field at the consequence it is describing", async () => {
+    // The copy is the whole reason this form has prose. Without the link a
+    // screen-reader user gets it once, unreliably, and can never return to it
+    // from the field it is about.
+    open();
+    const note = screen.getByRole("status");
+    expect(field("Email").getAttribute("aria-describedby")).toContain(note.id);
   });
 
   it("refuses to save an empty name", async () => {
