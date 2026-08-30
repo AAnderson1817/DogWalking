@@ -156,8 +156,21 @@ comment on function fn_rotate_unsubscribe_token() is
 -- address change whoever made it. `fn_purge_client` rotates the token itself
 -- and also nulls the email, so this fires there as well and simply rotates a
 -- second time — harmless, and cheaper than an exception nobody would maintain.
+-- `before update` and NOT `before update of email`, deliberately. The `OF`
+-- clause is evaluated against the columns the STATEMENT names, not against
+-- what the row image actually ends up holding — measured here: with a second
+-- BEFORE trigger assigning `new.email`, an `OF email` trigger does not fire at
+-- all when the statement never mentioned the column. No trigger ASSIGNS
+-- `new.email` today (checked with `prosrc ~ 'new\.email\s*:='` across every
+-- trigger function in `public`; the only match for a bare `new.email` is this
+-- function's own comparison), so this is defence in depth rather than a live
+-- fix; but
+-- the whole argument for putting this in a trigger is that the next writer of
+-- `clients.email` should not have to know the rule exists, and an `OF` clause
+-- quietly reintroduces exactly that requirement one level down. The function
+-- compares old against new, so firing on every update costs one comparison.
 create trigger trg_clients_rotate_unsubscribe_token
-  before update of email on clients
+  before update on clients
   for each row execute function fn_rotate_unsubscribe_token();
 
 -- ── 4. Refuse rather than deploy inert ────────────────────────────────────
@@ -166,8 +179,22 @@ create trigger trg_clients_rotate_unsubscribe_token
 -- repository keeps recording. Each of the three assertions below fails the
 -- deploy rather than letting it report success.
 do $$
+declare
+  -- Comments STRIPPED before the match. Checking the raw definition would let
+  -- a future edit satisfy this guard with a comment while deleting the
+  -- predicate — demonstrated on this schema: a function whose only mention of
+  -- `purged_at is null` was in a `--` comment matched a naive `position()`.
+  -- That is the "passes for the wrong reason" shape, in the check written to
+  -- prevent it.
+  --
+  -- The BEHAVIOURAL proof is in `smoke.sql`, which drives the real function
+  -- against a real purged client and then asserts end to end that the
+  -- tombstone's token admits nobody. This is the deploy-time structural
+  -- backstop, and it is honest about being only that.
+  v_def text := regexp_replace(
+    pg_get_functiondef('fn_rotate_invite(uuid)'::regprocedure), '--[^\n]*', '', 'g');
 begin
-  if position('purged_at is null' in pg_get_functiondef('fn_rotate_invite(uuid)'::regprocedure)) = 0 then
+  if position('purged_at is null' in v_def) = 0 then
     raise exception '0046: fn_rotate_invite did not gain the purged_at guard — refusing';
   end if;
 
