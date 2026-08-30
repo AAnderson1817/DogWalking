@@ -18,6 +18,7 @@ import {
 import { adminClient } from "../_lib/admin.ts";
 import { stripeClient } from "../_lib/stripe.ts";
 import {
+  assertTopupAllowed,
   parseCheckoutRequest,
   type PricedService,
   setupSessionParams,
@@ -80,8 +81,7 @@ serveFunction(async (req) => {
     // with DIFFERENT invoice ids — so uq_payments_subscription_invoice does
     // not catch it and the client is charged twice and granted two cycles.
     // The webhook now ignores invoices for an unbound subscription, but the
-    // right place to stop it is before the second one exists. Top-ups and
-    // card-saves are orthogonal to subscriptions and are not gated.
+    // right place to stop it is before the second one exists.
     if (client.stripe_subscription_id && client.subscription_status !== "cancelled") {
       throw new HttpError(
         409,
@@ -91,6 +91,11 @@ serveFunction(async (req) => {
     }
     plan = data;
   } else {
+    // A live billing cycle sweeps the balance at renewal, so a paid top-up
+    // for a subscribed client is money for credits the machinery is
+    // scheduled to destroy — refused, with fn_adjust_credits as the
+    // operator-judgment path (see assertTopupAllowed).
+    if (request.kind === "topup") assertTopupAllowed(client);
     const { data, error: sErr } = await db
       .from("service_types")
       .select("name, visit_price_pence")

@@ -4160,6 +4160,10 @@ declare
   v_w2   uuid := '99999999-0000-4000-f000-0000000000b2';
   v_w3   uuid := '99999999-0000-4000-f000-0000000000b3';
   v_w4   uuid := '99999999-0000-4000-f000-0000000000b4';
+  v_w5   uuid := '99999999-0000-4000-f000-0000000000b5';
+  v_plan uuid := '99999999-0000-4000-e000-0000000000b1';
+  v_clp  uuid := '99999999-0000-4000-c000-0000000000b3';
+  v_propp uuid := '99999999-0000-4000-b000-0000000000b3';
 begin
   reset session authorization;
 
@@ -4219,6 +4223,45 @@ begin
   end if;
   if (select visit_price_pence from walks where id = v_w1) is distinct from 2500 then
     raise exception 'FAIL: re-setting the price rewrote a walk priced at the old rate';
+  end if;
+
+  -- ── An ordinary edit also heals a walk the race left unpriced ──────────
+  -- The snapshot trigger and the backfill can each miss a walk INSERTed
+  -- concurrently with the price edit (documented in 0044), so the trigger
+  -- fires on ANY price-bearing edit, fill-only. Simulate the orphan the way
+  -- the race produces it: a scheduled walk with a null snapshot while the
+  -- service is already priced.
+  update walks set visit_price_pence = null where id = v_w4;
+  update service_types set visit_price_pence = 3200 where id = v_svc;
+  if (select visit_price_pence from walks where id = v_w4) is distinct from 3200 then
+    raise exception 'FAIL: a value-to-value price edit did not heal an unpriced walk';
+  end if;
+  if (select visit_price_pence from walks where id = v_w1) is distinct from 2500 then
+    raise exception 'FAIL: the healing edit rewrote an agreed snapshot';
+  end if;
+
+  -- ── A plan client's un-snapshotted walk is never stamped ───────────────
+  -- A pre-0043 row carries BOTH snapshots null even for a plan client, and
+  -- charges correctly through the live plan-rate fallback. Stamping a visit
+  -- price onto it would make the visit-price branch beat that fallback: a
+  -- plan client billed the cash rate under a "per-visit" label their Stripe
+  -- mandate never mentioned. The backfill therefore skips clients on a plan.
+  insert into plans (id, operator_id, name, credits_per_cycle, price_pence,
+                     cycle, rollover_policy, overage_rate_pence)
+  values (v_plan, v_op, 'PPV smoke plan', 10, 9000, 'monthly', 'none', 2200);
+  insert into clients (id, operator_id, full_name, status, plan_id)
+  values (v_clp, v_op, 'Plan Client PPV', 'active', v_plan);
+  insert into properties (id, operator_id, client_id, label)
+  values (v_propp, v_op, v_clp, 'Home');
+  insert into walks (id, operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status, origin_date)
+  values (v_w5, v_op, v_clp, v_propp, v_svc, current_date + 4, '09:00', '10:00',
+          'scheduled', current_date + 4);
+  -- Regress it to the pre-0043 shape: both snapshots null.
+  update walks set overage_rate_pence = null, visit_price_pence = null where id = v_w5;
+  update service_types set visit_price_pence = 3300 where id = v_svc;
+  if (select visit_price_pence from walks where id = v_w5) is not null then
+    raise exception 'FAIL: a plan client''s walk was stamped with the cash visit price';
   end if;
 
   -- ── A zero price is a misconfiguration, not "free" (0026 precedent) ─────
@@ -4349,6 +4392,15 @@ begin
     if sqlerrm like 'FAIL:%' then raise; end if;
     if sqlerrm not like '%payment intent id required%' then
       raise exception 'FAIL: empty PI rejected for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  begin
+    perform fn_apply_topup(v_cl, 5, 'pi_smoke_topup_3', 0);
+    raise exception 'FAIL: a zero-amount top-up was accepted — unrefundable by construction';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%amount must be positive%' then
+      raise exception 'FAIL: zero amount rejected for the wrong reason: %', sqlerrm;
     end if;
   end;
   begin

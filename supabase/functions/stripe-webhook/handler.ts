@@ -178,6 +178,80 @@ export async function handleStripeEvent(
 
 const CYCLE_REASONS = new Set(["subscription_create", "subscription_cycle"]);
 
+/**
+ * The Sanpo top-up shape of a Checkout Session object, or null when the
+ * session is not ours or is malformed. Everything here is attacker-controlled
+ * on a Connect endpoint (any operator can mint a session in their own
+ * dashboard carrying any metadata), so this validates shape only — the
+ * tenancy control is the customer→client lookup scoped to the event's
+ * operator, in applyTopupFromSession. An operator inflating credits for
+ * their own client gains nothing they do not already have through
+ * fn_adjust_credits.
+ */
+function parseTopupSession(
+  obj: Record<string, unknown>,
+): { credits: number; paymentIntentId: string; amountPence: number } | null {
+  const meta = (obj.metadata ?? {}) as Record<string, string>;
+  const creditsRaw = meta[STRIPE_META.topupCredits];
+  if (!creditsRaw) return null;
+  const credits = Number(creditsRaw);
+  if (!Number.isInteger(credits) || credits <= 0) return null;
+  const pi = typeof obj.payment_intent === "string" ? obj.payment_intent : null;
+  if (!pi) return null;
+  const amount = obj.amount_total;
+  // A session with no positive amount is outside the contract of anything
+  // create-checkout mints; recording it would write an unrefundable $0
+  // 'succeeded' row (fn_apply_topup refuses those too — this is the outer
+  // wall of the same rule).
+  if (typeof amount !== "number" || !Number.isInteger(amount) || amount <= 0) return null;
+  return { credits, paymentIntentId: pi, amountPence: amount };
+}
+
+/** Resolve the client through the session's CUSTOMER scoped to the event's
+ * operator — a crafted session naming another tenant's customer resolves to
+ * nothing — then apply atomically and announce once. */
+async function applyTopupFromSession(
+  topup: { credits: number; paymentIntentId: string; amountPence: number },
+  obj: Record<string, unknown>,
+  operatorId: string,
+  deps: WebhookDeps,
+): Promise<{ status: "processed" | "ignored" }> {
+  const client = await deps.findClientByCustomer(String(obj.customer ?? ""), operatorId);
+  if (!client) return { status: "ignored" };
+
+  const applied = await deps.applyTopup({
+    clientId: client.id,
+    credits: topup.credits,
+    paymentIntentId: topup.paymentIntentId,
+    amountPence: topup.amountPence,
+  });
+  // Notify only when this delivery actually granted: Stripe redelivers for
+  // three days, and a bell row per redelivery would announce one payment
+  // several times.
+  if (applied) {
+    const money = formatMoney(topup.amountPence);
+    const plural = topup.credits === 1 ? "credit" : "credits";
+    await deps.insertNotification({
+      operator_id: operatorId,
+      client_id: client.id,
+      type: "payment_taken",
+      title: `Top-up received — ${topup.credits} ${plural} added`,
+      body: `Your ${money} top-up went through and ${topup.credits} ${plural} ` +
+        "were added to your balance.",
+      walk_id: null,
+    });
+    await deps.insertNotification({
+      operator_id: operatorId,
+      client_id: null,
+      type: "payment_taken",
+      title: `${client.full_name} topped up ${topup.credits} ${plural}`,
+      body: `${money} was collected. The credits are already on their balance.`,
+      walk_id: null,
+    });
+  }
+  return { status: "processed" };
+}
+
 async function applyEvent(
   event: StripeEventLike,
   deps: WebhookDeps,
@@ -218,56 +292,25 @@ async function applyEvent(
       const mode = (obj.mode ?? "subscription") as string;
 
       // ── Payment mode: a top-up (review H32) ─────────────────────────────
-      // Only sessions carrying our credits marker are Sanpo top-ups; any
-      // other payment-mode session on the account is not ours to act on.
-      // Everything read off the session is attacker-controlled (any operator
-      // can mint a session in their own dashboard), so the client is resolved
-      // through the session's CUSTOMER scoped to THIS event's operator — a
-      // crafted session naming another tenant's customer resolves to nothing
-      // — and the credits are validated before they reach the RPC. An
-      // operator inflating credits for their own client gains nothing they
-      // do not already have through fn_adjust_credits.
+      // Granted only when the session is PAID. checkout.session.completed
+      // also fires with payment_status 'unpaid' for delayed-notification
+      // methods (ACH, one dashboard toggle away for a Standard operator),
+      // where the money arrives — or bounces — days later via the
+      // async_payment_* events below. Granting on completion alone would
+      // hand out spendable credits for money never received, record a
+      // 'succeeded' payment, and leave no reversal path when the debit
+      // fails (a failed debit is not a refund; charge.refunded never
+      // fires). Caught in adversarial review; the migration comment "an
+      // unpaid session never completes" recorded exactly this false
+      // assumption and is corrected.
       if (mode === "payment") {
-        const creditsRaw = meta[STRIPE_META.topupCredits];
-        if (!creditsRaw) return { status: "ignored" };
-        const credits = Number(creditsRaw);
-        if (!Number.isInteger(credits) || credits <= 0) return { status: "ignored" };
-        const pi = typeof obj.payment_intent === "string" ? obj.payment_intent : null;
-        if (!pi) return { status: "ignored" };
-        const client = await deps.findClientByCustomer(String(obj.customer ?? ""), operatorId);
-        if (!client) return { status: "ignored" };
-
-        const applied = await deps.applyTopup({
-          clientId: client.id,
-          credits,
-          paymentIntentId: pi,
-          amountPence: (obj.amount_total as number) ?? 0,
-        });
-        // Notify only when this delivery actually granted: Stripe redelivers
-        // for three days, and a bell row per redelivery would announce one
-        // payment several times.
-        if (applied) {
-          const money = formatMoney((obj.amount_total as number) ?? 0);
-          const plural = credits === 1 ? "credit" : "credits";
-          await deps.insertNotification({
-            operator_id: operatorId,
-            client_id: client.id,
-            type: "payment_taken",
-            title: `Top-up received — ${credits} ${plural} added`,
-            body: `Your ${money} top-up went through and ${credits} ${plural} ` +
-              "were added to your balance.",
-            walk_id: null,
-          });
-          await deps.insertNotification({
-            operator_id: operatorId,
-            client_id: null,
-            type: "payment_taken",
-            title: `${client.full_name} topped up ${credits} ${plural}`,
-            body: `${money} was collected by card. The credits are already on their balance.`,
-            walk_id: null,
-          });
+        const topup = parseTopupSession(obj);
+        if (!topup) return { status: "ignored" };
+        if ((obj.payment_status ?? "") !== "paid") {
+          // Ours, but the money is still in flight — the async event decides.
+          return { status: "processed" };
         }
-        return { status: "processed" };
+        return await applyTopupFromSession(topup, obj, operatorId, deps);
       }
 
       // ── Setup mode: a card was saved (review H32) ───────────────────────
@@ -305,6 +348,45 @@ async function applyEvent(
       // own. Ignored rather than 500'd: it is a well-formed event that simply
       // is not ours to act on, and retrying it forever would not change that.
       if (changed === 0) return { status: "ignored" };
+      return { status: "processed" };
+    }
+
+    // A delayed-notification top-up's money arrived. Same application path
+    // as a paid completion — fn_apply_topup's PI-keyed idempotency makes it
+    // safe even if both events raced to apply.
+    case "checkout.session.async_payment_succeeded": {
+      const topup = parseTopupSession(obj);
+      if (!topup) return { status: "ignored" };
+      return await applyTopupFromSession(topup, obj, operatorId, deps);
+    }
+
+    // The debit bounced days after the session completed. Nothing was ever
+    // granted (the completed arm defers on 'unpaid'), so this is disclosure,
+    // not reversal: the client may believe they paid, and the operator may
+    // be counting on the credits.
+    case "checkout.session.async_payment_failed": {
+      const topup = parseTopupSession(obj);
+      if (!topup) return { status: "ignored" };
+      const client = await deps.findClientByCustomer(String(obj.customer ?? ""), operatorId);
+      if (!client) return { status: "ignored" };
+      await deps.insertNotification({
+        operator_id: operatorId,
+        client_id: client.id,
+        type: "payment_failed",
+        title: "Your top-up didn't go through",
+        body: "The bank payment for your credit top-up failed, so no credits were " +
+          "added. You can try again with a different payment method.",
+        walk_id: null,
+      });
+      await deps.insertNotification({
+        operator_id: operatorId,
+        client_id: null,
+        type: "payment_failed",
+        title: `${client.full_name}'s top-up payment failed`,
+        body: "Their bank payment bounced after checkout, so no credits were granted " +
+          "and no money arrived.",
+        walk_id: null,
+      });
       return { status: "processed" };
     }
 

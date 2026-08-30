@@ -96,7 +96,12 @@ at once.
    > misconfigured endpoint fails silently and completely: nothing is billed
    > and nothing errors.
 
-   Events: `checkout.session.completed`, `invoice.paid`,
+   Events: `checkout.session.completed`,
+   `checkout.session.async_payment_succeeded`,
+   `checkout.session.async_payment_failed` (the two async events carry
+   delayed-notification top-ups — ACH — whose money arrives or bounces days
+   after completion; without them every ACH top-up is "paid but never
+   granted", unresolvable from inside the product), `invoice.paid`,
    `invoice.payment_failed`, `invoice.upcoming`,
    `customer.subscription.updated`, `customer.subscription.deleted`,
    `account.updated`, `charge.refunded`, `charge.dispute.created`,

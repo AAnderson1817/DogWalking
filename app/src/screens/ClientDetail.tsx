@@ -359,6 +359,12 @@ function PlanTab({
   const [checkoutPlan, setCheckoutPlan] = useState("");
   const [topupCredits, setTopupCredits] = useState("");
   const [topupDollars, setTopupDollars] = useState("");
+  // The pay-per-visit card gets its own error/busy/result state: sharing the
+  // Plan card's meant a top-up failure rendered its message inside a
+  // DIFFERENT card, and one busy flag spun three unrelated buttons at once.
+  const [payBusy, setPayBusy] = useState(false);
+  const [payError, setPayError] = useState<string | null>(null);
+  const [payLink, setPayLink] = useState<{ label: string; url: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -425,35 +431,45 @@ function PlanTab({
     const credits = Number(topupCredits);
     const dollars = Number(topupDollars);
     if (!Number.isInteger(credits) || credits <= 0) {
-      setError("credits must be a positive whole number");
+      setPayError("credits must be a positive whole number");
       return;
     }
-    if (!Number.isFinite(dollars) || dollars <= 0) {
-      setError("enter what the top-up costs in dollars");
+    // Validate the ROUNDED cents, not the raw dollars: "0.004" is a positive
+    // dollar figure that rounds to zero cents, which the server refuses with
+    // developer-facing wording nobody should have to read.
+    const pence = Math.round(dollars * 100);
+    if (!Number.isFinite(dollars) || pence <= 0) {
+      setPayError("enter what the top-up costs in dollars");
       return;
     }
-    setBusy(true);
-    setError(null);
+    setPayBusy(true);
+    setPayError(null);
     try {
-      const { url } = await createTopupCheckout(client.id, credits, Math.round(dollars * 100));
+      const { url } = await createTopupCheckout(client.id, credits, pence);
+      // window.open with "noopener" returns null even on success, so a
+      // blocked popup is indistinguishable from an opened one — the link
+      // below is the reliable surface (and what the operator usually needs
+      // anyway: something to hand to the client).
+      setPayLink({ label: `Top-up checkout for ${credits} credits`, url });
       window.open(url, "_blank", "noopener");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "top-up checkout failed");
+      setPayError(err instanceof Error ? err.message : "top-up checkout failed");
     } finally {
-      setBusy(false);
+      setPayBusy(false);
     }
   }
 
   async function launchCardLink() {
-    setBusy(true);
-    setError(null);
+    setPayBusy(true);
+    setPayError(null);
     try {
       const { url } = await createSetupCheckout(client.id);
+      setPayLink({ label: "Card-save link", url });
       window.open(url, "_blank", "noopener");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "card link failed");
+      setPayError(err instanceof Error ? err.message : "card link failed");
     } finally {
-      setBusy(false);
+      setPayBusy(false);
     }
   }
 
@@ -510,44 +526,60 @@ function PlanTab({
         <FormError message={error} />
       </Card>
 
-      <Card>
-        <span className="section-label">Pay per visit</span>
-        <p style={{ color: "var(--text-2)", fontSize: "var(--fs-14)", marginTop: "var(--s-1)" }}>
-          A client without a plan is charged the service&rsquo;s visit price after
-          each completed walk, from the card on file. Credits from a top-up are
-          used first.
-        </p>
-        <div style={{ marginTop: "var(--s-2)", display: "flex", flexDirection: "column", gap: "var(--s-2)" }}>
-          <div className="settings-grid">
-            <Input
-              label="Top-up credits"
-              value={topupCredits}
-              onChange={(e) => setTopupCredits(e.target.value)}
-              inputMode="numeric"
-              placeholder="10"
-            />
-            <Input
-              label="Top-up price ($)"
-              value={topupDollars}
-              onChange={(e) => setTopupDollars(e.target.value)}
-              inputMode="decimal"
-              placeholder="200"
-            />
-          </div>
-          <Button
-            variant="ghost"
-            onClick={() => void launchTopup()}
-            disabled={busy || !topupCredits.trim() || !topupDollars.trim()}
-          >
-            {busy ? <Spinner /> : "Open top-up checkout"}
-          </Button>
-          {!subscribed && (
-            <Button variant="ghost" onClick={() => void launchCardLink()} disabled={busy}>
-              {busy ? <Spinner /> : "Open card-save link"}
+      {/* The whole card is for clients OUTSIDE a live billing cycle: a plan
+          renewal sweeps the balance (fn_apply_rollover, policy 'none' by
+          default), so a paid top-up for a subscribed client is money for
+          credits the machinery is scheduled to destroy — the server refuses
+          it too (409 client_subscribed), and Adjust credits above remains
+          the operator-judgment path. */}
+      {!subscribed && (
+        <Card>
+          <span className="section-label">Pay per visit</span>
+          <p style={{ color: "var(--text-2)", fontSize: "var(--fs-14)", marginTop: "var(--s-1)" }}>
+            A client without a plan is charged the service&rsquo;s visit price after
+            each completed walk, from the card on file. Credits from a top-up are
+            used first.
+          </p>
+          <div style={{ marginTop: "var(--s-2)", display: "flex", flexDirection: "column", gap: "var(--s-2)" }}>
+            <div className="settings-grid">
+              <Input
+                label="Top-up credits"
+                value={topupCredits}
+                onChange={(e) => setTopupCredits(e.target.value)}
+                inputMode="numeric"
+                placeholder="10"
+              />
+              <Input
+                label="Top-up price ($)"
+                value={topupDollars}
+                onChange={(e) => setTopupDollars(e.target.value)}
+                inputMode="decimal"
+                placeholder="200"
+              />
+            </div>
+            <Button
+              variant="ghost"
+              onClick={() => void launchTopup()}
+              disabled={payBusy || !topupCredits.trim() || !topupDollars.trim()}
+            >
+              {payBusy ? <Spinner /> : "Open top-up checkout"}
             </Button>
-          )}
-        </div>
-      </Card>
+            <Button variant="ghost" onClick={() => void launchCardLink()} disabled={payBusy}>
+              {payBusy ? <Spinner /> : "Open card-save link"}
+            </Button>
+            {payLink && (
+              <p style={{ fontSize: "var(--fs-14)" }}>
+                {payLink.label}:{" "}
+                <a href={payLink.url} target="_blank" rel="noreferrer">
+                  open or copy this link
+                </a>{" "}
+                to send to the client.
+              </p>
+            )}
+            <FormError message={payError} />
+          </div>
+        </Card>
+      )}
 
       <Card>
         <span className="section-label">Ledger</span>

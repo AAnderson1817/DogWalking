@@ -545,12 +545,16 @@ jobs:
       - name: Tests
         # ./ prefix required: deno skips _-prefixed paths without it.
         #
-        # --allow-read is scoped to the migrations directory and nothing else.
-        # payment_status_test.ts parses the live definition of two partial
-        # unique indexes out of the SQL, because asserting a literal status
-        # list would only restate the code it is checking. Nothing else in the
-        # suite touches the filesystem, and a test that starts needing more
-        # than this should have to say so here.
+        # --allow-read is scoped to the migrations and functions directories
+        # and nothing else. payment_status_test.ts parses the live definition
+        # of the partial unique indexes out of the SQL, because asserting a
+        # literal status list would only restate the code it is checking;
+        # checkout_session_test.ts reads create-checkout's source for its
+        # wiring assertions (the functions half of the grant, widened in
+        # qc-lows/L8 — this comment said "migrations and nothing else" for two
+        # changes after that, which is its own small false-assurance lesson).
+        # A test that starts needing more than these two directories should
+        # have to say so here.
         #
         # This string must stay identical to the one in CLAUDE.md. It was
         # `deno test` bare while the documented local command was `deno test

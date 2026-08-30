@@ -39,3 +39,20 @@ export function bookingChargePence(
 ): number | null {
   return plan?.overage_rate_pence ?? service?.visit_price_pence ?? null;
 }
+
+/**
+ * What the booking form does about a walk that cannot be credit-funded:
+ * nothing when credits cover it, a figure-carrying confirmation when one
+ * exists, and a BLOCK when no figure exists to confirm. "I understand" with
+ * no number is not consent to whatever the number later becomes — the 0044
+ * backfill prices un-priced scheduled walks the moment the operator sets a
+ * price, so a figureless confirmation would authorise a charge fixed after
+ * the fact (H12; caught in adversarial review).
+ */
+export function overageBookingGate(
+  needsOverage: boolean,
+  chargePence: number | null,
+): "ok" | "confirm" | "blocked" {
+  if (!needsOverage) return "ok";
+  return chargePence == null ? "blocked" : "confirm";
+}

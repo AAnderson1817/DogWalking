@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bookingChargePence, parseVisitPriceInput } from "./visit-price";
+import { bookingChargePence, overageBookingGate, parseVisitPriceInput } from "./visit-price";
 
 describe("parseVisitPriceInput", () => {
   it("empty means no pay-per-visit, which is null, not zero", () => {
@@ -42,5 +42,22 @@ describe("bookingChargePence", () => {
   it("no plan and no visit price has no figure to quote", () => {
     expect(bookingChargePence(null, { visit_price_pence: null })).toBeNull();
     expect(bookingChargePence(null, null)).toBeNull();
+  });
+});
+
+describe("overageBookingGate", () => {
+  it("credit-funded walks pass with nothing to confirm", () => {
+    expect(overageBookingGate(false, null)).toBe("ok");
+    expect(overageBookingGate(false, 2500)).toBe("ok");
+  });
+
+  it("a quotable charge asks for a figure-carrying confirmation", () => {
+    expect(overageBookingGate(true, 2500)).toBe("confirm");
+  });
+
+  it("no figure to confirm BLOCKS the booking — an unquantified 'I understand' is not consent", () => {
+    // The 0044 backfill can price this walk after booking; a figureless
+    // confirmation would authorise a charge fixed behind the client's back.
+    expect(overageBookingGate(true, null)).toBe("blocked");
   });
 });
