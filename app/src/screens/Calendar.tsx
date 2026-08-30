@@ -31,11 +31,12 @@ import {
   updateWalk,
   walkPetNames,
   type WalkDetailed,
+  type ClientRecord,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { dateLocal, time12 } from "@/lib/format";
 import { todayLocal } from "@/lib/selectors";
-import type { Clients, Pets, Properties, ServiceTypes } from "@/lib/types";
+import type { Pets, Properties, ServiceTypes } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
 
 type CalendarView = "day" | "week";
@@ -445,7 +446,7 @@ function OneOffWalkSheet({
   onCreated: () => void;
 }) {
   const auth = useAuth();
-  const [clients, setClients] = useState<Clients[]>([]);
+  const [clients, setClients] = useState<ClientRecord[]>([]);
   const [properties, setProperties] = useState<Properties[]>([]);
   const [services, setServices] = useState<ServiceTypes[]>([]);
   const [pets, setPets] = useState<Pets[]>([]);

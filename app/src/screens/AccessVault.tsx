@@ -7,15 +7,17 @@ import { EmptyState } from "@/components/EmptyState";
 import { LoadError, loadErrorMessage } from "@/components/LoadError";
 import { LoadingState, StateField } from "@/components/StateField";
 import { CredentialRow, PutCredentialSheet } from "@/components/VaultFlows";
-import { listClients, listCredentials, listProperties, type CredentialMeta } from "@/lib/api";
-import type { Clients, Properties } from "@/lib/types";
+import { listClients, listCredentials, listProperties, type CredentialMeta,
+  type ClientRecord,
+} from "@/lib/api";
+import type { Properties } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
 
 export default function AccessVault() {
   useDocumentTitle("Access vault");
   const [credentials, setCredentials] = useState<CredentialMeta[] | null>(null);
   const [properties, setProperties] = useState<Properties[]>([]);
-  const [clients, setClients] = useState<Clients[]>([]);
+  const [clients, setClients] = useState<ClientRecord[]>([]);
   const [addFor, setAddFor] = useState<string | null>(null); // property id
   const [error, setError] = useState<string | null>(null);
 

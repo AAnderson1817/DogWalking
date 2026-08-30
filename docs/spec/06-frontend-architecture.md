@@ -62,7 +62,11 @@ come from.
 /                  Dashboard
 /calendar          Calendar (phase 06)
 /roster            Roster
-/clients/:id       ClientDetail (tabs: pets · plan&credits · walks · access)
+/clients/:id       ClientDetail (tabs: pets · plan&credits · walks · schedule
+                   · access). The header carries Edit details — name, email and
+                   phone — and each property on the Access tab carries its own
+                   Edit. Both are Sheets inside this route, not new routes.
+                   Withheld from a purged client (spec 03, erasure).
 /walks/:id/live    WalkMode  (.walkmode theme)
 /vault             AccessVault
 /billing           BillingConsole (phase 07: renewals, failed payments, plan changes)
@@ -235,6 +239,42 @@ un-recorded stretch: H7's defect, rebuilt by the fix for M28. The mark is set
 only if the ended run had produced a fix (otherwise the trail opens with a
 break) and is cleared as soon as it is used (otherwise every later point is a
 new subpath and the rest of the walk's distance disappears).
+
+### A wildcard select is a 42501 wherever a column is withheld
+
+`.select("*")` — and `.select()` with no argument, which postgrest-js turns
+into the same thing (`const cleanedColumns = (columns ?? '*')`) — does not ask
+for "the columns I may read". PostgREST emits `SELECT <table>.*`, and Postgres
+refuses the entire statement if ANY column in that expansion is ungranted. So a
+single withheld column does not hide a field: it takes every row of every query
+on that table with it, with a bare 42501.
+
+`clients` acquired that shape in `0038`, which replaced the table-level SELECT
+grant with a column list so `unsubscribe_token` could not reach the browser;
+`0043` §2 withheld three more. Six `api.ts` functions were still asking for `*`
+— `listClients`, `getClient`, `createClient`, `updateClient`, `getMyClient` and
+`listLowCreditClients` — which is the operator's Clients tab, the client
+record, adding a client, the low-credit strip, and every screen of the client
+portal.
+
+The rule was written down twice and connected to nothing: `api.ts` states it
+above `CRED_META` for `access_credentials` alone, and `smoke.sql` states it in
+the comment above a check that then exempts the four withheld columns by name.
+Both halves were true; nothing executable joined them.
+
+Now: every read of a column-restricted table names its columns
+(`CLIENT_COLUMNS`), the browser-visible row type is `ClientRecord`
+(`Omit<Clients, …>`) so the grant is enforced by the compiler rather than by a
+comment, and `app/scripts/column-grants.test.ts` replays the grants out of the
+migrations and fails the build on a wildcard against any column-restricted
+table, or on `CLIENT_COLUMNS` drifting from the grants in either direction. The
+DB-side half stays where it is — smoke asserts the withheld set, in both
+directions.
+
+Note the failure could not be seen by any existing gate: `smoke.sql` runs
+through psql, which simulates the personas with `set local role` and never goes
+through PostgREST, and no e2e spec signs in against a backend. It was found by
+running a real PostgREST against the local database.
 
 ### Every list query is bounded, and filtering is the server's job (review M9)
 

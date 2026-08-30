@@ -59,24 +59,64 @@ export const LIST_PAGE_LARGE = 500;
 export const WALK_DETAIL_PAGE = 5000;
 
 // ── clients ────────────────────────────────────────────────────────────────
-export async function listClients(): Promise<Clients[]> {
-  const { data, error } = await supabase.from("clients").select("*").order("full_name").limit(LIST_PAGE_LARGE);
+/**
+ * The columns an API role may SELECT on `clients` — and the reason every read
+ * of the table names them instead of asking for `*`.
+ *
+ * `0038` replaced the table-level SELECT grant with a column list so that
+ * `unsubscribe_token` could not be read by the browser (one XSS would
+ * otherwise mass-unsubscribe an operator's whole book), and `0043` §2 revoked
+ * `notes`, `stripe_customer_id` and `stripe_subscription_id` on top. Those
+ * grants are correct. What was wrong is that this file kept asking for `*`.
+ *
+ * PostgREST does not narrow a wildcard to what the caller may read: it emits
+ * `SELECT clients.*` and Postgres refuses the whole statement with 42501, so a
+ * single ungranted column takes every row of every query with it. The rule was
+ * already written down for `access_credentials` (see CRED_META below, and
+ * invariant 2) and simply never followed the second table to acquire the same
+ * shape.
+ *
+ * Keep this list in step with the grants. `scripts/client-columns.test.ts`
+ * derives the expected set from the migrations and fails if the two drift in
+ * either direction — a column granted later and not listed here is invisible
+ * to the product, and a column listed here but not granted is a 42501.
+ */
+// One literal with `as const`, deliberately, rather than the concatenation
+// that reads better: postgrest-js resolves the row type by PARSING this string
+// at the type level, and `"a" + "b"` widens to `string`, which it cannot parse
+// — the result is `GenericStringError` and every caller loses its type.
+export const CLIENT_COLUMNS =
+  "id, operator_id, auth_user_id, full_name, email, phone, status, invite_token, plan_id, subscription_status, credit_balance, created_at, updated_at, current_period_end, invite_expires_at, invite_revoked_at, purged_at, notice_accepted_at, notice_version" as const;
+
+/**
+ * A `clients` row as the browser may actually read it.
+ *
+ * The four omitted columns have no reader in `app/src` — that is what made
+ * revoking them cheap — so this narrowing costs no surface and puts the grant
+ * into the type system, where the compiler enforces it rather than a comment.
+ */
+export type ClientRecord = Omit<
+  Clients,
+  "notes" | "stripe_customer_id" | "stripe_subscription_id" | "unsubscribe_token"
+>;
+export async function listClients(): Promise<ClientRecord[]> {
+  const { data, error } = await supabase.from("clients").select(CLIENT_COLUMNS).order("full_name").limit(LIST_PAGE_LARGE);
   return must(data, error);
 }
 
-export async function getClient(id: string): Promise<Clients> {
-  const { data, error } = await supabase.from("clients").select("*").eq("id", id).single();
+export async function getClient(id: string): Promise<ClientRecord> {
+  const { data, error } = await supabase.from("clients").select(CLIENT_COLUMNS).eq("id", id).single();
   return must(data, error);
 }
 
-export async function createClient(row: TableInsert<"clients">): Promise<Clients> {
-  const { data, error } = await supabase.from("clients").insert(row).select().single();
+export async function createClient(row: TableInsert<"clients">): Promise<ClientRecord> {
+  const { data, error } = await supabase.from("clients").insert(row).select(CLIENT_COLUMNS).single();
   return must(data, error);
 }
 
-export async function updateClient(id: string, patch: TableUpdate<"clients">): Promise<Clients> {
+export async function updateClient(id: string, patch: TableUpdate<"clients">): Promise<ClientRecord> {
   const { data, error } = await supabase
-    .from("clients").update(patch).eq("id", id).select().single();
+    .from("clients").update(patch).eq("id", id).select(CLIENT_COLUMNS).single();
   return must(data, error);
 }
 
@@ -92,7 +132,7 @@ export async function updateClient(id: string, patch: TableUpdate<"clients">): P
  * from anywhere and keeps this a performance change rather than a refactor
  * that could strand a caller.
  */
-export async function getMyClient(userId?: string): Promise<Clients | null> {
+export async function getMyClient(userId?: string): Promise<ClientRecord | null> {
   let uid = userId;
   if (!uid) {
     const { data: userData } = await supabase.auth.getUser();
@@ -100,7 +140,7 @@ export async function getMyClient(userId?: string): Promise<Clients | null> {
   }
   if (!uid) return null;
   const { data, error } = await supabase
-    .from("clients").select("*").eq("auth_user_id", uid).maybeSingle();
+    .from("clients").select(CLIENT_COLUMNS).eq("auth_user_id", uid).maybeSingle();
   if (error) throw new Error(error.message);
   return data;
 }
@@ -390,10 +430,10 @@ export async function listPayments(clientId?: string): Promise<Payments[]> {
 export async function listLowCreditClients(
   threshold: number,
   limit = LIST_PAGE,
-): Promise<Clients[]> {
+): Promise<ClientRecord[]> {
   const { data, error } = await supabase
     .from("clients")
-    .select("*")
+    .select(CLIENT_COLUMNS)
     .neq("status", "archived")
     .in("subscription_status", [...LOW_CREDIT_SUBSCRIPTION_STATUSES])
     .lte("credit_balance", threshold)

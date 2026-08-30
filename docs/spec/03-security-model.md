@@ -30,8 +30,8 @@ assertions.
 | Table | Operator (`operator_id = auth.uid()`) | Client (own rows via `client_id = my_client_id()`) | anon |
 |---|---|---|---|
 | operators | select own row; insert/update by **column list** (0045 — the INSERT list excludes the platform billing columns `trial_ends_at`/`platform_*` AND the Connect `stripe_*` columns, closing the self-grant hole a table-level grant left open) | select `display_name,business_name` of own operator only (view `v_my_operator`) | — |
-| clients | full CRUD | select own row; update own contact fields only (column grants) | — |
-| properties | full CRUD | select own; update `access_notes_public` only | — |
+| clients | select/insert/update by COLUMN LIST, delete | select own row; update own contact fields only (column grants) | — |
+| properties | select/insert/delete; update all but `operator_id`/timestamps | select own; update `access_notes_public` only | — |
 | access_credentials | insert/update/delete metadata; **no select on `ciphertext`** | select own property's METADATA only (0030); **never `ciphertext`** | — |
 | credential_access_log | select own; **no insert/update/delete at all** (0030) | select own property's trail (0030) | — |
 | pets | full CRUD | select own; update care fields (temperament, feeding, medical, vet, photo) | — |
@@ -45,6 +45,31 @@ assertions.
 | payments | select | select own | — |
 | notifications | select/update `read_at` (operator rows) | select/update `read_at` (own rows) | — |
 | stripe_events | — (service role only) | — | — |
+
+`clients` is not "full CRUD" for the operator either, and the asymmetry is
+load-bearing in both directions:
+
+* **SELECT is a column list**, not the table (`0038` §1, narrowed again by
+  `0043` §2). `unsubscribe_token`, `notes`, `stripe_customer_id` and
+  `stripe_subscription_id` are withheld. A wildcard read is therefore a
+  42501 on the WHOLE table, not a row with fields missing — PostgREST emits
+  `SELECT clients.*` and Postgres refuses the statement. Every read of
+  `clients` names its columns (`CLIENT_COLUMNS` in `app/src/lib/api.ts`),
+  and `app/scripts/column-grants.test.ts` derives the allowed set from the
+  migrations and fails the build on a wildcard or on drift in either
+  direction.
+* **`notes` is UPDATE-granted and NOT SELECT-granted.** A notes field is
+  therefore unbuildable as things stand: the operator could write one and
+  never read it back. The edit surface deliberately omits it, and omits
+  `status` too — `status` is written by three invite-lifecycle functions,
+  so an operator setting it by hand can desynchronise the row from its
+  invite state.
+
+`properties.client_id` IS inside the operator's UPDATE grant, so re-parenting
+a property to another client is something the database permits (the `0014`
+tenant-consistency trigger constrains it to the same operator, and
+`walks.property_id` is RESTRICT). No surface offers it, and the edit form's
+patch is asserted to be incapable of carrying it.
 
 `anon` gets nothing except `EXECUTE` on `fn_claim_invite(token uuid)` (looks up client by invite_token, binds `auth_user_id`, flips status → active; called post-signup so effectively authenticated) — implement as authenticated-only; anon truly gets zero.
 
@@ -104,6 +129,16 @@ everything else is destroyed: `walk_gps_points`, `walk_photos`, `walk_pets`,
 is the only form the graph allows without dismantling the tax record or the
 audit trail, and what remains carries no personal data and no readable secret.
 
+**Nothing in the database stops an edit re-personalising a tombstone.** The
+`0004` UPDATE grant still covers `full_name`, `email` and `phone` after
+`fn_purge_client` has redacted them, so a client-edit form would let an
+operator undo, by hand, an erasure that was carried out on request. The
+operator UI therefore withholds the edit affordance from any client carrying
+`purged_at` (`isEditable` in `app/src/lib/client-edit.ts`). Stated as what it
+is: a UI-only guard, not a database one. A definer-enforced version would need
+a trigger refusing writes to a purged row, which is the shape a fix would take
+if this is ever reachable by another route.
+
 **Storage is two-phase, and the order is load-bearing.** SQL cannot delete a
 bucket object — dropping the `storage.objects` row removes the metadata and
 leaves the file. So `fn_purge_client` returns the paths and KEEPS the rows
@@ -146,6 +181,25 @@ belonged to whoever claimed and is not evidence about the real client. Without
 it there was no in-product recovery at all: revoke and rotate both require an
 UNCLAIMED invite, and the row cannot be deleted because every child FK
 restricts.
+
+`fn_unbind_invite` deliberately does NOT clear `clients.email`, and that makes
+the recovery only half a recovery on its own: the reissued token is still bound
+to the address of whoever wrongly claimed, so the real client cannot use it
+until somebody edits the row. Which is the other thing worth stating plainly —
+
+**on an UNCLAIMED client, `clients.email` is not contact detail. It is the last
+rung of the claim ladder**, in `fn_claim_invite` and `fn_invite_signup_check`
+alike: NULL admits any address (and the pre-flight then reserves the first one
+it admits), non-NULL admits only that address, compared `lower(trim(...))` on
+both sides. It is also the only ladder input an operator can change with a
+plain UPDATE rather than a definer function, because it sits in the `0004`
+column grant while `invite_token`, `invite_expires_at` and `invite_revoked_at`
+do not. So the edit surface treats it as an access-control decision and says
+which one is being made — adding an address narrows the invite to it, changing
+one transfers it, and CLEARING it re-opens the invite to anyone holding the
+link. Once `auth_user_id` is set the ladder stops at `already_claimed` and
+never reaches this rung; the login is `auth.users.email`, which nothing in this
+repository updates after signup, so an edit then changes only where mail goes.
 
 `invite_claim_attempts` is append-only, with exactly one exception: a row may
 be DELETEd once its client carries `purged_at`. Erasing attempts is therefore

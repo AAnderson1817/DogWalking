@@ -12,16 +12,18 @@ import { Sheet } from "@/components/Sheet";
 import { Spinner } from "@/components/Spinner";
 import { LoadingState } from "@/components/StateField";
 import { clientStatusTreatment } from "@/components/status-treatment";
-import { createClient, inviteUrlFor, listClients, listPets } from "@/lib/api";
+import { createClient, inviteUrlFor, listClients, listPets,
+  type ClientRecord,
+} from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import type { Clients, Pets } from "@/lib/types";
+import type { Pets } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
 
 export default function Roster() {
   useDocumentTitle("Clients");
   const auth = useAuth();
   const navigate = useNavigate();
-  const [clients, setClients] = useState<Clients[] | null>(null);
+  const [clients, setClients] = useState<ClientRecord[] | null>(null);
   const [pets, setPets] = useState<Pets[]>([]);
   const [search, setSearch] = useState("");
   const [addOpen, setAddOpen] = useState(false);

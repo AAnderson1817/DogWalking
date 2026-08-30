@@ -23,10 +23,11 @@ import {
   walkPetNames,
   type MyOperatorView,
   type WalkDetailed,
+  type ClientRecord,
 } from "@/lib/api";
 import { dateLocal } from "@/lib/format";
 import { todayLocal } from "@/lib/selectors";
-import type { Clients, Notifications, Plans } from "@/lib/types";
+import type { Notifications, Plans } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
 import { useAuth } from "@/lib/auth-context";
 
@@ -34,7 +35,7 @@ export default function PortalHome() {
   useDocumentTitle("Your walks");
   const auth = useAuth();
   const navigate = useNavigate();
-  const [client, setClient] = useState<Clients | null>(null);
+  const [client, setClient] = useState<ClientRecord | null>(null);
   const [operator, setOperator] = useState<MyOperatorView | null>(null);
   const [plan, setPlan] = useState<Plans | null>(null);
   const [upcomingWalks, setUpcoming] = useState<WalkDetailed[]>([]);

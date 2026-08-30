@@ -20,16 +20,17 @@ import {
   updatePet,
   updateProperty,
   uploadPetPhoto,
+  type ClientRecord,
 } from "@/lib/api";
 import { compressImage } from "@/lib/image";
-import type { Clients, Pets, Properties } from "@/lib/types";
+import type { Pets, Properties } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
 import { useAuth } from "@/lib/auth-context";
 
 export default function PetProfiles() {
   useDocumentTitle("Your pets");
   const auth = useAuth();
-  const [client, setClient] = useState<Clients | null>(null);
+  const [client, setClient] = useState<ClientRecord | null>(null);
   const [pets, setPets] = useState<Pets[]>([]);
   const [properties, setProperties] = useState<Properties[]>([]);
   const [photoUrls, setPhotoUrls] = useState<Record<string, string>>({});

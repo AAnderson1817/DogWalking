@@ -20,12 +20,13 @@ import {
   listWalksDetailed,
   walkPetNames,
   type AttentionPayment,
+  type ClientRecord,
 } from "@/lib/api";
 import type { WalkDetailed } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { dateLocal, distanceMi, money, time12 } from "@/lib/format";
 import { liveWalk, todayLocal, todaysWalks } from "@/lib/selectors";
-import type { Clients, Operators } from "@/lib/types";
+import type { Operators } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
 
 const DISPLAY_TZ = "America/Chicago";
@@ -62,7 +63,7 @@ export default function Dashboard() {
   const [operator, setOperator] = useState<Operators | null>(null);
   const [walks, setWalks] = useState<WalkDetailed[] | null>(null);
   const [stale, setStale] = useState<WalkDetailed[]>([]);
-  const [lowCredit, setLowCredit] = useState<Clients[]>([]);
+  const [lowCredit, setLowCredit] = useState<ClientRecord[]>([]);
   const [attention, setAttention] = useState<AttentionPayment[]>([]);
   const [error, setError] = useState<string | null>(null);
 

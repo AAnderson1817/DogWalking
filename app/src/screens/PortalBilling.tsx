@@ -18,17 +18,18 @@ import {
   listLedger,
   listPaymentsDetailed,
   type PaymentDetailed,
+  type ClientRecord,
 } from "@/lib/api";
 import { formatLedgerEntry } from "@/lib/credits";
 import { dateLocal, money } from "@/lib/format";
-import type { Clients, CreditLedger, Plans } from "@/lib/types";
+import type { CreditLedger, Plans } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
 import { useAuth } from "@/lib/auth-context";
 
 export default function PortalBilling() {
   useDocumentTitle("Billing");
   const auth = useAuth();
-  const [client, setClient] = useState<Clients | null>(null);
+  const [client, setClient] = useState<ClientRecord | null>(null);
   const [plan, setPlan] = useState<Plans | null>(null);
   const [ledger, setLedger] = useState<CreditLedger[]>([]);
   const [payments, setPayments] = useState<PaymentDetailed[]>([]);

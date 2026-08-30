@@ -10,8 +10,9 @@ import { useState } from "react";
 import { Button } from "./Button";
 import { FormError, Input } from "./fields";
 import { Sheet } from "./Sheet";
-import { exportClientData, purgeClient } from "@/lib/api";
-import type { Clients } from "@/lib/types";
+import { exportClientData, purgeClient,
+  type ClientRecord,
+} from "@/lib/api";
 
 /** Typed to confirm. Not a yes/no — this destroys a person's record. */
 const CONFIRM_WORD = "DELETE";
@@ -20,7 +21,7 @@ export function ClientDataPanel({
   client,
   onPurged,
 }: {
-  client: Clients;
+  client: ClientRecord;
   onPurged: () => void;
 }) {
   const [open, setOpen] = useState(false);

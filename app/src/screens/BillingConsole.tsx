@@ -22,23 +22,18 @@ import {
   listPaymentsDetailed,
   listPlans,
   type PaymentDetailed,
+  type ClientRecord,
 } from "@/lib/api";
 import { dateLocal, money } from "@/lib/format";
-import type {
-  Clients,
-  PaymentStatus,
-  PaymentType,
-  Payments,
-  Plans,
-} from "@/lib/types";
+import type { PaymentStatus, PaymentType, Payments, Plans } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
 
 export default function BillingConsole() {
   useDocumentTitle("Money");
-  const [clients, setClients] = useState<Clients[] | null>(null);
+  const [clients, setClients] = useState<ClientRecord[] | null>(null);
   const [plans, setPlans] = useState<Plans[]>([]);
   const [payments, setPayments] = useState<PaymentDetailed[]>([]);
-  const [planChangeFor, setPlanChangeFor] = useState<Clients | null>(null);
+  const [planChangeFor, setPlanChangeFor] = useState<ClientRecord | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState<PaymentStatus | "all">("all");
   const [typeFilter, setTypeFilter] = useState<PaymentType | "all">("all");
@@ -286,7 +281,7 @@ function PlanChangeSheet({
   onClose,
   onChanged,
 }: {
-  client: Clients;
+  client: ClientRecord;
   plans: Plans[];
   onClose: () => void;
   onChanged: (msg: string) => void;

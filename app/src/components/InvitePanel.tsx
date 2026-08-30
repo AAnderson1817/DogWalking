@@ -12,9 +12,15 @@ import { useState } from "react";
 import { Badge, type BadgeStatus } from "./Badge";
 import { Button } from "./Button";
 import { FormError } from "./fields";
-import { inviteState, inviteUrlFor, revokeInvite, rotateInvite, unbindInvite } from "@/lib/api";
+import {
+  inviteState,
+  inviteUrlFor,
+  revokeInvite,
+  rotateInvite,
+  unbindInvite,
+  type ClientRecord,
+} from "@/lib/api";
 import { dateLocal } from "@/lib/format";
-import type { Clients } from "@/lib/types";
 
 const STATE_COPY: Record<
   Exclude<ReturnType<typeof inviteState>, "claimed">,
@@ -41,7 +47,7 @@ export function InvitePanel({
   client,
   onChanged,
 }: {
-  client: Clients;
+  client: ClientRecord;
   onChanged: () => void;
 }) {
   const [token, setToken] = useState(client.invite_token);
