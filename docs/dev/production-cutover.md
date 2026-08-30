@@ -78,7 +78,8 @@ Staging stays exactly as it is — it remains your test bed. Production is a
    | `SUPABASE_DB_PASSWORD` | the **prod** DB password |
    | `SUPABASE_SERVICE_ROLE_KEY` | the **prod** service_role key (Settings → API). **Required** — the production deploy refuses to run without it, because it is the only way to confirm `VAULT_MASTER_KEY` actually opens this project's door codes. |
    | `STRIPE_SECRET_KEY` | **live** key `sk_live_…` (step 4) |
-   | `STRIPE_WEBHOOK_SECRET` | **live** `whsec_…` (step 4) |
+   | `STRIPE_WEBHOOK_SECRET` | **live** `whsec_…` (step 4, Connected-accounts endpoint) |
+   | `STRIPE_PLATFORM_WEBHOOK_SECRET` | **live** `whsec_…` (step 4/3a, Your-account endpoint — a different secret; H31) |
    | `VAULT_MASTER_KEY` | the fresh key from step 2 |
    | `VAULT_MASTER_KEY_PREVIOUS` | the literal `none` (see step 2) |
    | `APP_BASE_URL` | `https://app.yourdomain.com` |
@@ -94,8 +95,11 @@ Staging stays exactly as it is — it remains your test bed. Production is a
 > chargeback liability, their Stripe fees. Sanpo is never in the flow of
 > funds, which is also why none of this is money transmission.
 >
-> So the platform account below is **not** where client money lands. It exists
-> to create connected accounts, mint onboarding links, and verify webhooks.
+> So the platform account below is **not** where client money lands. It
+> carries exactly one kind of money: the operator's own $49/month Sanpo
+> subscription (review H31) — where Sanpo is the merchant and the operator
+> the customer. Beyond that it creates connected accounts, mints onboarding
+> links, and verifies webhooks.
 > As the founder you are also operator #1: you will connect your own account
 > through the app (Money → Connect Stripe) exactly as any other operator does.
 
@@ -138,8 +142,22 @@ Staging stays exactly as it is — it remains your test bed. Production is a
 
    Copy the live signing secret into the `STRIPE_WEBHOOK_SECRET`
    environment secret.
+3a. Add the **second** endpoint, for the operator's own Sanpo subscription
+   (review H31): URL
+   `https://<PROD_PROJECT_REF>.supabase.co/functions/v1/platform-webhook`,
+   **Listen to events on: Your account** — the exact mirror of step 3, with
+   the mirror failure mode: a platform endpoint on Connected accounts never
+   sees the subscription events, so the app locks operators out at trial end
+   while their payments succeed in Stripe. Events:
+   `checkout.session.completed`, `customer.subscription.created`,
+   `customer.subscription.updated`, `customer.subscription.deleted`,
+   `invoice.payment_failed`. Copy ITS live signing secret into
+   `STRIPE_PLATFORM_WEBHOOK_SECRET` — never the same value as step 3's. The
+   $49/month Price needs no dashboard step: `operator-billing` creates it
+   lazily under the lookup key `sanpo_operator_monthly_4900`.
 4. Settings → Billing → **Customer portal → activate** (live mode has its
-   own toggle; `/portal/billing` depends on it).
+   own toggle; `/portal/billing` depends on it) — on the platform account as
+   well, for the operator's own subscription portal.
 5. Settings → Branding: upload the logo/colors — this is what clients see
    on checkout and receipts.
 

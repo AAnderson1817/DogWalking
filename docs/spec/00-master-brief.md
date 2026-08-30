@@ -2,6 +2,7 @@
 
 ## Positioning
 - Target: solo and 1–3 walker dog-walking operators. Operator #1 is the founder (pre-launch); product is sellable as vertical micro-SaaS.
+- Revenue (review H31): **$49/month per operator, 14-day free trial**, billed by Stripe on the platform account (`operator-billing`/`platform-webhook`, spec 04). Public `/pricing` states the figure from the same constant the checkout charges. Signup is closable: client invites create accounts server-side (`claim-signup`), so the GoTrue toggle governs operator acquisition alone.
 - Gap: incumbents (Time To Pet, Scout, Precise Petcare, PetPocketbook, Pet Sitter Plus) are team-scoped, overbuilt, priced per-visit/per-package. Rover/Wag are marketplaces, not operations software.
 - Core differentiator: native subscription/credit billing — credits granted per cycle, debited per walk, rollover, pause/resume — built into the data model.
 - Secondary: solo simplicity at lower price; polished client experience (live GPS, photo report cards, in-app payment); hyper-local density routing.

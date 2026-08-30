@@ -65,6 +65,32 @@ credits are granted, and nothing errors.
 Both deploy runbooks say this in bold. Until it is set: subscriptions appear to
 work and no money is ever recorded.
 
+### 1a. The SECOND Stripe endpoint: platform-webhook on **Your account** — review H31
+Where: Stripe Dashboard → Developers → Webhooks → Add endpoint
+(`…/functions/v1/platform-webhook`), then the
+`STRIPE_PLATFORM_WEBHOOK_SECRET` GitHub secret (staging repo secret +
+production environment secret) and a `sync_secrets` deploy.
+
+The operator's own $49/month Sanpo subscription lives on the platform
+account, and its events arrive only at an endpoint set to **Your account** —
+the exact mirror of §1, with the mirror failure mode: misconfigured, the app
+locks operators out at trial end while their payments succeed in Stripe.
+Until the secret is set and synced, `platform-webhook` answers every
+delivery 500 `misconfigured` (loud in Stripe's dashboard, invisible in the
+app). Runbook steps: `staging-setup.md` §4·3, `production-cutover.md` §4·3a.
+
+### 1b. Decide the signup toggle — review H31, now actually usable
+Where: Supabase Dashboard → Authentication → Sign In / Up → "Allow new users
+to sign up".
+
+Client invites no longer depend on public signup (claim-signup uses the
+admin API) and the magic link no longer creates accounts, so this toggle now
+governs exactly one thing: whether strangers can start an operator trial at
+`/signup`. ON = self-serve acquisition; OFF = invitation-only. Either is
+fine — the point of H31 is that it is finally a choice. Nothing breaks
+either way, which also means nothing automated will tell you it is set
+wrong; it is a business decision, not a defect signal.
+
 ### 2. `SUPABASE_SERVICE_ROLE_KEY` on the staging environment — issue #31
 The vault deploy step *Verify the vault key opens this project* exits 0 with a
 warning when this secret is unset. It ran for the first time on `5193e69` and

@@ -211,9 +211,15 @@ records them as `null` in the live fixture rather than assuming.
    the dashboard, this file is the record and the readback job is the check. If
    the file, wire `config push` after verifying it, and the readback becomes a
    regression test rather than a report.
-3. **`enable_signup = true`.** Open signup is currently required because client
-   invites go through the same signup path (review H31). Closing it needs the
-   invite flow to change first.
+3. **`enable_signup` is now the owner's choice (review H31, closed).** Client
+   invites no longer go through public signup — `claim-signup` creates those
+   accounts via the admin API, which the toggle does not govern, and the
+   magic link stopped creating accounts (`shouldCreateUser: false`). The one
+   remaining public-signup dependency is `/signup`, the operator front door,
+   ON PURPOSE: turning the toggle off closes operator acquisition and nothing
+   else. Leave it on while operators may self-serve; flip it off in the
+   dashboard to make signup invitation-only — either way it is finally a
+   decision rather than a hostage.
 
 ## Related
 

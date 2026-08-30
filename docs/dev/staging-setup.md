@@ -21,7 +21,8 @@ dashboards) — no local tooling required. Do the steps in order; ~30–45 min.
    | `SUPABASE_DB_PASSWORD` | chosen when creating the project |
    | `SUPABASE_SERVICE_ROLE_KEY` | project Settings → API → `service_role`. Without it the deploy's `Verify the vault key opens this project` step warns and passes, so nothing confirms `VAULT_MASTER_KEY` can actually read this project's credentials (`docs/dev/vault-key-rotation.md`). |
    | `STRIPE_SECRET_KEY` | Stripe → Developers → API keys (TEST mode `sk_test_…`) |
-   | `STRIPE_WEBHOOK_SECRET` | step 4 below (`whsec_…`) |
+   | `STRIPE_WEBHOOK_SECRET` | step 4 below (`whsec_…`, the **Connected accounts** endpoint) |
+   | `STRIPE_PLATFORM_WEBHOOK_SECRET` | step 4 below (`whsec_…`, the **Your account** endpoint — a different secret; H31) |
    | `VAULT_MASTER_KEY` | step 3 below |
    | `VAULT_MASTER_KEY_PREVIOUS` | the literal `none` until you first rotate (step 3) |
    | `APP_BASE_URL` | your Vercel URL (step 6; set a placeholder first) |
@@ -109,8 +110,24 @@ at once.
 
    Copy the signing secret (`whsec_…`) into the `STRIPE_WEBHOOK_SECRET`
    GitHub secret.
+
+   Then add a **second** endpoint for the operator's own Sanpo subscription
+   (review H31): same Add-endpoint flow, URL
+   `https://<PROJECT_REF>.supabase.co/functions/v1/platform-webhook`,
+   and set **Listen to events on: Your account** — the exact mirror of the
+   endpoint above, and the mirror failure mode too: a platform endpoint set
+   to Connected accounts never sees the operator's subscription events, so
+   the app locks operators out at trial end while their payments succeed in
+   Stripe. Events: `checkout.session.completed`,
+   `customer.subscription.created`, `customer.subscription.updated`,
+   `customer.subscription.deleted`, `invoice.payment_failed`. Copy ITS
+   signing secret into `STRIPE_PLATFORM_WEBHOOK_SECRET` — the two secrets
+   are never interchangeable. (No dashboard Product/Price is needed: the
+   $49/month Price is created lazily by `operator-billing` under the lookup
+   key `sanpo_operator_monthly_4900`.)
 4. Settings → Billing → Customer portal → activate it (used by
-   `/portal/billing`).
+   `/portal/billing`) — and activate it on the PLATFORM account too, for the
+   operator's own subscription portal (`operator-billing` action `portal`).
 
 ## 5. Deploy
 

@@ -264,8 +264,38 @@ jobs:
           invite=$(echo "$created" | jq -r '.[0].invite_token // empty')
           [ -n "$invite" ] || { echo "FAIL: no invite token: $created"; exit 1; }
 
-          cl_uid=$(admin -X POST "$base/auth/v1/admin/users" -H "Content-Type: application/json" \
-            -d "{\"email\":\"$cl_email\",\"password\":\"$pass\",\"email_confirm\":true}" | jq -r '.id')
+          # The account is created by the PUBLIC claim-signup function now (review
+          # H31) — the replay exercises the real product path, which is the
+          # only path that keeps working once the owner turns the GoTrue
+          # signup toggle off. First the negative: a dead token must refuse
+          # with its outcome BEFORE any account exists, because that ordering
+          # is the function's entire security property.
+          neg=$(mktemp); ncode=$(curl -sS -o "$neg" -w '%{http_code}' -X POST \
+            "$base/functions/v1/claim-signup" -H "apikey: $ANON_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"token\":\"00000000-0000-4000-8000-00000000dead\",\"email\":\"$cl_email\",\"password\":\"$pass\"}")
+          echo "claim-signup (dead token) -> HTTP $ncode"; cat "$neg"; echo
+          if [ "$ncode" != "409" ] || ! grep -q '"not_found"' "$neg"; then
+            echo "FAIL: a dead invite token did not refuse as not_found"; exit 1
+          fi
+          if [ -n "$(user_id_for "$cl_email")" ]; then
+            echo "FAIL: the refused signup created an account anyway"; exit 1
+          fi
+
+          cs=$(mktemp); cscode=$(curl -sS -o "$cs" -w '%{http_code}' -X POST \
+            "$base/functions/v1/claim-signup" -H "apikey: $ANON_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"token\":\"$invite\",\"email\":\"$cl_email\",\"password\":\"$pass\"}")
+          echo "claim-signup -> HTTP $cscode"; cat "$cs"; echo
+          [ "$cscode" = "200" ] || { echo "FAIL: claim-signup refused a live invite"; exit 1; }
+          cl_uid=$(user_id_for "$cl_email")
+          [ -n "$cl_uid" ] || { echo "FAIL: claim-signup reported success but created no account"; exit 1; }
+          # The function creates the account unconfirmed (typing an address
+          # proves nothing — the frontend resends the confirmation email).
+          # CI has no inbox, so the admin API stands in for clicking the link;
+          # everything before this line went through the public path.
+          admin -X PUT "$base/auth/v1/admin/users/$cl_uid" -H "Content-Type: application/json" \
+            -d '{"email_confirm":true}' >/dev/null
           tok=$(curl -sS -X POST "$base/auth/v1/token?grant_type=password" \
             -H "apikey: $ANON_KEY" -H "Content-Type: application/json" \
             -d "{\"email\":\"$cl_email\",\"password\":\"$pass\"}" | jq -r '.access_token')
