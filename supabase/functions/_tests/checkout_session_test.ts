@@ -1,5 +1,6 @@
 import { assert, assertEquals, assertThrows } from "./asserts.ts";
 import {
+  assertTopupAllowed,
   parseCheckoutRequest,
   setupSessionParams,
   subscriptionSessionParams,
@@ -103,9 +104,37 @@ Deno.test("topup params: payment mode, ad-hoc price, credits marker, card saved"
   assert(p.custom_text?.submit.message.includes("$25.00"), "priced services are disclosed");
 });
 
-Deno.test("a topup with nothing priced states no per-visit promise", () => {
+Deno.test("a topup with nothing priced states no per-visit promise AND saves no card", () => {
+  // The setup branch refuses a card save with no stated terms; the top-up
+  // must not be a bypass of its sibling's rule. Its first draft saved the
+  // card anyway (adversarial review): the operator could later set a price,
+  // the 0044 backfill would price the queued walks, and the card would be
+  // charged off-session at a figure the client was never shown.
   const p = topup(null);
   assertEquals("custom_text" in p, false);
+  assertEquals("setup_future_usage" in p.payment_intent_data, false);
+});
+
+Deno.test("a topup under a mandate saves the card for off-session visits", () => {
+  const p = topup();
+  assertEquals(p.payment_intent_data.setup_future_usage, "off_session");
+});
+
+Deno.test("a subscribed client cannot buy a top-up — renewals sweep the balance", () => {
+  // fn_apply_rollover expires the whole balance under policy 'none' (the
+  // schema default) at every renewal, so a paid top-up for a plan client is
+  // money for credits the machinery is scheduled to destroy days later.
+  for (const status of ["active", "paused", "past_due"]) {
+    assertThrows(
+      () => assertTopupAllowed({ stripe_subscription_id: "sub_1", subscription_status: status }),
+      HttpError,
+      undefined,
+      `allowed a top-up for a ${status} subscription`,
+    );
+  }
+  // No live cycle → nothing sweeps the balance → allowed.
+  assertTopupAllowed({ stripe_subscription_id: null, subscription_status: "none" });
+  assertTopupAllowed({ stripe_subscription_id: "sub_old", subscription_status: "cancelled" });
 });
 
 Deno.test("setup params: setup mode, and the mandate is not optional", () => {

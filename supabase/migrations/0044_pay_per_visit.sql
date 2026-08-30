@@ -20,7 +20,7 @@
 --      plan rate until this PR; see _lib/overage.ts).
 --   3. fn_apply_topup — payment row + credit grant in ONE transaction keyed on
 --      the Stripe PaymentIntent, the fn_apply_invoice_paid shape. The webhook
---      calls it for payment-mode checkout completions.
+--      calls it for PAID payment-mode checkout completions.
 
 -- ── 0. A bell type for "the client saved a card" ──────────────────────────
 -- Setup-mode checkout is how a no-plan client puts a card on file; the
@@ -104,29 +104,56 @@ revoke all on function fn_snapshot_walk_price() from public, anon, authenticated
 -- when an operator first sets a visit price all carry a null snapshot — and
 -- null falls back to nothing for a no-plan client, so every one of them
 -- would refuse to bill for two weeks on exactly the adoption path H32 is
--- about. When a price transitions NULL → value, scheduled walks that were
--- never priced take it.
+-- about. When a price is set, scheduled walks that were never priced take it.
 --
 -- This can only ever FILL a null, so it is pricing, not re-pricing:
 --   * only walks with no snapshot — a price already agreed stands, so
---     clearing and re-setting the service price cannot rewrite anything;
+--     editing the service price cannot rewrite anything;
 --   * only status 'scheduled' — a walk in progress started under the terms
 --     in force at the time, and a completed one is history;
---   * only on the NULL → value edge — editing an existing price changes
---     future walks (via the INSERT snapshot), never queued ones.
+--   * only walks whose CLIENT is on no plan. A plan client's un-snapshotted
+--     walk (a pre-0043 row) already charges correctly through the live
+--     plan-rate fallback, and stamping a visit price onto it would make the
+--     visit-price branch of the charge resolution beat that fallback — a
+--     plan client billed the cash rate under a "per-visit" label their
+--     Stripe mandate never mentioned (caught in adversarial review).
 -- The no-API-role-UPDATE rule on the snapshot columns (0043) survives: the
 -- only writers are still definer trigger functions.
+--
+-- Fires on ANY price-bearing edit, not just the NULL→value edge. Fill-only
+-- makes re-firing harmless, and the wider trigger is the self-heal for a
+-- narrow race: a walk INSERTed concurrently with the price edit can read the
+-- pre-edit NULL in its snapshot trigger while being invisible to this
+-- backfill's scan — priced by neither. The next price edit fills it; until
+-- then the charge-time refusal names the Settings fix. Accepted and stated
+-- rather than serialized away, because the fix would be locking
+-- service_types in the INSERT path of every walk.
+--
+-- Lock order: the row locks are taken in id order via the FOR UPDATE
+-- subselect, matching fn_purge_client's id-ordered walk locking (0042) so
+-- two multi-row walk updaters cannot deadlock each other mid-scan. No
+-- clients lock is ever taken here, so the 0037 walks→clients order is not
+-- in play.
 create function fn_price_unpriced_scheduled_walks() returns trigger
 language plpgsql
 security definer
 set search_path = public
 as $$
 begin
-  update walks
+  update walks w
      set visit_price_pence = new.visit_price_pence
-   where service_type_id = new.id
-     and status = 'scheduled'
-     and visit_price_pence is null;
+    from (
+      select w2.id
+        from walks w2
+        join clients c on c.id = w2.client_id
+       where w2.service_type_id = new.id
+         and w2.status = 'scheduled'
+         and w2.visit_price_pence is null
+         and c.plan_id is null
+       order by w2.id
+         for update of w2
+    ) t
+   where w.id = t.id;
   return new;
 end;
 $$;
@@ -136,7 +163,8 @@ revoke all on function fn_price_unpriced_scheduled_walks() from public, anon, au
 create trigger trg_service_types_visit_price
   after update of visit_price_pence on service_types
   for each row
-  when (old.visit_price_pence is null and new.visit_price_pence is not null)
+  when (new.visit_price_pence is not null
+        and new.visit_price_pence is distinct from old.visit_price_pence)
   execute function fn_price_unpriced_scheduled_walks();
 
 -- ── 4. The top-up: payment row + grant, one transaction, one key ──────────
@@ -145,6 +173,13 @@ create trigger trg_service_types_visit_price
 -- so the money effect needs its own idempotency, keyed on the Stripe object
 -- that paid. A payment-mode Checkout Session has no invoice; the
 -- PaymentIntent is that object.
+--
+-- The caller (stripe-webhook) applies a top-up only for a session whose
+-- payment_status is 'paid' — checkout.session.completed also fires with
+-- 'unpaid' for delayed-notification methods (ACH), where the money arrives
+-- or fails days later via checkout.session.async_payment_succeeded/failed.
+-- Granting on completion alone would hand out credits for money never
+-- received (caught in adversarial review).
 --
 -- The PI id is stamped on BOTH payments.stripe_invoice_id and (through
 -- fn_grant_cycle_credits) credit_ledger.stripe_invoice_id. That column is
@@ -178,6 +213,15 @@ begin
   if p_credits is null or p_credits <= 0 then
     raise exception 'fn_apply_topup: credits must be positive';
   end if;
+  -- A zero-amount 'succeeded' payment is unrefundable by construction:
+  -- fn_reverse_payment refuses any reversal exceeding amount_pence, so a
+  -- charge.refunded for such a row would 500 on every redelivery for three
+  -- days while the client kept the credits. No session create-checkout
+  -- mints can produce one; refusing here keeps the invariant even for an
+  -- event shape outside that contract.
+  if p_amount_pence is null or p_amount_pence <= 0 then
+    raise exception 'fn_apply_topup: amount must be positive';
+  end if;
 
   select operator_id into v_operator
     from clients where id = p_client for update;
@@ -190,8 +234,7 @@ begin
   -- to three days, and a redelivery after a refund must not grant a second
   -- batch of credits — the 0023 double-grant hole, avoided rather than
   -- re-fixed. 'failed' is absent: no failed top-up row exists to conflict
-  -- with (an unpaid session never completes), and excluding it costs
-  -- nothing if one ever does.
+  -- with, and excluding it costs nothing if one ever does.
   if exists (
     select 1 from payments
      where stripe_payment_intent_id = p_payment_intent_id
@@ -203,7 +246,7 @@ begin
 
   insert into payments (operator_id, client_id, type, amount_pence, currency,
                         status, stripe_payment_intent_id, stripe_invoice_id)
-  values (v_operator, p_client, 'topup', coalesce(p_amount_pence, 0), 'USD',
+  values (v_operator, p_client, 'topup', p_amount_pence, 'USD',
           'succeeded', p_payment_intent_id, p_payment_intent_id);
 
   perform fn_grant_cycle_credits(

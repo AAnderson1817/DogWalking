@@ -216,6 +216,8 @@ interface OverageOpts {
     status: "succeeded" | "pending";
     pi?: string | null;
     createdMsAgo?: number;
+    /** What the claim row recorded as its amount. Defaults to 2200. */
+    amountPence?: number;
   };
   piLiveStatus?: string; // what retrievePaymentIntent reports
   declines?: boolean;
@@ -265,7 +267,7 @@ function makeODeps(opts: OverageOpts = {}) {
         id: "pay-live",
         walk_id: walkId,
         type: "overage" as const,
-        amount_pence: 2200,
+        amount_pence: opts.live.amountPence ?? 2200,
         status: opts.live.status,
         stripe_payment_intent_id: opts.live.pi ?? null,
         receipt_url: null,
@@ -364,6 +366,21 @@ Deno.test("stale id-less pending claim reuses the original claim idempotency key
   assert(!calls.includes("updatePayment:failed"), "must not release ambiguous claims as failed");
   assert(calls.includes("createPI"));
   assertEquals(attemptKey(), "overage_walk-1_pay-live");
+});
+
+Deno.test("a lease-expired retry charges the CLAIM's amount, not a re-resolution", async () => {
+  // The idempotency key is per-claim, and Stripe rejects the same key with
+  // different params (idempotency_error — transient to our taxonomy, so the
+  // claim would wedge until the key expires and then charge, or double-
+  // charge, at the drifted figure). The claim row recorded what its key was
+  // minted for; the retry replays exactly that. Drift is reachable on the
+  // live-rate fallback path and across the deploy that changed resolution.
+  const { deps, piArgs } = makeODeps({
+    live: { status: "pending", createdMsAgo: 20 * 60_000, amountPence: 1800 },
+  });
+  await chargeOverageForWalk("walk-1", deps);
+  assertEquals(piArgs.length, 1);
+  assertEquals(piArgs[0].amountPence, 1800); // the claim's, not the mock's live 2200
 });
 
 Deno.test("pending claim with a PI reconciles: Stripe says succeeded → settle, no re-charge", async () => {
@@ -513,7 +530,7 @@ Deno.test("a declined CARD still tells both — that one is the client's to fix"
 // charge billed the live plan rate, so a Settings edit re-priced every walk
 // already on the calendar, which is the exact defect 0043 was recorded as
 // closing. These pin the order: plan-rate snapshot, then visit-price
-// snapshot, then the live plan rate for pre-snapshot rows only.
+// snapshot, then the live plan rate for walks with no snapshot at all.
 
 Deno.test("the snapshotted plan rate wins over the live plan rate", async () => {
   // The walk was created when the rate was $22; the plan now says $99.
@@ -569,9 +586,11 @@ Deno.test("a plan client's walk never falls to the visit price", async () => {
 });
 
 Deno.test("a pre-snapshot walk still charges the live plan rate", async () => {
-  // Both snapshots null = a row from before 0043. The live fallback IS the
-  // behaviour those rows shipped with; refusing them would strand every
-  // in-flight overage at deploy time.
+  // Both snapshots null = a pre-0043 row, or a walk created with neither a
+  // plan nor a visit price whose client has since subscribed. The live
+  // fallback IS the pre-0043 behaviour, and for the second class it is the
+  // deliberate choice: no figure existed at creation, and refusing a
+  // now-subscribed client's walk would be worse.
   const { deps, piArgs } = makeODeps({});
   await chargeOverageForWalk("walk-1", deps);
   assertEquals(piArgs.length, 1);

@@ -92,8 +92,13 @@ export default function Settings() {
 
       <ServicesSection
         services={services}
-        onChanged={(next, msg) => {
-          setServices(next);
+        onChanged={(update, msg) => {
+          // Functional, because two blur-triggered saves can be in flight at
+          // once (rename row A, tab straight into row B's price): each
+          // resolver must rebase onto the LATEST list, or whichever response
+          // lands last silently reverts the other row's change in UI state
+          // while the server keeps both (caught in adversarial review).
+          setServices(update);
           setNotice(msg);
         }}
         onError={setError}
@@ -215,7 +220,8 @@ function ServicesSection({
   onError,
 }: {
   services: ServiceTypes[];
-  onChanged: (next: ServiceTypes[], msg: string) => void;
+  /** Functional on purpose — see the call site in Settings(). */
+  onChanged: (update: (prev: ServiceTypes[]) => ServiceTypes[], msg: string) => void;
   onError: (m: string) => void;
 }) {
   const [name, setName] = useState("");
@@ -224,6 +230,19 @@ function ServicesSection({
   const [surcharge, setSurcharge] = useState("0");
   const [visitPrice, setVisitPrice] = useState("");
   const [busy, setBusy] = useState(false);
+  // A rejected price edit must be visible AT THE FIELD and the field must
+  // revert to the last saved value — the page-level FormError sits above the
+  // whole Business section and is off-viewport on a phone, and an uncontrolled
+  // input otherwise keeps showing the rejected text as though it saved
+  // (caught in adversarial review). The revision counter re-keys the Input so
+  // React re-applies defaultValue.
+  const [priceErrors, setPriceErrors] = useState<Record<string, string>>({});
+  const [priceRev, setPriceRev] = useState<Record<string, number>>({});
+
+  function rejectPrice(id: string, reason: string) {
+    setPriceErrors((prev) => ({ ...prev, [id]: reason }));
+    setPriceRev((prev) => ({ ...prev, [id]: (prev[id] ?? 0) + 1 }));
+  }
 
   async function add() {
     const parsed = parseVisitPriceInput(visitPrice);
@@ -240,7 +259,7 @@ function ServicesSection({
         weekend_surcharge_credits: Number(surcharge),
         visit_price_pence: parsed.pence,
       });
-      onChanged([...services, created], `Added ${created.name}.`);
+      onChanged((prev) => [...prev, created], `Added ${created.name}.`);
       setName("");
       setVisitPrice("");
     } catch (e) {
@@ -253,7 +272,7 @@ function ServicesSection({
   async function remove(s: ServiceTypes) {
     try {
       await deleteServiceType(s.id);
-      onChanged(services.filter((x) => x.id !== s.id), `Removed ${s.name}.`);
+      onChanged((prev) => prev.filter((x) => x.id !== s.id), `Removed ${s.name}.`);
     } catch {
       // A service type in use is referenced by walks (ON DELETE RESTRICT), so
       // this is the common case rather than an exceptional one — say what to
@@ -269,7 +288,7 @@ function ServicesSection({
     if (!next.trim() || next === s.name) return;
     try {
       const updated = await updateServiceType(s.id, { name: next.trim() });
-      onChanged(services.map((x) => (x.id === s.id ? updated : x)), "Service renamed.");
+      onChanged((prev) => prev.map((x) => (x.id === s.id ? updated : x)), "Service renamed.");
     } catch (e) {
       onError(e instanceof Error ? e.message : "Could not rename that service.");
     }
@@ -278,18 +297,19 @@ function ServicesSection({
   async function reprice(s: ServiceTypes, raw: string) {
     const parsed = parseVisitPriceInput(raw);
     if (!parsed.ok) {
-      onError(parsed.reason);
+      rejectPrice(s.id, parsed.reason);
       return;
     }
     if (parsed.pence === s.visit_price_pence) return;
     try {
       const updated = await updateServiceType(s.id, { visit_price_pence: parsed.pence });
+      setPriceErrors((prev) => ({ ...prev, [s.id]: "" }));
       // Setting a price for the first time also prices the un-priced walks
       // already on the calendar (0044's stamping trigger) — say so, because
       // an invisible side effect on the money path is how surprises happen.
       const firstPrice = s.visit_price_pence === null && parsed.pence !== null;
       onChanged(
-        services.map((x) => (x.id === s.id ? updated : x)),
+        (prev) => prev.map((x) => (x.id === s.id ? updated : x)),
         parsed.pence === null
           ? `${s.name} is no longer offered pay-per-visit; walks already priced keep their price.`
           : firstPrice
@@ -297,7 +317,7 @@ function ServicesSection({
           : `${s.name} visits now charge ${money(parsed.pence)} for newly scheduled walks.`,
       );
     } catch (e) {
-      onError(e instanceof Error ? e.message : "Could not change that visit price.");
+      rejectPrice(s.id, e instanceof Error ? e.message : "Could not change that visit price.");
     }
   }
 
@@ -323,12 +343,14 @@ function ServicesSection({
                   onBlur={(e) => void rename(s, e.target.value)}
                 />
                 <Input
+                  key={`${s.id}:${priceRev[s.id] ?? 0}:${s.visit_price_pence ?? ""}`}
                   label={`Visit price of ${s.name} ($)`}
                   defaultValue={s.visit_price_pence === null
                     ? ""
                     : (s.visit_price_pence / 100).toFixed(2)}
                   onBlur={(e) => void reprice(s, e.target.value)}
                   inputMode="decimal"
+                  error={priceErrors[s.id] || undefined}
                 />
                 <span className="settings-row__meta">
                   {s.duration_minutes} min · {s.credit_cost} credit

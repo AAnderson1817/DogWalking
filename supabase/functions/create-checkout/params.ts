@@ -60,6 +60,32 @@ export interface PricedService {
   visit_price_pence: number;
 }
 
+/**
+ * Top-ups are for clients OUTSIDE a live billing cycle. A plan client's
+ * balance is swept by fn_apply_rollover at every renewal — the schema
+ * default policy 'none' expires the ENTIRE balance — so selling them
+ * credits mid-cycle is selling credits the machinery is scheduled to
+ * destroy days later, silently (caught in adversarial review; the v1
+ * single-lot rollover rule, CLAUDE.md invariant 4, forbids the per-lot
+ * tracking that would let purchased credit survive the sweep).
+ * `fn_adjust_credits` remains the operator-judgment path for a subscribed
+ * client. Same live set ClientDetail's `subscribed` uses: `past_due` is a
+ * live subscription whose payment failed, and `paused` still renews.
+ */
+export function assertTopupAllowed(client: {
+  stripe_subscription_id: string | null;
+  subscription_status: string;
+}): void {
+  if (client.stripe_subscription_id && client.subscription_status !== "cancelled") {
+    throw new HttpError(
+      409,
+      "client_subscribed",
+      "This client is on a plan, and plan renewals expire leftover credits — a paid " +
+        "top-up would be swept at their next cycle. Use Adjust credits instead.",
+    );
+  }
+}
+
 /** How many services the mandate names before it says "and more". Checkout's
  * custom_text caps at 1200 characters, and an unbounded join would make the
  * operator with the most services the one whose checkout 400s. */
@@ -173,9 +199,16 @@ export function topupSessionParams(
       quantity: 1,
     }],
     // The card that pays the top-up is saved for off-session visit charges —
-    // one checkout makes a cash client fully chargeable (review H32).
+    // one checkout makes a cash client fully chargeable (review H32) — but
+    // ONLY under a mandate. A card saved with no per-visit terms is exactly
+    // the state the setup branch refuses, and saving it here anyway was a
+    // bypass of that rule (caught in adversarial review): the operator could
+    // later set a price, the 0044 backfill would price the queued walks, and
+    // the card would be charged off-session at a figure the client was never
+    // shown. With nothing priced the top-up still runs — its line item
+    // discloses the PAYMENT — and simply saves no card.
     payment_intent_data: {
-      setup_future_usage: "off_session" as const,
+      ...(args.mandate ? { setup_future_usage: "off_session" as const } : {}),
       metadata: { client_id: args.clientId, operator_id: args.operatorId },
     },
     ...ADDRESS_COLLECTION,

@@ -72,16 +72,27 @@ through the **single** `checkout.sessions.create` call —
   one-live-subscription guard applies to this shape only.
 - `{ client_id, topup: { credits, amount_pence } }` → `mode=payment` with an
   ad-hoc `price_data` line item ("N walk credits"), metadata carrying
-  `STRIPE_META.topupCredits`, and `payment_intent_data.setup_future_usage =
-  'off_session'` — the paying card is saved, so one top-up makes a cash
-  client fully chargeable. Credits and amount must be positive integers.
+  `STRIPE_META.topupCredits`. When the operator has priced services, the
+  session carries the per-visit mandate AND
+  `payment_intent_data.setup_future_usage = 'off_session'` — the paying card
+  is saved, so one top-up makes a cash client fully chargeable. With nothing
+  priced the top-up still runs — its line item discloses the PAYMENT — but
+  **saves no card**: the line item says nothing about off-session use, and a
+  card saved under no stated per-visit terms is the state the setup branch
+  refuses (its first draft saved it anyway; adversarial review caught the
+  bypass). Credits and amount must be positive integers, and a client with a
+  live subscription is refused (`409 client_subscribed`): renewals sweep the
+  balance through `fn_apply_rollover`, so a paid top-up for a plan client is
+  money for credits the machinery is scheduled to destroy — the v1
+  single-lot rollover rule (invariant 4) forbids the per-lot tracking that
+  would let it survive, and `fn_adjust_credits` remains the
+  operator-judgment path.
 - `{ client_id, setup: true }` → `mode=setup`: card on file for a
   pay-per-visit client, under a `custom_text` mandate naming each priced
   service and its figure. Refused with `409 visit_price_missing` when no
   service has a visit price — a card saved under no stated terms is an
   off-session charge waiting to surprise somebody (H12), so the mandate is a
-  precondition, not decoration. A top-up with nothing priced still runs (its
-  own line item is its disclosure) and simply states no per-visit promise.
+  precondition, not decoration.
 
 Common to all three: ownership asserts, `requireAccount`, get/create the
 Stripe customer on the connected account (persist `stripe_customer_id`),
@@ -208,16 +219,32 @@ below, and spec 02 on why `uq_payments_subscription_invoice` had to widen.
 - `checkout.session.completed`, by session `mode` (review H32):
   - `subscription`: bind `stripe_subscription_id`, `subscription_status='active'`, `plan_id` from metadata.
   - `payment`: a Sanpo top-up, recognised by the `STRIPE_META.topupCredits`
-    metadata key — any other payment-mode session is ignored. The client is
-    resolved through the session's **customer** scoped to the event's
-    operator, never through the metadata (which any operator can forge in
-    their own dashboard); the credit count is validated as a positive
-    integer; then `fn_apply_topup` records the payment and grants atomically,
-    keyed on the PaymentIntent. Notifications (`payment_taken`, client and
-    operator) fire only when this delivery actually granted — a redelivery
-    must not re-announce.
+    metadata key — any other payment-mode session is ignored. **Granted only
+    when `payment_status` is `paid`**: completion also fires with `unpaid`
+    for delayed-notification methods (ACH — one dashboard toggle away for a
+    Standard operator), where the money arrives or bounces days later. The
+    first draft granted on completion alone — spendable credits for money
+    never received, a `succeeded` row, and no reversal path when the debit
+    failed (a bounced debit is not a refund; `charge.refunded` never fires).
+    Caught in adversarial review. The client is resolved through the
+    session's **customer** scoped to the event's operator, never through the
+    metadata (which any operator can forge in their own dashboard); credits
+    and amount are validated as positive integers; then `fn_apply_topup`
+    records the payment and grants atomically, keyed on the PaymentIntent.
+    Notifications (`payment_taken`, client and operator) fire only when this
+    delivery actually granted — a redelivery must not re-announce.
   - `setup`: a card was saved. One operator-only `card_saved` bell row —
     the moment a pay-per-visit client becomes chargeable.
+- `checkout.session.async_payment_succeeded`: the deferred top-up's money
+  arrived — same application path, and `fn_apply_topup`'s PI-keyed
+  idempotency makes a race with a redelivered completion safe.
+- `checkout.session.async_payment_failed`: the debit bounced after
+  completion. Nothing was granted (the completed arm deferred), so this is
+  disclosure, not reversal: `payment_failed` to both personas — the client
+  may believe they paid, the operator may be counting on the credits. Both
+  runbooks' webhook event lists carry these two events; an endpoint
+  subscribed without them silently converts every ACH top-up into an
+  unresolvable "paid but never granted".
 - `invoice.paid` (subscription): **scoped to the client's bound subscription** — an invoice for any other subscription on the same customer is ignored, exactly as the two `customer.subscription.*` arms already did. A customer can carry more than one live subscription and their invoices have *different* ids, so `uq_payments_subscription_invoice` does not catch it: the result was two cycle grants and two rollovers. An *unbound* client is still applied, because `checkout.session.completed` and `invoice.paid` race and refusing would drop the first cycle of every new subscription. `create-checkout` now also refuses to start a second subscription for a client who has one.
 
   **Rollover runs on renewals only.** `fn_apply_invoice_paid` takes `p_is_renewal`, true for `subscription_cycle` and false for `subscription_create`. Rollover carries what is left of the cycle that just ended; a first invoice has no prior cycle, and on `rollover_policy='none'` running it books an expiry for the entire balance — destroying credit the operator granted before billing started.
@@ -314,7 +341,10 @@ Body: `{ walk_id }` → assert walk `is_overage=true` and no live overage paymen
 else `walks.visit_price_pence` (the service's cash price at creation — the
 pay-per-visit case; same `type='overage'` row and claim machinery, different
 wording and PI description), else the live `plans.overage_rate_pence` for
-pre-snapshot rows only. This line used to say "amount = client's
+walks with no snapshot at all — pre-0043 rows, and post-0044 walks created
+with neither a plan nor a visit price whose client subscribed before
+completion (a deliberate fallback: no figure was agreed at creation, and
+refusing a now-subscribed client's walk would be worse). This line used to say "amount = client's
 `plans.overage_rate_pence`" and that was the code: 0043's money-side snapshot
 had zero readers, so a Settings edit re-priced every walk already on the
 calendar. All three null → `failWithoutAttempt`, operator-only, naming the

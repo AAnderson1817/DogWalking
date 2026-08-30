@@ -28,7 +28,7 @@ import {
   type WalkDetailed,
 } from "@/lib/api";
 import { availableCredits, committedCredits, effectiveWalkCost } from "@/lib/credits";
-import { bookingChargePence } from "@/lib/visit-price";
+import { bookingChargePence, overageBookingGate } from "@/lib/visit-price";
 import { money, walkTime } from "@/lib/format";
 import { todayLocal } from "@/lib/selectors";
 import type { Clients, Pets, Plans, Properties, ServiceTypes } from "@/lib/types";
@@ -116,10 +116,14 @@ export default function Booking() {
   // The figure quoted here mirrors the charge path's resolution (H32): the
   // plan's overage rate for a plan client, the service's visit price for a
   // pay-per-visit client. Null only when the operator has priced neither —
-  // in which case completion refuses to charge, and the wording below
-  // carries no figure rather than inventing one.
-  const selectedService = services.find((s) => s.id === serviceId) ?? null;
-  const chargePence = bookingChargePence(plan, selectedService);
+  // and a null figure BLOCKS an overage booking rather than asking the
+  // client to confirm an unquantified charge: the walk could be priced
+  // after booking (0044's backfill fills un-priced scheduled walks the
+  // moment the operator sets a price), and "I understand" with no number
+  // is not consent to whatever that number turns out to be (H12; caught in
+  // adversarial review).
+  const chargePence = bookingChargePence(plan, service);
+  const chargeGate = overageBookingGate(needsOverage, chargePence);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -144,7 +148,14 @@ export default function Booking() {
         : "select at least one pet");
       return;
     }
-    if (needsOverage && !confirmOverage) {
+    if (chargeGate === "blocked") {
+      setError(
+        "this walk would need a card charge, and your walker hasn't set a price for it yet — "
+          + "ask them to set a visit price or add credits, then book",
+      );
+      return;
+    }
+    if (chargeGate === "confirm" && !confirmOverage) {
       setError("confirm the overage price to continue");
       return;
     }
@@ -281,16 +292,11 @@ export default function Booking() {
                   </>
                 )}
               </div>
-              {needsOverage && (
+              {chargeGate === "confirm" && chargePence != null && (
                 <div style={{ marginTop: "var(--s-2)" }}>
                   <p style={{ fontSize: "var(--fs-14)", fontWeight: 600 }}>
                     Not enough credits — this walk will be charged in full
-                    {chargePence != null
-                      ? ` at ${money(chargePence)}`
-                      : plan != null
-                      ? " at your plan's overage rate"
-                      : " at your walker's per-visit rate"}
-                    {" "}to your card after completion.
+                    at {money(chargePence)} to your card after completion.
                   </p>
                   <label style={{ display: "flex", gap: "var(--s-2)", alignItems: "center", marginTop: "var(--s-2)" }}>
                     <input
@@ -298,9 +304,19 @@ export default function Booking() {
                       checked={confirmOverage}
                       onChange={(e) => setConfirmOverage(e.target.checked)}
                     />
-                    I understand{chargePence != null ? ` — charge ${money(chargePence)}` : ""}
+                    I understand — charge {money(chargePence)}
                   </label>
                 </div>
+              )}
+              {chargeGate === "blocked" && (
+                <p style={{ fontSize: "var(--fs-14)", fontWeight: 600, marginTop: "var(--s-2)" }}>
+                  {/* No figure exists to confirm, so there is nothing honest
+                      to ask the client to agree to — booking this walk is
+                      blocked in submit() with the same explanation. */}
+                  Not enough credits, and your walker hasn&rsquo;t set a price for
+                  charging this walk to your card yet — ask them to set a visit
+                  price, or top up your credits first.
+                </p>
               )}
             </Card>
           )}

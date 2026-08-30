@@ -179,8 +179,11 @@ export async function chargeOverageForWalk(
    *      was created (0044). The snapshot trigger fills it whenever the
    *      service has one, plan client or not, so this ORDER — plan rate
    *      first — is what keeps a plan client off the cash price.
-   *   3. The live plan rate — pre-snapshot rows only (both snapshots null),
-   *      which is exactly the behaviour those rows shipped with.
+   *   3. The live plan rate — walks with no snapshot at all: pre-0043 rows
+   *      (exactly the behaviour they shipped with), and walks created with
+   *      neither a plan nor a visit price whose client subscribed before
+   *      completion. For those there was no figure to snapshot; charging
+   *      the plan they since agreed to beats refusing their walk.
    *
    * All three null → refuse below. Null is "nothing agreed", never "free"
    * (0043's rule, restated on both new columns).
@@ -286,11 +289,20 @@ export async function chargeOverageForWalk(
 
   const chargeClaim = async (
     claim: OveragePayment,
+    // What THIS claim charges. For a fresh claim it is the resolution above;
+    // for a lease-expired retry it is the amount the claim was minted with —
+    // the idempotency key is per-claim, and replaying the same key with a
+    // different amount makes Stripe answer idempotency_error (transient to
+    // our taxonomy, so the claim would wedge for the key's ~24h lifetime and
+    // then charge — or double-charge — at the drifted figure). Caught in
+    // adversarial review; drift is reachable on the live-rate fallback path
+    // and across the deploy that changed the resolution.
+    chargePence: number,
   ): Promise<{ payment: OveragePayment; already_charged: false }> => {
     try {
       const pi = await deps.createOffSessionPaymentIntent({
         customerId,
-        amountPence: amount,
+        amountPence: chargePence,
         walkId,
         clientId: walk.client_id,
         attemptKey: `overage_${walkId}_${claim.id ?? "claim"}`,
@@ -323,7 +335,7 @@ export async function chargeOverageForWalk(
        * somewhere to put it rather than a `$` glued to a number.
        */
       if (status === "succeeded") {
-        const money = formatMoney(amount);
+        const money = formatMoney(chargePence);
         // The wording follows the promise that priced the charge (H32): the
         // plan sentence presupposes credits that were used up, which is false
         // for a pay-per-visit client who never had any — telling them their
@@ -378,7 +390,7 @@ export async function chargeOverageForWalk(
     const now = deps.now?.() ?? Date.now();
     const age = live.created_at ? now - Date.parse(live.created_at) : Infinity;
     if (age < CLAIM_LEASE_MS) return { payment: live, already_charged: true };
-    return chargeClaim(live);
+    return chargeClaim(live, live.amount_pence);
   }
 
   // Claim the walk (uq_overage_payment_per_walk serializes concurrent
@@ -395,5 +407,5 @@ export async function chargeOverageForWalk(
     receipt_url: null,
   });
 
-  return chargeClaim(claim);
+  return chargeClaim(claim, amount);
 }

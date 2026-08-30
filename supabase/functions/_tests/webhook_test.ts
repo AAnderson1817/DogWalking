@@ -297,9 +297,10 @@ Deno.test("checkout.session.completed binds subscription + plan from metadata", 
 
 // ── payment-mode completions: top-ups (0044, review H32) ──────────────────
 
-/** A completed payment-mode top-up session as Stripe delivers it. */
+/** A completed, PAID payment-mode top-up session as Stripe delivers it. */
 const TOPUP_SESSION = {
   mode: "payment",
+  payment_status: "paid",
   customer: "cus_1",
   payment_intent: "pi_topup_1",
   amount_total: 5000,
@@ -389,6 +390,74 @@ Deno.test("malformed or missing credit counts never reach the RPC", async () => 
   );
   assertEquals(result.status, "ignored");
   assertFalse(calls.some((c) => c.fn === "applyTopup"));
+});
+
+Deno.test("an UNPAID completion grants nothing — the async event decides", async () => {
+  // checkout.session.completed fires with payment_status 'unpaid' for
+  // delayed-notification methods (ACH — one operator dashboard toggle away).
+  // Granting there is spendable credits for money never received, with no
+  // reversal path when the debit later bounces.
+  const { deps, calls } = makeMockDeps();
+  const result = await handleStripeEvent(
+    event("checkout.session.completed", { ...TOPUP_SESSION, payment_status: "unpaid" }),
+    deps,
+  );
+  assertEquals(result.status, "processed");
+  assertFalse(calls.some((c) => c.fn === "applyTopup"));
+  assertFalse(calls.some((c) => c.fn === "insertNotification"));
+});
+
+Deno.test("async_payment_succeeded applies the deferred top-up", async () => {
+  const { deps, calls } = makeMockDeps();
+  const result = await handleStripeEvent(
+    event("checkout.session.async_payment_succeeded", {
+      ...TOPUP_SESSION,
+      payment_status: "paid",
+    }),
+    deps,
+  );
+  assertEquals(result.status, "processed");
+  const apply = calls.find((c) => c.fn === "applyTopup")!;
+  assertEquals(apply.args[0], {
+    clientId: "client-1",
+    credits: 10,
+    paymentIntentId: "pi_topup_1",
+    amountPence: 5000,
+  });
+});
+
+Deno.test("async_payment_failed grants nothing and tells both personas", async () => {
+  // Nothing was granted at completion (the arm defers on unpaid), so this is
+  // disclosure, not reversal — but it must not be silent: the client may
+  // believe they paid, and the operator may be counting on the credits.
+  const { deps, calls } = makeMockDeps();
+  const result = await handleStripeEvent(
+    event("checkout.session.async_payment_failed", TOPUP_SESSION),
+    deps,
+  );
+  assertEquals(result.status, "processed");
+  assertFalse(calls.some((c) => c.fn === "applyTopup"));
+  const notifs = calls.filter((c) => c.fn === "insertNotification")
+    .map((c) => c.args[0] as Record<string, unknown>);
+  assertEquals(notifs.length, 2);
+  for (const n of notifs) assertEquals(n.type, "payment_failed");
+  const targets = notifs.map((n) => n.client_id);
+  assert(targets.includes("client-1") && targets.includes(null));
+});
+
+Deno.test("a session with no positive amount never reaches the RPC", async () => {
+  // Outside the contract of anything create-checkout mints; recording it
+  // would write an unrefundable $0 'succeeded' row (fn_reverse_payment
+  // refuses any reversal exceeding amount_pence, so a later refund would
+  // 500 on every redelivery for three days).
+  for (const amount_total of [undefined, 0, -100, 2.5]) {
+    const { deps, calls } = makeMockDeps();
+    const obj: Record<string, unknown> = { ...TOPUP_SESSION, amount_total };
+    if (amount_total === undefined) delete obj.amount_total;
+    const result = await handleStripeEvent(event("checkout.session.completed", obj), deps);
+    assertEquals(result.status, "ignored", `amount_total=${amount_total}`);
+    assertFalse(calls.some((c) => c.fn === "applyTopup"));
+  }
 });
 
 Deno.test("a completed card-save (setup mode) tells the operator only", async () => {
