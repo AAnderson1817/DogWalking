@@ -32,6 +32,7 @@ import {
 } from "@/lib/api";
 import type { Operators, Plans, ServiceTypes } from "@/lib/types";
 import { money } from "@/lib/format";
+import { parseVisitPriceInput } from "@/lib/visit-price";
 import { useDocumentTitle } from "@/lib/use-document-title";
 import { useAuth } from "@/lib/auth-context";
 
@@ -221,9 +222,15 @@ function ServicesSection({
   const [minutes, setMinutes] = useState("30");
   const [cost, setCost] = useState("1");
   const [surcharge, setSurcharge] = useState("0");
+  const [visitPrice, setVisitPrice] = useState("");
   const [busy, setBusy] = useState(false);
 
   async function add() {
+    const parsed = parseVisitPriceInput(visitPrice);
+    if (!parsed.ok) {
+      onError(parsed.reason);
+      return;
+    }
     setBusy(true);
     try {
       const created = await createServiceType({
@@ -231,9 +238,11 @@ function ServicesSection({
         duration_minutes: Number(minutes),
         credit_cost: Number(cost),
         weekend_surcharge_credits: Number(surcharge),
+        visit_price_pence: parsed.pence,
       });
       onChanged([...services, created], `Added ${created.name}.`);
       setName("");
+      setVisitPrice("");
     } catch (e) {
       onError(e instanceof Error ? e.message : "Could not add that service.");
     } finally {
@@ -266,12 +275,40 @@ function ServicesSection({
     }
   }
 
+  async function reprice(s: ServiceTypes, raw: string) {
+    const parsed = parseVisitPriceInput(raw);
+    if (!parsed.ok) {
+      onError(parsed.reason);
+      return;
+    }
+    if (parsed.pence === s.visit_price_pence) return;
+    try {
+      const updated = await updateServiceType(s.id, { visit_price_pence: parsed.pence });
+      // Setting a price for the first time also prices the un-priced walks
+      // already on the calendar (0044's stamping trigger) — say so, because
+      // an invisible side effect on the money path is how surprises happen.
+      const firstPrice = s.visit_price_pence === null && parsed.pence !== null;
+      onChanged(
+        services.map((x) => (x.id === s.id ? updated : x)),
+        parsed.pence === null
+          ? `${s.name} is no longer offered pay-per-visit; walks already priced keep their price.`
+          : firstPrice
+          ? `${s.name} visits now charge ${money(parsed.pence)} — scheduled walks that had no price yet are included.`
+          : `${s.name} visits now charge ${money(parsed.pence)} for newly scheduled walks.`,
+      );
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Could not change that visit price.");
+    }
+  }
+
   return (
     <section className="settings-section" aria-labelledby="settings-services">
       <h2 id="settings-services" className="section-label">Services</h2>
       <p className="settings-help">
         What you offer, and what each one costs in credits. A weekend surcharge
-        is added on Saturdays and Sundays.
+        is added on Saturdays and Sundays. The visit price is what a client
+        with no plan is charged per completed visit — leave it empty to not
+        offer pay-per-visit.
       </p>
 
       {services.length === 0
@@ -285,11 +322,22 @@ function ServicesSection({
                   defaultValue={s.name}
                   onBlur={(e) => void rename(s, e.target.value)}
                 />
+                <Input
+                  label={`Visit price of ${s.name} ($)`}
+                  defaultValue={s.visit_price_pence === null
+                    ? ""
+                    : (s.visit_price_pence / 100).toFixed(2)}
+                  onBlur={(e) => void reprice(s, e.target.value)}
+                  inputMode="decimal"
+                />
                 <span className="settings-row__meta">
                   {s.duration_minutes} min · {s.credit_cost} credit
                   {s.credit_cost === 1 ? "" : "s"}
                   {s.weekend_surcharge_credits > 0
                     ? ` · +${s.weekend_surcharge_credits} weekend`
+                    : ""}
+                  {s.visit_price_pence !== null
+                    ? ` · ${money(s.visit_price_pence)}/visit`
                     : ""}
                 </span>
                 <Button variant="ghost" onClick={() => void remove(s)}>Remove</Button>
@@ -317,6 +365,12 @@ function ServicesSection({
           value={surcharge}
           onChange={(e) => setSurcharge(e.target.value)}
           inputMode="numeric"
+        />
+        <Input
+          label="Visit price ($)"
+          value={visitPrice}
+          onChange={(e) => setVisitPrice(e.target.value)}
+          inputMode="decimal"
         />
       </div>
       <Button onClick={() => void add()} disabled={busy || !name.trim()}>

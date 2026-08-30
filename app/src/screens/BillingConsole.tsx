@@ -246,6 +246,7 @@ export default function BillingConsole() {
             <option value="all">All payment types</option>
             <option value="subscription">Subscription</option>
             <option value="overage">Walk overage</option>
+            <option value="topup">Credit top-up</option>
           </Select>
           <Button
             variant="ghost"

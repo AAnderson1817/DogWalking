@@ -24,6 +24,8 @@ import { ScheduleTab } from "@/components/ScheduleEditor";
 import {
   adjustCredits,
   createCheckout,
+  createSetupCheckout,
+  createTopupCheckout,
   createPet,
   createProperty,
   getClient,
@@ -355,6 +357,8 @@ function PlanTab({
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
   const [checkoutPlan, setCheckoutPlan] = useState("");
+  const [topupCredits, setTopupCredits] = useState("");
+  const [topupDollars, setTopupDollars] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -417,6 +421,42 @@ function PlanTab({
     }
   }
 
+  async function launchTopup() {
+    const credits = Number(topupCredits);
+    const dollars = Number(topupDollars);
+    if (!Number.isInteger(credits) || credits <= 0) {
+      setError("credits must be a positive whole number");
+      return;
+    }
+    if (!Number.isFinite(dollars) || dollars <= 0) {
+      setError("enter what the top-up costs in dollars");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const { url } = await createTopupCheckout(client.id, credits, Math.round(dollars * 100));
+      window.open(url, "_blank", "noopener");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "top-up checkout failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function launchCardLink() {
+    setBusy(true);
+    setError(null);
+    try {
+      const { url } = await createSetupCheckout(client.id);
+      window.open(url, "_blank", "noopener");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "card link failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-3)" }}>
       <Card>
@@ -468,6 +508,45 @@ function PlanTab({
           </div>
         )}
         <FormError message={error} />
+      </Card>
+
+      <Card>
+        <span className="section-label">Pay per visit</span>
+        <p style={{ color: "var(--text-2)", fontSize: "var(--fs-14)", marginTop: "var(--s-1)" }}>
+          A client without a plan is charged the service&rsquo;s visit price after
+          each completed walk, from the card on file. Credits from a top-up are
+          used first.
+        </p>
+        <div style={{ marginTop: "var(--s-2)", display: "flex", flexDirection: "column", gap: "var(--s-2)" }}>
+          <div className="settings-grid">
+            <Input
+              label="Top-up credits"
+              value={topupCredits}
+              onChange={(e) => setTopupCredits(e.target.value)}
+              inputMode="numeric"
+              placeholder="10"
+            />
+            <Input
+              label="Top-up price ($)"
+              value={topupDollars}
+              onChange={(e) => setTopupDollars(e.target.value)}
+              inputMode="decimal"
+              placeholder="200"
+            />
+          </div>
+          <Button
+            variant="ghost"
+            onClick={() => void launchTopup()}
+            disabled={busy || !topupCredits.trim() || !topupDollars.trim()}
+          >
+            {busy ? <Spinner /> : "Open top-up checkout"}
+          </Button>
+          {!subscribed && (
+            <Button variant="ghost" onClick={() => void launchCardLink()} disabled={busy}>
+              {busy ? <Spinner /> : "Open card-save link"}
+            </Button>
+          )}
+        </div>
       </Card>
 
       <Card>

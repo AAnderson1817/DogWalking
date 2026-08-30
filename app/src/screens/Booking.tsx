@@ -28,6 +28,7 @@ import {
   type WalkDetailed,
 } from "@/lib/api";
 import { availableCredits, committedCredits, effectiveWalkCost } from "@/lib/credits";
+import { bookingChargePence } from "@/lib/visit-price";
 import { money, walkTime } from "@/lib/format";
 import { todayLocal } from "@/lib/selectors";
 import type { Clients, Pets, Plans, Properties, ServiceTypes } from "@/lib/types";
@@ -112,7 +113,13 @@ export default function Booking() {
   );
   const available = availableCredits(balance, committed);
   const needsOverage = cost !== null && cost > available;
-  const overagePence = plan?.overage_rate_pence ?? null;
+  // The figure quoted here mirrors the charge path's resolution (H32): the
+  // plan's overage rate for a plan client, the service's visit price for a
+  // pay-per-visit client. Null only when the operator has priced neither —
+  // in which case completion refuses to charge, and the wording below
+  // carries no figure rather than inventing one.
+  const selectedService = services.find((s) => s.id === serviceId) ?? null;
+  const chargePence = bookingChargePence(plan, selectedService);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -278,8 +285,12 @@ export default function Booking() {
                 <div style={{ marginTop: "var(--s-2)" }}>
                   <p style={{ fontSize: "var(--fs-14)", fontWeight: 600 }}>
                     Not enough credits — this walk will be charged in full
-                    {overagePence != null ? ` at ${money(overagePence)}` : " at your plan's overage rate"}
-                    to your card after completion.
+                    {chargePence != null
+                      ? ` at ${money(chargePence)}`
+                      : plan != null
+                      ? " at your plan's overage rate"
+                      : " at your walker's per-visit rate"}
+                    {" "}to your card after completion.
                   </p>
                   <label style={{ display: "flex", gap: "var(--s-2)", alignItems: "center", marginTop: "var(--s-2)" }}>
                     <input
@@ -287,7 +298,7 @@ export default function Booking() {
                       checked={confirmOverage}
                       onChange={(e) => setConfirmOverage(e.target.checked)}
                     />
-                    I understand{overagePence != null ? ` — charge ${money(overagePence)}` : ""}
+                    I understand{chargePence != null ? ` — charge ${money(chargePence)}` : ""}
                   </label>
                 </div>
               )}

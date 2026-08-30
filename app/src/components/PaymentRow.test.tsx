@@ -53,8 +53,15 @@ describe("PaymentRow", () => {
     const subscription = renderToStaticMarkup(
       <PaymentRow payment={{ ...PAYMENT, walk: null, type: "subscription" }} />,
     );
+    const topup = renderToStaticMarkup(
+      <PaymentRow payment={{ ...PAYMENT, walk: null, type: "topup" }} />,
+    );
     expect(overage).toContain("Walk overage");
     expect(subscription).toContain("Subscription");
+    // 0044: a top-up must not render as "Subscription", which is what the
+    // old binary ternary did for every non-overage type.
+    expect(topup).toContain("Credit top-up");
+    expect(topup).not.toContain("Subscription");
   });
 });
 
