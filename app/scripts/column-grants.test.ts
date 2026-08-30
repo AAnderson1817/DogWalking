@@ -70,7 +70,7 @@ interface GrantState {
 }
 
 /**
- * Statements, not lines: `0038`'s grant list spans five lines, and a
+ * Statements, not lines: `0038`'s grant list spans several of them, and a
  * line-oriented parser reads it as no grant at all — which would make this
  * check pass by seeing nothing, the failure mode it exists to catch.
  */
@@ -305,9 +305,9 @@ describe("column-level SELECT grants and wildcard selects", () => {
   });
 
   it("parses 0038's multi-line grant rather than skipping it", () => {
-    // The statement that first put `clients` into this shape spans five lines.
-    // If the parser missed it, `clients` would look table-level and every
-    // assertion below would pass while the product stayed broken.
+    // The statement that first put `clients` into this shape spans several
+    // lines. If the parser missed it, `clients` would look table-level and
+    // every assertion below would pass while the product stayed broken.
     const cols = columnRestrictedTables().get("clients");
     expect(cols).toBeDefined();
     expect(cols).toContain("full_name");
