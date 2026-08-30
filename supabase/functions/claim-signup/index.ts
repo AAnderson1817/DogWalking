@@ -46,9 +46,24 @@ function makeDeps(): ClaimSignupDeps {
         email_confirm: false,
       });
       if (!error) return "created";
-      const already = (error as { code?: string }).code === "email_exists" ||
-        /already.*(registered|exists)/i.test(error.message ?? "");
-      if (already) return "exists";
+      const code = (error as { code?: string }).code;
+      if (code === "email_exists" || /already.*(registered|exists)/i.test(error.message ?? "")) {
+        return "exists";
+      }
+      // GoTrue's own 4xx refusals are the CALLER's to fix, and its messages
+      // for them are user-facing by design — collapsing them into a 500 gave
+      // the person a generic sentence for a condition retrying can never
+      // change (adversarial review). weak_password keeps the code the
+      // handler's own floor uses, so the frontend has one branch.
+      if (code === "weak_password") {
+        throw new HttpError(400, "weak_password", error.message);
+      }
+      if (
+        code === "validation_failed" || code === "email_address_invalid" ||
+        code === "email_address_not_authorized"
+      ) {
+        throw new HttpError(400, "bad_request", error.message);
+      }
       throw new HttpError(500, "signup_failed", "could not create the account", error);
     },
   };

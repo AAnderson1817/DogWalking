@@ -553,6 +553,21 @@ export const INVITE_CLAIM_MESSAGE: Record<Exclude<InviteClaimOutcome, "claimed">
     "This invite was sent to a different email address. Sign up with the address your walker invited, or ask them to update it.",
 };
 
+/**
+ * clients.auth_user_id is UNIQUE: one account, one portal. A pet owner who
+ * already claimed one walker's invite and presents a second walker's gets
+ * this — a permanent condition with its own next step, which must never
+ * wear the "check your connection" sentence (adversarial review).
+ */
+export class AccountAlreadyBoundError extends Error {
+  constructor() {
+    super(
+      "This account is already connected to another walker's portal. An account can hold one portal — ask your walker to send the invite to a different email address.",
+    );
+    this.name = "AccountAlreadyBoundError";
+  }
+}
+
 export async function claimInvite(token: string, noticeVersion: string): Promise<string> {
   // The version travels with the claim so the acceptance and the account
   // binding are one transaction — a claimed account with no consent record is
@@ -565,7 +580,17 @@ export async function claimInvite(token: string, noticeVersion: string): Promise
     p_token: token,
     p_notice_version: noticeVersion,
   });
-  if (error) throw new Error(error.message);
+  if (error) {
+    // The binding UPDATE hitting clients_auth_user_id_key means THIS account
+    // is already somebody's portal — not a transient failure.
+    if (
+      (error as { code?: string }).code === "23505" ||
+      /auth_user_id|duplicate key/i.test(error.message)
+    ) {
+      throw new AccountAlreadyBoundError();
+    }
+    throw new Error(error.message);
+  }
   const row = (Array.isArray(data) ? data[0] : data) as
     | { client_id: string | null; outcome: InviteClaimOutcome }
     | undefined;

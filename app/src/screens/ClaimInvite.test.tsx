@@ -89,7 +89,7 @@ function renderScreen() {
 
 async function fillAndSubmit(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByLabelText("Email"), "amelia@sanpo.test");
-  await user.type(screen.getByLabelText("Choose a password"), "correct-horse-battery");
+  await user.type(screen.getByLabelText("Choose a password"), "Correct-Horse-9-Battery");
   await user.click(screen.getByRole("button", { name: "Create account" }));
 }
 
@@ -114,7 +114,7 @@ describe("ClaimInvite signup (H31)", () => {
     await fillAndSubmit(user);
 
     await waitFor(() => expect(API.claimSignup).toHaveBeenCalledTimes(1));
-    expect(API.claimSignup).toHaveBeenCalledWith(TOKEN, "amelia@sanpo.test", "correct-horse-battery");
+    expect(API.claimSignup).toHaveBeenCalledWith(TOKEN, "amelia@sanpo.test", "Correct-Horse-9-Battery");
     // The whole point of the rewire: no browser-side account creation, so
     // the GoTrue signup toggle can be off without breaking this screen.
     expect(SUPA.signUp).not.toHaveBeenCalled();
@@ -173,5 +173,67 @@ describe("ClaimInvite signup (H31)", () => {
     expect(await screen.findByText(/invalid login credentials/i)).toBeInTheDocument();
     // Still on the signup form — not a dead end, they can retype.
     expect(screen.getByRole("button", { name: "Create account" })).toBeInTheDocument();
+  });
+});
+
+describe("ClaimInvite recovery edges (adversarial review)", () => {
+  it("a failed resend never advances to 'check your email' — that sentence would be false", async () => {
+    // Admin creation sends no confirmation, so this resend is the ONLY
+    // thing that ever puts one in the inbox; a rate limit here with the
+    // check-email screen showing means waiting forever on an empty inbox.
+    SUPA.signInWithPassword.mockResolvedValueOnce({
+      data: { session: null },
+      error: { code: "email_not_confirmed", message: "Email not confirmed" },
+    } as never);
+    SUPA.resend.mockResolvedValueOnce({
+      error: { message: "For security purposes, you can only request this once every 60 seconds" },
+    } as never);
+    renderScreen();
+    const user = userEvent.setup();
+    await fillAndSubmit(user);
+
+    expect(await screen.findByText(/once every 60 seconds/i)).toBeInTheDocument();
+    expect(screen.queryByText(/confirm your email/i)).not.toBeInTheDocument();
+    // Still on the form: the person can wait and resubmit.
+    expect(screen.getByRole("button", { name: "Create account" })).toBeInTheDocument();
+  });
+
+  it("a signed-in client holding a LIVE foreign invite gets the honest dead-end, not a silent bounce", async () => {
+    // auth_user_id is unique — this account already IS somebody's portal.
+    // The old unconditional /portal redirect left the operator staring at
+    // an invite that never claims, with no sentence anywhere.
+    Object.assign(authState, {
+      session: { access_token: "t" } as never,
+      role: "client" as Role,
+      clientId: "c-existing",
+    });
+    try {
+      renderScreen();
+      expect(
+        await screen.findByText(/already connected to another walker/i),
+      ).toBeInTheDocument();
+      expect(screen.queryByText("portal home")).not.toBeInTheDocument();
+    } finally {
+      Object.assign(authState, { session: null, role: null, clientId: null });
+    }
+  });
+
+  it("a signed-in client re-opening their CLAIMED invite still lands on their portal", async () => {
+    API.previewInviteAuthed.mockResolvedValueOnce({
+      full_name: "Amelia",
+      business_name: "Old Town Dog Care",
+      already_claimed: true,
+    });
+    Object.assign(authState, {
+      session: { access_token: "t" } as never,
+      role: "client" as Role,
+      clientId: "c-existing",
+    });
+    try {
+      renderScreen();
+      expect(await screen.findByText("portal home")).toBeInTheDocument();
+    } finally {
+      Object.assign(authState, { session: null, role: null, clientId: null });
+    }
   });
 });

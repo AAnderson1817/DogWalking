@@ -15,11 +15,26 @@
 // fn_invite_signup_check — which returns exactly what the claim will.
 import { HttpError } from "../_lib/http.ts";
 
-/** Mirrors config.toml's minimum_password_length. Enforced here as well
- * because auth.admin.createUser does not apply the GoTrue password policy,
- * and the deployed policy is a dashboard setting no file controls (H2) —
- * the measured staging floor is 6. */
+/** Mirrors config.toml's declared password posture — BOTH settings, not just
+ * the length: `minimum_password_length = 12` AND `password_requirements =
+ * "lower_upper_letters_digits"`. Enforced here because the deployed GoTrue
+ * policy is a dashboard setting no file controls (H2; the measured staging
+ * floor is 6 with no character classes), and an invited client's account
+ * reaches their home address, entry-code activity and GPS traces — it must
+ * not be allowed a WEAKER password than the declared posture just because it
+ * was created through the admin API (adversarial review). */
 export const PASSWORD_MIN_LENGTH = 12;
+
+/** The `lower_upper_letters_digits` rule, one place. */
+export function passwordMeetsPolicy(password: string): boolean {
+  return password.length >= PASSWORD_MIN_LENGTH &&
+    /[a-z]/.test(password) &&
+    /[A-Z]/.test(password) &&
+    /\d/.test(password);
+}
+
+export const PASSWORD_POLICY_MESSAGE =
+  `password must be at least ${PASSWORD_MIN_LENGTH} characters and include a lowercase letter, an uppercase letter, and a digit`;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -56,12 +71,8 @@ export async function handleClaimSignup(
   if (email.length < 3 || !email.includes("@") || email.length > 320) {
     throw new HttpError(400, "bad_request", "a valid email address is required");
   }
-  if (password.length < PASSWORD_MIN_LENGTH) {
-    throw new HttpError(
-      400,
-      "weak_password",
-      `password must be at least ${PASSWORD_MIN_LENGTH} characters`,
-    );
+  if (!passwordMeetsPolicy(password)) {
+    throw new HttpError(400, "weak_password", PASSWORD_POLICY_MESSAGE);
   }
 
   // The invite decides whether an account may exist, BEFORE one is created.
