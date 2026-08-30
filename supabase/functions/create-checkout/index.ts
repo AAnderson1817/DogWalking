@@ -1,5 +1,12 @@
-// create-checkout — POST, operator JWT (spec 04). Creates a subscription-mode
-// Checkout Session for a client on one of the operator's plans.
+// create-checkout — POST, operator JWT (spec 04). Mints one of three Checkout
+// Sessions for a client (review H32):
+//   * { client_id, plan_id }                       → subscription mode
+//   * { client_id, topup: { credits, amount_pence } } → payment mode; the paid
+//     card is saved for off-session visit charges
+//   * { client_id, setup: true }                   → setup mode; card on file
+//     for a pay-per-visit client, under a mandate naming the visit prices
+// The session shapes live in params.ts as pure builders; everything here is
+// lookup, authorization and the single sessions.create call.
 import {
   HttpError,
   jsonOk,
@@ -10,68 +17,109 @@ import {
 } from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
 import { stripeClient } from "../_lib/stripe.ts";
-import { formatMoney } from "../_lib/money.ts";
+import {
+  parseCheckoutRequest,
+  type PricedService,
+  setupSessionParams,
+  subscriptionSessionParams,
+  topupSessionParams,
+  visitPriceMandate,
+} from "./params.ts";
 
 serveFunction(async (req) => {
   const operator = await requireOperator(req);
-  const body = await readJson<{ client_id?: string; plan_id?: string }>(req);
-  if (!body?.client_id || !body.plan_id) {
-    throw new HttpError(400, "bad_request", "client_id and plan_id are required");
-  }
+  const request = parseCheckoutRequest(await readJson(req));
 
   const db = adminClient();
 
   const { data: client, error: cErr } = await db
     .from("clients")
-    .select("id, operator_id, full_name, email, stripe_customer_id, stripe_subscription_id, subscription_status")
-    .eq("id", body.client_id)
+    .select(
+      "id, operator_id, full_name, email, stripe_customer_id, stripe_subscription_id, subscription_status",
+    )
+    .eq("id", request.clientId)
     .maybeSingle();
   if (cErr) {
     throw new HttpError(500, "db_error", "client lookup failed", cErr, {
-      client_id: body.client_id,
+      client_id: request.clientId,
     });
   }
   if (!client || client.operator_id !== operator.id) {
     throw new HttpError(404, "client_not_found", "client not found");
   }
 
-  const { data: plan, error: pErr } = await db
-    .from("plans")
-    .select("id, operator_id, name, stripe_price_id, active, overage_rate_pence")
-    .eq("id", body.plan_id)
-    .maybeSingle();
-  if (pErr) {
-    throw new HttpError(500, "db_error", "plan lookup failed", pErr, {
-      plan_id: body.plan_id,
-    });
-  }
-  if (!plan || plan.operator_id !== operator.id) {
-    throw new HttpError(404, "plan_not_found", "plan not found");
-  }
-  if (!plan.active) throw new HttpError(409, "plan_inactive", "plan is not active");
-  if (!plan.stripe_price_id) {
-    throw new HttpError(409, "plan_unpriced", "plan has no stripe_price_id configured");
+  // Subscription checkout needs its plan; the other two kinds need the
+  // operator's priced services for the per-visit mandate.
+  let plan: {
+    id: string;
+    stripe_price_id: string | null;
+    overage_rate_pence: number | null;
+  } | null = null;
+  let pricedServices: PricedService[] = [];
+
+  if (request.kind === "subscription") {
+    const { data, error: pErr } = await db
+      .from("plans")
+      .select("id, operator_id, name, stripe_price_id, active, overage_rate_pence")
+      .eq("id", request.planId)
+      .maybeSingle();
+    if (pErr) {
+      throw new HttpError(500, "db_error", "plan lookup failed", pErr, {
+        plan_id: request.planId,
+      });
+    }
+    if (!data || data.operator_id !== operator.id) {
+      throw new HttpError(404, "plan_not_found", "plan not found");
+    }
+    if (!data.active) throw new HttpError(409, "plan_inactive", "plan is not active");
+    if (!data.stripe_price_id) {
+      throw new HttpError(409, "plan_unpriced", "plan has no stripe_price_id configured");
+    }
+    // One live subscription per client. Nothing stopped a second checkout,
+    // and a customer with two subscriptions receives two invoice.paid events
+    // with DIFFERENT invoice ids — so uq_payments_subscription_invoice does
+    // not catch it and the client is charged twice and granted two cycles.
+    // The webhook now ignores invoices for an unbound subscription, but the
+    // right place to stop it is before the second one exists. Top-ups and
+    // card-saves are orthogonal to subscriptions and are not gated.
+    if (client.stripe_subscription_id && client.subscription_status !== "cancelled") {
+      throw new HttpError(
+        409,
+        "already_subscribed",
+        "This client already has a live subscription. Change their plan instead of starting a second one.",
+      );
+    }
+    plan = data;
+  } else {
+    const { data, error: sErr } = await db
+      .from("service_types")
+      .select("name, visit_price_pence")
+      .eq("operator_id", operator.id)
+      .not("visit_price_pence", "is", null)
+      .order("name")
+      .limit(50);
+    if (sErr) {
+      throw new HttpError(500, "db_error", "service lookup failed", sErr, {
+        client_id: client.id,
+      });
+    }
+    pricedServices = (data ?? []) as PricedService[];
+    if (request.kind === "setup" && pricedServices.length === 0) {
+      // A card saved under no stated terms is an off-session charge waiting
+      // to surprise somebody (H12), so the mandate is a precondition, not
+      // decoration. Refuse BEFORE creating anything — create-plan's posture.
+      throw new HttpError(
+        409,
+        "visit_price_missing",
+        "Set a visit price in Settings first — the card-save form has to say what the card will be charged.",
+      );
+    }
   }
 
   const stripe = stripeClient();
-  // Every call below carries this. The operator is the merchant of record
-  // (review B5): the customer, the subscription and the charge all live on
-  // THEIR Stripe account, their business appears on the client's statement,
-  // and the money lands in their bank — Sanpo is never in the flow of funds.
-  // One live subscription per client. Nothing stopped a second checkout, and
-  // a customer with two subscriptions receives two invoice.paid events with
-  // DIFFERENT invoice ids — so uq_payments_subscription_invoice does not catch
-  // it and the client is charged twice and granted two cycles. The webhook now
-  // ignores invoices for an unbound subscription, but the right place to stop
-  // it is before the second one exists.
-  if (client.stripe_subscription_id && client.subscription_status !== "cancelled") {
-    throw new HttpError(
-      409,
-      "already_subscribed",
-      "This client already has a live subscription. Change their plan instead of starting a second one.",
-    );
-  }
-
+  // Every Stripe call below carries this. The operator is the merchant of
+  // record (review B5): the customer, the session and the money all live on
+  // THEIR Stripe account — Sanpo is never in the flow of funds.
   const account = requireAccount(operator);
 
   let customerId = client.stripe_customer_id as string | null;
@@ -101,69 +149,33 @@ serveFunction(async (req) => {
   }
 
   const base = Deno.env.get("APP_BASE_URL") ?? "http://localhost:5173";
-  const metadata = {
-    client_id: client.id,
-    operator_id: operator.id,
-    plan_id: plan.id,
+  const common = {
+    customerId,
+    clientId: client.id,
+    operatorId: operator.id,
+    base,
   };
-  const session = await stripe.checkout.sessions.create({
-    mode: "subscription",
-    customer: customerId,
-    line_items: [{ price: plan.stripe_price_id, quantity: 1 }],
-    payment_method_collection: "always",
-    /**
-     * Review L8: collect the billing address now, while it is free.
-     *
-     * Sanpo does not calculate tax and this does not turn it on — dog walking
-     * is untaxed in most US states, and doing it properly means `automatic_tax`
-     * plus restructuring overage from a raw PaymentIntent (which cannot carry
-     * tax at all) into an invoice. That is a project, not a line.
-     *
-     * The address is a different question from the tax, and it has a deadline:
-     * Stripe Tax cannot be enabled retroactively for customers whose address
-     * it never captured, so the alternative to collecting it at signup is
-     * asking every existing client for it later, one at a time, through a
-     * surface that does not exist. The cost today is one extra field in a form
-     * the client is already filling in with card details.
-     *
-     * `customer_update.address` is what makes it stick: without it Checkout
-     * collects the address for the payment and does NOT write it back to the
-     * Customer, so it would be captured and then thrown away — which is the
-     * same as not collecting it, but harder to notice.
-     */
-    billing_address_collection: "required",
-    customer_update: { address: "auto", name: "auto" },
-    // Metadata on both the session (read by checkout.session.completed) and
-    // the subscription (read by anything inspecting the subscription later).
-    metadata,
-    subscription_data: { metadata },
-    success_url: `${base}/clients/${client.id}?checkout=success`,
-    cancel_url: `${base}/clients/${client.id}?checkout=cancelled`,
-    /**
-     * Review H12: the overage mandate, on Stripe's record.
-     *
-     * A walk beyond the plan's credits is charged off-session — no one is
-     * present, and until this the client had agreed to a subscription and
-     * nothing else. Checkout is the moment the card is authorised, so it is
-     * where the authorisation has to say what it authorises. Stripe stores the
-     * session, which makes this evidence rather than copy on a page we own.
-     *
-     * Omitted rather than fudged when the operator has no overage rate set:
-     * "charged at your overage rate" with no figure is the kind of vague
-     * disclosure that is worse than none.
-     */
-    ...(typeof plan.overage_rate_pence === "number" && plan.overage_rate_pence > 0
-      ? {
-        custom_text: {
-          submit: {
-            message:
-              `Walks beyond the credits in this plan are charged to this card at `
-              + `${formatMoney(plan.overage_rate_pence)} each, after the walk is completed.`,
-          },
-        },
-      }
-      : {}),
-  }, account);
+  const params = request.kind === "subscription"
+    ? subscriptionSessionParams({
+      ...common,
+      planId: plan!.id,
+      stripePriceId: plan!.stripe_price_id!,
+      overageRatePence: plan!.overage_rate_pence,
+    })
+    : request.kind === "topup"
+    ? topupSessionParams({
+      ...common,
+      credits: request.credits,
+      amountPence: request.amountPence,
+      mandate: visitPriceMandate(pricedServices),
+    })
+    : setupSessionParams({
+      ...common,
+      // Non-null: the setup branch refused above when nothing is priced.
+      mandate: visitPriceMandate(pricedServices)!,
+    });
+
+  const session = await stripe.checkout.sessions.create(params, account);
 
   return jsonOk({ url: session.url });
 });

@@ -1,6 +1,9 @@
-// Overage charging (spec 04): used by charge-overage and invoked in-process
-// by complete-walk. A walk flagged is_overage is charged as a WHOLE at the
-// client's plans.overage_rate_pence (invariant 3 — never partial credit).
+// Off-session walk charging (spec 04): used by charge-overage and invoked
+// in-process by complete-walk. A walk flagged is_overage is charged as a
+// WHOLE (invariant 3 — never partial credit) at the rate snapshotted when it
+// was created: the client's plan overage rate, or — for a client on no plan —
+// the service's visit price (review H32). See the resolution order at the
+// `amount` assignment below.
 //
 // Double-charge protection (re-review hardening):
 //   1. A 'pending' payments row is inserted BEFORE the Stripe confirm — it
@@ -24,6 +27,12 @@ export interface OverageWalk {
   client_id: string;
   status: string;
   is_overage: boolean;
+  /** The client's plan overage rate when the walk was created (0043).
+   * Null = no plan at creation, or a pre-0043 row. */
+  overage_rate_pence: number | null;
+  /** The service's cash visit price when the walk was created (0044).
+   * Null = the service had no visit price, or a pre-0044 row. */
+  visit_price_pence: number | null;
 }
 
 export interface OveragePayment {
@@ -59,6 +68,11 @@ export interface OverageDeps {
     clientId: string;
     /** Stripe idempotency key for THIS payment claim. */
     attemptKey: string;
+    /** Which promise priced the charge — drives the PI description the
+     * client sees on their statement/receipt. Required, not defaulted: a
+     * call site that has not decided is a call site that will label a
+     * pay-per-visit client's charge "overage". */
+    pricing: "plan_rate" | "visit_price";
   }): Promise<{ id: string; status: string; receipt_url: string | null }>;
   insertPayment(
     row: OveragePayment & { operator_id: string; client_id: string },
@@ -106,10 +120,10 @@ export class OverageError extends Error {
 function permanentReason(err: unknown): string {
   const e = err as { code?: string; message?: string } | null;
   if (e?.code === "resource_missing") {
-    return "This client's payment details are not on your Stripe account — they may need to subscribe again";
+    return "This client's payment details are not on your Stripe account — they may need to subscribe again or save a card";
   }
   if (e?.message?.includes("no payment method on file")) {
-    return "This client has no card saved, so there is nothing to charge";
+    return "This client has no card saved, so there is nothing to charge — send them a card link from their client page";
   }
   return "Stripe rejected the charge as invalid, so retrying will not help";
 }
@@ -151,7 +165,33 @@ export async function chargeOverageForWalk(
 
   const billing = await deps.getClientBilling(walk.client_id);
   if (!billing) throw new OverageError("client_not_found", "client not found", 404);
-  const amount = billing.plan?.overage_rate_pence;
+
+  /**
+   * The price the walk is charged at, in the order the promises were made
+   * (review H32, completing 0043/L7):
+   *
+   *   1. `walks.overage_rate_pence` — the client's PLAN rate when the walk
+   *      was created. Written since 0043 and, until this change, read by
+   *      NOTHING: the charge billed the live plan rate, so a Settings edit
+   *      re-priced every walk already on the calendar — the exact defect
+   *      0043 was recorded as closing.
+   *   2. `walks.visit_price_pence` — the service's cash price when the walk
+   *      was created (0044). The snapshot trigger fills it whenever the
+   *      service has one, plan client or not, so this ORDER — plan rate
+   *      first — is what keeps a plan client off the cash price.
+   *   3. The live plan rate — pre-snapshot rows only (both snapshots null),
+   *      which is exactly the behaviour those rows shipped with.
+   *
+   * All three null → refuse below. Null is "nothing agreed", never "free"
+   * (0043's rule, restated on both new columns).
+   */
+  const amount = walk.overage_rate_pence ??
+    walk.visit_price_pence ??
+    billing.plan?.overage_rate_pence;
+  const pricing: "plan_rate" | "visit_price" =
+    walk.overage_rate_pence == null && walk.visit_price_pence != null
+      ? "visit_price"
+      : "plan_rate";
 
   /**
    * Who hears about a failed charge depends on whose fault it is (review B6).
@@ -215,12 +255,19 @@ export async function chargeOverageForWalk(
   };
 
   if (amount == null) {
-    return failWithoutAttempt("This client is not on a plan, so there is no overage rate to charge");
+    return failWithoutAttempt(
+      "This client is not on a plan and this walk has no visit price on record — "
+        + "set a visit price in Settings and future walks will carry it",
+    );
   }
   if (!billing.stripe_customer_id) {
-    // No Stripe customer means checkout never completed, so the client has no
-    // payment method to update and no way to add one unaided.
-    return failWithoutAttempt("This client has no billing profile yet — send them a plan to subscribe to");
+    // No Stripe customer means no checkout of any kind ever ran for this
+    // client, so there is no card anywhere to charge and no way for them to
+    // add one unaided.
+    return failWithoutAttempt(
+      "This client has no billing profile yet — send them a plan to subscribe to, "
+        + "or a card link so visit charges have a card to land on",
+    );
   }
   // Narrowing doesn't survive into the closure below — capture it.
   const customerId = billing.stripe_customer_id;
@@ -247,6 +294,7 @@ export async function chargeOverageForWalk(
         walkId,
         clientId: walk.client_id,
         attemptKey: `overage_${walkId}_${claim.id ?? "claim"}`,
+        pricing,
       });
       const status = pi.status === "succeeded" ? "succeeded" : "pending";
       const payment = await deps.updatePayment(claim.id!, {
@@ -276,14 +324,22 @@ export async function chargeOverageForWalk(
        */
       if (status === "succeeded") {
         const money = formatMoney(amount);
+        // The wording follows the promise that priced the charge (H32): the
+        // plan sentence presupposes credits that were used up, which is false
+        // for a pay-per-visit client who never had any — telling them their
+        // "plan credits were used up" would be an announcement of a plan
+        // they are not on.
+        const explanation = pricing === "visit_price"
+          ? `This walk was charged at your walker's per-visit price. ${money} was `
+            + "taken from the card on file."
+          : "Your plan credits were used up, so this walk was charged at your walker's "
+            + `overage rate. ${money} was taken from the card on file.`;
         await deps.insertNotification({
           operator_id: walk.operator_id,
           client_id: walk.client_id,
           type: "payment_taken",
           title: `${money} charged for your walk`,
-          body: "Your plan credits were used up, so this walk was charged at your walker's "
-            + `overage rate. ${money} was taken from the card on file.`
-            + (pi.receipt_url ? ` Receipt: ${pi.receipt_url}` : ""),
+          body: explanation + (pi.receipt_url ? ` Receipt: ${pi.receipt_url}` : ""),
           walk_id: walkId,
         });
       }

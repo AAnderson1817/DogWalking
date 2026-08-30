@@ -74,6 +74,7 @@ Deno.test("createOffSessionPaymentIntent routes EVERY Stripe call to the connect
     walkId: "walk-1",
     clientId: "client-1",
     attemptKey: "key-1",
+    pricing: "plan_rate",
   });
 
   assert(recorded.length > 0, "expected Stripe calls");
@@ -99,6 +100,7 @@ Deno.test("the customer lookup specifically is on the connected account", async 
     walkId: "walk-1",
     clientId: "client-1",
     attemptKey: "key-1",
+    pricing: "plan_rate",
   });
   const lookup = recorded.find((r) => r.call === "customers.retrieve");
   assert(lookup, "customers.retrieve was not called");
@@ -122,6 +124,7 @@ Deno.test("the card fallback is routed too", async () => {
     walkId: "walk-1",
     clientId: "client-1",
     attemptKey: "key-1",
+    pricing: "plan_rate",
   });
   const list = recorded.find((r) => r.call === "paymentMethods.list");
   assert(list, "paymentMethods.list was not called");
@@ -146,9 +149,42 @@ Deno.test("the idempotency key survives being merged with the account", async ()
     walkId: "walk-1",
     clientId: "client-1",
     attemptKey: "attempt-abc",
+    pricing: "plan_rate",
   });
   const create = recorded.find((r) => r.call === "paymentIntents.create");
   const opts = create!.options as { idempotencyKey?: string; stripeAccount?: string };
   assertEquals(opts.idempotencyKey, "attempt-abc");
   assertEquals(opts.stripeAccount, ACCOUNT.stripeAccount);
+});
+
+Deno.test("the PI description follows the pricing kind", async () => {
+  // "Overage" on a pay-per-visit client's statement would name a plan they
+  // are not on; "per-visit" on a plan client's would deny the plan they are.
+  for (
+    const [pricing, expected] of [
+      ["visit_price", "Sanpo walk (per-visit)"],
+      ["plan_rate", "Sanpo walk (overage)"],
+    ] as const
+  ) {
+    const recorded: Recorded[] = [];
+    const stripe = makeStripeDouble(recorded);
+    let description: string | undefined;
+    const orig = stripe.paymentIntents.create;
+    stripe.paymentIntents.create = ((...args: unknown[]) => {
+      description = (args[0] as { description?: string }).description;
+      return orig(...args);
+      // deno-lint-ignore no-explicit-any
+    }) as any;
+    // deno-lint-ignore no-explicit-any
+    const deps = makeOverageDeps(db, stripe as any, () => ACCOUNT);
+    await deps.createOffSessionPaymentIntent({
+      customerId: "cus_1",
+      amountPence: 2500,
+      walkId: "walk-1",
+      clientId: "client-1",
+      attemptKey: "key-1",
+      pricing,
+    });
+    assertEquals(description, expected);
+  }
 });
