@@ -115,6 +115,50 @@ describe("ClientDetail edit affordances", () => {
     expect(screen.queryByRole("button", { name: "Edit details" })).toBeNull();
   });
 
+  it("withholds every re-personalising surface from a purged client", async () => {
+    // Codex review on PR #79, correctly. `fn_purge_client` (0040:240-244)
+    // redacts the property to `label = 'Removed'` with every address field
+    // nulled and KEEPS the row, because retained walks reference its id — so a
+    // property Edit button lets the operator type the erased address straight
+    // back in and relink it to that walk history. The same is true of adding a
+    // property, adding a pet (purge DELETES pets, 0040:308) and adding a
+    // secret (purge blanks the ciphertext and keeps the row, 0040:227-228).
+    //
+    // Guarding only the header — the first version of this change — left the
+    // rule spec 03 states false two tabs over. Asserted per surface so that
+    // fixing one and not its siblings fails here.
+    const user = userEvent.setup();
+    state.client = { ...CLIENT, purged_at: "2026-08-02T00:00:00Z" };
+    state.properties = [{ ...PROPERTY, label: "Removed", address_line1: null, city: null, postcode: null }];
+    await show();
+
+    // PetsTab fetches, so "Add pet" is absent for a moment on ANY client.
+    // Waiting for the loaded empty state first is what stops this assertion
+    // passing before the tab has rendered at all.
+    await screen.findByText("No pets yet");
+    expect(screen.queryByRole("button", { name: "Edit details" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add pet" })).toBeNull();
+
+    await user.click(screen.getByRole("tab", { name: "Access" }));
+    await waitFor(() => expect(screen.getByText("Removed")).toBeTruthy());
+    expect(screen.queryByRole("button", { name: "Add property" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Edit Removed" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add secret" })).toBeNull();
+  });
+
+  it("still offers all of them on an ordinary client", async () => {
+    // The other direction: a guard that hid everything unconditionally would
+    // pass the test above and ship a dead screen.
+    const user = userEvent.setup();
+    await show();
+    await screen.findByText("No pets yet");
+    expect(screen.getByRole("button", { name: "Add pet" })).toBeTruthy();
+    await user.click(screen.getByRole("tab", { name: "Access" }));
+    expect(await screen.findByRole("button", { name: "Add property" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Edit Old Town loop" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add secret" })).toBeTruthy();
+  });
+
   it("opens the client sheet with the record's current values", async () => {
     const user = userEvent.setup();
     await show();

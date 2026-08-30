@@ -129,15 +129,32 @@ everything else is destroyed: `walk_gps_points`, `walk_photos`, `walk_pets`,
 is the only form the graph allows without dismantling the tax record or the
 audit trail, and what remains carries no personal data and no readable secret.
 
-**Nothing in the database stops an edit re-personalising a tombstone.** The
+**Nothing in the database stops a purged record being re-personalised.** The
 `0004` UPDATE grant still covers `full_name`, `email` and `phone` after
-`fn_purge_client` has redacted them, so a client-edit form would let an
-operator undo, by hand, an erasure that was carried out on request. The
-operator UI therefore withholds the edit affordance from any client carrying
-`purged_at` (`isEditable` in `app/src/lib/client-edit.ts`). Stated as what it
-is: a UI-only guard, not a database one. A definer-enforced version would need
-a trigger refusing writes to a purged row, which is the shape a fix would take
-if this is ever reachable by another route.
+`fn_purge_client` has redacted them, and the rows this function REDACTS rather
+than destroys are kept precisely because retained walks reference them — so
+every surface that writes personal data back is a way to undo, by hand, an
+erasure carried out on request:
+
+| surface | what the purge did |
+|---|---|
+| Edit details (client) | tombstoned `full_name`, nulled `email`/`phone`/`notes` |
+| Edit property | nulled every address field, `label` → `'Removed'` — **row kept** |
+| Add property | (a new row re-attaches an address to the erased client) |
+| Add secret | ciphertext overwritten with a 37-byte sentinel — **row kept** |
+| Add pet | `pets` DELETEd outright |
+
+The operator UI withholds all five from any client carrying `purged_at`, from
+one decision (`isEditable` in `app/src/lib/client-edit.ts`, read once in
+`ClientDetail`). Guarding only the client header — the first version of the
+edit surface — left this paragraph false two tabs over; the Codex review on
+PR #79 caught it, and the test now asserts each surface separately so fixing
+one and not its siblings fails.
+
+Stated as what it is: a **UI-only guard, not a database one**. A
+definer-enforced version would need a trigger refusing writes to a purged
+row, which is the shape a fix would take if this is ever reachable by another
+route.
 
 **Storage is two-phase, and the order is load-bearing.** SQL cannot delete a
 bucket object — dropping the `storage.objects` row removes the metadata and
