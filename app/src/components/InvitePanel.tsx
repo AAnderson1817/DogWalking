@@ -65,10 +65,11 @@ export function InvitePanel({
   // reserving the first one that arrives. One click would turn an erased
   // record back into a claimable account.
   //
-  // The database does not refuse this: `fn_unbind_invite` carries a
-  // `purged_at` guard and `fn_rotate_invite` does not. Closing that properly
-  // is a migration, so it stays a stated residual rather than something this
-  // frontend guard should be mistaken for.
+  // `0046` closed the database half: `fn_rotate_invite` now carries the same
+  // `purged_at` guard `fn_unbind_invite` always had, so this is defence in
+  // depth rather than the only thing standing between a tombstone and a live
+  // bearer token. Kept, because a panel offering an action the server will
+  // refuse is a worse surface than one that does not offer it.
   if (client.purged_at) return null;
 
   async function act(kind: "rotate" | "revoke" | "unbind") {
