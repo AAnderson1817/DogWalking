@@ -177,10 +177,17 @@ export async function confirmTotpEnrolment(factorId: string, code: string): Prom
 
 /** Remove a verified factor. GoTrue requires the session at aal2 for this,
  * which is why MfaSection collects a code first — turning two-factor off
- * requires having it. */
+ * requires having it. Message-or-null on EVERY failure path, same rule as
+ * stepUpWithCode: auth-js rethrows non-AuthErrors, and an escaped throw
+ * strands the removal form on a permanent spinner (Codex, PR #78 — the
+ * sibling of the exact hole the review round fixed one function up). */
 export async function removeTotpFactor(factorId: string): Promise<string | null> {
-  const { error } = await supabase.auth.mfa.unenroll({ factorId });
-  return error ? error.message : null;
+  try {
+    const { error } = await supabase.auth.mfa.unenroll({ factorId });
+    return error ? error.message : null;
+  } catch (e) {
+    return e instanceof Error ? e.message : "Could not turn two-factor off — try again.";
+  }
 }
 
 /** The Settings section's view of the account: the verified factor if any. */

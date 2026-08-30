@@ -197,6 +197,22 @@ describe("beginTotpEnrolment", () => {
   });
 });
 
+describe("removeTotpFactor", () => {
+  it("a THROWN unenroll comes back as a message — the sibling of the stepUpWithCode rule (Codex, PR #78)", async () => {
+    // auth-js rethrows non-AuthErrors (a dropped connection, say); unwrapped,
+    // the rejection escapes into MfaSection.remove(), which never reaches
+    // setBusy(false) — the removal form stuck on its spinner until reload.
+    const { removeTotpFactor } = await import("./mfa");
+    auth.unenroll.mockReset();
+    auth.unenroll.mockRejectedValueOnce(new Error("fetch failed"));
+    expect(await removeTotpFactor("f1")).toMatch(/fetch failed/);
+    auth.unenroll.mockResolvedValueOnce({ error: { message: "denied" } });
+    expect(await removeTotpFactor("f1")).toMatch(/denied/);
+    auth.unenroll.mockResolvedValueOnce({ error: null });
+    expect(await removeTotpFactor("f1")).toBeNull();
+  });
+});
+
 describe("fetchVerifiedFactor", () => {
   beforeEach(() => {
     auth.listFactors.mockReset();
