@@ -850,6 +850,27 @@ export function createCheckout(clientId: string, planId: string): Promise<{ url:
   return invokeEdge("create-checkout", { client_id: clientId, plan_id: planId });
 }
 
+/** Payment-mode checkout: the client buys `credits` for `amountPence`, and
+ * the paying card is saved for off-session visit charges (review H32). The
+ * grant lands when the webhook sees checkout.session.completed. */
+export function createTopupCheckout(
+  clientId: string,
+  credits: number,
+  amountPence: number,
+): Promise<{ url: string }> {
+  return invokeEdge("create-checkout", {
+    client_id: clientId,
+    topup: { credits, amount_pence: amountPence },
+  });
+}
+
+/** Setup-mode checkout: card on file for a pay-per-visit client, under a
+ * mandate naming the visit prices. Refused server-side (409
+ * visit_price_missing) until a visit price exists to name. */
+export function createSetupCheckout(clientId: string): Promise<{ url: string }> {
+  return invokeEdge("create-checkout", { client_id: clientId, setup: true });
+}
+
 /**
  * `already_charged` is returned by the edge function and was dropped by this
  * type, so no caller could tell a fresh charge from a no-op that found an

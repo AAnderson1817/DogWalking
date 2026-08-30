@@ -5,7 +5,9 @@ import { dateLocal, money } from "@/lib/format";
 import { reversalNote } from "@/lib/reversal";
 
 function paymentTypeLabel(type: PaymentDetailed["type"]): string {
-  return type === "overage" ? "Walk overage" : "Subscription";
+  if (type === "overage") return "Walk overage";
+  if (type === "topup") return "Credit top-up";
+  return "Subscription";
 }
 
 export function PaymentRow({
