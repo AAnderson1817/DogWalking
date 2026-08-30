@@ -784,6 +784,7 @@ export type Database = {
           is_default: boolean;
           created_at: string;
           updated_at: string;
+          visit_price_pence: number | null;
         };
         Insert: {
           id?: string;
@@ -795,6 +796,7 @@ export type Database = {
           is_default?: boolean;
           created_at?: string;
           updated_at?: string;
+          visit_price_pence?: number | null;
         };
         Update: {
           id?: string;
@@ -806,6 +808,7 @@ export type Database = {
           is_default?: boolean;
           created_at?: string;
           updated_at?: string;
+          visit_price_pence?: number | null;
         };
         Relationships: [];
       };
@@ -996,6 +999,7 @@ export type Database = {
           abandoned_at: string | null;
           cost_credits: number | null;
           overage_rate_pence: number | null;
+          visit_price_pence: number | null;
         };
         Insert: {
           id?: string;
@@ -1026,6 +1030,7 @@ export type Database = {
           abandoned_at?: string | null;
           cost_credits?: number | null;
           overage_rate_pence?: number | null;
+          visit_price_pence?: number | null;
         };
         Update: {
           id?: string;
@@ -1056,6 +1061,7 @@ export type Database = {
           abandoned_at?: string | null;
           cost_credits?: number | null;
           overage_rate_pence?: number | null;
+          visit_price_pence?: number | null;
         };
         Relationships: [];
       };
@@ -1111,6 +1117,15 @@ export type Database = {
           p_client: string;
         };
         Returns: number;
+      };
+      fn_apply_topup: {
+        Args: {
+          p_client: string;
+          p_credits: number;
+          p_payment_intent_id: string;
+          p_amount_pence: number;
+        };
+        Returns: boolean;
       };
       fn_assert_plan_change_intent_tenant: {
         Args: Record<string, never>;
@@ -1297,6 +1312,10 @@ export type Database = {
           p_token: string;
         };
         Returns: Array<{ full_name: string; business_name: string; already_claimed: boolean }>;
+      };
+      fn_price_unpriced_scheduled_walks: {
+        Args: Record<string, never>;
+        Returns: unknown;
       };
       fn_purge_client: {
         Args: {
@@ -1510,7 +1529,7 @@ export type Database = {
       entry_method: "key_on_file" | "lockbox" | "smart_lock" | "door_code" | "buzzer_fob";
       invite_claim_outcome: "claimed" | "not_found" | "already_claimed" | "expired" | "revoked" | "email_mismatch";
       ledger_entry_type: "grant" | "debit" | "adjust" | "rollover" | "expiry";
-      notification_type: "walk_complete" | "low_credit" | "renewal_upcoming" | "payment_failed" | "walk_scheduled" | "walk_cancelled" | "payment_refunded" | "payment_disputed" | "subscription_cancelled" | "plan_changed_externally" | "payment_taken";
+      notification_type: "walk_complete" | "low_credit" | "renewal_upcoming" | "payment_failed" | "walk_scheduled" | "walk_cancelled" | "payment_refunded" | "payment_disputed" | "subscription_cancelled" | "plan_changed_externally" | "payment_taken" | "card_saved";
       payment_status: "pending" | "succeeded" | "failed" | "refunded" | "disputed";
       payment_type: "subscription" | "overage" | "topup";
       pet_size: "small" | "medium" | "large" | "giant";
