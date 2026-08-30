@@ -774,8 +774,8 @@ function AccessTab({ client, editable }: { client: ClientRecord; editable: boole
       ) : (
         properties.map((property) => (
           <Card key={property.id}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "var(--s-2)" }}>
-              <div>
+            <div className="property-card__head">
+              <div className="property-card__identity">
                 <div style={{ fontWeight: 600 }}>{property.label}</div>
                 <div style={{ color: "var(--text-2)", fontSize: "var(--fs-14)" }}>
                   {[property.address_line1, property.city, property.postcode].filter(Boolean).join(", ")}
@@ -787,7 +787,7 @@ function AccessTab({ client, editable }: { client: ClientRecord; editable: boole
                 )}
               </div>
               {editable && (
-                <div style={{ display: "flex", gap: "var(--s-1)", flexShrink: 0 }}>
+                <div className="property-card__actions">
                   {/* Named per property rather than a bare "Edit": this list is
                       several cards long and a screen reader reading the buttons
                       out of context would hear the same word each time. */}

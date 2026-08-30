@@ -553,14 +553,36 @@ a.btn { text-decoration: none; }
 .form-note {
   margin: 0;
   padding-left: var(--s-3);
-  border-left: 3px solid var(--sanpo-color-border-attention);
+  border-left: 3px solid var(--sanpo-color-border-focus);
   color: var(--sanpo-color-text-secondary);
   font-size: var(--fs-14);
 }
+/* Kaki is reserved for the notes that describe a change to who may claim the
+   account. Painting the attention rule on reassurance too — "this does not
+   change how they sign in", "this invite isn't live" — teaches the operator
+   that the red bar means nothing in particular, which is the erosion the
+   status vocabulary in spec 05 exists to prevent. */
+.form-note--attention { border-left-color: var(--sanpo-color-border-attention); }
 /* Same treatment as `.form-error:empty`, and for the same reason: the region
    is always in the DOM so the live region pre-exists its text, and an
    out-of-flow child is not a flex item, so an empty note costs no `gap` and
    draws no border. */
+/* The Access tab is read at a door. A second action in this row (review of
+   PR #79) left the address in a ~101px column at 375px while 184px went to
+   buttons, so the identity column gets `min-width: 0` — without it a flex item
+   will not shrink below its content — and the actions wrap under the text on a
+   narrow screen rather than compressing it. */
+.property-card__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+.property-card__identity { min-width: 0; flex: 1 1 12rem; }
+.property-card__identity > * { overflow-wrap: anywhere; }
+.property-card__actions { display: flex; gap: var(--s-1); flex-shrink: 0; }
+
 .form-note:empty {
   position: absolute;
   width: 1px;
@@ -2346,8 +2368,16 @@ body:has(.today-emaki-page) .bottom-nav {
   align-items: center;
 }
 .client-relationship-header__title { justify-content: space-between; gap: var(--s-3); }
-/* Layout only — paints no surface, so the H24 tint escalation does not apply
-   and the ghost button inside inherits the header's already-escalated roles. */
+/* Layout only — it paints no surface, so the H24 tint escalation rule does not
+   apply to this selector and it does not belong in that list.
+
+   An earlier version of this comment added "and the ghost button inside
+   inherits the header's already-escalated roles", which is not the mechanism:
+   `.btn--ghost` paints its own opaque fill and takes its colours from the
+   `--sanpo-color-button-secondary-*` tokens, which are declared on `:root` —
+   substitution happens where a custom property is DECLARED, so re-pointing the
+   text roles on an ancestor does not reach them. The button is legible here
+   because it paints its own background, not because it inherited anything. */
 .client-relationship-header__actions { margin-top: var(--s-2); }
 .client-relationship-header__credits { font-size: var(--fs-20); font-weight: 900; white-space: nowrap; }
 .client-relationship-header__credits span { color: var(--sanpo-color-text-primary); font-family: var(--font-body); font-size: var(--fs-12); }

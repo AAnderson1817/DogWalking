@@ -175,6 +175,26 @@ describe("ClientEditSheet", () => {
     expect(onSaved).not.toHaveBeenCalled();
   });
 
+  it("keeps the attention rule for the notes that change who may claim", async () => {
+    // Painting the Kaki rule on reassurance too would teach the operator that
+    // it means nothing in particular — the erosion spec 05's status vocabulary
+    // exists to prevent. So: ladder changes get it, explanations do not.
+    const user = userEvent.setup();
+    open();
+    await user.clear(field("Email"));
+    expect(screen.getByRole("status").className).toContain("form-note--attention");
+  });
+
+  it("does not paint the attention rule on reassurance", async () => {
+    const user = userEvent.setup();
+    open({ auth_user_id: "user-9" });
+    await user.clear(field("Email"));
+    await user.type(field("Email"), "moved@sanpo.test");
+    const note = screen.getByRole("status");
+    expect(note.textContent).toMatch(/does not change how they sign in/);
+    expect(note.className).not.toContain("form-note--attention");
+  });
+
   it("cannot be dismissed while the save is in flight", async () => {
     // Rendered with a real `open` owner: with a no-op `onClose` the sheet
     // never closes whatever the guard does, and the assertion below could not

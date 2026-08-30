@@ -51,6 +51,13 @@ const EMAIL_EFFECT_COPY: Record<Exclude<EmailEditEffect, "unchanged">, string> =
     + "client's account. Withdraw the invite first if the link has been shared.",
 };
 
+/** The effects that change WHO MAY CLAIM — the ones the attention rule is for. */
+const LADDER_EFFECTS = new Set<EmailEditEffect>([
+  "binds-invite",
+  "rebinds-invite",
+  "opens-invite",
+]);
+
 export function ClientEditSheet({
   open,
   client,
@@ -126,7 +133,12 @@ export function ClientEditSheet({
             it out of flow, so it costs no `gap` while there is nothing to say.
             role="status" rather than alert — this is a consequence of what the
             operator is typing, not a failure. */}
-        <p id={noteId} className="form-note" role="status">
+        <p
+          id={noteId}
+          // Kaki only for the notes that change who may claim the account.
+          className={`form-note${LADDER_EFFECTS.has(effect) ? " form-note--attention" : ""}`}
+          role="status"
+        >
           {effect === "unchanged" ? null : EMAIL_EFFECT_COPY[effect]}
         </p>
         <Input
