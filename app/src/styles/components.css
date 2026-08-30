@@ -537,6 +537,26 @@ a.btn { text-decoration: none; }
    out-of-flow child is not a flex item, contributes no `gap` to the forms it
    sits inside. */
 .form-error { display: block; margin: 0; }
+
+/* A consequence of what the operator is typing, not a failure — so it is a
+   note rather than an error region, and it announces politely.
+
+   Bounded with a BORDER role and deliberately not filled. A border role
+   darkens toward Indigo under `prefers-contrast: more`, which makes a rule
+   more visible and makes a fill vanish — `--sanpo-color-text-primary` is
+   Indigo too, so the invite link and the Booking cost card both rendered at
+   1.00:1 for exactly the users who asked for more contrast. Painting no
+   surface also keeps this outside the H24 tint escalation entirely.
+
+   No font-weight: de-emphasis colour must never be heavier than body
+   (type-ramp), and inheriting is the way to stay equal to it. */
+.form-note {
+  margin: 0;
+  padding-left: var(--s-3);
+  border-left: 3px solid var(--sanpo-color-border-attention);
+  color: var(--sanpo-color-text-secondary);
+  font-size: var(--fs-14);
+}
 /* The one site not inside a gapped flex column. */
 .form-error.claim-invite__error { margin-top: var(--s-2); }
 .form-error:empty {
@@ -2313,6 +2333,9 @@ body:has(.today-emaki-page) .bottom-nav {
   align-items: center;
 }
 .client-relationship-header__title { justify-content: space-between; gap: var(--s-3); }
+/* Layout only — paints no surface, so the H24 tint escalation does not apply
+   and the ghost button inside inherits the header's already-escalated roles. */
+.client-relationship-header__actions { margin-top: var(--s-2); }
 .client-relationship-header__credits { font-size: var(--fs-20); font-weight: 900; white-space: nowrap; }
 .client-relationship-header__credits span { color: var(--sanpo-color-text-primary); font-family: var(--font-body); font-size: var(--fs-12); }
 .client-relationship-header__meta {

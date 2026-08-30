@@ -302,7 +302,11 @@ binds `clients.email` with one atomic conditional UPDATE (Codex review on
 PR #77), so a token is worth at most ONE account, and the claim then
 enforces the reserved address like any operator-recorded one. A mistyped
 first address is recoverable the ordinary way: the operator edits the
-client's email in the roster, or reissues the invite.
+client's email on the client record (ClientDetail -> Edit details), or
+reissues the invite. That edit surface did not exist when this paragraph
+was first written — `updateClient` had no importers — so the recovery was
+documented before it was reachable; it ships with the client/property edit
+work.
 
 Three further residuals, accepted and recorded rather than silently carried
 (adversarial review):
@@ -845,7 +849,25 @@ Three deliberate non-features:
 Suppression is keyed on the **address**, not the client, and defaults to every
 operator and every type. The wrong recipient has no client row of their own, so
 suppressing "this client" would let the same address start receiving again the
-moment the operator corrects and re-enters it.
+moment the operator corrects and re-enters it. That correction is now an actual
+surface (ClientDetail -> Edit details); until the client/property edit work it
+was reasoning about a repair the product could not perform.
+
+Two consequences of editing the address, recorded rather than carried
+silently:
+
+* Editing a client's address TO one that is already suppressed makes every
+  future client-facing email skip permanently, terminally, and with no signal
+  anywhere in the operator UI — `email_delivery_status` says `skipped` and
+  nothing surfaces it. Whether the operator should be told is a product
+  question, not a defect in the sender.
+* `clients.unsubscribe_token` is per-CLIENT and is not rotated by an email
+  edit, so a stranger who received a mistyped email holds a live one-click
+  link that, when clicked, suppresses whatever address the row holds AT CLICK
+  TIME — i.e. the corrected one. Rotating it on an email change is the fix;
+  it needs a definer function, because the column deliberately carries no
+  UPDATE grant for any API role (0038), so it is out of scope for a
+  frontend-only change and stated here instead.
 
 `send-notification` asks `fn_email_suppressed` before every send and **fails
 closed**: an unreadable suppression list is recorded as a retryable failure, not

@@ -26,19 +26,20 @@ import {
   withinCancellationWindow,
   type MyOperatorView,
   type WalkDetailed,
+  type ClientRecord,
 } from "@/lib/api";
 import { availableCredits, committedCredits, effectiveWalkCost } from "@/lib/credits";
 import { bookingChargePence, overageBookingGate } from "@/lib/visit-price";
 import { money, walkTime } from "@/lib/format";
 import { todayLocal } from "@/lib/selectors";
-import type { Clients, Pets, Plans, Properties, ServiceTypes } from "@/lib/types";
+import type { Pets, Plans, Properties, ServiceTypes } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
 import { useAuth } from "@/lib/auth-context";
 
 export default function Booking() {
   useDocumentTitle("Book a walk");
   const auth = useAuth();
-  const [client, setClient] = useState<Clients | null>(null);
+  const [client, setClient] = useState<ClientRecord | null>(null);
   const [operator, setOperator] = useState<MyOperatorView | null>(null);
   const [plan, setPlan] = useState<Plans | null>(null);
   const [services, setServices] = useState<ServiceTypes[]>([]);

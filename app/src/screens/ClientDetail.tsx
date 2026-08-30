@@ -9,6 +9,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { FormError, Input, Select, Textarea } from "@/components/fields";
 import { LoadError, loadErrorMessage } from "@/components/LoadError";
 import { ClientDataPanel } from "@/components/ClientDataPanel";
+import { ClientEditSheet } from "@/components/ClientEditSheet";
 import { InvitePanel } from "@/components/InvitePanel";
 import { SegmentedTabs, TabPanel } from "@/components/SegmentedTabs";
 import { Sheet } from "@/components/Sheet";
@@ -38,16 +39,24 @@ import {
   listProperties,
   listWalksDetailed,
   updatePet,
+  updateProperty,
   uploadPetPhoto,
   walkPetNames,
   type CredentialMeta,
   type WalkDetailed,
+  type ClientRecord,
 } from "@/lib/api";
+import {
+  isEditable,
+  propertyFormError,
+  propertyFormOf,
+  propertyPatch,
+} from "@/lib/client-edit";
 import { useAuth } from "@/lib/auth-context";
 import { compressImage } from "@/lib/image";
 import { formatLedgerEntry } from "@/lib/credits";
 import { dateLocal, money } from "@/lib/format";
-import type { Clients, CreditLedger, Operators, Pets, Plans, Properties } from "@/lib/types";
+import type { CreditLedger, Operators, Pets, Plans, Properties } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
 
 type Tab = "pets" | "plan" | "walks" | "schedule" | "access";
@@ -57,9 +66,10 @@ export default function ClientDetail() {
   const auth = useAuth();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [client, setClient] = useState<Clients | null>(null);
+  const [client, setClient] = useState<ClientRecord | null>(null);
   const [operator, setOperator] = useState<Operators | null>(null);
   const [tab, setTab] = useState<Tab>("pets");
+  const [editOpen, setEditOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Distinguished from `error` on purpose: "this client does not exist" and
   // "we could not reach the server" need different screens, and conflating
@@ -138,7 +148,29 @@ export default function ClientDetail() {
           <span>{client.phone ?? "No phone"}</span>
           <Badge status={clientTreatment.badge}>{clientTreatment.label}</Badge>
         </div>
+        {/* Withheld from a purged client: `fn_purge_client` (H5) writes the
+            tombstone, the UPDATE grant still covers those columns, and nothing
+            in the database stops an edit re-personalising an erasure that was
+            carried out on request. */}
+        {isEditable(client) && (
+          <div className="client-relationship-header__actions">
+            <Button variant="ghost" onClick={() => setEditOpen(true)}>
+              Edit details
+            </Button>
+          </div>
+        )}
       </header>
+
+      <ClientEditSheet
+        key={client.updated_at}
+        open={editOpen}
+        client={client}
+        onClose={() => setEditOpen(false)}
+        onSaved={() => {
+          setEditOpen(false);
+          void reload();
+        }}
+      />
 
       {/* Review H4: the operator's only way to reissue or withdraw an invite.
           Renders nothing once the client has claimed. */}
@@ -347,7 +379,7 @@ function PlanTab({
   operator,
   onChanged,
 }: {
-  client: Clients;
+  client: ClientRecord;
   operator: Operators;
   onChanged: () => void;
 }) {
@@ -676,19 +708,13 @@ function WalksTab({ clientId }: { clientId: string }) {
 }
 
 // ── Access ─────────────────────────────────────────────────────────────────
-function AccessTab({ client }: { client: Clients }) {
-  const auth = useAuth();
+function AccessTab({ client }: { client: ClientRecord }) {
   const [properties, setProperties] = useState<Properties[] | null>(null);
   const [credentials, setCredentials] = useState<CredentialMeta[]>([]);
-  const [addPropOpen, setAddPropOpen] = useState(false);
+  // One piece of state for both shapes, the PetSheet idiom: "new" opens an
+  // empty form, a row opens it filled.
+  const [editingProp, setEditingProp] = useState<Properties | "new" | null>(null);
   const [addCredFor, setAddCredFor] = useState<string | null>(null);
-  const [label, setLabel] = useState("Home");
-  const [address, setAddress] = useState("");
-  const [city, setCity] = useState("");
-  const [postcode, setPostcode] = useState("");
-  const [notes, setNotes] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const [props, creds] = await Promise.all([listProperties(client.id), listCredentials()]);
@@ -700,43 +726,19 @@ function AccessTab({ client }: { client: Clients }) {
     void load();
   }, [load]);
 
-  async function addProperty(e: FormEvent) {
-    e.preventDefault();
-    if (!auth.operatorId) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await createProperty({
-        operator_id: auth.operatorId,
-        client_id: client.id,
-        label: label.trim(),
-        address_line1: address.trim() || null,
-        city: city.trim() || null,
-        postcode: postcode.trim() || null,
-        access_notes_public: notes.trim() || null,
-      });
-      setAddPropOpen(false);
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "could not add the property");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   if (properties === null) return <LoadingState label="Loading properties" compact />;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-3)" }}>
       <div>
-        <Button variant="accent" onClick={() => setAddPropOpen(true)}>Add property</Button>
+        <Button variant="accent" onClick={() => setEditingProp("new")}>Add property</Button>
       </div>
       {properties.length === 0 ? (
         <Card><EmptyState title="No properties yet" hint="Add where the pets live to store access secrets." /></Card>
       ) : (
         properties.map((property) => (
           <Card key={property.id}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "var(--s-2)" }}>
               <div>
                 <div style={{ fontWeight: 600 }}>{property.label}</div>
                 <div style={{ color: "var(--text-2)", fontSize: "var(--fs-14)" }}>
@@ -748,7 +750,19 @@ function AccessTab({ client }: { client: Clients }) {
                   </div>
                 )}
               </div>
-              <Button variant="ghost" onClick={() => setAddCredFor(property.id)}>Add secret</Button>
+              <div style={{ display: "flex", gap: "var(--s-1)", flexShrink: 0 }}>
+                {/* Named per property rather than a bare "Edit": this list is
+                    several cards long and a screen reader reading the buttons
+                    out of context would hear the same word each time. */}
+                <Button
+                  variant="ghost"
+                  aria-label={`Edit ${property.label}`}
+                  onClick={() => setEditingProp(property)}
+                >
+                  Edit
+                </Button>
+                <Button variant="ghost" onClick={() => setAddCredFor(property.id)}>Add secret</Button>
+              </div>
             </div>
             {credentials
               .filter((c) => c.property_id === property.id)
@@ -759,24 +773,17 @@ function AccessTab({ client }: { client: Clients }) {
         ))
       )}
 
-      <Sheet open={addPropOpen} onClose={() => setAddPropOpen(false)} title="Add property">
-        <form onSubmit={addProperty} style={{ display: "flex", flexDirection: "column", gap: "var(--s-3)" }}>
-          <Input label="Label" required value={label} onChange={(e) => setLabel(e.target.value)} />
-          <Input label="Address" value={address} onChange={(e) => setAddress(e.target.value)} />
-          <Input label="City" value={city} onChange={(e) => setCity(e.target.value)} />
-          <Input label="Postcode" value={postcode} onChange={(e) => setPostcode(e.target.value)} />
-          <Textarea
-            label="Public access notes (non-secret)"
-            placeholder="Gate sticks — lift while pushing."
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-          />
-          <FormError message={error} />
-          <Button type="submit" full disabled={busy || !label.trim()}>
-            {busy ? <Spinner /> : "Save property"}
-          </Button>
-        </form>
-      </Sheet>
+      <PropertySheet
+        key={editingProp === "new" ? "new" : editingProp?.id ?? "closed"}
+        open={editingProp !== null}
+        property={editingProp === "new" ? null : editingProp}
+        clientId={client.id}
+        onClose={() => setEditingProp(null)}
+        onSaved={() => {
+          setEditingProp(null);
+          void load();
+        }}
+      />
 
       <PutCredentialSheet
         open={addCredFor !== null}
@@ -788,5 +795,100 @@ function AccessTab({ client }: { client: Clients }) {
         }}
       />
     </div>
+  );
+}
+
+/**
+ * Add and edit in one sheet, keyed by the caller so the form state is rebuilt
+ * from props on every open — `useState(initial)` reads its argument once, so a
+ * sheet reused across two rows would show the first row's values.
+ *
+ * `address_line2` is deliberately in neither shape. The create form has never
+ * collected it, so no property in the product has one, and offering it on edit
+ * alone would make the two forms disagree about what a property is. It is also
+ * the one address column with no UPDATE grant for `authenticated`, so a field
+ * for it would fail on save.
+ */
+function PropertySheet({
+  open,
+  property,
+  clientId,
+  onClose,
+  onSaved,
+}: {
+  open: boolean;
+  property: Properties | null;
+  clientId: string;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const auth = useAuth();
+  const [form, setForm] = useState(() =>
+    property
+      ? propertyFormOf(property)
+      : { label: "Home", address_line1: "", city: "", postcode: "", access_notes_public: "" },
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const set = (k: keyof typeof form, v: string) => setForm((f) => ({ ...f, [k]: v }));
+  const invalid = propertyFormError(form);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    const problem = propertyFormError(form);
+    if (problem) {
+      setError(problem);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      if (property) {
+        const patch = propertyPatch(property, form);
+        if (patch) await updateProperty(property.id, patch);
+      } else {
+        if (!auth.operatorId) throw new Error("not signed in");
+        await createProperty({
+          operator_id: auth.operatorId,
+          client_id: clientId,
+          label: form.label.trim(),
+          address_line1: form.address_line1.trim() || null,
+          city: form.city.trim() || null,
+          postcode: form.postcode.trim() || null,
+          access_notes_public: form.access_notes_public.trim() || null,
+        });
+      }
+      onSaved();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "could not save the property");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Sheet
+      open={open}
+      onClose={onClose}
+      title={property ? `Edit ${property.label}` : "Add property"}
+    >
+      <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: "var(--s-3)" }}>
+        <Input label="Label" required value={form.label} onChange={(e) => set("label", e.target.value)} />
+        <Input label="Address" value={form.address_line1} onChange={(e) => set("address_line1", e.target.value)} />
+        <Input label="City" value={form.city} onChange={(e) => set("city", e.target.value)} />
+        <Input label="Postcode" value={form.postcode} onChange={(e) => set("postcode", e.target.value)} />
+        <Textarea
+          label="Public access notes (non-secret)"
+          placeholder="Gate sticks — lift while pushing."
+          value={form.access_notes_public}
+          onChange={(e) => set("access_notes_public", e.target.value)}
+        />
+        <FormError message={error} />
+        <Button type="submit" full disabled={busy || invalid !== null}>
+          {busy ? <Spinner /> : property ? "Save changes" : "Save property"}
+        </Button>
+      </form>
+    </Sheet>
   );
 }

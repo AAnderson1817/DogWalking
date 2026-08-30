@@ -22,6 +22,19 @@ pick a preset and change it during the walk.
    an `adjust` ledger row (visible in the table, running balance right).
 5. Unsubscribed client + a plan with `stripe_price_id` → Launch Stripe
    checkout opens the hosted page (test key).
+6. **Edit details** (header). Change the phone → save → the header shows
+   it and Studio's `clients` row matches. Reopen and save with NOTHING
+   changed → no write at all (`updated_at` unmoved).
+7. Email consequences, on an UNCLAIMED client — the note under the field
+   must change as you type: clear it → "anyone who has the invite link can
+   claim"; type a different address → "stop working for the old address";
+   on a client with no email, add one → "only that address can claim it".
+   Re-type the SAME address in different case → no note (both ladders
+   compare `lower(trim(...))`).
+8. On a CLAIMED client the note says the login does not change; confirm in
+   Studio that `auth.users.email` is untouched after saving.
+9. Purge a client (Client data → erase) → the header offers no Edit
+   details. This is a UI-only guard; the UPDATE grant still allows it.
 
 ## 3. Access vault
 1. ClientDetail → Access: add property, then Add secret → reauth sheet →
@@ -36,6 +49,11 @@ pick a preset and change it during the walk.
    the prior audit rows. Six attempts inside a minute → 429 rate limit.
 5. Rotate writes new ciphertext + `rotated_at`; Revoke soft-deletes
    (`revoked_at` set, audit trail intact, row gone from the vault list).
+6. **Edit a property**: each property card carries `Edit <label>`. Change
+   the city → save → the card re-renders and only `city` moved in Studio.
+   With two properties, edit the first, close, then edit the second — the
+   form must show the SECOND one's values (the sheet is keyed to remount).
+   Its credentials are untouched by an address edit.
 
 ## 4. Walk Mode — full walk
 1. Dashboard → tap the scheduled walk → Start walk (status → in_progress,
