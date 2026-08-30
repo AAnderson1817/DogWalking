@@ -131,6 +131,15 @@ export default function ClientDetail() {
     { key: "schedule", label: "Schedule" },
     { key: "access", label: "Access" },
   ];
+  // One decision, consulted by every surface that writes personal data back
+  // into the record. `fn_purge_client` (H5) DELETES pets, REDACTS the property
+  // address and access notes and blanks the credential ciphertext while
+  // KEEPING those rows — walks still reference them — so "add a pet", "add a
+  // property", "edit a property" and "add a secret" each re-personalise an
+  // erasure carried out on request, exactly as editing the client would.
+  // Guarding only the header, as the first version of this did, made the rule
+  // in spec 03 false two tabs over (Codex review, PR #79).
+  const editable = isEditable(client);
   const clientTreatment = clientStatusTreatment(client.status);
 
   return (
@@ -152,7 +161,7 @@ export default function ClientDetail() {
             tombstone, the UPDATE grant still covers those columns, and nothing
             in the database stops an edit re-personalising an erasure that was
             carried out on request. */}
-        {isEditable(client) && (
+        {editable && (
           <div className="client-relationship-header__actions">
             <Button variant="ghost" onClick={() => setEditOpen(true)}>
               Edit details
@@ -196,13 +205,13 @@ export default function ClientDetail() {
 
       <div style={{ marginTop: "var(--s-4)" }}>
         <TabPanel idBase="client" tabKey={tab}>
-          {tab === "pets" && <PetsTab clientId={client.id} />}
+          {tab === "pets" && <PetsTab clientId={client.id} editable={editable} />}
           {tab === "plan" && operator && (
             <PlanTab client={client} operator={operator} onChanged={() => void reload()} />
           )}
           {tab === "walks" && <WalksTab clientId={client.id} />}
           {tab === "schedule" && <ScheduleTab clientId={client.id} />}
-          {tab === "access" && <AccessTab client={client} />}
+          {tab === "access" && <AccessTab client={client} editable={editable} />}
         </TabPanel>
       </div>
     </div>
@@ -210,7 +219,7 @@ export default function ClientDetail() {
 }
 
 // ── Pets ───────────────────────────────────────────────────────────────────
-function PetsTab({ clientId }: { clientId: string }) {
+function PetsTab({ clientId, editable }: { clientId: string; editable: boolean }) {
   const auth = useAuth();
   const [pets, setPets] = useState<Pets[] | null>(null);
   const [editing, setEditing] = useState<Pets | "new" | null>(null);
@@ -224,9 +233,11 @@ function PetsTab({ clientId }: { clientId: string }) {
 
   return (
     <div className="pet-profile-list">
-      <div>
-        <Button variant="accent" onClick={() => setEditing("new")}>Add pet</Button>
-      </div>
+      {editable && (
+        <div>
+          <Button variant="accent" onClick={() => setEditing("new")}>Add pet</Button>
+        </div>
+      )}
       {pets.length === 0 ? (
         <Card><EmptyState title="No pets yet" /></Card>
       ) : (
@@ -708,7 +719,7 @@ function WalksTab({ clientId }: { clientId: string }) {
 }
 
 // ── Access ─────────────────────────────────────────────────────────────────
-function AccessTab({ client }: { client: ClientRecord }) {
+function AccessTab({ client, editable }: { client: ClientRecord; editable: boolean }) {
   const [properties, setProperties] = useState<Properties[] | null>(null);
   const [credentials, setCredentials] = useState<CredentialMeta[]>([]);
   // One piece of state for both shapes, the PetSheet idiom: "new" opens an
@@ -730,9 +741,11 @@ function AccessTab({ client }: { client: ClientRecord }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-3)" }}>
-      <div>
-        <Button variant="accent" onClick={() => setEditingProp("new")}>Add property</Button>
-      </div>
+      {editable && (
+        <div>
+          <Button variant="accent" onClick={() => setEditingProp("new")}>Add property</Button>
+        </div>
+      )}
       {properties.length === 0 ? (
         <Card><EmptyState title="No properties yet" hint="Add where the pets live to store access secrets." /></Card>
       ) : (
@@ -750,19 +763,21 @@ function AccessTab({ client }: { client: ClientRecord }) {
                   </div>
                 )}
               </div>
-              <div style={{ display: "flex", gap: "var(--s-1)", flexShrink: 0 }}>
-                {/* Named per property rather than a bare "Edit": this list is
-                    several cards long and a screen reader reading the buttons
-                    out of context would hear the same word each time. */}
-                <Button
-                  variant="ghost"
-                  aria-label={`Edit ${property.label}`}
-                  onClick={() => setEditingProp(property)}
-                >
-                  Edit
-                </Button>
-                <Button variant="ghost" onClick={() => setAddCredFor(property.id)}>Add secret</Button>
-              </div>
+              {editable && (
+                <div style={{ display: "flex", gap: "var(--s-1)", flexShrink: 0 }}>
+                  {/* Named per property rather than a bare "Edit": this list is
+                      several cards long and a screen reader reading the buttons
+                      out of context would hear the same word each time. */}
+                  <Button
+                    variant="ghost"
+                    aria-label={`Edit ${property.label}`}
+                    onClick={() => setEditingProp(property)}
+                  >
+                    Edit
+                  </Button>
+                  <Button variant="ghost" onClick={() => setAddCredFor(property.id)}>Add secret</Button>
+                </div>
+              )}
             </div>
             {credentials
               .filter((c) => c.property_id === property.id)
