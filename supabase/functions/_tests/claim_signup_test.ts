@@ -9,13 +9,17 @@ import {
   type ClaimSignupDeps,
   handleClaimSignup,
   PASSWORD_MIN_LENGTH,
+  passwordMeetsPolicy,
 } from "../claim-signup/handler.ts";
 
 const TOKEN = "99999999-0000-4000-e000-000000000001";
+// Meets the declared posture — length AND lower_upper_letters_digits. The
+// first fixture was 12 lowercase letters, i.e. a password the declared
+// policy REJECTS, so the suite itself encoded the gap (adversarial review).
 const GOOD = {
   token: TOKEN,
   email: "pet-owner@example.com",
-  password: "a".repeat(PASSWORD_MIN_LENGTH),
+  password: "Correct-Horse-9",
 };
 
 function recordingDeps(
@@ -90,12 +94,23 @@ Deno.test("an already-registered address collapses into the same success", async
   assertEquals(res, { registered: true });
 });
 
-Deno.test("a short password is refused before any dependency runs", async () => {
-  const err = await assertRejects(() =>
-    handleClaimSignup({ ...GOOD, password: "a".repeat(PASSWORD_MIN_LENGTH - 1) }, untouchable)
-  );
-  assert(err instanceof HttpError && err.status === 400, `got ${String(err)}`);
-  assertEquals((err as HttpError).code, "weak_password");
+Deno.test("a policy-breaking password is refused before any dependency runs", async () => {
+  // The declared posture is length AND character classes: a 12-char
+  // all-lowercase password passes a bare length check and is exactly what
+  // `lower_upper_letters_digits` exists to refuse.
+  for (const password of [
+    "Aa1".padEnd(PASSWORD_MIN_LENGTH - 1, "x"), // too short
+    "a".repeat(PASSWORD_MIN_LENGTH + 4),        // no upper, no digit
+    "A".repeat(PASSWORD_MIN_LENGTH + 4),        // no lower, no digit
+    "Aa".repeat(PASSWORD_MIN_LENGTH),           // no digit
+  ]) {
+    const err = await assertRejects(() =>
+      handleClaimSignup({ ...GOOD, password }, untouchable)
+    );
+    assert(err instanceof HttpError && err.status === 400, `${password}: got ${String(err)}`);
+    assertEquals((err as HttpError).code, "weak_password", password);
+  }
+  assert(passwordMeetsPolicy(GOOD.password), "the happy fixture must meet the policy it tests");
 });
 
 Deno.test("a malformed token is refused before any dependency runs", async () => {
@@ -116,18 +131,27 @@ Deno.test("a malformed email is refused before any dependency runs", async () =>
   }
 });
 
-Deno.test("token and email are trimmed before the check sees them", async () => {
-  let seen: { token?: string; email?: string } = {};
+Deno.test("check and createUser see the IDENTICAL trimmed email — the invariant the design rests on", async () => {
+  // 0045's contract is that the email the check validated is the email the
+  // account is created with. Pinning only the check's arguments left the
+  // other half free to drift to the raw input (adversarial review).
+  const seen: Array<{ call: string; token?: string; email?: string }> = [];
   const deps: ClaimSignupDeps = {
     checkInvite(token, email) {
-      seen = { token, email };
+      seen.push({ call: "checkInvite", token, email });
       return Promise.resolve("claimed");
     },
-    createUser: () => Promise.resolve("created"),
+    createUser(email) {
+      seen.push({ call: "createUser", email });
+      return Promise.resolve("created");
+    },
   };
   await handleClaimSignup(
     { token: `  ${TOKEN} `, email: " pet-owner@example.com ", password: GOOD.password },
     deps,
   );
-  assertEquals(seen, { token: TOKEN, email: "pet-owner@example.com" });
+  assertEquals(seen, [
+    { call: "checkInvite", token: TOKEN, email: "pet-owner@example.com" },
+    { call: "createUser", email: "pet-owner@example.com" },
+  ]);
 });

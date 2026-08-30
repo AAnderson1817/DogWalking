@@ -71,11 +71,11 @@ describe("Signup", () => {
     renderScreen();
     const user = userEvent.setup();
     await user.type(screen.getByLabelText("Email"), "walker@sanpo.test");
-    await user.type(screen.getByLabelText("Choose a password"), "correct-horse-battery");
+    await user.type(screen.getByLabelText("Choose a password"), "Correct-Horse-9-Battery");
     await user.click(screen.getByRole("button", { name: "Create my account" }));
     await waitFor(() => expect(SUPA.signUp).toHaveBeenCalledWith({
       email: "walker@sanpo.test",
-      password: "correct-horse-battery",
+      password: "Correct-Horse-9-Battery",
     }));
     expect(await screen.findByText("onboarding form")).toBeInTheDocument();
   });
@@ -84,7 +84,7 @@ describe("Signup", () => {
     renderScreen();
     const user = userEvent.setup();
     await user.type(screen.getByLabelText("Email"), "walker@sanpo.test");
-    await user.type(screen.getByLabelText("Choose a password"), "correct-horse-battery");
+    await user.type(screen.getByLabelText("Choose a password"), "Correct-Horse-9-Battery");
     await user.click(screen.getByRole("button", { name: "Create my account" }));
     expect(await screen.findByText(/confirm your email/i)).toBeInTheDocument();
   });
@@ -97,7 +97,7 @@ describe("Signup", () => {
     renderScreen();
     const user = userEvent.setup();
     await user.type(screen.getByLabelText("Email"), "walker@sanpo.test");
-    await user.type(screen.getByLabelText("Choose a password"), "correct-horse-battery");
+    await user.type(screen.getByLabelText("Choose a password"), "Correct-Horse-9-Battery");
     await user.click(screen.getByRole("button", { name: "Create my account" }));
     expect(await screen.findByText(/signups not allowed/i)).toBeInTheDocument();
   });

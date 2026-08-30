@@ -19,6 +19,7 @@ import { FormError, Input } from "@/components/fields";
 import { Spinner } from "@/components/Spinner";
 import { LoadingState, StateField } from "@/components/StateField";
 import {
+  AccountAlreadyBoundError,
   claimInvite,
   claimSignup,
   InviteClaimError,
@@ -73,7 +74,33 @@ export default function ClaimInvite() {
   useEffect(() => {
     if (auth.loading) return;
     if (auth.role === "client") {
-      navigate("/portal", { replace: true });
+      // Not an unconditional bounce to /portal (adversarial review): a
+      // signed-in CLIENT holding a LIVE invite cannot claim it —
+      // auth_user_id is unique, their account is already some walker's
+      // portal — and silently redirecting left the operator staring at an
+      // invite that never claims with no idea why. Preview decides: a
+      // claimed or dead link sends them home (re-clicking your own claimed
+      // invite is the common case), a live one gets the honest dead-end.
+      if (!token) {
+        navigate("/portal", { replace: true });
+        return;
+      }
+      void (async () => {
+        try {
+          const p = await previewInviteAuthed(token);
+          if (p && !p.already_claimed) {
+            setDeadEndReason(
+              "This account is already connected to another walker's portal. An account can hold one portal — ask your walker to send the invite to a different email address, or open this link signed out.",
+            );
+            setStage("dead-end");
+            return;
+          }
+        } catch {
+          // Preview unreachable: fall through to the portal, where their
+          // own data loads (or fails) with its own retry surfaces.
+        }
+        navigate("/portal", { replace: true });
+      })();
       return;
     }
     // An operator (or any already-provisioned account) must not consume a
@@ -90,7 +117,7 @@ export default function ClaimInvite() {
     if (!auth.session) setStage("signup");
     else if (auth.roleError) setStage("role-error"); // don't strand on a spinner
     else void loadPreview();
-  }, [auth.loading, auth.session, auth.role, auth.roleError, navigate, loadPreview]);
+  }, [auth.loading, auth.session, auth.role, auth.roleError, token, navigate, loadPreview]);
 
   async function signUp(e: FormEvent) {
     e.preventDefault();
@@ -101,15 +128,26 @@ export default function ClaimInvite() {
     setError(null);
     setBusy(true);
     try {
+      // ONE string on both sides of the two-call handshake. The input
+      // sanitises ASCII whitespace but not NBSP/FEFF — exactly what a paste
+      // from a rich-text invite email carries — and the edge function trims
+      // server-side, so an untrimmed sign-in here would chase an account
+      // that was just created under the trimmed address (adversarial
+      // review).
+      const addr = email.trim();
+      setEmail(addr);
       // Server-side account creation (H31): the invite is checked BEFORE the
       // account exists, so a dead link dead-ends with its 0039 sentence here
       // instead of leaving a fresh account with nothing to claim.
-      await claimSignup(token, email, password);
+      await claimSignup(token, addr, password);
       // The account exists (or already did — claim-signup deliberately
       // reports both as success). Sign in with what was just typed; a wrong
       // password on an existing account gets GoTrue's ordinary, rate-limited
       // sign-in answer below.
-      const { data, error: err } = await supabase.auth.signInWithPassword({ email, password });
+      const { data, error: err } = await supabase.auth.signInWithPassword({
+        email: addr,
+        password,
+      });
       if (err) {
         if ((err as { code?: string }).code === "email_not_confirmed" || /confirm/i.test(err.message)) {
           // Confirmations are on and the admin-created account is
@@ -122,14 +160,23 @@ export default function ClaimInvite() {
           // invite (adversarial review). GoTrue silently falls back to
           // site_url when the URL is not allowlisted, so the runbook adds
           // APP_BASE_URL/claim/* to the redirect allowlist.
-          await supabase.auth.resend({
+          const { error: resendErr } = await supabase.auth.resend({
             type: "signup",
-            email,
+            email: addr,
             // inviteUrlFor, not location.href: the canonical claim URL with
             // no stray query or fragment, matching the /claim/* allowlist
             // wildcard shape.
             options: { emailRedirectTo: inviteUrlFor(token) },
           });
+          if (resendErr) {
+            // This resend is the ONLY thing that ever puts a confirmation
+            // in an invited client's inbox (admin creation sends none), so
+            // its failure must never advance to a screen that says "we sent
+            // it" — a rate limit or provider outage would leave them
+            // waiting on an inbox that stays empty forever.
+            setError(resendErr.message);
+            return;
+          }
           setStage("check-email");
           return;
         }
@@ -137,7 +184,9 @@ export default function ClaimInvite() {
         return;
       }
       if (!data.session) {
-        setStage("check-email");
+        // No session and no error is not a state GoTrue documents; saying
+        // "check your email" here would claim a send that never happened.
+        setError("Sign-in did not complete. Try again.");
         return;
       }
       await loadPreview();
@@ -176,7 +225,7 @@ export default function ClaimInvite() {
       // the same wrong sentence. The outcome is now a value, so the person is
       // told which of those actually happened and what to do about it.
       setDeadEndReason(
-        err instanceof InviteClaimError
+        err instanceof InviteClaimError || err instanceof AccountAlreadyBoundError
           ? err.message
           : "This invite could not be claimed. Check your connection and try again.",
       );
@@ -219,9 +268,13 @@ export default function ClaimInvite() {
                 type="password"
                 autoComplete="new-password"
                 required
-                // claim-signup refuses under 12 (its PASSWORD_MIN_LENGTH,
-                // mirroring config.toml); saying so here beats a round trip.
+                // The WHOLE declared policy, not just the length —
+                // claim-signup refuses both halves (passwordMeetsPolicy),
+                // and a form advertising only "12+" collects passwords the
+                // server then rejects with a rule it never mentioned.
                 minLength={12}
+                pattern="(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{12,}"
+                title="At least 12 characters, with an uppercase letter, a lowercase letter and a digit"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 error={error ?? undefined}

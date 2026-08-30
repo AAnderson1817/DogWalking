@@ -55,8 +55,14 @@ export default function Signup() {
               detail="You're signed in, but we couldn't check your account. Retry rather than signing up again."
               role="alert"
               action={
-                <Button disabled={busy} onClick={() => void auth.refreshRole()}>
-                  Retry
+                <Button
+                  disabled={busy}
+                  onClick={() => {
+                    setBusy(true);
+                    void auth.refreshRole().finally(() => setBusy(false));
+                  }}
+                >
+                  {busy ? <Spinner label="Retrying" /> : "Retry"}
                 </Button>
               }
             />
@@ -130,10 +136,14 @@ export default function Signup() {
                   type="password"
                   autoComplete="new-password"
                   required
-                  // config.toml's minimum_password_length; saying it here
-                  // beats a server round trip. This password also guards the
-                  // credential vault's re-auth, so the floor is not ceremony.
+                  // config.toml's FULL declared policy — length AND
+                  // lower_upper_letters_digits. This password guards the
+                  // credential vault's re-auth, so the floor is not
+                  // ceremony, and advertising only the length collects
+                  // passwords the declared posture rejects.
                   minLength={12}
+                  pattern="(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{12,}"
+                  title="At least 12 characters, with an uppercase letter, a lowercase letter and a digit"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                 />

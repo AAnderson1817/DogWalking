@@ -251,9 +251,13 @@ so a dead invite refuses (409, code = the outcome verbatim:
 `not_found`/`already_claimed`/`expired`/`revoked`/`email_mismatch`) with no
 account created. An account created first would be public signup wearing an
 invite's clothes. A mismatch refused pre-account also spares the claimant an
-account that can never claim. The password floor (12) is enforced
-in-function because the admin API bypasses GoTrue's policy and the deployed
-policy is a dashboard setting no file controls (H2).
+account that can never claim. The FULL declared password posture — the
+12-character floor AND `lower_upper_letters_digits` — is enforced
+in-function (`passwordMeetsPolicy`), because the deployed GoTrue policy is a
+dashboard setting no file controls (H2) and an invited client's account
+reaches their home address and entry-code activity; GoTrue's own 4xx
+refusals (weak_password, address validation) surface as 400s with GoTrue's
+message rather than collapsing into a 500.
 
 An already-registered address collapses into the same `{ registered: true }`
 success — a distinct answer would make the endpoint an account-existence
