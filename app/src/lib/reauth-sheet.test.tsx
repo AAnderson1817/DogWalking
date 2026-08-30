@@ -17,12 +17,27 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const hasPassword = vi.fn();
 const updateUser = vi.fn();
+const CALLS = vi.hoisted(() => ({ order: [] as string[] }));
+const mfa = vi.hoisted(() => ({
+  fetchMfaGate: vi.fn(async (): Promise<{ factorId: string } | null> => null),
+  stepUpWithCode: vi.fn(async (_f: string, _c: string): Promise<string | null> => null),
+}));
 
 vi.mock("./api", () => ({ accountHasPassword: () => hasPassword() }));
+vi.mock("./mfa", () => ({
+  fetchMfaGate: () => mfa.fetchMfaGate(),
+  stepUpWithCode: (f: string, c: string) => {
+    CALLS.order.push("stepUp");
+    return mfa.stepUpWithCode(f, c);
+  },
+}));
 vi.mock("./supabase", () => ({
   supabase: {
     auth: {
-      updateUser: (args: unknown) => updateUser(args),
+      updateUser: (args: unknown) => {
+        CALLS.order.push("updateUser");
+        return updateUser(args);
+      },
       getSession: () => Promise.resolve({ data: { session: null } }),
       onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
     },
@@ -52,6 +67,11 @@ describe("ReauthSheet", () => {
   beforeEach(() => {
     hasPassword.mockReset();
     updateUser.mockReset();
+    CALLS.order.length = 0;
+    mfa.fetchMfaGate.mockReset();
+    mfa.fetchMfaGate.mockResolvedValue(null);
+    mfa.stepUpWithCode.mockReset();
+    mfa.stepUpWithCode.mockResolvedValue(null);
   });
 
   it("asks for the existing password when there is one", async () => {
@@ -59,11 +79,14 @@ describe("ReauthSheet", () => {
     const { user, onResolve } = await openSheet();
     await screen.findByLabelText("Password");
     expect(screen.queryByLabelText("Confirm password")).toBeNull();
+    // No verified factor ⇒ no code field: the step-up is never ceremony.
+    expect(screen.queryByLabelText("Two-factor code")).toBeNull();
     await user.type(screen.getByLabelText("Password"), "hunter2");
     await user.click(screen.getByRole("button", { name: "Confirm" }));
-    expect(onResolve).toHaveBeenCalledWith("hunter2");
+    await waitFor(() => expect(onResolve).toHaveBeenCalledWith("hunter2"));
     // Nothing was changed about the account — this is a confirmation.
     expect(updateUser).not.toHaveBeenCalled();
+    expect(mfa.stepUpWithCode).not.toHaveBeenCalled();
   });
 
   it("offers to SET a password when the account has none", async () => {
@@ -115,6 +138,57 @@ describe("ReauthSheet", () => {
     await user.click(screen.getByRole("button", { name: "Set password and continue" }));
     expect(await screen.findByText(/please sign in again/i)).toBeInTheDocument();
     expect(onResolve).not.toHaveBeenCalled();
+  });
+
+  it("asks for the TOTP code when a verified factor exists, and upgrades BEFORE settling", async () => {
+    // Review H2's client half: once a factor is enrolled, the vault refuses
+    // any aal1 session — after the password was verified and a rate slot
+    // spent. The sheet asks up front and challengeAndVerify upgrades the
+    // session in place, so the doomed request is never made (the M2 shape).
+    hasPassword.mockResolvedValue(true);
+    mfa.fetchMfaGate.mockResolvedValue({ factorId: "f1" });
+    const { user, onResolve } = await openSheet();
+    await screen.findByLabelText("Two-factor code");
+    await user.type(screen.getByLabelText("Password"), "hunter2");
+    // No code yet: the submit is disabled — a passwordless submit of the
+    // step-up would burn a GoTrue verify attempt on an empty string.
+    expect(screen.getByRole("button", { name: "Confirm" })).toBeDisabled();
+    await user.type(screen.getByLabelText("Two-factor code"), "123456");
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+    await waitFor(() => expect(onResolve).toHaveBeenCalledWith("hunter2"));
+    expect(mfa.stepUpWithCode).toHaveBeenCalledWith("f1", "123456");
+  });
+
+  it("a refused code shows the refusal and settles NOTHING", async () => {
+    hasPassword.mockResolvedValue(true);
+    mfa.fetchMfaGate.mockResolvedValue({ factorId: "f1" });
+    mfa.stepUpWithCode.mockResolvedValue("Invalid TOTP code entered");
+    const { user, onResolve } = await openSheet();
+    await screen.findByLabelText("Two-factor code");
+    await user.type(screen.getByLabelText("Password"), "hunter2");
+    await user.type(screen.getByLabelText("Two-factor code"), "000000");
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+    expect(await screen.findByText(/invalid totp code/i)).toBeInTheDocument();
+    // Settling the password anyway would hand the vault call a session the
+    // server is guaranteed to refuse — and spend a rate slot doing it.
+    expect(onResolve).not.toHaveBeenCalled();
+  });
+
+  it("the set-password flow steps up BEFORE the password write", async () => {
+    // An account with a verified factor gets its password changed by an aal2
+    // session, never by the bare session whose theft the factor exists to
+    // contain — the exact chain resolveAssurance was built against.
+    hasPassword.mockResolvedValue(false);
+    mfa.fetchMfaGate.mockResolvedValue({ factorId: "f1" });
+    updateUser.mockResolvedValue({ error: null });
+    const { user, onResolve } = await openSheet();
+    await screen.findByLabelText("New password");
+    await user.type(screen.getByLabelText("New password"), "correct-horse-battery");
+    await user.type(screen.getByLabelText("Confirm password"), "correct-horse-battery");
+    await user.type(screen.getByLabelText("Two-factor code"), "123456");
+    await user.click(screen.getByRole("button", { name: "Set password and continue" }));
+    await waitFor(() => expect(onResolve).toHaveBeenCalledWith("correct-horse-battery"));
+    expect(CALLS.order).toEqual(["stepUp", "updateUser"]);
   });
 
   it("falls back to the password form when the check itself fails", async () => {

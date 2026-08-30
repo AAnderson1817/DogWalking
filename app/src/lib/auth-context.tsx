@@ -22,6 +22,7 @@ import { Sheet } from "@/components/Sheet";
 import { FormError, Input } from "@/components/fields";
 import { LoadingState } from "@/components/StateField";
 import { accountHasPassword } from "./api";
+import { fetchMfaGate, stepUpWithCode } from "./mfa";
 import type { OperatorBillingState } from "./operator-access";
 import { Button } from "@/components/Button";
 
@@ -264,6 +265,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
  * There are four call sites and a fifth will exist; and this way the operator
  * never makes the doomed request at all — they are asked for the thing that
  * will actually work, once, before anything is attempted.
+ *
+ * The same reasoning gives the sheet its TOTP step (review H2's client
+ * half). Once a verified factor exists, the vault refuses any aal1 session
+ * as `second_factor_required` — AFTER the password was verified and a rate
+ * slot spent. So the sheet asks for the code up front, exactly when the
+ * session actually needs it (`fetchMfaGate` mirrors the server's
+ * resolveAssurance, and a session already at aal2 is never asked), and
+ * `challengeAndVerify` upgrades the session in place — covering magic-link
+ * sessions and sessions that predate enrolment alike, with no sign-out.
  */
 function ReauthSheet({
   open,
@@ -274,7 +284,10 @@ function ReauthSheet({
 }) {
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
+  const [code, setCode] = useState("");
   const [hasPassword, setHasPassword] = useState<boolean | null>(null);
+  const [mfaGate, setMfaGate] = useState<{ factorId: string } | null>(null);
+  const [mfaChecked, setMfaChecked] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -282,6 +295,8 @@ function ReauthSheet({
     if (!open) return;
     let cancelled = false;
     setHasPassword(null);
+    setMfaGate(null);
+    setMfaChecked(false);
     setError(null);
     accountHasPassword()
       .then((has) => { if (!cancelled) setHasPassword(has); })
@@ -289,19 +304,50 @@ function ReauthSheet({
       // still refuses safely on the server, and assuming "no password" on a
       // lookup failure would push every operator through a password reset.
       .catch(() => { if (!cancelled) setHasPassword(true); });
+    // fetchMfaGate fails open internally (null = password only), same rule.
+    fetchMfaGate()
+      .then((gate) => {
+        if (cancelled) return;
+        setMfaGate(gate);
+        setMfaChecked(true);
+      })
+      .catch(() => { if (!cancelled) setMfaChecked(true); });
     return () => { cancelled = true; };
   }, [open]);
 
   function reset() {
     setPassword("");
     setConfirm("");
+    setCode("");
     setError(null);
     setBusy(false);
   }
 
-  function submitExisting(e: FormEvent) {
+  /** The TOTP step, shared by both forms. True = proceed; false = refused
+   * (error already shown), and nothing has been settled or changed. */
+  async function passStepUp(): Promise<boolean> {
+    if (!mfaGate) return true;
+    const err = await stepUpWithCode(mfaGate.factorId, code.trim());
+    if (err) {
+      setError(err);
+      return false;
+    }
+    // The session is aal2 now; a retry of THIS sheet must not demand a
+    // second code for a step already passed.
+    setMfaGate(null);
+    return true;
+  }
+
+  async function submitExisting(e: FormEvent) {
     e.preventDefault();
     if (!password) return;
+    setBusy(true);
+    setError(null);
+    if (!(await passStepUp())) {
+      setBusy(false);
+      return;
+    }
+    setBusy(false);
     onSettle(password);
     reset();
   }
@@ -314,6 +360,13 @@ function ReauthSheet({
     }
     setBusy(true);
     setError(null);
+    // Step up BEFORE the password write: an account with a verified factor
+    // gets its password changed by an aal2 session, never by the bare
+    // session whose theft the factor exists to contain.
+    if (!(await passStepUp())) {
+      setBusy(false);
+      return;
+    }
     const { error: err } = await supabase.auth.updateUser({ password });
     setBusy(false);
     if (err) {
@@ -338,7 +391,7 @@ function ReauthSheet({
 
   return (
     <Sheet open={open} onClose={cancel} title={settingUp ? "Set a password" : "Confirm it's you"}>
-      {hasPassword === null
+      {hasPassword === null || !mfaChecked
         ? <LoadingState label="Checking your account" />
         : (
           <form
@@ -367,8 +420,22 @@ function ReauthSheet({
                 onChange={(e) => setConfirm(e.target.value)}
               />
             )}
+            {mfaGate && (
+              <Input
+                label="Two-factor code"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+              />
+            )}
             <FormError message={error} />
-            <Button type="submit" full disabled={!password || busy || (settingUp && !confirm)}>
+            <Button
+              type="submit"
+              full
+              disabled={!password || busy || (settingUp && !confirm) ||
+                (mfaGate !== null && !code.trim())}
+            >
               {busy ? "Saving…" : settingUp ? "Set password and continue" : "Confirm"}
             </Button>
             <Button type="button" variant="ghost" full onClick={cancel}>

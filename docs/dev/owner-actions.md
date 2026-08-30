@@ -270,6 +270,18 @@ session can change the account password (see `auth-posture.md` for why
 `secure_password_change` does not stop that within 24h), but it cannot
 manufacture `aal2`, because that needs the factor itself.
 
+**The surface for this now exists**: Settings → *Two-factor authentication* —
+turn it on, scan the QR with any authenticator app, enter the code. Verifying
+upgrades the current session on the spot, and the vault's re-auth sheet asks
+for the code from then on. What used to be "impossible until a UI ships" is a
+one-minute scan.
+
+The one edge that stays with you: a **lost authenticator** cannot be removed
+from inside the product (turning two-factor off requires a current code — a
+session thief must not be able to delete the control). Recovery is the
+dashboard: Authentication → Users → the account → delete its MFA factor,
+after satisfying yourself it is really the operator asking.
+
 Highest-value action on this list, and it costs nothing.
 
 ### 10. Have the privacy notice and terms reviewed
