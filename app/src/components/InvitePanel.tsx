@@ -58,6 +58,19 @@ export function InvitePanel({
   const state = inviteState(client);
   const copy = state === "claimed" ? null : STATE_COPY[state];
 
+  // A purged client (H5) has no invite worth offering, and "Send a new invite"
+  // on one is not merely meaningless: `fn_rotate_invite` mints a live 14-day
+  // token, and the tombstone's `email` is NULL — precisely the ladder rung
+  // that admits ANY address (0039/0045), with the signup pre-flight then
+  // reserving the first one that arrives. One click would turn an erased
+  // record back into a claimable account.
+  //
+  // The database does not refuse this: `fn_unbind_invite` carries a
+  // `purged_at` guard and `fn_rotate_invite` does not. Closing that properly
+  // is a migration, so it stays a stated residual rather than something this
+  // frontend guard should be mistaken for.
+  if (client.purged_at) return null;
+
   async function act(kind: "rotate" | "revoke" | "unbind") {
     setBusy(kind);
     setError(null);

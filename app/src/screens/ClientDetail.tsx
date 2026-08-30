@@ -171,7 +171,15 @@ export default function ClientDetail() {
       </header>
 
       <ClientEditSheet
-        key={client.updated_at}
+        // Keyed on the OPEN state as well as the row, so closing remounts and
+        // the next open initialises from the record. Without the open flag the
+        // sheet is mounted for the life of the screen and `useState(initial)`
+        // never re-reads: an operator who typed a wrong address and pressed
+        // Escape to abandon it found it still there — and still showing the
+        // consequence note — one Save click from being written to the column
+        // that decides who may claim the invite. `PropertySheet` below already
+        // had this property because its key falls to "closed".
+        key={editOpen ? `open:${client.updated_at}` : "closed"}
         open={editOpen}
         client={client}
         onClose={() => setEditOpen(false)}

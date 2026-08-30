@@ -58,6 +58,10 @@ function clientColumnsLiteral(): string[] {
 /** The API role the browser holds. `anon` never reads tenant data. */
 const ROLE = "authenticated";
 
+/** `grant|revoke <privs> [(cols)] on <table> to|from <roles>` */
+const RE =
+  /^(grant|revoke) ([a-z, ]*?) ?(\(([^)]*)\))? ?on (?:table )?([a-z_][a-z0-9_.]*) (?:to|from) ([a-z_, ]+)$/;
+
 interface GrantState {
   /** A table-level SELECT covers every column, including ones added later. */
   tableLevel: boolean;
@@ -95,10 +99,6 @@ function grantStateFromMigrations(): Map<string, GrantState> {
   const files = readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql")).sort();
   expect(files.length).toBeGreaterThan(0);
 
-  // `grant|revoke <privs> [(cols)] on <table> to|from <roles>`
-  const RE =
-    /^(grant|revoke) ([a-z, ]*?) ?(\(([^)]*)\))? ?on (?:table )?([a-z_][a-z0-9_.]*) (?:to|from) ([a-z_, ]+)$/;
-
   for (const file of files) {
     for (const stmt of statementsOf(readFileSync(join(MIGRATIONS, file), "utf8"))) {
       const m = RE.exec(stmt);
@@ -127,6 +127,38 @@ function grantStateFromMigrations(): Map<string, GrantState> {
     }
   }
   return state;
+}
+
+/**
+ * Statements this parser SHOULD have understood and did not.
+ *
+ * Skipping silently is how a guard keeps passing while the thing it guards
+ * drifts: a later migration withholding one more column with a form the regex
+ * misses would leave the modelled grants stale and the drift test green. So
+ * the miss is an assertion rather than a `continue`.
+ */
+function unparsedRelationGrants(): string[] {
+  const missed: string[] = [];
+  const files = readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql")).sort();
+  for (const file of files) {
+    for (const stmt of statementsOf(readFileSync(join(MIGRATIONS, file), "utf8"))) {
+      if (!/^(grant|revoke) /.test(stmt)) continue;
+      // Only relation-level privileges are modelled here; EXECUTE on a
+      // function, USAGE on a schema and the rest are a different grammar.
+      if (/ on (function|schema|sequence|type|domain|language|database|tablespace|foreign) /.test(stmt)) continue;
+      if (/ on all /.test(stmt)) continue;
+      // Split the privilege list off at " on " and look for SELECT as a token.
+      // The first version of this asked for / select / with spaces on both
+      // sides, which silently skipped every `grant select, insert, ...` — the
+      // multi-privilege form, i.e. exactly the statements most likely to defeat
+      // the parser. A guard that cannot fail is the thing this guard is about,
+      // so the sabotage that found it is kept as the test below.
+      const split = /^(?:grant|revoke) (.+?) on .+$/.exec(stmt);
+      if (!split || !/\b(select|all)\b/.test(split[1])) continue;
+      if (!RE.test(stmt)) missed.push(`${file}: ${stmt.slice(0, 110)}`);
+    }
+  }
+  return missed;
 }
 
 /** Tables ROLE may read only column-by-column — where `*` is a 42501. */
@@ -164,7 +196,32 @@ function selectsByTable(): Array<{ file: string; table: string; arg: string }> {
   return found;
 }
 
-const isWildcard = (arg: string) => arg === "" || arg === '"*"' || arg === "'*'";
+/**
+ * A wildcard is a wildcard even in company.
+ *
+ * `.select("*, client:clients(full_name)")` is an idiom this file already uses
+ * four times, and the base-table `*` in it expands exactly as a bare one does.
+ * An exact string match would pass it — the guard defeated by the first
+ * refactor that adds an embed, which is the failure this guard exists to stop.
+ *
+ * Embedded resources are their own tables and are handled by their own entry
+ * in the scan, so everything inside parentheses is dropped before splitting.
+ */
+export function selectsWildcard(arg: string): boolean {
+  const inner = arg.trim().replace(/^["'`]|["'`]$/g, "");
+  if (inner === "") return true; // `.select()` — postgrest-js sends `*`
+  let depth = 0;
+  let term = "";
+  const terms: string[] = [];
+  for (const ch of inner) {
+    if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    else if (ch === "," && depth === 0) { terms.push(term); term = ""; continue; }
+    if (depth === 0 && ch !== "(" && ch !== ")") term += ch;
+  }
+  terms.push(term);
+  return terms.some((t) => t.trim() === "*");
+}
 
 describe("column-level SELECT grants and wildcard selects", () => {
   it("finds the tables whose SELECT is column-restricted", () => {
@@ -190,9 +247,25 @@ describe("column-level SELECT grants and wildcard selects", () => {
   it("never selects * from a table with column-level grants", () => {
     const restricted = columnRestrictedTables();
     const offenders = selectsByTable()
-      .filter((s) => restricted.has(s.table) && isWildcard(s.arg))
+      .filter((s) => restricted.has(s.table) && selectsWildcard(s.arg))
       .map((s) => `${s.file.replace(/.*\/src\//, "src/")}: .from("${s.table}").select(${s.arg || ""})`);
     expect(offenders).toEqual([]);
+  });
+
+  it("understands every relation grant in the migrations", () => {
+    // The drift test derives its expectation from this parser, so a statement
+    // the parser cannot read is a silent hole in the check, not a no-op.
+    expect(unparsedRelationGrants()).toEqual([]);
+  });
+
+  it("treats a wildcard as a wildcard even beside an embed", () => {
+    expect(selectsWildcard('"*"')).toBe(true);
+    expect(selectsWildcard("")).toBe(true);
+    // The idiom api.ts already uses — the base-table `*` expands the same way.
+    expect(selectsWildcard('"*, client:clients(full_name)"')).toBe(true);
+    expect(selectsWildcard('"pets(*), id"')).toBe(false); // the embed is its own table
+    expect(selectsWildcard('"id, full_name"')).toBe(false);
+    expect(selectsWildcard("CLIENT_COLUMNS")).toBe(false);
   });
 
   it("CLIENT_COLUMNS names exactly the columns the grants allow", () => {

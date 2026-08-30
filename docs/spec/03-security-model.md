@@ -143,6 +143,7 @@ erasure carried out on request:
 | Add property | (a new row re-attaches an address to the erased client) |
 | Add secret | ciphertext overwritten with a 37-byte sentinel — **row kept** |
 | Add pet | `pets` DELETEd outright |
+| Send a new invite | the token is reissued and `email` is NULL — see below |
 
 The operator UI withholds all five from any client carrying `purged_at`, from
 one decision (`isEditable` in `app/src/lib/client-edit.ts`, read once in
@@ -151,10 +152,19 @@ edit surface — left this paragraph false two tabs over; the Codex review on
 PR #79 caught it, and the test now asserts each surface separately so fixing
 one and not its siblings fails.
 
-Stated as what it is: a **UI-only guard, not a database one**. A
-definer-enforced version would need a trigger refusing writes to a purged
-row, which is the shape a fix would take if this is ever reachable by another
-route.
+The invite panel is withheld too, and that one is not cosmetic:
+`fn_rotate_invite` mints a live 14-day token, and a tombstone's `email` is
+NULL — which is exactly the ladder rung that admits ANY address, with the
+signup pre-flight then reserving the first that arrives. One click on an
+erased record would make it claimable again.
+
+Stated as what it is: a **UI-only guard, not a database one**. `fn_unbind_invite`
+carries a `purged_at` guard; `fn_rotate_invite` and `fn_revoke_invite` do not
+(verified against the migrations), so the database will still rotate a purged
+client's token for any caller holding the service role or a future surface that
+forgets to ask. Closing that is a migration and therefore a separate change;
+the same is true of a trigger refusing writes to a purged row, which is what a
+database-enforced version of the whole rule would need.
 
 **Storage is two-phase, and the order is load-bearing.** SQL cannot delete a
 bucket object — dropping the `storage.objects` row removes the metadata and

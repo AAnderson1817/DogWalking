@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -18,7 +18,11 @@ const state = vi.hoisted(() => ({
 }));
 const updateProperty = vi.fn();
 
-vi.mock("@/lib/api", () => ({
+vi.mock("@/lib/api", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
+  return {
+  // The real state machine — the edit sheet's copy is a function of it.
+  inviteState: actual.inviteState,
   getClient: async () => state.client,
   getMyOperator: async () => ({ id: "op-1", display_name: "Op" }),
   isNotFound: () => false,
@@ -39,7 +43,8 @@ vi.mock("@/lib/api", () => ({
   createSetupCheckout: vi.fn(),
   createTopupCheckout: vi.fn(),
   updateClient: vi.fn(),
-}));
+  };
+});
 vi.mock("@/lib/auth-context", () => ({
   useAuth: () => ({ session: { user: { id: "op-1" } }, operatorId: "op-1" }),
 }));
@@ -165,6 +170,31 @@ describe("ClientDetail edit affordances", () => {
     await user.click(screen.getByRole("button", { name: "Edit details" }));
     expect(await screen.findByRole("dialog", { name: "Edit Amelia Hart" })).toBeTruthy();
     expect(screen.getByLabelText("Email")).toHaveProperty("value", "amelia@sanpo.test");
+  });
+
+  it("discards an abandoned draft — Escape then reopen shows the record again", async () => {
+    // Found by an adversarial review of this PR. The sheet is mounted for the
+    // life of the screen, so `useState(initial)` runs once: keyed on the row
+    // alone, an operator who typed a wrong address and pressed Escape to
+    // abandon it reopened to find it still there, still showing the
+    // consequence note, one Save click from being written — to the column that
+    // decides who may claim the invite.
+    const user = userEvent.setup();
+    await show();
+    await user.click(screen.getByRole("button", { name: "Edit details" }));
+    await user.clear(screen.getByLabelText("Email"));
+    await user.type(screen.getByLabelText("Email"), "typo@wrong.test");
+    const sheet = () => within(screen.getByRole("dialog"));
+    expect(sheet().getByRole("status").textContent).toMatch(/stop working for the old address/);
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByLabelText("Email")).toBeNull());
+
+    await user.click(screen.getByRole("button", { name: "Edit details" }));
+    expect(await screen.findByLabelText("Email")).toHaveProperty("value", "amelia@sanpo.test");
+    // And the note is silent again, rather than warning about a draft that no
+    // longer exists.
+    expect(sheet().getByRole("status").textContent).toBe("");
   });
 
   it("edits a property in place, sending only what changed", async () => {

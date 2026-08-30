@@ -18,9 +18,13 @@ import type { ClientRecord } from "@/lib/api";
 
 const updateClient = vi.fn();
 
-vi.mock("@/lib/api", () => ({
-  updateClient: (...a: unknown[]) => updateClient(...a),
-}));
+vi.mock("@/lib/api", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
+  // `inviteState` is the real one on purpose (the InvitePanel precedent): the
+  // consequence copy is a function of the invite's lifecycle, and mocking that
+  // would leave these tests asserting against a fixture of their own answer.
+  return { inviteState: actual.inviteState, updateClient: (...a: unknown[]) => updateClient(...a) };
+});
 
 const client = (over: Partial<ClientRecord> = {}): ClientRecord => ({
   id: "client-1",
@@ -29,6 +33,10 @@ const client = (over: Partial<ClientRecord> = {}): ClientRecord => ({
   email: "amelia@sanpo.test",
   phone: "+1 555-0101",
   updated_at: "2026-08-01T00:00:00Z",
+  // A live invite unless a case says otherwise — that is what makes the three
+  // invite sentences the right ones to expect.
+  invite_revoked_at: null,
+  invite_expires_at: new Date(Date.now() + 7 * 86400_000).toISOString(),
   ...over,
 } as ClientRecord);
 
@@ -111,6 +119,16 @@ describe("ClientEditSheet", () => {
     expect(screen.queryByText(/invite link/i)).toBeNull();
   });
 
+  it("keeps the live region mounted before it has anything to say", async () => {
+    // The FormError rule, applied to the note: `role="status"` on an element
+    // that appears together with its text is announced far less reliably than
+    // one already in the accessibility tree. It is empty, not absent.
+    open();
+    const note = screen.getByRole("status");
+    expect(note.textContent).toBe("");
+    expect(note.className).toContain("form-note");
+  });
+
   it("says nothing at all when the change is only capitalisation", async () => {
     const user = userEvent.setup();
     open();
@@ -119,7 +137,17 @@ describe("ClientEditSheet", () => {
     // Both ladders compare lower(trim(...)), so this admits exactly the same
     // claimant. A warning here would train the operator to ignore the one
     // that matters.
-    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByRole("status").textContent).toBe("");
+  });
+
+  it("does not claim a withdrawn link still works", async () => {
+    const user = userEvent.setup();
+    open({ invite_revoked_at: "2026-08-02T00:00:00Z" });
+    await user.clear(field("Email"));
+    // The panel above this form shows "Invite withdrawn". Telling the operator
+    // that anyone holding the link can claim would contradict it.
+    expect(await screen.findByText(/isn't live/i)).toBeTruthy();
+    expect(screen.queryByText(/anyone who has the invite link can claim/i)).toBeNull();
   });
 
   it("surfaces a failed save instead of reporting success", async () => {

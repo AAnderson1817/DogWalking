@@ -82,7 +82,16 @@ mistyped email holds a live one-click link that suppresses whatever address
 the row holds at click time — the corrected one. Needs a definer function:
 the column deliberately carries no UPDATE grant for any API role (`0038`).
 
-### 7. Tell the operator when an edited address is already suppressed
+### 7. `fn_rotate_invite` / `fn_revoke_invite` have no `purged_at` guard
+`fn_unbind_invite` refuses on a purged client; its two siblings do not
+(verified against the migrations). A purged client's `email` is NULL, which is
+the ladder rung that admits ANY address, so rotating a tombstone's token mints
+a bearer credential that makes an erased record claimable again. The operator
+UI withholds the panel (`InvitePanel` returns null on `purged_at`), but that is
+a frontend guard in front of a function that will still do it. Needs a
+migration, so it was not done in the frontend-only PR that found it.
+
+### 8. Tell the operator when an edited address is already suppressed
 Also recorded in spec 04. Editing a client's address to one already in
 `email_suppressions` makes every future client-facing email skip
 permanently and terminally, with no signal in the UI. Whether to surface it
