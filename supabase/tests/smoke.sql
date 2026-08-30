@@ -4773,6 +4773,166 @@ begin
 end $$;
 
 
+-- ═══ 0046: an erased record cannot be made claimable again ════════════════
+--
+-- `fn_purge_client` leaves the tombstone safe at rest — email NULL, a fresh
+-- invite_token nobody holds, and invite_revoked_at set. `fn_rotate_invite`
+-- used to set invite_revoked_at back to NULL and stamp a fresh 14-day expiry,
+-- and since a purge also NULLs auth_user_id the tombstone looked exactly like
+-- an unclaimed client to it. A NULL email is the ladder rung that admits ANY
+-- address, so one press of "Send a new invite" made an erased client claimable
+-- by a stranger — whose address the signup pre-flight would then RESERVE onto
+-- the tombstone, writing personal data back into a record erased on request.
+--
+-- The end-to-end assertion is the one that matters, so it is made through
+-- `fn_invite_signup_check` rather than by reading the columns: checking
+-- invite_revoked_at alone would pass against a rotate that cleared the guard
+-- some other way.
+do $$
+declare
+  v_op  uuid := '99999999-0000-4000-a000-000000000001';
+  v_cl  uuid := '99999999-0000-4000-c000-0000000000f6';
+  v_tok uuid;
+  v_n   integer;
+begin
+  reset session authorization;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  insert into clients (id, operator_id, full_name, status, email,
+                       invite_token, invite_expires_at)
+  values (v_cl, v_op, '0046 Purge Invite', 'invited', 'f6@sanpo.test',
+          '99999999-0000-4000-e000-0000000000f6', now() + interval '7 days');
+
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  set local session authorization authenticated;
+  select count(*) into v_n from fn_purge_client(v_cl);
+
+  if (select invite_revoked_at from clients where id = v_cl) is null then
+    raise exception 'FAIL: the purge left the invite live';
+  end if;
+
+  -- The fix. Refused for the same reason as every other miss, so the message
+  -- stays a non-oracle over client ids.
+  begin
+    perform fn_rotate_invite(v_cl);
+    raise exception 'FAIL: an invite was reissued for a purged client';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%no unclaimed invite%' then
+      raise exception 'FAIL: rotate on a tombstone refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- The deliberate asymmetry: revoke KILLS a token, so it must stay reachable.
+  -- It is the only in-product remedy for a row that already carried a live
+  -- invite before 0046, and refusing it would strand exactly those rows.
+  -- Wrapped rather than called bare: if a future change guards revoke too, an
+  -- unhandled exception here aborts the suite with the function's own message,
+  -- which reads as a broken suite rather than a broken rule (the 0038 lesson).
+  begin
+    perform fn_revoke_invite(v_cl);
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    raise exception 'FAIL: revoke no longer works on a purged client (%) — it is the only in-product remedy for a row that already carries a live invite', sqlerrm;
+  end;
+  if (select invite_revoked_at from clients where id = v_cl) is null then
+    raise exception 'FAIL: revoke no longer works on a purged client';
+  end if;
+  reset session authorization;
+
+  -- End to end: the tombstone's token admits nobody.
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  select invite_token into v_tok from clients where id = v_cl;
+  if fn_invite_signup_check(v_tok, 'stranger@example.test') = 'claimed' then
+    raise exception 'FAIL: a stranger can claim an erased client';
+  end if;
+  if (select email from clients where id = v_cl) is not null then
+    raise exception 'FAIL: the refused pre-flight still reserved an address onto the tombstone';
+  end if;
+
+  raise notice 'a purged client cannot be made claimable again (0046): OK';
+end $$;
+
+-- ═══ 0046: the one-click unsubscribe link dies with the address ═══════════
+--
+-- `unsubscribe_token` is a bearer credential and `fn_unsubscribe_by_token`
+-- suppresses whatever address the row holds AT CLICK TIME. So without this,
+-- the stranger who received a mistyped email held a link that suppressed the
+-- CORRECTED address — terminally, since a suppression is recorded as `skipped`
+-- and the nightly drain never retries it.
+--
+-- The edits are made as the OPERATOR, which is the path that actually happens
+-- and the one that proves the grant interaction: `authenticated` may update
+-- `email` and may neither read nor write `unsubscribe_token` (0038), so the
+-- rotation has to come from the trigger. Each read of the token therefore
+-- drops back to the service role — reading it as the operator is itself a
+-- permission error, which is the property 0038 exists for.
+--
+-- Asserted in four directions. The two negatives are the load-bearing ones: a
+-- trigger that rotated on every update would pass the positives alone while
+-- killing a live unsubscribe path on every unrelated edit.
+do $$
+declare
+  v_op  uuid := '99999999-0000-4000-a000-000000000001';
+  v_cl  uuid := '99999999-0000-4000-c000-0000000000f7';
+  v_t0 uuid; v_t1 uuid; v_t2 uuid; v_t3 uuid; v_t4 uuid;
+begin
+  reset session authorization;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  insert into clients (id, operator_id, full_name, status, email)
+  values (v_cl, v_op, '0046 Token Rotation', 'invited', 'typo@sanpo.test');
+  select unsubscribe_token into v_t0 from clients where id = v_cl;
+
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+
+  -- The operator cannot read the token at all — the 0038 property this rests on.
+  set local session authorization authenticated;
+  begin
+    perform unsubscribe_token from clients where id = v_cl;
+    raise exception 'FAIL: the operator can read the unsubscribe token';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+
+  -- 1. the address changes -> the old link must die
+  update clients set email = 'correct@sanpo.test' where id = v_cl;
+  reset session authorization;
+  select unsubscribe_token into v_t1 from clients where id = v_cl;
+  if v_t1 = v_t0 then
+    raise exception 'FAIL: correcting the address left the old unsubscribe link live';
+  end if;
+
+  -- 2. capitalisation only -> the same inbox, so the link must survive
+  set local session authorization authenticated;
+  update clients set email = 'Correct@Sanpo.TEST' where id = v_cl;
+  reset session authorization;
+  select unsubscribe_token into v_t2 from clients where id = v_cl;
+  if v_t2 <> v_t1 then
+    raise exception 'FAIL: a capitalisation fix killed a live unsubscribe link';
+  end if;
+
+  -- 3. an unrelated column -> untouched
+  set local session authorization authenticated;
+  update clients set phone = '+1 555-0146' where id = v_cl;
+  reset session authorization;
+  select unsubscribe_token into v_t3 from clients where id = v_cl;
+  if v_t3 <> v_t2 then
+    raise exception 'FAIL: an unrelated edit rotated the unsubscribe token';
+  end if;
+
+  -- 4. clearing the address counts as a change (NULL against an address)
+  set local session authorization authenticated;
+  update clients set email = null where id = v_cl;
+  reset session authorization;
+  select unsubscribe_token into v_t4 from clients where id = v_cl;
+  if v_t4 = v_t3 then
+    raise exception 'FAIL: clearing the address left the old unsubscribe link live';
+  end if;
+
+  raise notice 'the unsubscribe token dies with the address it was sent to (0046): OK';
+end $$;
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;

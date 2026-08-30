@@ -158,13 +158,26 @@ NULL — which is exactly the ladder rung that admits ANY address, with the
 signup pre-flight then reserving the first that arrives. One click on an
 erased record would make it claimable again.
 
-Stated as what it is: a **UI-only guard, not a database one**. `fn_unbind_invite`
-carries a `purged_at` guard; `fn_rotate_invite` and `fn_revoke_invite` do not
-(verified against the migrations), so the database will still rotate a purged
-client's token for any caller holding the service role or a future surface that
-forgets to ask. Closing that is a migration and therefore a separate change;
-the same is true of a trigger refusing writes to a purged row, which is what a
-database-enforced version of the whole rule would need.
+**`0046` closed the database half of that one.** `fn_rotate_invite` now carries
+the same `purged_at` predicate `fn_unbind_invite` always had, so a tombstone
+cannot be handed a live bearer token by any caller. Measured before the fix, as
+the owning operator: the purge left `invite_revoked_at` set, one rotate cleared
+it, and `fn_invite_signup_check(<new token>, 'stranger@example.test')` then
+answered `claimed` — which would have reserved the stranger's address onto the
+tombstone, undoing the erasure by a second route. `0046` also re-revokes any
+purged client that already carried a live invite, and reports the count rather
+than repairing silently.
+
+`fn_revoke_invite` is deliberately NOT given the predicate, and the asymmetry is
+the point: rotate MINTS a token, revoke KILLS one. On a tombstone revoke is a
+no-op in effect and moves toward safety, and it is the only in-product remedy
+for a row that already carried a live invite — refusing it would strand exactly
+the rows the repair exists for. A guard that blocks the safe direction is worse
+than no guard.
+
+What remains UI-only is the rest of the rule: the edit forms above. A
+database-enforced version needs a trigger refusing writes to a purged row,
+which is a larger change than the one hole that was actually reachable.
 
 **Storage is two-phase, and the order is load-bearing.** SQL cannot delete a
 bucket object — dropping the `storage.objects` row removes the metadata and
@@ -190,7 +203,7 @@ four axes, all added in `0039`:
 | --- | --- |
 | Expiry | `clients.invite_expires_at`, defaulting to 14 days, checked in `fn_claim_invite` **and** `fn_preview_invite` — and pre-account in `fn_invite_signup_check` (0045) |
 | Revocation | `clients.invite_revoked_at`, set by `fn_revoke_invite` |
-| Reissue | `fn_rotate_invite` mints a new token, resets the window, clears revocation |
+| Reissue | `fn_rotate_invite` mints a new token, resets the window, clears revocation — refused on a purged client (0046) |
 | Attribution | every attempt against a matching token writes `invite_claim_attempts` — including pre-account refusals from the signup pre-flight, with a null `attempted_by` (0045) |
 
 Since review H31 the ACCOUNT is created server-side: the public `claim-signup`

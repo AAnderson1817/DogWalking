@@ -1420,6 +1420,10 @@ export type Database = {
         };
         Returns: string;
       };
+      fn_rotate_unsubscribe_token: {
+        Args: Record<string, never>;
+        Returns: unknown;
+      };
       fn_run_nightly_jobs: {
         Args: {
           p_horizon_days: number;

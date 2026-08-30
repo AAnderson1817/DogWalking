@@ -861,13 +861,26 @@ silently:
   anywhere in the operator UI — `email_delivery_status` says `skipped` and
   nothing surfaces it. Whether the operator should be told is a product
   question, not a defect in the sender.
-* `clients.unsubscribe_token` is per-CLIENT and is not rotated by an email
-  edit, so a stranger who received a mistyped email holds a live one-click
-  link that, when clicked, suppresses whatever address the row holds AT CLICK
-  TIME — i.e. the corrected one. Rotating it on an email change is the fix;
-  it needs a definer function, because the column deliberately carries no
-  UPDATE grant for any API role (0038), so it is out of scope for a
-  frontend-only change and stated here instead.
+* `clients.unsubscribe_token` **is rotated whenever the address changes**
+  (`0046`). Before that it was not, so a stranger who had received a mistyped
+  email held a live one-click link that, when clicked, suppressed whatever
+  address the row held AT CLICK TIME — the corrected one — silently and
+  terminally, since a suppression is recorded `skipped` and the nightly drain
+  never retries it.
+
+  The rotation is a BEFORE UPDATE trigger rather than a definer RPC, and that
+  choice is load-bearing: the column carries no UPDATE grant for any API role,
+  so a caller *cannot* do it for itself, and every writer of `clients.email` —
+  the operator's edit form, the client persona's own contact edit, the `0045`
+  signup reservation, and whatever writes it next — gets the rotation without
+  knowing the rule exists. A rule the next caller has to remember is a rule
+  that will be forgotten.
+
+  Compared NORMALISED (`lower(trim(...))`, matching both claim ladders), so a
+  capitalisation fix reaches the same inbox and keeps its link; `is distinct
+  from`, so setting and clearing an address both count. A link sent to the old
+  address then resolves to nothing, and the endpoint answers an unknown token
+  exactly as it answers a known one, so this leaks no more than it did.
 
 `send-notification` asks `fn_email_suppressed` before every send and **fails
 closed**: an unreadable suppression list is recorded as a retryable failure, not

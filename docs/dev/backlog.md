@@ -75,23 +75,7 @@ commit and degrade gracefully without it.
   the deliberate thin-wrapper exception (its logic is SQL-side);
   `charge-overage` is already covered through `_lib/overage*.ts`.
 
-### 6. Rotate `clients.unsubscribe_token` when the email changes
-Found while building the edit surface, and recorded in spec 04. The token is
-per-client and is not rotated by an email edit, so a stranger who received a
-mistyped email holds a live one-click link that suppresses whatever address
-the row holds at click time — the corrected one. Needs a definer function:
-the column deliberately carries no UPDATE grant for any API role (`0038`).
-
-### 7. `fn_rotate_invite` / `fn_revoke_invite` have no `purged_at` guard
-`fn_unbind_invite` refuses on a purged client; its two siblings do not
-(verified against the migrations). A purged client's `email` is NULL, which is
-the ladder rung that admits ANY address, so rotating a tombstone's token mints
-a bearer credential that makes an erased record claimable again. The operator
-UI withholds the panel (`InvitePanel` returns null on `purged_at`), but that is
-a frontend guard in front of a function that will still do it. Needs a
-migration, so it was not done in the frontend-only PR that found it.
-
-### 8. Tell the operator when an edited address is already suppressed
+### 6. Tell the operator when an edited address is already suppressed
 Also recorded in spec 04. Editing a client's address to one already in
 `email_suppressions` makes every future client-facing email skip
 permanently and terminally, with no signal in the UI. Whether to surface it
@@ -100,6 +84,11 @@ a product question.
 
 ## Done
 
+- **The two migration-gated security items** — `fn_rotate_invite` refusing a
+  purged client (it used to clear the purge's own revocation and hand a
+  tombstone a live 14-day token, which the NULL-email ladder rung then let a
+  stranger claim), and `clients.unsubscribe_token` rotating whenever the
+  address changes. Migration `0046`; see the `security(0046)` status-log entry.
 - **Client & property editing** — the header's *Edit details* and per-property
   *Edit* on ClientDetail. Shipped with the `clients` wildcard-select fix it
   depended on; see the `fix(client-columns)` status-log entry.
