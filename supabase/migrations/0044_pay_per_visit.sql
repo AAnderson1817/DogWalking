@@ -77,11 +77,23 @@ begin
   -- already refuses a walk with no rate (`failWithoutAttempt`, "not on a
   -- plan"), and writing 0 here would turn that honest refusal into a silent
   -- zero-value charge.
+  --
+  -- A retained plan prices walks only while its subscription is LIVE
+  -- (active/paused/past_due — an allow-list, so a future enum value stops
+  -- pricing until somebody decides what it means, the 0026 posture).
+  -- customer.subscription.deleted clears the binding but deliberately keeps
+  -- plan_id, so a cancelled client walked as pay-per-visit would otherwise
+  -- have every new walk stamped with a rate whose Stripe mandate died with
+  -- the subscription, while their card-save mandate names visit prices
+  -- (Codex review finding on #76). A client who never checked out
+  -- ('none' with a plan picked but never subscribed) never mandated the
+  -- plan rate at all — same rule covers both.
   if new.overage_rate_pence is null then
     select p.overage_rate_pence into new.overage_rate_pence
       from clients c
-      left join plans p on p.id = c.plan_id
-     where c.id = new.client_id;
+      join plans p on p.id = c.plan_id
+     where c.id = new.client_id
+       and c.subscription_status in ('active', 'paused', 'past_due');
   end if;
 
   -- The visit price, same treatment. Null when the service has no cash
@@ -111,12 +123,15 @@ revoke all on function fn_snapshot_walk_price() from public, anon, authenticated
 --     editing the service price cannot rewrite anything;
 --   * only status 'scheduled' — a walk in progress started under the terms
 --     in force at the time, and a completed one is history;
---   * only walks whose CLIENT is on no plan. A plan client's un-snapshotted
---     walk (a pre-0043 row) already charges correctly through the live
---     plan-rate fallback, and stamping a visit price onto it would make the
---     visit-price branch of the charge resolution beat that fallback — a
---     plan client billed the cash rate under a "per-visit" label their
---     Stripe mandate never mentioned (caught in adversarial review).
+--   * only walks whose CLIENT has no LIVE plan subscription. A live plan
+--     client's un-snapshotted walk (a pre-0043 row) already charges
+--     correctly through the live plan-rate fallback, and stamping a visit
+--     price onto it would make the visit-price branch of the charge
+--     resolution beat that fallback — a plan client billed the cash rate
+--     under a "per-visit" label their Stripe mandate never mentioned
+--     (caught in adversarial review). A client whose subscription is dead
+--     (cancelled, or 'none' with a plan merely picked) IS stamped: the
+--     visit price is the only rate their current mandate can name.
 -- The no-API-role-UPDATE rule on the snapshot columns (0043) survives: the
 -- only writers are still definer trigger functions.
 --
@@ -149,7 +164,8 @@ begin
        where w2.service_type_id = new.id
          and w2.status = 'scheduled'
          and w2.visit_price_pence is null
-         and c.plan_id is null
+         and not (c.plan_id is not null
+                  and c.subscription_status in ('active', 'paused', 'past_due'))
        order by w2.id
          for update of w2
     ) t

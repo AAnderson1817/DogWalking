@@ -56,6 +56,8 @@ export interface OverageDeps {
     | {
       stripe_customer_id: string | null;
       plan: { overage_rate_pence: number } | null;
+      /** clients.subscription_status — the live-plan gate below reads it. */
+      subscription_status: string;
       full_name: string;
     }
     | null
@@ -128,6 +130,15 @@ function permanentReason(err: unknown): string {
   return "Stripe rejected the charge as invalid, so retrying will not help";
 }
 
+/** The subscription states in which a client's plan still governs pricing —
+ * mirrors 0044's SQL allow-list. 'past_due' is a live subscription whose
+ * payment failed; 'cancelled' and 'none' are dead, and a dead subscription's
+ * retained plan_id prices nothing. */
+const LIVE_PLAN_STATUSES = new Set(["active", "paused", "past_due"]);
+function planIsLive(subscriptionStatus: string): boolean {
+  return LIVE_PLAN_STATUSES.has(subscriptionStatus);
+}
+
 /** Stripe PI states that mean the attempt is dead and re-chargeable. */
 const PI_DEAD = new Set(["canceled", "requires_payment_method"]);
 /** How long an id-less pending claim blocks before retrying the same claim. */
@@ -179,18 +190,22 @@ export async function chargeOverageForWalk(
    *      was created (0044). The snapshot trigger fills it whenever the
    *      service has one, plan client or not, so this ORDER — plan rate
    *      first — is what keeps a plan client off the cash price.
-   *   3. The live plan rate — walks with no snapshot at all: pre-0043 rows
-   *      (exactly the behaviour they shipped with), and walks created with
-   *      neither a plan nor a visit price whose client subscribed before
-   *      completion. For those there was no figure to snapshot; charging
-   *      the plan they since agreed to beats refusing their walk.
+   *   3. The live plan rate, only while the plan's subscription is LIVE —
+   *      walks with no snapshot at all: pre-0043 rows (exactly the
+   *      behaviour they shipped with), and walks created with neither a
+   *      plan nor a visit price whose client subscribed before completion.
+   *      For those there was no figure to snapshot; charging the plan they
+   *      since agreed to beats refusing their walk. A DEAD subscription's
+   *      retained plan prices nothing (Codex finding on #76): its Stripe
+   *      mandate died with it, so a cancelled client's un-snapshotted walk
+   *      refuses rather than billing the old rate.
    *
    * All three null → refuse below. Null is "nothing agreed", never "free"
    * (0043's rule, restated on both new columns).
    */
   const amount = walk.overage_rate_pence ??
     walk.visit_price_pence ??
-    billing.plan?.overage_rate_pence;
+    (planIsLive(billing.subscription_status) ? billing.plan?.overage_rate_pence : undefined);
   const pricing: "plan_rate" | "visit_price" =
     walk.overage_rate_pence == null && walk.visit_price_pence != null
       ? "visit_price"

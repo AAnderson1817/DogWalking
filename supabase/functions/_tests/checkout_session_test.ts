@@ -1,13 +1,14 @@
 import { assert, assertEquals, assertThrows } from "./asserts.ts";
 import {
   assertTopupAllowed,
+  MANDATE_MAX_CHARS,
   parseCheckoutRequest,
   setupSessionParams,
   subscriptionSessionParams,
   topupSessionParams,
   visitPriceMandate,
 } from "../create-checkout/params.ts";
-import { STRIPE_META } from "../_lib/stripe_metadata.ts";
+import { MAX_TOPUP_CREDITS, STRIPE_META } from "../_lib/stripe_metadata.ts";
 import { HttpError } from "../_lib/http.ts";
 
 /**
@@ -46,12 +47,18 @@ function subscription(overage: number | null = 2200) {
   });
 }
 
-function topup(mandate: string | null = visitPriceMandate(SERVICES)) {
+function mandateText(services = SERVICES): string {
+  const m = visitPriceMandate(services);
+  if (m.kind !== "ok") throw new Error(`expected a complete mandate, got ${m.kind}`);
+  return m.text;
+}
+
+function topup(mandate: string | null = mandateText()) {
   return topupSessionParams({ ...COMMON, credits: 10, amountPence: 5000, mandate });
 }
 
 function setup() {
-  return setupSessionParams({ ...COMMON, mandate: visitPriceMandate(SERVICES)! });
+  return setupSessionParams({ ...COMMON, mandate: mandateText() });
 }
 
 Deno.test("EVERY session kind collects a billing address and persists it", () => {
@@ -145,15 +152,29 @@ Deno.test("setup params: setup mode, and the mandate is not optional", () => {
   assert(message.includes("Private walk 60 $40.00"));
 });
 
-Deno.test("visitPriceMandate: null on nothing priced, capped on many services", () => {
-  assertEquals(visitPriceMandate([]), null);
+Deno.test("visitPriceMandate names EVERY priced service — or says it cannot", () => {
+  assertEquals(visitPriceMandate([]), { kind: "none" });
+  // Every service, every figure. The first draft capped the list at six and
+  // said "and N more" — but an omitted service still charges off-session
+  // through its snapshot, so the client would have authorised a card without
+  // seeing a figure that can hit it (Codex finding on #76).
   const many = Array.from({ length: 9 }, (_, i) => ({
     name: `Service ${i}`,
     visit_price_pence: 1000 + i,
   }));
-  const text = visitPriceMandate(many)!;
-  assert(text.includes("and 3 more priced services"), "the cap must say what it dropped");
-  assert(text.length < 1200, "Checkout rejects custom_text over 1200 chars");
+  const m = visitPriceMandate(many);
+  assert(m.kind === "ok");
+  for (const svc of many) {
+    assert(m.text.includes(svc.name), `${svc.name} missing from the mandate`);
+    assert(m.text.includes((svc.visit_price_pence / 100).toFixed(2)), `${svc.name}'s figure missing`);
+  }
+  assert(m.text.length <= MANDATE_MAX_CHARS);
+  // Too many to disclose completely → tooLong, never a truncated disclosure.
+  const tooMany = Array.from({ length: 40 }, (_, i) => ({
+    name: `A very descriptive service name number ${i}`,
+    visit_price_pence: 1000 + i,
+  }));
+  assertEquals(visitPriceMandate(tooMany), { kind: "tooLong" });
 });
 
 Deno.test("parseCheckoutRequest: exactly one kind, and money fields are validated", () => {
@@ -174,6 +195,10 @@ Deno.test("parseCheckoutRequest: exactly one kind, and money fields are validate
     { client_id: "c", topup: { credits: "3", amount_pence: 900 } },
     { client_id: "c", topup: { credits: 3, amount_pence: 0 } },
     { client_id: "c", topup: { credits: 3, amount_pence: -100 } },
+    // Past the bound, fn_apply_topup's int parameter cannot encode the value:
+    // Checkout would collect the money and every grant retry would fail.
+    { client_id: "c", topup: { credits: MAX_TOPUP_CREDITS + 1, amount_pence: 900 } },
+    { client_id: "c", topup: { credits: 2 ** 31, amount_pence: 900 } },
   ];
   for (const body of bad) {
     assertThrows(

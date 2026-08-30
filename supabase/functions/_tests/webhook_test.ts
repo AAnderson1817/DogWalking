@@ -369,7 +369,9 @@ Deno.test("a crafted top-up naming another tenant's customer grants nothing", as
 });
 
 Deno.test("malformed or missing credit counts never reach the RPC", async () => {
-  for (const credits of ["0", "-3", "2.5", "ten", ""]) {
+  // "2147483648" is int4-overflow: past the bound the RPC cannot encode
+  // p_credits, so applying would 500 forever with the money already taken.
+  for (const credits of ["0", "-3", "2.5", "ten", "", "2147483648", "10001"]) {
     const { deps, calls } = makeMockDeps();
     const meta = { ...TOPUP_SESSION.metadata, sanpo_topup_credits: credits };
     const result = await handleStripeEvent(

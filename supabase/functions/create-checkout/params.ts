@@ -8,7 +8,7 @@
 // session collects the address". Now the tests assert the built objects.
 import { HttpError } from "../_lib/http.ts";
 import { formatMoney } from "../_lib/money.ts";
-import { STRIPE_META } from "../_lib/stripe_metadata.ts";
+import { MAX_TOPUP_CREDITS, STRIPE_META } from "../_lib/stripe_metadata.ts";
 
 export type CheckoutRequest =
   | { kind: "subscription"; clientId: string; planId: string }
@@ -46,6 +46,16 @@ export function parseCheckoutRequest(body: unknown): CheckoutRequest {
     const amount = b.topup.amount_pence;
     if (typeof credits !== "number" || !Number.isInteger(credits) || credits <= 0) {
       throw new HttpError(400, "bad_request", "topup.credits must be a positive integer");
+    }
+    if (credits > MAX_TOPUP_CREDITS) {
+      // Refused BEFORE Stripe collects anything: past int4, the RPC that
+      // grants can never encode the value, so the money would be taken and
+      // the credits never land (see MAX_TOPUP_CREDITS).
+      throw new HttpError(
+        400,
+        "bad_request",
+        `topup.credits must be at most ${MAX_TOPUP_CREDITS}`,
+      );
     }
     if (typeof amount !== "number" || !Number.isInteger(amount) || amount <= 0) {
       throw new HttpError(400, "bad_request", "topup.amount_pence must be a positive integer");
@@ -86,28 +96,35 @@ export function assertTopupAllowed(client: {
   }
 }
 
-/** How many services the mandate names before it says "and more". Checkout's
- * custom_text caps at 1200 characters, and an unbounded join would make the
- * operator with the most services the one whose checkout 400s. */
-const MANDATE_SERVICE_CAP = 6;
+/** Checkout rejects custom_text over 1200 characters; stay under it with
+ * room for a multibyte name or two. */
+export const MANDATE_MAX_CHARS = 1150;
 
 /**
  * The per-visit mandate (review H12's rule applied to H32): a card saved for
  * off-session use is authorised AT THE SAVE, and the authorisation has to say
- * what it authorises — with figures. Null when nothing is priced, because a
- * disclosure with no figure in it is worse than none (create-checkout's
- * overage mandate makes the same call).
+ * what it authorises — with figures, for EVERY priced service. Null when
+ * nothing is priced, because a disclosure with no figure in it is worse than
+ * none (create-checkout's overage mandate makes the same call).
+ *
+ * Every service, no truncation. The first draft capped the list at six with
+ * "and N more priced services" — but an omitted service still charges
+ * off-session through its snapshotted visit price, so the client would have
+ * authorised a card without being shown a figure that can hit it (Codex
+ * finding on #76). A mandate too long for Checkout's limit is `tooLong`, and
+ * the CALLER decides: setup refuses outright, a top-up runs without saving
+ * the card — incomplete disclosure never quietly becomes partial disclosure.
  */
-export function visitPriceMandate(services: PricedService[]): string | null {
-  if (services.length === 0) return null;
-  const shown = services.slice(0, MANDATE_SERVICE_CAP);
-  const list = shown
+export function visitPriceMandate(
+  services: PricedService[],
+): { kind: "none" } | { kind: "tooLong" } | { kind: "ok"; text: string } {
+  if (services.length === 0) return { kind: "none" };
+  const list = services
     .map((s) => `${s.name} ${formatMoney(s.visit_price_pence)}`)
     .join("; ");
-  const more = services.length > shown.length
-    ? `; and ${services.length - shown.length} more priced services`
-    : "";
-  return `Completed walks are charged to this card after each visit: ${list}${more}.`;
+  const text = `Completed walks are charged to this card after each visit: ${list}.`;
+  if (text.length > MANDATE_MAX_CHARS) return { kind: "tooLong" };
+  return { kind: "ok", text };
 }
 
 interface CommonArgs {
