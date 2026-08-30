@@ -871,9 +871,10 @@ Deno.test("an event from an account we do not know is ignored", async () => {
 });
 
 Deno.test("an event with NO account is ignored", async () => {
-  // A platform-account event. Sanpo takes no money on the platform account —
-  // operators are the merchant of record — so there is nothing legitimate to
-  // do with one, and acting would mean guessing whose it was.
+  // A platform-account event — the operator's own Sanpo subscription, which
+  // belongs to platform-webhook (review H31). Acting on one HERE would mean
+  // guessing whose it was, on the endpoint whose metadata any connected
+  // account can mint.
   const { deps, calls } = makeMockDeps();
   const res = await handleStripeEvent(
     event("invoice.paid", { ...PAID_CYCLE }, null),

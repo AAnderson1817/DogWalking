@@ -30,6 +30,7 @@ type Handler = (name: string) => { status: number; body: string; requestId?: boo
  * to be a change to both. */
 const healthy: Handler = (name) => {
   if (name === "stripe-webhook") return { status: 405, body: "POST only" };
+  if (name === "platform-webhook") return { status: 405, body: "POST only" };
   if (name === "unsubscribe") {
     return { status: 200, body: "<h1>You're unsubscribed</h1>" };
   }

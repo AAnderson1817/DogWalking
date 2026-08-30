@@ -5,11 +5,16 @@ let cached: Stripe | null = null;
 
 /**
  * The platform client. Use this ONLY for platform-level work: creating a
- * connected account, minting an AccountLink, and verifying webhooks.
+ * connected account, minting an AccountLink, verifying webhooks — and, since
+ * review H31, the operator's own $49/month Sanpo subscription
+ * (operator-billing / platform-webhook), which is the one money that
+ * legitimately moves on the platform account, because there Sanpo is the
+ * merchant and the operator is the customer.
  *
- * Money never moves here. Operators are the merchant of record (review B5),
- * so every customer, subscription, PaymentIntent and portal session belongs
- * to the operator's own Standard connected account — see `connectedStripe`.
+ * CLIENT money never moves here. Operators are the merchant of record for
+ * their clients (review B5), so every client customer, subscription,
+ * PaymentIntent and portal session belongs to the operator's own Standard
+ * connected account and must carry `stripeAccount`.
  */
 export function stripeClient(): Stripe {
   if (!cached) {

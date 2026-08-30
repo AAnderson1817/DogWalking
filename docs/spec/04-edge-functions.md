@@ -171,8 +171,104 @@ another); losing the id is not — the next `start` would create a *second*
 Stripe account and the money would land in whichever one Stripe finished
 first, with the other left half-onboarded and invisible.
 
-This is the only function that reaches Stripe on the platform account for
-anything but signature verification. Money never moves there.
+The platform account carries exactly one kind of money: the operator's own
+Sanpo subscription (`operator-billing` / `platform-webhook`, review H31),
+where Sanpo is the merchant and the operator is the customer. Client money
+never moves there.
+
+## operator-billing — POST, operator JWT (review H31)
+
+The operator's own **$49/month** Sanpo subscription — the one money path on
+the **platform** account, so unlike every other money path its Stripe calls
+carry **no** `stripeAccount` (asserted over every call by
+`operator_billing_test.ts`, the inverse of the overage guard).
+
+- `{ "action": "checkout" }` → `{ url }` — a subscription-mode Checkout
+  Session on the platform account. The platform Customer is created lazily
+  with the connect-onboarding idiom: persisted under a
+  `WHERE platform_customer_id IS NULL` guard **before** any link is minted,
+  re-read so a concurrent loser adopts the winner. The Price is resolved by
+  Stripe **lookup key** (`sanpo_operator_monthly_4900`), created on first
+  use — Stripe is the platform account's book of record, and the amount
+  lives in the key so a price change mints a new key rather than repointing
+  the old one. Remaining trial above Stripe's 48-hour floor is passed as
+  `subscription_data.trial_end` (subscribing early never forfeits promised
+  days); under the floor the field is omitted. Refused `already_subscribed`
+  (409) while a subscription is bound and not `cancelled` — a past_due one
+  is fixed in the portal, not replaced.
+- `{ "action": "portal" }` → `{ url }` — platform billing portal session;
+  409 `no_billing` before the first checkout.
+
+No `payments` rows are written for operator payments, deliberately:
+`payments` is tenant-scoped (`client_id NOT NULL`) and records client money
+moving to operators. Sanpo's own revenue has Stripe as its book of record.
+
+## platform-webhook — POST from Stripe, PLATFORM account (review H31)
+
+**Register it on "Your account"**, not Connected accounts — the exact mirror
+of `stripe-webhook`, with its **own signing secret**
+(`STRIPE_PLATFORM_WEBHOOK_SECRET`). The two endpoints fail in opposite
+silent modes: the Connect endpoint on "Your account" bills nothing, and this
+endpoint on "Connected accounts" never sees the operator's subscription —
+the gate would then lock every operator out at trial end with their payments
+succeeding in Stripe.
+
+An event **with** an `account` is ignored (a Connect event; `stripe-webhook`
+owns those, and processing it here would put attacker-influenceable Connect
+metadata adjacent to platform billing state). Platform session metadata IS
+trustworthy — only `operator-billing` mints platform sessions.
+
+Effects, all onto `operators.platform_*` via the shared `stripe_events`
+claim ledger (event ids are globally unique, so the two endpoints cannot
+collide):
+- `checkout.session.completed` (subscription mode, ours) — binds
+  `platform_subscription_id`; sets status `active` only when
+  `payment_status` is `paid`/`no_payment_required` (the H32 lesson: an
+  unpaid session grants nothing).
+- `customer.subscription.created/updated` — mirrors Stripe's status onto the
+  enum: `trialing` counts as `active`; `incomplete` decides **nothing** (an
+  unfinished checkout never downgrades a live row). `created` may beat the
+  checkout event, so an unbound operator is bound through the customer —
+  and only an unbound one; a row bound to a different subscription is never
+  clobbered.
+- `customer.subscription.deleted` → `cancelled`; `invoice.payment_failed` →
+  `past_due`. Both ring the operator's bell **once**, gated on the status
+  transition — Stripe redelivers dunning failures with fresh event ids the
+  claim ledger cannot dedupe (the H13 lesson).
+
+## claim-signup — public, unauthenticated (review H31)
+
+Creates the auth account for an invited client, which is what lets the
+GoTrue **"allow new users to sign up" toggle be turned off** without
+breaking invites: `ClaimInvite` stops calling public `signUp`. Its caller
+has no JWT yet — creating the account is the point — so `verify_jwt =
+false`, and no unverified-claim helper may ever be used in it.
+
+Body `{ token, email, password }`. The ordering is the security property:
+`fn_invite_signup_check(token, email)` — a service-role definer mirroring
+`fn_claim_invite`'s ladder exactly — runs **before** `auth.admin.createUser`,
+so a dead invite refuses (409, code = the outcome verbatim:
+`not_found`/`already_claimed`/`expired`/`revoked`/`email_mismatch`) with no
+account created. An account created first would be public signup wearing an
+invite's clothes. A mismatch refused pre-account also spares the claimant an
+account that can never claim. The password floor (12) is enforced
+in-function because the admin API bypasses GoTrue's policy and the deployed
+policy is a dashboard setting no file controls (H2).
+
+An already-registered address collapses into the same `{ registered: true }`
+success — a distinct answer would make the endpoint an account-existence
+oracle for a live-token holder; the frontend's sign-in attempt is where that
+distinction already lives, rate-limited. The account is created
+`email_confirm: false` (typing an address proves nothing), and the claim
+itself still happens in the browser via authenticated `fn_claim_invite`
+carrying the privacy-notice version (H6) — this function only decides
+whether an account may exist.
+
+Abuse bound, stated: account creation requires a LIVE invite token
+(unguessable, 14-day expiry, revocable — 0039), and a token bound to an
+email admits only that email. A live *unbound* token can mint accounts for
+arbitrary addresses until it expires or is revoked — strictly narrower than
+the public signup it replaces, which needed no token at all.
 
 ## stripe-webhook — POST from Stripe
 **Register it as a Connect endpoint**, not an account endpoint — connected
@@ -181,8 +277,9 @@ would receive none of them.
 
 `event.account` is an **authorization input, not a routing hint**. A Connect
 endpoint receives events for every account connected to the platform, so:
-- an event with no `account` is **ignored** (a platform-account event; Sanpo
-  takes no money there),
+- an event with no `account` is **ignored** (a platform-account event —
+  the operator's own Sanpo subscription, which belongs to `platform-webhook`
+  and its own signing secret, never to this endpoint),
 - an `account` matching no operator is **ignored**,
 - every lookup below is **scoped to the operator it resolves to** — the client
   lookup, the client update, and the reversal lookup.
@@ -653,8 +750,8 @@ Response: `{ created, expired_clients, expiry_error, walks_flagged_abandoned, st
 
 ## unsubscribe — public, unauthenticated, token-only (0038, review M29)
 
-The only endpoint in this project with `verify_jwt = false` besides the Stripe
-webhook, and for a reason that has no alternative: `clients.email` is typed by
+One of the four `verify_jwt = false` endpoints (with the two Stripe webhooks
+and `claim-signup`), and for a reason that has no alternative: `clients.email` is typed by
 the operator and reconciled with nothing, so a typo sends a **stranger** a
 recurring feed of when a named person's house is empty. That person cannot sign
 in — they are not a client and claimed no invite — so an opt-out behind a

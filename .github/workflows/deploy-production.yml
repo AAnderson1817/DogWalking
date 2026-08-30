@@ -10,7 +10,8 @@ name: Deploy production (Supabase)
 #
 # Secrets are ENVIRONMENT-SCOPED: create the same names used by staging
 # (SUPABASE_ACCESS_TOKEN, SUPABASE_PROJECT_REF, SUPABASE_DB_PASSWORD,
-# STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, VAULT_MASTER_KEY, APP_BASE_URL,
+# STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PLATFORM_WEBHOOK_SECRET,
+# VAULT_MASTER_KEY, APP_BASE_URL,
 # RESEND_API_KEY, NOTIFY_FROM_EMAIL) inside the `production` environment,
 # holding the PRODUCTION project's values. One-time setup lives in
 # docs/dev/production-cutover.md.
@@ -361,6 +362,7 @@ jobs:
           add() { if [ -n "$2" ]; then args+=("$1=$2"); else echo "skip: $1 not set"; fi; }
           add STRIPE_SECRET_KEY     "${{ secrets.STRIPE_SECRET_KEY }}"
           add STRIPE_WEBHOOK_SECRET "${{ secrets.STRIPE_WEBHOOK_SECRET }}"
+          add STRIPE_PLATFORM_WEBHOOK_SECRET "${{ secrets.STRIPE_PLATFORM_WEBHOOK_SECRET }}"
           add VAULT_MASTER_KEY      "${{ secrets.VAULT_MASTER_KEY }}"
           add APP_BASE_URL          "${{ secrets.APP_BASE_URL }}"
           add RESEND_API_KEY        "${{ secrets.RESEND_API_KEY }}"
