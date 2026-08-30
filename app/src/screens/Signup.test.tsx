@@ -102,3 +102,25 @@ describe("Signup", () => {
     expect(await screen.findByText(/signups not allowed/i)).toBeInTheDocument();
   });
 });
+
+describe("Signup with a broken role lookup", () => {
+  it("shows a retry, not the live form — submitting again is the wrong affordance", async () => {
+    // Signed in + roleError: none of the redirects fire, and before this
+    // branch the interactive form stayed on screen, where "submit again"
+    // re-signs-up the very account whose lookup blipped (adversarial
+    // review). Same treatment SignIn gives the identical state.
+    Object.assign(authState, {
+      session: { access_token: "t" } as never,
+      roleError: true,
+    });
+    try {
+      renderScreen();
+      expect(screen.getByText(/couldn't load your account/i)).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Create my account" })).not.toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: /retry/i }));
+      expect(authState.refreshRole).toHaveBeenCalled();
+    } finally {
+      Object.assign(authState, { session: null, roleError: false });
+    }
+  });
+});

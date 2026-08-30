@@ -44,10 +44,14 @@ not quietly rot:
 | §8 auth settings | `.github/workflows/auth-posture.yml`, every staging deploy |
 | §9 TOTP | Same workflow — it already reports enrolment and verification as on |
 | §11 `RESEND_API_KEY` | `Nightly ops check` goes red when an email backlog survives its retry |
+| §1a platform webhook + secret | Nothing automated from here — Stripe's own webhook delivery log (every delivery 500s while the secret is missing) is the only signal |
+| §1b signup toggle | Nothing automated, by design — it is a business decision, and neither setting is a defect |
 
-Two of these have no automated signal at all — §6 and §4 — and that is worth
-knowing about them specifically, because they are the two whose absence is
-invisible from inside the product.
+Several of these have no automated signal at all — §1, §1a, §1b, §4 and §6 —
+and that is worth knowing about them specifically, because they are the ones
+whose absence is invisible from inside the product. (This sentence used to say
+"two", which was already an undercount before H31 — §1's own text describes a
+failure that "nothing errors" on.)
 
 ---
 
@@ -85,11 +89,17 @@ to sign up".
 
 Client invites no longer depend on public signup (claim-signup uses the
 admin API) and the magic link no longer creates accounts, so this toggle now
-governs exactly one thing: whether strangers can start an operator trial at
+governs exactly one thing: whether STRANGERS can start an operator trial at
 `/signup`. ON = self-serve acquisition; OFF = invitation-only. Either is
 fine — the point of H31 is that it is finally a choice. Nothing breaks
 either way, which also means nothing automated will tell you it is set
 wrong; it is a business decision, not a defect signal.
+
+One stated residual (spec 04): with the toggle OFF, a person holding a live
+client invite can still end up with an operator trial — claim-signup mints
+them an ordinary account, and nothing stops an account from filling in the
+operator onboarding form instead of claiming. "Off" means strangers cannot;
+invitees technically still can.
 
 ### 2. `SUPABASE_SERVICE_ROLE_KEY` on the staging environment — issue #31
 The vault deploy step *Verify the vault key opens this project* exits 0 with a
@@ -231,7 +241,15 @@ sends people to `{site}/reset-password`, and the list is matched **exactly** —
 ```
 https://<staging-host>/reset-password
 https://<production-host>/reset-password
+https://<staging-host>/claim/*
+https://<production-host>/claim/*
 ```
+
+The `/claim/*` wildcard is H31's: an invited client's confirmation email must
+land back on THEIR INVITE LINK — without it, GoTrue's silent `site_url`
+fallback drops them on "/", a role-less signed-in user is routed to the
+operator onboarding form, and completing that form permanently dead-ends the
+invite.
 
 Until this is done the flow fails in the way that is hardest to report:
 GoTrue accepts the reset request, sends a perfectly good email, and then

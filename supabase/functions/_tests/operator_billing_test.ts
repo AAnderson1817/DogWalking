@@ -15,6 +15,7 @@ import {
   OPERATOR_PRICE_LOOKUP_KEY,
   OPERATOR_PRICE_PENCE,
   operatorPriceParams,
+  TRIAL_FLOOR_MARGIN_MS,
   TRIAL_MIN_REMAINING_MS,
   trialEndSeconds,
 } from "../operator-billing/params.ts";
@@ -42,7 +43,12 @@ function operatorRow(over: Partial<OperatorBillingRow> = {}): OperatorBillingRow
 
 function makeStripeDouble(
   recorded: Recorded[],
-  opts: { priceListed?: boolean; priceCreateFails?: boolean } = {},
+  opts: {
+    priceListed?: boolean;
+    priceCreateFails?: boolean;
+    liveSubscriptions?: Array<{ id: string; status: string }>;
+    openSessions?: Array<{ id: string }>;
+  } = {},
 ): PlatformStripe {
   const priceListed = opts.priceListed ?? true;
   let listCalls = 0;
@@ -51,6 +57,12 @@ function makeStripeDouble(
       create(params) {
         recorded.push({ call: "customers.create", args: [params] });
         return Promise.resolve({ id: "cus_fresh" });
+      },
+    },
+    subscriptions: {
+      list(params) {
+        recorded.push({ call: "subscriptions.list", args: [params] });
+        return Promise.resolve({ data: opts.liveSubscriptions ?? [] });
       },
     },
     prices: {
@@ -75,6 +87,14 @@ function makeStripeDouble(
           recorded.push({ call: "checkout.sessions.create", args: [params] });
           return Promise.resolve({ id: "cs_1", url: "https://checkout.stripe.com/x" });
         },
+        list(params) {
+          recorded.push({ call: "checkout.sessions.list", args: [params] });
+          return Promise.resolve({ data: opts.openSessions ?? [] });
+        },
+        expire(id) {
+          recorded.push({ call: "checkout.sessions.expire", args: [id] });
+          return Promise.resolve({ id });
+        },
       },
     },
     billingPortal: {
@@ -95,6 +115,8 @@ function makeDeps(
     priceListed?: boolean;
     priceCreateFails?: boolean;
     claimWinner?: string;
+    liveSubscriptions?: Array<{ id: string; status: string }>;
+    openSessions?: Array<{ id: string }>;
   } = {},
 ): OperatorBillingDeps & { claims: string[] } {
   const claims: string[] = [];
@@ -205,11 +227,18 @@ Deno.test("remaining trial above Stripe's 48h floor is passed through; below it,
   assert(!("trial_end" in params.subscription_data));
 });
 
-Deno.test("trialEndSeconds: the 48h boundary itself", () => {
-  const at = new Date(NOW + TRIAL_MIN_REMAINING_MS).toISOString();
-  assertEquals(trialEndSeconds(at, NOW), Math.floor(Date.parse(at) / 1000));
-  const under = new Date(NOW + TRIAL_MIN_REMAINING_MS - 1000).toISOString();
-  assertEquals(trialEndSeconds(under, NOW), null);
+Deno.test("trialEndSeconds: the floor carries a margin — exactly 48h is already too late", () => {
+  // A trial_end minted at exactly Stripe's 48h floor is UNDER it by the
+  // time the request lands (transit latency, clock skew), and Stripe then
+  // rejects the whole session — the Subscribe button failing for exactly
+  // the operators closest to needing it (adversarial review).
+  const atFloor = new Date(NOW + TRIAL_MIN_REMAINING_MS).toISOString();
+  assertEquals(trialEndSeconds(atFloor, NOW), null);
+  const justUnderMargin = new Date(NOW + TRIAL_MIN_REMAINING_MS + TRIAL_FLOOR_MARGIN_MS - 1000)
+    .toISOString();
+  assertEquals(trialEndSeconds(justUnderMargin, NOW), null);
+  const clear = new Date(NOW + TRIAL_MIN_REMAINING_MS + TRIAL_FLOOR_MARGIN_MS).toISOString();
+  assertEquals(trialEndSeconds(clear, NOW), Math.floor(Date.parse(clear) / 1000));
   assertEquals(trialEndSeconds("not a date", NOW), null);
   assertEquals(trialEndSeconds(null, NOW), null);
 });
@@ -330,4 +359,70 @@ Deno.test("unknown action and missing operator are refused", async () => {
     handleOperatorBilling(OP_ID, { action: "checkout" }, makeDeps(null, []))
   );
   assert(gone instanceof HttpError && gone.status === 403);
+});
+
+// ── Stripe is the truth at mint time (adversarial review: pay-twice) ──────
+
+Deno.test("a live subscription at STRIPE refuses checkout even when the DB row says none", async () => {
+  // The binding webhook can be behind or (owner-actions §1a) failing, and
+  // during that window Subscribe is still on screen after a successful
+  // payment. Asking Stripe directly is what stops the second $49/month.
+  const recorded: Recorded[] = [];
+  const deps = makeDeps(
+    operatorRow({ platform_customer_id: "cus_have" }),
+    recorded,
+    { liveSubscriptions: [{ id: "sub_paid", status: "active" }] },
+  );
+  const err = await assertRejects(() =>
+    handleOperatorBilling(OP_ID, { action: "checkout" }, deps)
+  );
+  assert(err instanceof HttpError && err.status === 409, `got ${String(err)}`);
+  assertEquals((err as HttpError).code, "already_subscribed");
+  assert(
+    !recorded.some((r) => r.call === "checkout.sessions.create"),
+    "a session was minted for an already-subscribed customer",
+  );
+});
+
+Deno.test("only truly dead Stripe subscriptions let a checkout proceed", async () => {
+  const recorded: Recorded[] = [];
+  const deps = makeDeps(
+    operatorRow({ platform_customer_id: "cus_have" }),
+    recorded,
+    {
+      liveSubscriptions: [
+        { id: "sub_old", status: "canceled" },
+        { id: "sub_never", status: "incomplete_expired" },
+      ],
+    },
+  );
+  const res = await handleOperatorBilling(OP_ID, { action: "checkout" }, deps);
+  assert(res.url, "cancelled history blocked an honest re-subscribe");
+});
+
+Deno.test("stale OPEN sessions are expired before a new one is minted — one completable checkout at a time", async () => {
+  // Sessions stay completable for 24h: back-out-and-click-again must not
+  // leave two sessions that can BOTH complete into two subscriptions.
+  const recorded: Recorded[] = [];
+  const deps = makeDeps(
+    operatorRow({ platform_customer_id: "cus_have" }),
+    recorded,
+    { openSessions: [{ id: "cs_stale1" }, { id: "cs_stale2" }] },
+  );
+  await handleOperatorBilling(OP_ID, { action: "checkout" }, deps);
+  const order = recorded.map((r) => r.call);
+  const expires = recorded.filter((r) => r.call === "checkout.sessions.expire").map((r) => r.args[0]);
+  assertEquals(expires, ["cs_stale1", "cs_stale2"]);
+  assert(
+    order.lastIndexOf("checkout.sessions.expire") < order.indexOf("checkout.sessions.create"),
+    "the new session was minted before the stale ones were expired",
+  );
+});
+
+Deno.test("a FRESH customer skips the Stripe-truth checks — it can hold nothing yet", async () => {
+  const recorded: Recorded[] = [];
+  const deps = makeDeps(operatorRow(), recorded); // no platform_customer_id
+  await handleOperatorBilling(OP_ID, { action: "checkout" }, deps);
+  assert(!recorded.some((r) => r.call === "subscriptions.list"));
+  assert(!recorded.some((r) => r.call === "checkout.sessions.list"));
 });

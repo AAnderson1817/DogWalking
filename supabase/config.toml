@@ -169,10 +169,19 @@ site_url = "http://127.0.0.1:3000"
 #
 # Staging and production have their own copy of this list in a dashboard no
 # file here can write; `docs/dev/owner-actions.md` carries it.
+#
+# `/claim/*` is where an invited client's confirmation email must land
+# (review H31): claim-signup creates the account unconfirmed, ClaimInvite
+# resends the confirmation with `emailRedirectTo: <the claim URL>`, and
+# without the wildcard GoTrue's silent site_url fallback drops the person on
+# "/" — where a role-less signed-in user is routed to the OPERATOR
+# onboarding form, and completing it dead-ends the invite for good.
 additional_redirect_urls = [
   "https://127.0.0.1:3000",
   "http://127.0.0.1:3000/reset-password",
   "https://127.0.0.1:3000/reset-password",
+  "http://127.0.0.1:3000/claim/*",
+  "https://127.0.0.1:3000/claim/*",
 ]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600

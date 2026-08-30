@@ -66,10 +66,20 @@ function makeDeps(): PlatformWebhookDeps {
       if (error) throw new Error("stripe_events mark-processed failed", { cause: error });
     },
 
+    async findOperatorById(id) {
+      const { data, error } = await db
+        .from("operators")
+        .select("id, platform_subscription_id, platform_subscription_status")
+        .eq("id", id)
+        .maybeSingle();
+      if (error) throw new Error("operator lookup failed", { cause: error });
+      return data;
+    },
+
     async findOperatorBySubscription(subscriptionId) {
       const { data, error } = await db
         .from("operators")
-        .select("id, platform_subscription_id")
+        .select("id, platform_subscription_id, platform_subscription_status")
         .eq("platform_subscription_id", subscriptionId)
         .maybeSingle();
       if (error) throw new Error("operator lookup failed", { cause: error });
@@ -79,7 +89,7 @@ function makeDeps(): PlatformWebhookDeps {
     async findOperatorByCustomer(customerId) {
       const { data, error } = await db
         .from("operators")
-        .select("id, platform_subscription_id")
+        .select("id, platform_subscription_id, platform_subscription_status")
         .eq("platform_customer_id", customerId)
         .maybeSingle();
       if (error) throw new Error("operator lookup failed", { cause: error });

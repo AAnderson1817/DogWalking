@@ -112,6 +112,14 @@ export default function Onboard() {
         Set up your walking business. Two default services (30 and 60 minute
         private walks) are created for you.
       </p>
+      {/* The wrong-form trap (H31): a signed-in user with no persona lands
+          here whether they are a new WALKER or an invited PET OWNER whose
+          confirmation link lost its way — and completing this form as the
+          latter mints an operator row that dead-ends their invite for good. */}
+      <p style={{ color: "var(--text-2)", fontSize: "var(--fs-14)" }}>
+        Invited by your dog walker? Don't fill this in — open the invite link
+        from your email instead; this form creates a walker account.
+      </p>
       <Card style={{ marginTop: "var(--s-4)" }}>
         <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: "var(--s-3)" }}>
           <Input

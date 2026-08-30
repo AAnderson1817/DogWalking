@@ -174,14 +174,29 @@ jobs:
           #
           # `seen` guards the other direction: an endpoint that ignores `page`
           # would otherwise be rescanned to the bound and still report absence.
+          # Exit 0 with the id on stdout (empty = genuinely absent); exit 9
+          # when the LOOKUP failed — non-2xx, or a body with no users array.
+          # The distinction became load-bearing with H31: two security
+          # assertions below read this function, and a 401 body read as
+          # "absent" would pass the dead-token check while checking nothing —
+          # the green-but-empty class this repo's log records four times
+          # (adversarial review). Warnings go to stderr because stdout is the
+          # captured return value.
           user_id_for() {
-            local page=1 body id first seen=""
+            local page=1 code lbody id first seen=""
+            lbody=$(mktemp)
             while [ "$page" -le 50 ]; do
-              body=$(admin "$base/auth/v1/admin/users?page=$page&per_page=100")
-              id=$(printf '%s' "$body" | jq -r --arg e "$1" '.users[]? | select(.email==$e) | .id' | head -1)
+              code=$(admin -o "$lbody" -w '%{http_code}' "$base/auth/v1/admin/users?page=$page&per_page=100")
+              case "$code" in
+                2*) ;;
+                *) echo "auth user lookup failed: GET admin/users page $page -> HTTP $code" >&2; return 9 ;;
+              esac
+              jq -e '.users | type == "array"' "$lbody" >/dev/null 2>&1 \
+                || { echo "auth user lookup: page $page carried no users array" >&2; return 9; }
+              id=$(jq -r --arg e "$1" '.users[]? | select(.email==$e) | .id' "$lbody" | head -1)
               [ -n "$id" ] && { printf '%s' "$id"; return 0; }
-              [ "$(printf '%s' "$body" | jq -r '.users | length')" -eq 0 ] && return 0
-              first=$(printf '%s' "$body" | jq -r '.users[0].id // empty')
+              [ "$(jq -r '.users | length' "$lbody")" -eq 0 ] && return 0
+              first=$(jq -r '.users[0].id // empty' "$lbody")
               [ -n "$first" ] && [ "$first" = "$seen" ] && return 0
               seen=$first
               page=$((page + 1))
@@ -278,7 +293,12 @@ jobs:
           if [ "$ncode" != "409" ] || ! grep -q '"not_found"' "$neg"; then
             echo "FAIL: a dead invite token did not refuse as not_found"; exit 1
           fi
-          if [ -n "$(user_id_for "$cl_email")" ]; then
+          # Assigned (not tested inline) so that if the refused signup DID
+          # create an account, the EXIT trap holds its id and deletes it —
+          # and a failed LOOKUP is its own loud failure, never "absent".
+          cl_uid=$(user_id_for "$cl_email") \
+            || { echo "FAIL: could not verify the refused signup created no account — the auth lookup itself failed"; exit 1; }
+          if [ -n "$cl_uid" ]; then
             echo "FAIL: the refused signup created an account anyway"; exit 1
           fi
 
@@ -287,19 +307,35 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"token\":\"$invite\",\"email\":\"$cl_email\",\"password\":\"$pass\"}")
           echo "claim-signup -> HTTP $cscode"; cat "$cs"; echo
-          [ "$cscode" = "200" ] || { echo "FAIL: claim-signup refused a live invite"; exit 1; }
-          cl_uid=$(user_id_for "$cl_email")
+          if [ "$cscode" != "200" ]; then
+            # A crash AFTER createUser can leave a half-created account behind
+            # a non-200: give the EXIT trap the id so it can clean up.
+            cl_uid=$(user_id_for "$cl_email") || true
+            echo "FAIL: claim-signup refused a live invite"; exit 1
+          fi
+          cl_uid=$(user_id_for "$cl_email") \
+            || { echo "FAIL: claim-signup reported success but the auth lookup failed — cannot verify the account"; exit 1; }
           [ -n "$cl_uid" ] || { echo "FAIL: claim-signup reported success but created no account"; exit 1; }
           # The function creates the account unconfirmed (typing an address
           # proves nothing — the frontend resends the confirmation email).
           # CI has no inbox, so the admin API stands in for clicking the link;
-          # everything before this line went through the public path.
-          admin -X PUT "$base/auth/v1/admin/users/$cl_uid" -H "Content-Type: application/json" \
-            -d '{"email_confirm":true}' >/dev/null
-          tok=$(curl -sS -X POST "$base/auth/v1/token?grant_type=password" \
+          # everything before this line went through the public path. The PUT
+          # is newly load-bearing (pre-H31 the create itself confirmed), so
+          # its failure is named HERE rather than surfacing two lines later
+          # as a bare sign-in failure.
+          conf=$(mktemp)
+          confcode=$(admin -o "$conf" -w '%{http_code}' -X PUT "$base/auth/v1/admin/users/$cl_uid" \
+            -H "Content-Type: application/json" -d '{"email_confirm":true}')
+          case "$confcode" in
+            2*) ;;
+            *) echo "FAIL: could not confirm the fixture email: HTTP $confcode — $(jq -r '.error_description // .msg // .message // "no message"' "$conf")"; exit 1 ;;
+          esac
+          tokbody=$(mktemp)
+          tokcode=$(curl -sS -o "$tokbody" -w '%{http_code}' -X POST "$base/auth/v1/token?grant_type=password" \
             -H "apikey: $ANON_KEY" -H "Content-Type: application/json" \
-            -d "{\"email\":\"$cl_email\",\"password\":\"$pass\"}" | jq -r '.access_token')
-          [ -n "$tok" ] && [ "$tok" != "null" ] || { echo "FAIL: client sign-in"; exit 1; }
+            -d "{\"email\":\"$cl_email\",\"password\":\"$pass\"}")
+          tok=$(jq -r '.access_token // empty' "$tokbody")
+          [ -n "$tok" ] || { echo "FAIL: client sign-in: HTTP $tokcode — $(jq -r '.error_description // .msg // .message // "no message"' "$tokbody")"; exit 1; }
           echo "::add-mask::$tok"
           as_client() { curl -sS -H "apikey: $ANON_KEY" -H "Authorization: Bearer $tok" "$@"; }
 

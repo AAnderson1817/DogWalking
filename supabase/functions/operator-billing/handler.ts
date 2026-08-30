@@ -32,6 +32,13 @@ export interface PlatformStripe {
       metadata: { operator_id: string };
     }): Promise<{ id: string }>;
   };
+  subscriptions: {
+    list(params: {
+      customer: string;
+      status: "all";
+      limit: number;
+    }): Promise<{ data: Array<{ id: string; status: string }> }>;
+  };
   prices: {
     list(params: {
       lookup_keys: string[];
@@ -48,6 +55,12 @@ export interface PlatformStripe {
       create(
         params: ReturnType<typeof operatorCheckoutParams>,
       ): Promise<{ id: string; url: string | null }>;
+      list(params: {
+        customer: string;
+        status: "open";
+        limit: number;
+      }): Promise<{ data: Array<{ id: string }> }>;
+      expire(id: string): Promise<{ id: string }>;
     };
   };
   billingPortal: {
@@ -56,6 +69,10 @@ export interface PlatformStripe {
     };
   };
 }
+
+/** Anything Stripe could still collect money for. Only canceled and the two
+ * incomplete states are safely "not subscribed". */
+const LIVE_STRIPE_STATUSES = new Set(["active", "trialing", "past_due", "unpaid", "paused"]);
 
 export interface OperatorBillingDeps {
   getOperator(id: string): Promise<OperatorBillingRow | null>;
@@ -137,6 +154,7 @@ export async function handleOperatorBilling(
   }
 
   let customerId = op.platform_customer_id;
+  let freshCustomer = false;
   if (!customerId) {
     const customer = await deps.stripe.customers.create({
       email: op.email ?? undefined,
@@ -147,6 +165,40 @@ export async function handleOperatorBilling(
     // losing the checkout link is recoverable, losing which customer is ours
     // is not.
     customerId = await deps.claimCustomerId(operatorId, customer.id);
+    freshCustomer = customerId === customer.id;
+  }
+
+  if (!freshCustomer) {
+    // The DB row can be BEHIND Stripe — the binding webhook not yet
+    // delivered, or (owner-actions §1a) failing while its secret is
+    // missing — and during that window the Subscribe button is still on
+    // screen after a successful payment. Stripe is the truth at mint time:
+    // any subscription it could still collect for means the answer is the
+    // portal, not a second checkout (adversarial review: the pay-twice
+    // path).
+    const existing = await deps.stripe.subscriptions.list({
+      customer: customerId,
+      status: "all",
+      limit: 10,
+    });
+    if (existing.data.some((s) => LIVE_STRIPE_STATUSES.has(s.status))) {
+      throw new HttpError(
+        409,
+        "already_subscribed",
+        "Stripe already holds a live Sanpo subscription for you — use Manage billing. If the app disagrees, it catches up as soon as Stripe's confirmation lands.",
+      );
+    }
+    // One completable checkout at a time. Sessions stay completable for
+    // 24h, so back-out-and-click-again would otherwise leave two sessions
+    // that can BOTH complete into two $49 subscriptions.
+    const open = await deps.stripe.checkout.sessions.list({
+      customer: customerId,
+      status: "open",
+      limit: 10,
+    });
+    for (const stale of open.data) {
+      await deps.stripe.checkout.sessions.expire(stale.id);
+    }
   }
 
   const priceId = await ensurePrice(deps.stripe);

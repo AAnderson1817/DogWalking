@@ -11,10 +11,12 @@
 // 'processing' past its lease is taken over by the next retry.
 
 // The only imports in this module: `handler.ts` is otherwise entirely
-// dependency-injected. Constants and a pure formatter, not dependencies —
-// and sharing the metadata keys with their writer is the point (review L23).
+// dependency-injected. Constants and pure helpers, not dependencies —
+// and sharing the metadata keys with their writer is the point (review L23),
+// as is sharing the invoice shape with platform-webhook.
 import { MAX_TOPUP_CREDITS, STRIPE_META } from "../_lib/stripe_metadata.ts";
 import { formatMoney } from "../_lib/money.ts";
+import { invoiceSubscriptionId } from "../_lib/stripe_shapes.ts";
 
 export interface StripeEventLike {
   id: string;
@@ -796,12 +798,6 @@ function asString(v: unknown): string | null {
 
 function numberOr(v: unknown, fallback: number): number {
   return typeof v === "number" && Number.isFinite(v) ? v : fallback;
-}
-
-function invoiceSubscriptionId(obj: Record<string, unknown>): string | null {
-  if (typeof obj.subscription === "string" && obj.subscription) return obj.subscription;
-  const parent = obj.parent as { subscription_details?: { subscription?: string } } | undefined;
-  return parent?.subscription_details?.subscription ?? null;
 }
 
 function subscriptionPriceId(obj: Record<string, unknown>): string | null {

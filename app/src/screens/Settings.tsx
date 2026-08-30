@@ -34,7 +34,7 @@ import {
 } from "@/lib/api";
 import type { Operators, Plans, ServiceTypes } from "@/lib/types";
 import { dateLocal, money } from "@/lib/format";
-import { PLATFORM_PRICE_PENCE } from "@/lib/operator-access";
+import { PLATFORM_PRICE_PENCE, TRIAL_KEEP_FLOOR_MS } from "@/lib/operator-access";
 import { parseVisitPriceInput } from "@/lib/visit-price";
 import { useDocumentTitle } from "@/lib/use-document-title";
 import { useAuth } from "@/lib/auth-context";
@@ -569,6 +569,12 @@ function SubscriptionSection({
   const status = operator.platform_subscription_status;
   const trialEndsMs = operator.trial_ends_at ? Date.parse(operator.trial_ends_at) : NaN;
   const inTrial = Number.isFinite(trialEndsMs) && Date.now() < trialEndsMs;
+  // Stripe refuses a trial_end under 48h out, so the checkout DROPS the
+  // trial inside that window and billing starts at once — the sentence
+  // below must say so, or a money screen promises days it will not deliver
+  // (H12's truthfulness rule; the floor is pinned against the edge
+  // function's by platform-price.test.ts).
+  const keepsTrial = inTrial && trialEndsMs - Date.now() >= TRIAL_KEEP_FLOOR_MS;
   const hasBilling = Boolean(operator.platform_customer_id);
   const live = status === "active" || status === "past_due" || status === "paused";
 
@@ -580,8 +586,10 @@ function SubscriptionSection({
     ? "Paused. Resume it from Manage billing."
     : status === "cancelled"
     ? "Cancelled."
-    : inTrial
+    : keepsTrial
     ? `Free trial until ${dateLocal(operator.trial_ends_at)} — subscribe any time; your trial days are kept.`
+    : inTrial
+    ? `Free trial until ${dateLocal(operator.trial_ends_at)} — subscribing this close to the end starts billing right away.`
     : "Your free trial has ended.";
 
   async function open(kind: "checkout" | "portal") {

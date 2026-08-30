@@ -38,6 +38,34 @@ export default function Signup() {
     else if (!auth.roleError) navigate("/onboard", { replace: true });
   }, [auth.loading, auth.session, auth.role, auth.roleError, navigate]);
 
+  // Signed in but role resolution FAILED: none of the redirects above fired,
+  // and leaving the live form on screen makes "submit again" the visible
+  // affordance — which re-signs-up the very account whose lookup blipped.
+  // Same retry treatment SignIn gives the identical state.
+  if (auth.session && auth.role === null && auth.roleError) {
+    return (
+      <div className="page" style={{ display: "grid", placeItems: "center" }}>
+        <div style={{ width: "100%", maxWidth: 400 }}>
+          <h1 className="sr-only">Start your Sanpo free trial</h1>
+          <Card>
+            <StateField
+              tone="information"
+              label="Connection interrupted"
+              title="Couldn't load your account"
+              detail="You're signed in, but we couldn't check your account. Retry rather than signing up again."
+              role="alert"
+              action={
+                <Button disabled={busy} onClick={() => void auth.refreshRole()}>
+                  Retry
+                </Button>
+              }
+            />
+          </Card>
+        </div>
+      </div>
+    );
+  }
+
   async function submit(e: FormEvent) {
     e.preventDefault();
     setError(null);

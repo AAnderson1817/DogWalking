@@ -8,15 +8,21 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { PLATFORM_PRICE_PENCE, TRIAL_DAYS } from "../src/lib/operator-access.js";
+import { PLATFORM_PRICE_PENCE, TRIAL_DAYS, TRIAL_KEEP_FLOOR_MS } from "../src/lib/operator-access.js";
 
 const REPO = resolve(__dirname, "..", "..");
 
 function constFrom(file: string, name: string): number {
+  // Accepts a literal OR simple arithmetic (48 * 60 * 60 * 1000): the RHS is
+  // validated to digits/operators/whitespace before being evaluated.
   const src = readFileSync(resolve(REPO, file), "utf8");
-  const m = src.match(new RegExp(`export const ${name} = (\\d+);`));
+  const m = src.match(new RegExp(`export const ${name} = ([^;]+);`));
   if (!m) throw new Error(`${name} not found in ${file} — the parity this test pins is gone`);
-  return Number(m[1]);
+  const expr = m[1].trim();
+  if (!/^[\d\s*+()-]+$/.test(expr)) {
+    throw new Error(`${name} in ${file} is not a plain numeric expression: ${expr}`);
+  }
+  return new Function(`return (${expr});`)() as number;
 }
 
 describe("platform price parity", () => {
@@ -41,5 +47,19 @@ describe("platform price parity", () => {
       "utf8",
     );
     expect(migration).toContain(`interval '${TRIAL_DAYS} days'`);
+  });
+});
+
+describe("trial floor parity", () => {
+  it("the sentence's floor equals the checkout's floor", () => {
+    // Settings stops promising "your trial days are kept" exactly where the
+    // edge function stops passing trial_end through — two constants in two
+    // runtimes, one rule.
+    const min = constFrom("supabase/functions/operator-billing/params.ts", "TRIAL_MIN_REMAINING_MS");
+    const margin = constFrom(
+      "supabase/functions/operator-billing/params.ts",
+      "TRIAL_FLOOR_MARGIN_MS",
+    );
+    expect(TRIAL_KEEP_FLOOR_MS).toBe(min + margin);
   });
 });

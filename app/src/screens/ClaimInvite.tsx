@@ -22,6 +22,7 @@ import {
   claimInvite,
   claimSignup,
   InviteClaimError,
+  inviteUrlFor,
   previewInviteAuthed,
   type InvitePreview,
 } from "@/lib/api";
@@ -114,8 +115,21 @@ export default function ClaimInvite() {
           // Confirmations are on and the admin-created account is
           // unconfirmed — admin creation sends no email, so ask GoTrue to
           // send the confirmation now. The claim resumes when they return
-          // signed in.
-          await supabase.auth.resend({ type: "signup", email });
+          // signed in — which is why the redirect points BACK AT THIS
+          // INVITE: without it the link lands on site_url ("/"), a
+          // role-less signed-in user is routed to /onboard, and completing
+          // that form mints an OPERATOR row that permanently dead-ends the
+          // invite (adversarial review). GoTrue silently falls back to
+          // site_url when the URL is not allowlisted, so the runbook adds
+          // APP_BASE_URL/claim/* to the redirect allowlist.
+          await supabase.auth.resend({
+            type: "signup",
+            email,
+            // inviteUrlFor, not location.href: the canonical claim URL with
+            // no stray query or fragment, matching the /claim/* allowlist
+            // wildcard shape.
+            options: { emailRedirectTo: inviteUrlFor(token) },
+          });
           setStage("check-email");
           return;
         }

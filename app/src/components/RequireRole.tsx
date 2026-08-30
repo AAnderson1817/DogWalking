@@ -11,7 +11,25 @@ import { BillingGraceBanner, BillingLocked } from "./BillingLocked";
 import { LoadError } from "./LoadError";
 import { LoadingState } from "./StateField";
 
-export function RequireRole({ role, children }: { role: Exclude<Role, null>; children: ReactNode }) {
+export function RequireRole({
+  role,
+  children,
+  deferLock = false,
+}: {
+  role: Exclude<Role, null>;
+  children: ReactNode;
+  /** Walk Mode's flag (operatorBare in App.tsx). While a walk is in
+   * progress, the gate must not fire: RequireRole re-renders on every auth
+   * event (a token refresh lands ~hourly), so a trial that ends MID-WALK
+   * would otherwise swap Walk Mode for the wall with no confirm — GPS stops
+   * silently, and END WALK, which is also the BILLING moment, becomes
+   * unreachable. That converts the operator's lapse into the client's harm,
+   * which the gate's own scoping rule forbids. The lock lands on the next
+   * navigation instead; the grace banner is also withheld here, because a
+   * router link above an in-progress walk is an unguarded exit (the class
+   * fix(walk-durability) closed for back-swipe). */
+  deferLock?: boolean;
+}) {
   const auth = useAuth();
   const location = useLocation();
 
@@ -51,7 +69,7 @@ export function RequireRole({ role, children }: { role: Exclude<Role, null>; chi
   // because the walker's own Sanpo bill failed. operatorAccess fails OPEN on
   // anything unreadable, so a transient blip can never masquerade as a
   // lapsed subscription (the roleError lesson, applied to billing).
-  if (role === "operator") {
+  if (role === "operator" && !deferLock) {
     const access = operatorAccess(auth.operatorBilling, Date.now());
     if (access === "locked") return <BillingLocked />;
     if (access === "grace") {

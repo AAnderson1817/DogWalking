@@ -4487,9 +4487,13 @@ begin
     '{"sub":"99999999-0000-4000-a000-000000003101","role":"authenticated","email":"h31-op1@sanpo.test"}', true);
   set local session authorization authenticated;
   begin
-    insert into operators (id, business_name, display_name, email, terms_version, terms_accepted_at)
+    -- Every column Onboard sends, including phone at an explicit NULL: the
+    -- key alone puts the column in PostgREST's INSERT list, which requires
+    -- the privilege — omitting it here let a grant list without phone pass
+    -- every gate while breaking every real signup (adversarial review).
+    insert into operators (id, business_name, display_name, email, phone, terms_version, terms_accepted_at)
     values ('99999999-0000-4000-a000-000000003101', 'H31 Walks', 'H31', 'h31-op1@sanpo.test',
-            '2026-08-29', now());
+            null, '2026-08-29', now());
   exception when others then
     raise exception 'FAIL: the operators INSERT list broke signup in Onboard''s shape: % (%)', sqlerrm, sqlstate;
   end;
@@ -4590,6 +4594,15 @@ begin
           'H31 Bound', 'h31-a@sanpo.test', 'invited', '99999999-0000-4000-e000-000000003103'),
          ('99999999-0000-4000-c000-000000003104', '99999999-0000-4000-a000-000000000001',
           'H31 Open', 'h31-a@sanpo.test', 'invited', '99999999-0000-4000-e000-000000003104');
+  -- Email NULL is an ordinary product state (Roster stores '' as null), and
+  -- both ladders must ADMIT any address for it. Undriven, this was the one
+  -- refuse-vs-admit divergence smoke could not see: a drifted guard (plain
+  -- `is distinct from` without the not-null wrapper) turns every email-less
+  -- invite into email_mismatch at signup while the claim accepts it
+  -- (adversarial review).
+  insert into clients (id, operator_id, full_name, status, invite_token)
+  values ('99999999-0000-4000-c000-000000003105', '99999999-0000-4000-a000-000000000001',
+          'H31 Unbound', 'invited', '99999999-0000-4000-e000-000000003105');
   insert into auth.users (id, email) values
     ('99999999-0000-4000-a000-000000003111', 'h31-a@sanpo.test'),
     ('99999999-0000-4000-a000-000000003112', 'h31-b@sanpo.test');
@@ -4631,6 +4644,20 @@ begin
   if fn_invite_signup_check('99999999-0000-4000-e000-0000000dead1', 'h31-a@sanpo.test')
        <> 'not_found' then
     raise exception 'FAIL: an unknown token was not not_found';
+  end if;
+
+  -- The unbound invite admits ANY address, on both sides of the parity.
+  v_check := fn_invite_signup_check('99999999-0000-4000-e000-000000003105', 'anyone@sanpo.test');
+  if v_check <> 'claimed' then
+    raise exception 'FAIL: an email-less invite was refused at signup as %', v_check;
+  end if;
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000003112","role":"authenticated","email":"h31-b@sanpo.test"}', true);
+  set local session authorization authenticated;
+  select c.outcome into v_claim from fn_claim_invite('99999999-0000-4000-e000-000000003105') c;
+  reset session authorization;
+  if v_claim <> 'claimed' then
+    raise exception 'FAIL: email-less parity broke — check said claimed, claim said %', v_claim;
   end if;
 
   -- The happy path, case- and whitespace-insensitive like the claim — and

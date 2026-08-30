@@ -154,7 +154,11 @@ Staging stays exactly as it is — it remains your test bed. Production is a
    `invoice.payment_failed`. Copy ITS live signing secret into
    `STRIPE_PLATFORM_WEBHOOK_SECRET` — never the same value as step 3's. The
    $49/month Price needs no dashboard step: `operator-billing` creates it
-   lazily under the lookup key `sanpo_operator_monthly_4900`.
+   lazily under the lookup key `sanpo_operator_monthly_4900`. Leave
+   Settings → Billing → Subscriptions and emails → "if all retries fail" at
+   the default **cancel the subscription** — the handler maps `unpaid` to
+   past_due (grace), so "mark as unpaid" would leave a non-payer with full
+   access forever.
 4. Settings → Billing → **Customer portal → activate** (live mode has its
    own toggle; `/portal/billing` depends on it) — on the platform account as
    well, for the operator's own subscription portal.

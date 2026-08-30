@@ -33,10 +33,14 @@
 
 -- ── 1. Trial + platform subscription state ─────────────────────────────────
 
--- A volatile default on ADD COLUMN is evaluated for every existing row at
--- migration time, so every pre-0045 operator gets a fresh 14 days from the
--- moment this deploys. Deliberate: the fair start for a gate that did not
--- exist when they signed up, and the same clock a brand-new operator gets.
+-- `now()` is STABLE, so Postgres evaluates the default ONCE and stores it as
+-- the missing-value fast path (attmissingval — no table rewrite): every
+-- pre-0045 operator reads the identical value, migration time + 14 days.
+-- Deliberate: the fair start for a gate that did not exist when they signed
+-- up, and the same clock a brand-new operator gets (whose rows evaluate the
+-- default at their own INSERT). An earlier draft of this comment attributed
+-- the same outcome to per-row evaluation of a volatile default, which is the
+-- wrong mechanism — verified against a live scratch table in review.
 alter table operators
   add column trial_ends_at timestamptz not null
     default (now() + interval '14 days');
@@ -58,7 +62,7 @@ alter table operators
 comment on column operators.platform_customer_id is
   'Stripe Customer (cus_…) for the OPERATOR on Sanpo''s platform account — who pays the $49/month (review H31). Written by operator-billing before any checkout link is minted (the connect-onboarding persist-before-link rule).';
 comment on column operators.platform_subscription_id is
-  'Stripe Subscription (sub_…) on the platform account, bound by platform-webhook from the checkout session. One live subscription per operator.';
+  'Stripe Subscription (sub_…) on the platform account, bound by platform-webhook from the checkout session. One live subscription per operator. KEPT on cancellation as the tombstone the resurrection guard reads (platform-webhook rule 1).';
 comment on column operators.platform_subscription_status is
   'Mirror of the platform subscription''s Stripe status, mapped onto the existing enum (trialing counts as active). ''none'' means never subscribed — after trial_ends_at that reads as locked.';
 
@@ -128,7 +132,8 @@ comment on column invite_claim_attempts.attempted_by is
 -- No FOR UPDATE, unlike the claim: this is an advisory pre-flight, binds
 -- nothing, and the claim re-decides under its own row lock — while a lock
 -- here would hand the public claim-signup endpoint a way to serialise
--- writes against a client row it will never own.
+-- writes against a client row it will never own. The price of the unlocked
+-- read is the foreign_key_violation handler below.
 --
 -- Only REFUSALS are logged. A passing check is followed within moments by
 -- the real authenticated claim, which writes the 'claimed' row; logging the
@@ -178,9 +183,19 @@ begin
   end if;
 
   if v_outcome <> 'claimed' then
-    insert into invite_claim_attempts
-      (operator_id, client_id, attempted_by, attempted_email, outcome)
-    values (v_client.operator_id, v_client.id, null, v_email, v_outcome);
+    begin
+      insert into invite_claim_attempts
+        (operator_id, client_id, attempted_by, attempted_email, outcome)
+      values (v_client.operator_id, v_client.id, null, v_email, v_outcome);
+    exception when foreign_key_violation then
+      -- The unlocked read raced a concurrent DELETE of the client
+      -- (authenticated legitimately holds DELETE on clients): the row this
+      -- refusal was about no longer exists, so not_found is now the true
+      -- answer — and raising instead would turn a vanished client into a
+      -- 500 on a public endpoint, the exact raise path the 0039 design
+      -- ("refusals are RETURNED") exists to avoid.
+      return 'not_found';
+    end;
   end if;
 
   return v_outcome;
@@ -220,10 +235,18 @@ begin
     raise exception '0045: an operator can rewrite platform billing state — refusing';
   end if;
 
-  -- The other direction: signup must still work. A grant list that omits
-  -- what Onboard sends breaks every new operator at the door (and dropping
-  -- the terms pair would silently stop recording consent — H6).
-  if not has_column_privilege('authenticated', 'operators', 'business_name', 'insert')
+  -- The other direction: signup must still work — checked for EVERY column
+  -- Onboard sends, because a list that omits one breaks every new operator
+  -- at the door with a 42501 nothing else exercises (adversarial review:
+  -- the first draft checked three of the seven, and smoke's replay omitted
+  -- `phone`, so dropping phone from the grant would have passed every
+  -- gate). An explicit null still puts the column in PostgREST's INSERT
+  -- column list, which requires the privilege.
+  if not has_column_privilege('authenticated', 'operators', 'id', 'insert')
+     or not has_column_privilege('authenticated', 'operators', 'business_name', 'insert')
+     or not has_column_privilege('authenticated', 'operators', 'display_name', 'insert')
+     or not has_column_privilege('authenticated', 'operators', 'email', 'insert')
+     or not has_column_privilege('authenticated', 'operators', 'phone', 'insert')
      or not has_column_privilege('authenticated', 'operators', 'terms_version', 'insert')
      or not has_column_privilege('authenticated', 'operators', 'terms_accepted_at', 'insert') then
     raise exception '0045: the operators INSERT list broke signup — refusing';
