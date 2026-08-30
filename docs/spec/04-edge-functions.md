@@ -80,7 +80,11 @@ through the **single** `checkout.sessions.create` call —
   **saves no card**: the line item says nothing about off-session use, and a
   card saved under no stated per-visit terms is the state the setup branch
   refuses (its first draft saved it anyway; adversarial review caught the
-  bypass). Credits and amount must be positive integers, and a client with a
+  bypass). Credits and amount must be positive integers, credits at most
+  `MAX_TOPUP_CREDITS` (10,000 — past int4 the granting RPC could never
+  encode the value, so Checkout would collect money that can never become
+  credits; the webhook's parse enforces the same bound against
+  dashboard-crafted sessions), and a client with a
   live subscription is refused (`409 client_subscribed`): renewals sweep the
   balance through `fn_apply_rollover`, so a paid top-up for a plan client is
   money for credits the machinery is scheduled to destroy — the v1
@@ -88,11 +92,17 @@ through the **single** `checkout.sessions.create` call —
   would let it survive, and `fn_adjust_credits` remains the
   operator-judgment path.
 - `{ client_id, setup: true }` → `mode=setup`: card on file for a
-  pay-per-visit client, under a `custom_text` mandate naming each priced
-  service and its figure. Refused with `409 visit_price_missing` when no
-  service has a visit price — a card saved under no stated terms is an
-  off-session charge waiting to surprise somebody (H12), so the mandate is a
-  precondition, not decoration.
+  pay-per-visit client, under a `custom_text` mandate naming **every**
+  priced service and its figure — a capped list ("and N more") would let an
+  omitted service charge off-session at a figure never shown (Codex finding
+  on #76). Refused with `409 visit_price_missing` when no service has a
+  visit price, and `409 visit_price_mandate_too_long` when the complete
+  list cannot fit Checkout's 1200-char limit — incomplete disclosure never
+  quietly becomes partial disclosure. A card saved under un-stated terms is
+  an off-session charge waiting to surprise somebody (H12), so the complete
+  mandate is a precondition, not decoration. A top-up whose mandate cannot
+  be stated completely runs without saving the card, same as nothing
+  priced.
 
 Common to all three: ownership asserts, `requireAccount`, get/create the
 Stripe customer on the connected account (persist `stripe_customer_id`),
@@ -340,8 +350,10 @@ Body: `{ walk_id }` → assert walk `is_overage=true` and no live overage paymen
 `walks.overage_rate_pence` (the plan rate agreed when the walk was created),
 else `walks.visit_price_pence` (the service's cash price at creation — the
 pay-per-visit case; same `type='overage'` row and claim machinery, different
-wording and PI description), else the live `plans.overage_rate_pence` for
-walks with no snapshot at all — pre-0043 rows, and post-0044 walks created
+wording and PI description), else the live `plans.overage_rate_pence` — only while
+the plan's subscription is live (`active`/`paused`/`past_due`; a dead
+subscription's retained plan prices nothing) — for
+walks with no snapshot at all: pre-0043 rows, and post-0044 walks created
 with neither a plan nor a visit price whose client subscribed before
 completion (a deliberate fallback: no figure was agreed at creation, and
 refusing a now-subscribed client's walk would be worse). This line used to say "amount = client's

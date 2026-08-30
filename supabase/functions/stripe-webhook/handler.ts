@@ -13,7 +13,7 @@
 // The only imports in this module: `handler.ts` is otherwise entirely
 // dependency-injected. Constants and a pure formatter, not dependencies —
 // and sharing the metadata keys with their writer is the point (review L23).
-import { STRIPE_META } from "../_lib/stripe_metadata.ts";
+import { MAX_TOPUP_CREDITS, STRIPE_META } from "../_lib/stripe_metadata.ts";
 import { formatMoney } from "../_lib/money.ts";
 
 export interface StripeEventLike {
@@ -195,7 +195,12 @@ function parseTopupSession(
   const creditsRaw = meta[STRIPE_META.topupCredits];
   if (!creditsRaw) return null;
   const credits = Number(creditsRaw);
-  if (!Number.isInteger(credits) || credits <= 0) return null;
+  if (!Number.isInteger(credits) || credits <= 0 || credits > MAX_TOPUP_CREDITS) {
+    // Past the bound, fn_apply_topup's int parameter cannot encode the value:
+    // applying would 500 on every retry with the money already taken. Only a
+    // dashboard-crafted session can carry one (create-checkout refuses first).
+    return null;
+  }
   const pi = typeof obj.payment_intent === "string" ? obj.payment_intent : null;
   if (!pi) return null;
   const amount = obj.amount_total;

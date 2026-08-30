@@ -73,7 +73,7 @@ export function makeOverageDeps(
     async getClientBilling(clientId) {
       const { data, error } = await db
         .from("clients")
-        .select("full_name, stripe_customer_id, plan:plans(overage_rate_pence)")
+        .select("full_name, stripe_customer_id, subscription_status, plan:plans(overage_rate_pence)")
         .eq("id", clientId)
         .maybeSingle();
       if (error) throw new Error("client lookup failed");
@@ -82,6 +82,7 @@ export function makeOverageDeps(
       return {
         full_name: data.full_name,
         stripe_customer_id: data.stripe_customer_id,
+        subscription_status: data.subscription_status,
         plan,
       };
     },

@@ -4161,9 +4161,12 @@ declare
   v_w3   uuid := '99999999-0000-4000-f000-0000000000b3';
   v_w4   uuid := '99999999-0000-4000-f000-0000000000b4';
   v_w5   uuid := '99999999-0000-4000-f000-0000000000b5';
+  v_w6   uuid := '99999999-0000-4000-f000-0000000000b6';
   v_plan uuid := '99999999-0000-4000-e000-0000000000b1';
   v_clp  uuid := '99999999-0000-4000-c000-0000000000b3';
   v_propp uuid := '99999999-0000-4000-b000-0000000000b3';
+  v_clc  uuid := '99999999-0000-4000-c000-0000000000b4';
+  v_propc uuid := '99999999-0000-4000-b000-0000000000b4';
 begin
   reset session authorization;
 
@@ -4240,28 +4243,63 @@ begin
     raise exception 'FAIL: the healing edit rewrote an agreed snapshot';
   end if;
 
-  -- ── A plan client's un-snapshotted walk is never stamped ───────────────
+  -- ── A LIVE plan client's un-snapshotted walk is never stamped ──────────
   -- A pre-0043 row carries BOTH snapshots null even for a plan client, and
   -- charges correctly through the live plan-rate fallback. Stamping a visit
   -- price onto it would make the visit-price branch beat that fallback: a
   -- plan client billed the cash rate under a "per-visit" label their Stripe
-  -- mandate never mentioned. The backfill therefore skips clients on a plan.
+  -- mandate never mentioned. The backfill therefore skips clients whose
+  -- plan subscription is live.
   insert into plans (id, operator_id, name, credits_per_cycle, price_pence,
                      cycle, rollover_policy, overage_rate_pence)
   values (v_plan, v_op, 'PPV smoke plan', 10, 9000, 'monthly', 'none', 2200);
-  insert into clients (id, operator_id, full_name, status, plan_id)
-  values (v_clp, v_op, 'Plan Client PPV', 'active', v_plan);
+  insert into clients (id, operator_id, full_name, status, plan_id, subscription_status)
+  values (v_clp, v_op, 'Plan Client PPV', 'active', v_plan, 'active');
   insert into properties (id, operator_id, client_id, label)
   values (v_propp, v_op, v_clp, 'Home');
   insert into walks (id, operator_id, client_id, property_id, service_type_id,
                      scheduled_date, window_start, window_end, status, origin_date)
   values (v_w5, v_op, v_clp, v_propp, v_svc, current_date + 4, '09:00', '10:00',
           'scheduled', current_date + 4);
+  if (select overage_rate_pence from walks where id = v_w5) is distinct from 2200 then
+    raise exception 'FAIL: a live plan client''s walk did not snapshot the plan rate';
+  end if;
   -- Regress it to the pre-0043 shape: both snapshots null.
   update walks set overage_rate_pence = null, visit_price_pence = null where id = v_w5;
   update service_types set visit_price_pence = 3300 where id = v_svc;
   if (select visit_price_pence from walks where id = v_w5) is not null then
-    raise exception 'FAIL: a plan client''s walk was stamped with the cash visit price';
+    raise exception 'FAIL: a live plan client''s walk was stamped with the cash visit price';
+  end if;
+
+  -- ── A DEAD subscription's plan prices nothing (Codex finding, #76) ─────
+  -- customer.subscription.deleted keeps plan_id, so a cancelled client
+  -- walked as pay-per-visit would otherwise have every new walk stamped
+  -- with a rate whose Stripe mandate died with the subscription — while
+  -- their card-save mandate names visit prices. The plan rate applies only
+  -- while its subscription is live; the visit price takes over.
+  insert into clients (id, operator_id, full_name, status, plan_id, subscription_status)
+  values (v_clc, v_op, 'Cancelled Client PPV', 'active', v_plan, 'cancelled');
+  insert into properties (id, operator_id, client_id, label)
+  values (v_propc, v_op, v_clc, 'Home');
+  insert into walks (id, operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status, origin_date)
+  values (v_w6, v_op, v_clc, v_propc, v_svc, current_date + 5, '09:00', '10:00',
+          'scheduled', current_date + 5);
+  if (select overage_rate_pence from walks where id = v_w6) is not null then
+    raise exception 'FAIL: a cancelled client''s walk snapshotted the dead plan''s rate';
+  end if;
+  if (select visit_price_pence from walks where id = v_w6) is distinct from 3300 then
+    raise exception 'FAIL: a cancelled client''s walk did not take the visit price';
+  end if;
+  -- And the backfill covers them too: an unpriced scheduled walk of a
+  -- cancelled-with-plan client is stamped on the next price edit.
+  update walks set visit_price_pence = null where id = v_w6;
+  update service_types set visit_price_pence = 3400 where id = v_svc;
+  if (select visit_price_pence from walks where id = v_w6) is distinct from 3400 then
+    raise exception 'FAIL: the backfill skipped a cancelled-with-plan client''s walk';
+  end if;
+  if (select visit_price_pence from walks where id = v_w5) is not null then
+    raise exception 'FAIL: the backfill stamped a LIVE plan client''s walk';
   end if;
 
   -- ── A zero price is a misconfiguration, not "free" (0026 precedent) ─────

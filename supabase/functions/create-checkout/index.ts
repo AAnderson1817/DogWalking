@@ -109,16 +109,6 @@ serveFunction(async (req) => {
       });
     }
     pricedServices = (data ?? []) as PricedService[];
-    if (request.kind === "setup" && pricedServices.length === 0) {
-      // A card saved under no stated terms is an off-session charge waiting
-      // to surprise somebody (H12), so the mandate is a precondition, not
-      // decoration. Refuse BEFORE creating anything — create-plan's posture.
-      throw new HttpError(
-        409,
-        "visit_price_missing",
-        "Set a visit price in Settings first — the card-save form has to say what the card will be charged.",
-      );
-    }
   }
 
   const stripe = stripeClient();
@@ -160,6 +150,26 @@ serveFunction(async (req) => {
     operatorId: operator.id,
     base,
   };
+  const mandate = visitPriceMandate(pricedServices);
+  if (request.kind === "setup" && mandate.kind !== "ok") {
+    // A card saved under incomplete terms is an off-session charge waiting
+    // to surprise somebody (H12), so a COMPLETE mandate is a precondition,
+    // not decoration — refuse BEFORE creating anything (create-plan's
+    // posture). Two ways to lack one, two different fixes.
+    throw mandate.kind === "none"
+      ? new HttpError(
+        409,
+        "visit_price_missing",
+        "Set a visit price in Settings first — the card-save form has to say what the card will be charged.",
+      )
+      : new HttpError(
+        409,
+        "visit_price_mandate_too_long",
+        "Too many priced services to disclose on one card-save form — every price must be shown. " +
+          "Shorten service names or reduce how many services carry a visit price.",
+      );
+  }
+
   const params = request.kind === "subscription"
     ? subscriptionSessionParams({
       ...common,
@@ -172,12 +182,15 @@ serveFunction(async (req) => {
       ...common,
       credits: request.credits,
       amountPence: request.amountPence,
-      mandate: visitPriceMandate(pricedServices),
+      // Complete disclosure or no card save — an over-long mandate is
+      // treated exactly like no mandate here (the top-up itself still runs;
+      // its line item discloses the payment).
+      mandate: mandate.kind === "ok" ? mandate.text : null,
     })
     : setupSessionParams({
       ...common,
-      // Non-null: the setup branch refused above when nothing is priced.
-      mandate: visitPriceMandate(pricedServices)!,
+      // Narrowed above: setup refused unless the mandate is complete.
+      mandate: (mandate as { kind: "ok"; text: string }).text,
     });
 
   const session = await stripe.checkout.sessions.create(params, account);

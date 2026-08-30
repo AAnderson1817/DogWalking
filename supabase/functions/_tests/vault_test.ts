@@ -224,6 +224,8 @@ interface OverageOpts {
   infraFails?: boolean;
   /** null plan → no overage rate to charge (operator has configured nothing). */
   noPlan?: boolean;
+  /** clients.subscription_status; defaults to 'active' with a plan, 'none' without. */
+  subscriptionStatus?: string;
   /** null customer → checkout never completed for this client. */
   noCustomer?: boolean;
   /** resolveAccount throws → operator has not connected Stripe. */
@@ -282,6 +284,7 @@ function makeODeps(opts: OverageOpts = {}) {
       Promise.resolve({
         stripe_customer_id: opts.noCustomer ? null : "cus_1",
         plan: opts.noPlan ? null : { overage_rate_pence: 2200 },
+        subscription_status: opts.subscriptionStatus ?? (opts.noPlan ? "none" : "active"),
         full_name: "Amelia Hart",
       }),
     resolveAccount: () => {
@@ -541,6 +544,7 @@ Deno.test("the snapshotted plan rate wins over the live plan rate", async () => 
     Promise.resolve({
       stripe_customer_id: "cus_1",
       plan: { overage_rate_pence: 9900 },
+      subscription_status: "active",
       full_name: "Amelia Hart",
     });
   await chargeOverageForWalk("walk-1", deps);
@@ -596,6 +600,27 @@ Deno.test("a pre-snapshot walk still charges the live plan rate", async () => {
   assertEquals(piArgs.length, 1);
   assertEquals(piArgs[0].amountPence, 2200); // the mock's live plan rate
   assertEquals(piArgs[0].pricing, "plan_rate");
+});
+
+Deno.test("a DEAD subscription's retained plan prices nothing", async () => {
+  // customer.subscription.deleted keeps plan_id, so a cancelled client's
+  // un-snapshotted walk would otherwise bill a rate whose Stripe mandate
+  // died with the subscription (Codex finding on #76). It refuses instead —
+  // the operator's fix is a visit price, whose mandate the client's next
+  // card-save actually names.
+  const { deps, calls } = makeODeps({ subscriptionStatus: "cancelled" });
+  const result = await chargeOverageForWalk("walk-1", deps);
+  assertEquals(result.payment.status, "failed");
+  assertFalse(calls.includes("createPI"));
+  assert(calls.includes("notify:operator"));
+  assertFalse(calls.includes("notify:client"));
+});
+
+Deno.test("past_due keeps the plan's pricing — a live subscription whose payment failed", async () => {
+  const { deps, piArgs } = makeODeps({ subscriptionStatus: "past_due" });
+  await chargeOverageForWalk("walk-1", deps);
+  assertEquals(piArgs.length, 1);
+  assertEquals(piArgs[0].amountPence, 2200);
 });
 
 Deno.test("no plan, no snapshots → refusal names the fix and the operator only", async () => {

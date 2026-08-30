@@ -30,3 +30,16 @@ export const STRIPE_META = {
    * scopes the client by the event's account before granting anything. */
   topupCredits: "sanpo_topup_credits",
 } as const;
+
+/**
+ * Upper bound on one top-up's credit count, enforced by BOTH sides of the
+ * handshake: create-checkout refuses before Stripe collects anything, and
+ * stripe-webhook's parse treats a larger value as not-ours. The failure the
+ * bound prevents is asymmetric (Codex finding on #76): `fn_apply_topup`
+ * takes `p_credits int`, so a JavaScript integer past 2^31-1 passes every
+ * `Number.isInteger` check, Checkout collects the independently-valid
+ * amount, and then every webhook retry fails to ENCODE the RPC — the client
+ * charged forever, the credits never granted. 10,000 is a product bound
+ * (twenty-plus years of daily walks), not merely the int4 ceiling.
+ */
+export const MAX_TOPUP_CREDITS = 10_000;
