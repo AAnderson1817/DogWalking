@@ -29,7 +29,7 @@ assertions.
 
 | Table | Operator (`operator_id = auth.uid()`) | Client (own rows via `client_id = my_client_id()`) | anon |
 |---|---|---|---|
-| operators | select/update own row | select `display_name,business_name` of own operator only (view `v_my_operator`) | — |
+| operators | select own row; insert/update by **column list** (0045 — the INSERT list excludes the platform billing columns `trial_ends_at`/`platform_*` AND the Connect `stripe_*` columns, closing the self-grant hole a table-level grant left open) | select `display_name,business_name` of own operator only (view `v_my_operator`) | — |
 | clients | full CRUD | select own row; update own contact fields only (column grants) | — |
 | properties | full CRUD | select own; update `access_notes_public` only | — |
 | access_credentials | insert/update/delete metadata; **no select on `ciphertext`** | select own property's METADATA only (0030); **never `ciphertext`** | — |
@@ -126,10 +126,17 @@ four axes, all added in `0039`:
 
 | Control | Mechanism |
 | --- | --- |
-| Expiry | `clients.invite_expires_at`, defaulting to 14 days, checked in `fn_claim_invite` **and** `fn_preview_invite` |
+| Expiry | `clients.invite_expires_at`, defaulting to 14 days, checked in `fn_claim_invite` **and** `fn_preview_invite` — and pre-account in `fn_invite_signup_check` (0045) |
 | Revocation | `clients.invite_revoked_at`, set by `fn_revoke_invite` |
 | Reissue | `fn_rotate_invite` mints a new token, resets the window, clears revocation |
-| Attribution | every attempt against a matching token writes `invite_claim_attempts` |
+| Attribution | every attempt against a matching token writes `invite_claim_attempts` — including pre-account refusals from the signup pre-flight, with a null `attempted_by` (0045) |
+
+Since review H31 the ACCOUNT is created server-side: the public `claim-signup`
+edge function asks `fn_invite_signup_check` (service-role-only; mirrors the
+claim ladder exactly, smoke-pinned for parity) BEFORE `auth.admin.createUser`,
+so a dead invite refuses with no account created and public GoTrue signup is
+no longer load-bearing for invites. The claim itself stays authenticated
+`fn_claim_invite`, so binding, consent and attribution are unchanged.
 
 A claim that lands on the wrong person is undone with `fn_unbind_invite`,
 which severs the account and reissues in ONE statement — two statements leave a
