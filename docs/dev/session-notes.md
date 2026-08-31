@@ -129,6 +129,21 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   next statement collides with it and psql dies on a syntax error hundreds of
   lines before your assertion. Same class as the entry above: exit non-zero,
   nothing proved. Append the `;`.
+- **Tightening a validation rule silently invalidates other suites' fixtures.**
+  PR #85 added a push-service host allowlist; `push_delivery_test.ts` went red
+  immediately (its fixtures were arbitrary hosts) and was fixed. `concurrency.sh`
+  case 7 did NOT, because its assertion — "at most 10 rows" — was satisfied by
+  the nine seed rows alone: all ten concurrent registrations ERRORED, nothing
+  was inserted, and the case printed `ok (got 9)` locally and in CI. The rule
+  is not "grep for the fixture" — it is that **an assertion with a floor is
+  vacuous without a precondition**. Any case whose detector can be satisfied by
+  doing nothing needs an explicit "the thing under test actually happened"
+  check, run FIRST, labelled as a precondition (cases 1, 5 and 6 already do).
+- **A green tick is not a green run.** The above was found by reading the CI
+  job log, where the postgres *service container* log at the very end printed
+  ten `ERROR: … is not a push service` lines the job itself never surfaced.
+  After a change that could make a fixture invalid, read the log of the job
+  that exercises it rather than the conclusion.
 - **A sabotage can be red for the WRONG reason.** When several rules share one
   assertion, change exactly one of them. A userinfo-blind host parse written
   for PR #85 also dropped the suffix list, so it failed on "a real push service
