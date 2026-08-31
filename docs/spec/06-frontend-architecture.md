@@ -805,8 +805,14 @@ a switch belongs.
 `VITE_VAPID_PUBLIC_KEY` is optional, like `VITE_MAPBOX_TOKEN`. Minting the
 pair is an owner action; absent it, the UI says so and no device subscribes.
 
-Sign-out removes this device's registration BEFORE clearing the session, which
-is the opposite of the M8 outbox and snapshot cleanups beside it: those are
+Sign-out removes this device's registration BEFORE clearing the session, and
+BOUNDED: a promise that never settles is not a rejection, so a stalled
+unsubscribe or a hung RPC left the await pending forever and the button did
+nothing while the person walked away from a shared device still signed in
+(Codex review on PR #85). Three seconds, then sign out regardless — losing the
+cleanup is survivable and this is not, and the SIGNED_OUT transition retries
+the local half anyway. This is the opposite of the M8 outbox and snapshot
+cleanups beside it: those are
 local storage and need no caller, while `fn_remove_push_subscription` is
 scoped to the caller. Leaving the row behind means that on a shared device the
 next person's notifications reach a registration the previous person owns.

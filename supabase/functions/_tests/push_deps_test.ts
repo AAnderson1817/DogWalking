@@ -293,3 +293,69 @@ Deno.test("`transport` is claimed ONLY when a request was actually made", async 
   assertEquals(netCalls.length, 1, "the transport case must actually reach the network");
   assert(thrown instanceof Error, "a real transport failure still surfaces");
 });
+
+// ── Device health bookkeeping ────────────────────────────────────────────
+
+/** A `db` double whose two `push_subscriptions` calls can each fail. */
+function healthDb(opts: { readError?: boolean; writeError?: boolean } = {}) {
+  const updates: Array<Record<string, unknown>> = [];
+  const db = {
+    from: () => ({
+      select: () => ({
+        eq: () => ({
+          maybeSingle: () =>
+            Promise.resolve(
+              opts.readError
+                ? { data: null, error: { message: "read failed" } }
+                : { data: { failure_count: 7 }, error: null },
+            ),
+        }),
+      }),
+      update: (patch: Record<string, unknown>) => ({
+        eq: () => {
+          updates.push(patch);
+          return Promise.resolve({ error: opts.writeError ? { message: "write failed" } : null });
+        },
+      }),
+    }),
+  };
+  const req = new Request("https://x.functions.supabase.co/send-notification", {
+    method: "POST",
+    headers: { "x-request-id": "req-abc-123" },
+  });
+  return { updates, push: makePushDeps(db as never, VAPID, req, (() => {}) as never) };
+}
+
+Deno.test("an unreadable failure count is left ALONE, not reset to 1", async () => {
+  // supabase-js reports failures in the RESOLVED result, so `const { data }`
+  // alone turned an unreadable row into a zero and the next write reset a
+  // device's failure_count to 1 — health data destroyed by the call that
+  // exists to keep it (Codex review on PR #85, sixteenth round). That is
+  // `dropSubscription`'s tenth-round defect surviving in the method beside it.
+  const h = healthDb({ readError: true });
+  const { lines } = await captureErrors(() => h.push.noteFailure("sub-1", "the push service answered 500"));
+  assertEquals(h.updates, [], "clobbered a counter it could not read");
+  assertEquals(lines.length, 1, `expected one log line: ${JSON.stringify(lines)}`);
+  assertEquals(JSON.parse(lines[0]).context.subscription_id, "sub-1");
+});
+
+Deno.test("a readable count is incremented, not replaced", async () => {
+  // The other direction: skipping on every read would quietly disable the
+  // counter and satisfy the case above.
+  const h = healthDb();
+  const { lines } = await captureErrors(() => h.push.noteFailure("sub-1", "the push service answered 500"));
+  assertEquals(h.updates.length, 1);
+  assertEquals(h.updates[0].failure_count, 8);
+  assertEquals(lines, [], "a healthy write must not log");
+});
+
+Deno.test("a failed WRITE is logged and swallowed, never thrown", async () => {
+  // Per-device health is diagnostic. Throwing here would abort the fanout and
+  // lose a live notification over bookkeeping — the round-ten defect in the
+  // other direction.
+  const h = healthDb({ writeError: true });
+  const { lines } = await captureErrors(() => h.push.noteFailure("sub-1", "boom"));
+  assertEquals(h.updates.length, 1, "did not attempt the write");
+  assertEquals(lines.length, 1);
+  assertEquals(JSON.parse(lines[0]).code, "db_error");
+});

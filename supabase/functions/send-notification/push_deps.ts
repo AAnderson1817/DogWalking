@@ -231,12 +231,35 @@ export function makePushDeps(
     },
 
     async noteFailure(id, error) {
-      const { data } = await db
+      // Both errors are read, and a failed READ skips the write entirely
+      // (Codex review on PR #85, sixteenth round). supabase-js reports
+      // failures in the RESOLVED result, so `const { data }` alone turned an
+      // unreadable row into a zero and the next write reset a device's
+      // failure_count to 1 — health data quietly destroyed by the very call
+      // that exists to keep it. That is `dropSubscription`'s defect, fixed in
+      // the tenth round, surviving in the method beside it.
+      //
+      // Skipping beats guessing: this counter is advisory, and not
+      // incrementing it is a smaller lie than resetting it. The same
+      // notification is retryable, so the next pass counts.
+      const { data, error: readError } = await db
         .from("push_subscriptions")
         .select("failure_count")
         .eq("id", id)
         .maybeSingle();
-      await db
+      if (readError) {
+        logServerError({
+          fn: functionName(req.url),
+          request_id: rid,
+          status: 500,
+          code: "db_error",
+          message: "could not read a device's failure count, so it was left alone",
+          cause: readError,
+          context: { subscription_id: id },
+        });
+        return;
+      }
+      const { error: writeError } = await db
         .from("push_subscriptions")
         .update({
           failure_count: ((data?.failure_count as number | undefined) ?? 0) + 1,
@@ -244,6 +267,20 @@ export function makePushDeps(
           last_error: error.slice(0, 500),
         })
         .eq("id", id);
+      if (writeError) {
+        // Logged and swallowed, like the dead-row delete: per-device health is
+        // diagnostic, and losing a notification over it would be the round-ten
+        // defect in the other direction.
+        logServerError({
+          fn: functionName(req.url),
+          request_id: rid,
+          status: 500,
+          code: "db_error",
+          message: "could not record a device failure",
+          cause: writeError,
+          context: { subscription_id: id },
+        });
+      }
     },
 
     async recordPush(id, outcome, previousAttempts) {
