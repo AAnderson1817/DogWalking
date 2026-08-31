@@ -160,10 +160,22 @@ export function makePushDeps(
       // table for every future notification to POST to again.
       const { error } = await db.from("push_subscriptions").delete().eq("id", id);
       if (error) {
-        throw new HttpError(500, "db_error", "could not drop a dead subscription", error, {
-          subscription_id: id,
+        // Logged, not thrown (Codex review on PR #85, tenth round). Throwing
+        // from here aborted the whole device fanout on a database blip
+        // affecting one dead row. The caller reads the boolean and keeps the
+        // notification retryable, so the row is deleted on the next pass.
+        logServerError({
+          fn: functionName(req.url),
+          request_id: rid,
+          status: 500,
+          code: "db_error",
+          message: "could not drop a dead push subscription",
+          cause: error,
+          context: { subscription_id: id },
         });
+        return false;
       }
+      return true;
     },
 
     async noteFailure(id, error) {

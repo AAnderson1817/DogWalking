@@ -45,8 +45,25 @@ export interface PushDeps {
    * the point it is read, so it cannot reach a column by being forgotten.
    */
   sendPush(sub: PushSubscription, payload: string): Promise<{ status: number }>;
-  /** 404/410 — the browser has permanently forgotten this registration. */
-  dropSubscription(id: string): Promise<void>;
+  /**
+   * 404/410 — the browser has permanently forgotten this registration.
+   *
+   * Returns whether the row actually WENT, rather than throwing (Codex review
+   * on PR #85, tenth round). Throwing aborted the fanout mid-loop: the
+   * recipient's remaining healthy devices were never tried, no aggregate
+   * outcome was recorded at all, and a device that had already accepted the
+   * push got it a second time when the still-pending row came back through
+   * the drain. A database blip on a dead row is not a reason to drop a live
+   * notification.
+   *
+   * The failure still has to be VISIBLE — a swallowed delete error is what
+   * round five fixed, where `deliverPush` could record the terminal `skipped`
+   * over a dead endpoint that was still in the table. So the implementation
+   * logs it server-side and answers false, and the caller must decide: a row
+   * that did not go means the recipient still has that device, so the
+   * notification stays retryable.
+   */
+  dropSubscription(id: string): Promise<boolean>;
   /** Per-device health, so a flapping endpoint is visible before it is dropped. */
   noteFailure(id: string, error: string): Promise<void>;
   recordPush(id: string, outcome: Outcome, previousAttempts: number): Promise<void>;
@@ -205,8 +222,14 @@ export async function deliverPush(row: PushableRow, deps: PushDeps): Promise<Out
     // — which is exactly why it is here. It is the check that survives a
     // future write path forgetting the rule.
     if (!isPushServiceEndpoint(sub.endpoint)) {
-      refused += 1;
-      await deps.dropSubscription(sub.id);
+      if (await deps.dropSubscription(sub.id)) {
+        refused += 1;
+      } else {
+        // The row survives, so the recipient still has a device this send did
+        // not reach. Retryable, and the drop is retried with it.
+        anyTransient = true;
+        lastError = "a device that is not a push service could not be dropped";
+      }
       continue;
     }
 
@@ -227,8 +250,15 @@ export async function deliverPush(row: PushableRow, deps: PushDeps): Promise<Out
     }
     lastError = pushFailureLabel(status);
     if (isGoneStatus(status)) {
-      gone += 1;
-      await deps.dropSubscription(sub.id);
+      if (await deps.dropSubscription(sub.id)) {
+        gone += 1;
+      } else {
+        // Recording `gone` here would let the aggregate resolve to the
+        // TERMINAL `skipped` while the dead endpoint is still in the table for
+        // every future notification to POST to — round five's finding. It
+        // stays a transient failure until the row is actually gone.
+        anyTransient = true;
+      }
       continue;
     }
     if (!isPermanentPushFailure(status)) anyTransient = true;

@@ -48,6 +48,8 @@ function foreignSub(id: string, endpoint = "https://internal.svc.local/admin"): 
 
 interface Harness {
   deps: PushDeps;
+  /** Make every dead-row delete fail, as a database blip would. */
+  dropFails?: boolean;
   dropped: string[];
   failures: Array<{ id: string; error: string }>;
   recorded: Array<{ outcome: Outcome; attempts: number }>;
@@ -64,7 +66,10 @@ function harness(subs: PushSubscription[], reply: (s: PushSubscription) => { sta
       if (r instanceof Error) return Promise.reject(r);
       return Promise.resolve(r);
     },
-    dropSubscription: (id) => { h.dropped.push(id); return Promise.resolve(); },
+    dropSubscription: (id) => {
+      h.dropped.push(id);
+      return Promise.resolve(!h.dropFails);
+    },
     noteFailure: (id, error) => { h.failures.push({ id, error }); return Promise.resolve(); },
     recordPush: (_id, outcome, attempts) => { h.recorded.push({ outcome, attempts }); return Promise.resolve(); },
   };
@@ -228,6 +233,42 @@ Deno.test("a redirect is a failure, never a delivery", async () => {
   assertEquals(outcome.kind, "failed");
   assert(outcome.kind === "failed" && !outcome.permanent, "a 3xx is not classed permanent");
   assertEquals(h.dropped, [], "a redirect must not delete a registration");
+});
+
+Deno.test("a failed dead-row delete does not abandon the rest of the fanout", async () => {
+  // Codex review on PR #85, tenth round. `dropSubscription` used to THROW on a
+  // database error, which rejected `deliverPush` mid-loop: the recipient's
+  // remaining healthy devices were never tried, no outcome was recorded at
+  // all, and a device that had already accepted the push received it again
+  // when the still-pending row came back through the drain. A blip on one dead
+  // row is not a reason to drop a live notification.
+  const h = harness(
+    [sub("dead"), sub("phone")],
+    (x) => (x.id === "dead" ? { status: 410 } : { status: 201 }),
+  );
+  h.dropFails = true;
+  const outcome = await deliverPush(ROW, h.deps);
+  assertEquals(h.sent, ["dead", "phone"], "the fanout stopped at the failed delete");
+  assertEquals(outcome.kind, "sent", "a device accepted it, so the person WAS told");
+  assertEquals(h.recorded.length, 1, "no aggregate outcome was recorded");
+});
+
+Deno.test("a dead row that survives its delete keeps the push retryable", async () => {
+  // The other half, and it is round five's finding restated: counting the
+  // device as `gone` when the row is still there lets the aggregate resolve to
+  // the TERMINAL `skipped` over an endpoint every future notification will
+  // POST to again.
+  const h = harness([sub("dead")], () => ({ status: 410 }));
+  h.dropFails = true;
+  const outcome = await deliverPush(ROW, h.deps);
+  assertEquals(outcome.kind, "failed", `expected retryable, got ${JSON.stringify(outcome)}`);
+  assert(outcome.kind === "failed" && !outcome.permanent, "and not permanent");
+
+  // With the delete succeeding it IS terminal, so the rule is not just
+  // "always retry".
+  const ok = harness([sub("dead")], () => ({ status: 410 }));
+  const settled = await deliverPush(ROW, ok.deps);
+  assertEquals(settled.kind, "skipped");
 });
 
 Deno.test("a row already sent is not pushed again", async () => {

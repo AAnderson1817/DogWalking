@@ -475,7 +475,17 @@ FOLLOW a redirect: the allowlist decides which host this function contacts,
 and a followed redirect hands that decision to the response instead, one hop
 later, at a host nothing checked.
 
-404 and 410 delete the registration: the browser has permanently forgotten it,
+404 and 410 delete the registration — and the delete ANSWERS rather than
+throwing (Codex review on PR #85). A throw aborted the fanout mid-loop: the
+recipient's remaining healthy devices were never tried, no aggregate outcome
+was recorded, and a device that had already accepted the push got it again
+when the still-pending row came back through the drain. A database blip on one
+dead row is not a reason to drop a live notification. The failure stays visible
+— it goes to the log, and a row that did not go is NOT counted `gone`, so the
+notification stays retryable rather than resolving to the terminal `skipped`
+over an endpoint still in the table.
+
+The browser has permanently forgotten it,
 and the row holds an endpoint identifying a browser. 413 is OURS — the payload
 exceeded the service's limit — so it is permanent but must NOT delete a good
 device over a bug in our own message. A thrown transport error is not a

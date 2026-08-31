@@ -76,8 +76,12 @@ same endpoint, so `fn_register_push_subscription` upserts on it and REASSIGNS
 ownership. A row left attached to the previous person sends their walk reports
 to a lock screen somebody else is holding.
 
-The reassignment is CONDITIONAL on presenting the endpoint's existing key
-material (Codex review on PR #85). Unconditional, it contradicted the reason
+The reassignment is CONDITIONAL on presenting BOTH halves of the endpoint's
+existing key material (Codex review on PR #85). `p256dh` alone is not proof:
+it is the ECDH public key, semantically not a secret, and the update replaces
+`auth` as well — so checking only the public half let anyone holding the
+endpoint and that key take the row and overwrite the secret one, which
+silences the victim. Unconditional, it contradicted the reason
 `fn_remove_push_subscription` is scoped to its caller — an endpoint is not
 secret enough to authorize acting on it — and let any authenticated caller who
 learned an endpoint claim that row, stopping the victim's notifications and
