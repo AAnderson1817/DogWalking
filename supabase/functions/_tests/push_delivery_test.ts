@@ -131,6 +131,12 @@ Deno.test("the payload carries a deep link and nothing sensitive", async () => {
   const client = JSON.parse(pushPayload(ROW));
   assertEquals(client.url, "/portal/walks/w1");
   assertEquals(client.title, "Walk complete");
+  // Tagged by ROW, not by type: two distinct walk_complete events must not
+  // collapse into one tray entry, or the second silently replaces the first
+  // and nobody learns the first existed.
+  assertEquals(client.tag, ROW.id);
+  const other = JSON.parse(pushPayload({ ...ROW, id: "n2" }));
+  assert(other.tag !== client.tag, "two distinct notifications share a tag");
   const operator = JSON.parse(pushPayload({ ...ROW, client_id: null }));
   assertEquals(operator.url, "/calendar", "an operator has no portal route");
   const noWalk = JSON.parse(pushPayload({ ...ROW, walk_id: null }));
