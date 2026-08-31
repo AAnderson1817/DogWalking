@@ -1414,6 +1414,10 @@ export type Database = {
         Args: Record<string, never>;
         Returns: unknown;
       };
+      fn_reset_invite_signup_budget: {
+        Args: Record<string, never>;
+        Returns: unknown;
+      };
       fn_reverse_payment: {
         Args: {
           p_payment: string;

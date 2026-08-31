@@ -78,9 +78,13 @@
 -- A token holder can burn the legitimate claimant's budget: a denial of
 -- service against one invite. That is accepted, and mitigated three ways —
 -- the limit is generous, the window self-heals within the hour, and the
--- operator can reissue the invite (0039 `fn_rotate_invite`). An IP key would
--- avoid this and buy almost nothing, since the attacker controls their IP and
--- the victim does not.
+-- operator can reissue the invite (0039 `fn_rotate_invite`), which starts a
+-- fresh budget. That third mitigation was FALSE when this file was first
+-- written: the budget is keyed on the client and rotation mints a token on
+-- the same row, so the reissued link inherited the spent budget and the
+-- documented remedy did not work. See `fn_reset_invite_signup_budget` below.
+-- An IP key would avoid the denial of service and buy almost nothing, since
+-- the attacker controls their IP and the victim does not.
 --
 -- ── Sizing ───────────────────────────────────────────────────────────────
 --
@@ -183,8 +187,97 @@ begin
     return false;
   end if;
 
-  insert into invite_signup_attempts (client_id, ip) values (v_client, p_ip);
+  -- The token lookup above is unlocked, so an operator deleting an unclaimed
+  -- client between it and this insert leaves the FK to raise — and an
+  -- unhandled raise here is a 500 from a PUBLIC endpoint for a request the
+  -- check would have answered `not_found`, which by then is true (Codex
+  -- review on PR #84). `fn_invite_signup_check` already handles this exact
+  -- permitted race the same way (0045); this is that precedent applied.
+  --
+  -- ALLOW rather than refuse: the caller proceeds to the check, which answers
+  -- `not_found`. Refusing would 429 a token that no longer matches anything,
+  -- which is both wrong and a refusal an attacker could read.
+  --
+  -- Deliberately NOT closed by locking the client row instead. `select … for
+  -- update` here would make an unauthenticated caller able to hold a lock on
+  -- `clients`, which trades a rare 500 for a denial-of-service primitive on
+  -- the table the whole product reads.
+  begin
+    insert into invite_signup_attempts (client_id, ip) values (v_client, p_ip);
+  exception when foreign_key_violation then
+    return true;
+  end;
   return true;
+end $$;
+
+/**
+ * A NEW invite token starts with a fresh budget.
+ *
+ * The budget is keyed on the client, and every reissue path mints a token on
+ * the SAME client row — so without this, a token holder who spent the budget
+ * also spent it for the operator's remedy, and the freshly issued link was
+ * refused for the rest of the hour (Codex review on PR #84). This header used
+ * to list "the operator can reissue the invite" as one of three mitigations
+ * for that denial of service, which was simply false: rotation changed the
+ * token and left the rows.
+ *
+ * A trigger rather than an edit to `fn_rotate_invite`, because `invite_token`
+ * has FIVE writers across 0039-0046 — `fn_rotate_invite`, `fn_unbind_invite`
+ * and three successive replacements of `fn_purge_client` — and fixing the one
+ * the reviewer named while leaving its siblings is the defect shape this
+ * repository keeps recording. A writer added later gets the reset without
+ * knowing the rule exists, which is the 0046 argument verbatim.
+ *
+ * It is safe in every direction a reissue can come from. An attacker holding
+ * only the link cannot rotate: `fn_rotate_invite` and `fn_unbind_invite` both
+ * require the owning operator, and `fn_purge_client` is the erasure path,
+ * where clearing the rows is not a side effect but the point — they carry an
+ * `ip`, so without this they were personal data surviving an erasure request
+ * indefinitely, because a purged client receives no further attempts and the
+ * prune only ever runs for the key being attempted.
+ *
+ * AFTER, not BEFORE, and a WHEN clause rather than `update of invite_token`.
+ * A BEFORE trigger sees only the row image as it stands when it runs and an
+ * `OF` clause is evaluated against the columns the STATEMENT names, so a
+ * trigger sorting later that assigned the column would defeat both — the
+ * finding Codex made against 0046. An AFTER trigger's WHEN clause is
+ * evaluated against the final image, so neither hazard exists here.
+ *
+ * SECURITY DEFINER because it DELETEs from a table with no API-role grants
+ * and forced RLS — unlike 0046's rotation trigger, which only assigns a
+ * column on the row already being written and therefore needs no privilege
+ * of its own.
+ */
+create function fn_reset_invite_signup_budget() returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  delete from invite_signup_attempts where client_id = new.id;
+  return null;
+end $$;
+
+revoke all on function fn_reset_invite_signup_budget() from public, anon, authenticated;
+
+create trigger trg_clients_reset_invite_signup_budget
+  after update on clients
+  for each row
+  when (old.invite_token is distinct from new.invite_token)
+  execute function fn_reset_invite_signup_budget();
+
+-- An inert trigger that deployed cleanly is worse than a failed deploy: the
+-- remedy would silently not work and nothing would say so (the 0028 rule).
+do $$
+begin
+  if not exists (
+    select 1 from pg_trigger
+     where tgrelid = 'clients'::regclass
+       and tgname = 'trg_clients_reset_invite_signup_budget'
+       and not tgisinternal
+  ) then
+    raise exception '0048: the budget-reset trigger was not installed — refusing';
+  end if;
 end $$;
 
 -- Retention needs no sweep, and that is a property of the algorithm rather
