@@ -5065,6 +5065,8 @@ declare
   v_cl2     uuid := '99999999-0000-4000-c000-0000000000f9';
   v_tok     uuid := '99999999-0000-4000-b000-0000000000f8';
   v_tok2    uuid := '99999999-0000-4000-b000-0000000000f9';
+  v_cl3     uuid := '99999999-0000-4000-c000-0000000000fa';
+  v_tok3    uuid := '99999999-0000-4000-b000-0000000000fa';
   v_unknown uuid := '99999999-0000-4000-b000-00000000dead';
   v_allowed int := 0;
   v_rows    int;
@@ -5159,7 +5161,64 @@ begin
     raise exception 'FAIL: % rows for one client after crossing a window (0048) — expired rows are not pruned, so the table has no ceiling', v_rows;
   end if;
 
-  -- 5. Service role only, by GRANT.
+  -- 5. A REISSUED invite starts with a fresh budget.
+  --
+  -- Codex review on PR #84. The budget is keyed on the client and every
+  -- reissue path mints a token on the SAME row, so without the reset trigger
+  -- a token holder who spent the budget also spent it for the operator's
+  -- remedy — and this file's own header listed "the operator can reissue"
+  -- as a mitigation for exactly that denial of service. Measured before the
+  -- fix: reissue, and the brand-new token was still refused with all ten
+  -- rows intact.
+  --
+  -- Asserted through fn_rotate_invite, which is the path an operator takes,
+  -- rather than by updating the column directly — a test that writes the
+  -- column itself would pass against a trigger nothing real can reach.
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  v_tok := fn_rotate_invite(v_cl);
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+
+  select count(*) into v_rows from invite_signup_attempts where client_id = v_cl;
+  if v_rows <> 0 then
+    raise exception 'FAIL: reissuing the invite left % attempt rows (0048) — the documented remedy for a burned budget does not work, and a purged client keeps IP addresses forever', v_rows;
+  end if;
+  if not fn_invite_signup_allow_attempt(p_token => v_tok) then
+    raise exception 'FAIL: a freshly reissued invite is still rate-limited (0048)';
+  end if;
+
+  -- 6. A client deleted mid-attempt must not 500 a PUBLIC endpoint.
+  --
+  -- The token lookup is unlocked, so an operator deleting an unclaimed client
+  -- between it and the insert leaves the FK to raise. Injected deterministically
+  -- at exactly that point with a BEFORE INSERT trigger, because the race cannot
+  -- be interleaved inside a single RPC call. Measured before the fix: SQLSTATE
+  -- 23503 propagated out of the function.
+  --
+  -- ALLOW is the right answer, not refuse: the caller goes on to the check,
+  -- which answers `not_found` — true by then. This is 0045's handling of the
+  -- same permitted race, applied to the function in front of it.
+  insert into clients (id, operator_id, full_name, status, invite_token)
+  values (v_cl3, v_op, '0048 FK Race', 'invited', v_tok3);
+  create function _smoke_0048_race() returns trigger language plpgsql as $race$
+  begin
+    delete from clients where id = new.client_id;
+    return new;
+  end $race$;
+  create trigger _smoke_0048_race before insert on invite_signup_attempts
+    for each row execute function _smoke_0048_race();
+  begin
+    v_ok := fn_invite_signup_allow_attempt(p_token => v_tok3);
+  exception when others then
+    raise exception 'FAIL: a client vanishing mid-attempt raised % (0048) — the public endpoint 500s where it should answer not_found', sqlstate;
+  end;
+  drop trigger _smoke_0048_race on invite_signup_attempts;
+  drop function _smoke_0048_race();
+  if not v_ok then
+    raise exception 'FAIL: a vanished client was rate-limited rather than allowed through to not_found (0048)';
+  end if;
+
+  -- 7. Service role only, by GRANT.
   set local session authorization authenticated;
   perform set_config('request.jwt.claims',
     format('{"sub":"%s","role":"authenticated"}', v_op), true);
@@ -5171,7 +5230,7 @@ begin
   end;
   reset session authorization;
 
-  -- 6. And service role only IN THE BODY, which is the half a future GRANT
+  -- 8. And service role only IN THE BODY, which is the half a future GRANT
   -- cannot undo. Granting execute here (rolled back with the suite) is the
   -- only way to reach the body as a non-service caller at all; without this
   -- the body guard would be untested and one `grant execute` away from
@@ -5190,7 +5249,7 @@ begin
   revoke execute on function fn_invite_signup_allow_attempt(uuid, inet, int, int)
     from authenticated;
 
-  -- 7. The ledger itself: RLS on AND forced, no API-role privileges. 0032
+  -- 9. The ledger itself: RLS on AND forced, no API-role privileges. 0032
   -- exists because `vault_rate_limit_attempts` — the table this one is
   -- modelled on — shipped with a REVOKE and no RLS at all.
   select relrowsecurity and relforcerowsecurity into v_ok

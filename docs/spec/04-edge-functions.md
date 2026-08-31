@@ -355,9 +355,25 @@ lookup, because here the load is the attack.
 The trade, stated rather than hidden: a token holder can burn the legitimate
 claimant's budget — a denial of service against one invite. Accepted, and
 mitigated three ways: the limit is generous, the window self-heals within the
-hour, and the operator can reissue the invite. An IP key would avoid it and
-buy almost nothing, since the attacker controls their address and the victim
-does not.
+hour, and the operator can reissue the invite, which starts a **fresh**
+budget. That third one needed a mechanism it did not originally have (Codex
+review on PR #84): the budget is keyed on the client and every reissue path
+mints a token on the same row, so a reissued link inherited the spent budget
+and the documented remedy did not work for the rest of the hour.
+`trg_clients_reset_invite_signup_budget` clears the client's attempts whenever
+`invite_token` changes — a trigger rather than an edit to `fn_rotate_invite`,
+because the column has five writers across 0039-0046 and the purge is one of
+them, where clearing rows carrying an `ip` is the point rather than a side
+effect. An IP key would avoid the denial of service and buy almost nothing,
+since the attacker controls their address and the victim does not.
+
+A client deleted between the limiter's unlocked token lookup and its insert
+leaves the FK to raise, which on a public endpoint is a 500 for a request the
+check would have answered `not_found`. The limiter catches
+`foreign_key_violation` and **allows**, so the caller reaches that answer —
+`fn_invite_signup_check` already handled the same permitted race the same way
+(0045). Deliberately not closed by locking the client row instead: that would
+let an unauthenticated caller hold a lock on `clients`.
 
 Two things this spec previously said about the absence were wrong, and are
 corrected here rather than left to be re-derived. It discounted the address
