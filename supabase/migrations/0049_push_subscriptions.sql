@@ -98,6 +98,20 @@ grant select (id, operator_id, client_id, endpoint, user_agent, created_at,
               last_seen_at, failure_count, last_failure_at)
   on push_subscriptions to authenticated;
 
+-- The sender reads this table and deletes dead rows through the service-role
+-- PostgREST client, so it needs the privilege explicitly. 0004's header states
+-- the rule -- "explicit grants ... (no reliance on platform default
+-- privileges)" -- and its loop grants every one of the original 18 tables to
+-- service_role; 0015, 0016 and 0028 each did the same for the table they
+-- added. Without this the REVOKE above still runs and the table still works
+-- on a project that carries Supabase's default ACL, which is precisely what
+-- makes the omission invisible: it is the platform grant doing the work, not
+-- ours. Narrow rather than `grant all`, following 0028: the sender selects
+-- (including p256dh/auth, which `authenticated` may not read) and deletes an
+-- endpoint the push service has retired. It never inserts or updates -- both
+-- go through the definer RPCs, which run as the owner.
+grant select, delete on push_subscriptions to service_role;
+
 create policy push_subscriptions_operator_select on push_subscriptions
   for select to authenticated
   using (operator_id = auth.uid() and client_id is null);
@@ -480,6 +494,7 @@ begin
 end $$;
 
 revoke all on function fn_note_push_failure(uuid, text) from public, anon, authenticated;
+grant execute on function fn_note_push_failure(uuid, text) to service_role;
 
 comment on function fn_note_push_failure(uuid, text) is
   'Increment one device''s failure counter atomically (0049). A client-side '

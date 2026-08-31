@@ -465,6 +465,44 @@ billing decision.
 - `REVOKE ALL ON stripe_events, payments FROM authenticated` except `GRANT SELECT ON payments`.
 - `walks.credits_debited`, `walks.is_overage`: no UPDATE grant to authenticated — set only inside `fn_debit_walk`.
 
+## Service-role grants are explicit, never inherited (0050)
+
+0004's header states the rule the whole matrix rests on: explicit grants,
+**no reliance on platform default privileges**. Its loop does both halves for
+each of the original 18 tables — `REVOKE ALL … FROM public, anon,
+authenticated` *and* `GRANT ALL ON TABLE … TO service_role`.
+
+The trap is that only the first half is load-bearing on a live project. Supabase's
+bootstrap sets `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES /
+FUNCTIONS TO … service_role`, so anything `postgres` creates in `public` reaches
+service_role whether or not a migration says so. A migration that revokes and
+forgets to grant therefore works, and nothing on the project can tell the two
+apart: an inherited grant and an explicit one both read as
+`service_role=arwdDxt/postgres` in `relacl`. Smoke cannot see it either.
+
+Four objects had done exactly that, each read or called by the sender through
+`adminClient()`:
+
+| object | migration | reached by |
+| --- | --- | --- |
+| `push_subscriptions` (SELECT, DELETE) | 0049 | `send-notification` |
+| `fn_note_push_failure(uuid, text)` | 0049 | `send-notification` |
+| `vault_canary` (SELECT) | 0021 → 0050 | `vault-rekey` |
+| `fn_unsubscribe_by_token(uuid)` | 0038 → 0050 | `unsubscribe` |
+
+`scripts/db-push-check.sh` is the gate, because it is the only place that can
+ask the question: it replays every migration as `sb_deploy`, which holds no
+default privileges, so an object is reachable there only if a migration said
+so out loud. It measured all four unreachable while still exiting 0. It now
+derives the object set from the `.from(…)` / `.rpc(…)` calls in
+`supabase/functions/` and asserts each one — derived rather than enumerated, so
+a table added to a handler is covered without anyone remembering, and it
+refuses outright if the derivation returns nothing rather than passing by
+looking at nothing.
+
+Its blind spot, stated: a `.from()` built from a variable is invisible to that
+grep, so the rule remains a review concern as well as a gate.
+
 ## Definer function catalog + grant pattern
 Every definer fn: `SECURITY DEFINER SET search_path = public`, then
 ```
