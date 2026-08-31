@@ -311,11 +311,18 @@ export async function disablePush(): Promise<PushState> {
  * prevent anyone from being signed out. A failure is not permanent: this runs
  * on EVERY resolution that yields no session, so the next page load retries.
  */
-export async function forgetPushDeviceOnSignedOut(): Promise<void> {
+export async function forgetPushDeviceOnSignedOut(
+  superseded: () => boolean = () => false,
+): Promise<void> {
   try {
     const reg = await registration();
     const sub = reg ? await reg.pushManager.getSubscription() : null;
-    if (sub) await sub.unsubscribe();
+    // Immediately before the irreversible step, not at the top (Codex review
+    // on PR #85). A sign-in arriving while this was reading the registration
+    // means the device now belongs to somebody who is signed IN, and
+    // `reclaimPushDevice` is about to reassign it to them — unsubscribing
+    // first would leave them with push silently off.
+    if (sub && !superseded()) await sub.unsubscribe();
   } catch {
     /* see above — retried on the next resolution that yields no session */
   }
@@ -343,13 +350,18 @@ export async function forgetPushDeviceOnSignedOut(): Promise<void> {
  * (mid-onboarding, before the row exists) is refused by the function, and
  * that must not break signing in.
  */
-export async function reclaimPushDevice(): Promise<void> {
+export async function reclaimPushDevice(
+  superseded: () => boolean = () => false,
+): Promise<void> {
   try {
     const reg = await registration();
     const sub = reg ? await reg.pushManager.getSubscription() : null;
     if (!sub) return;
     const keys = subscriptionKeys(sub);
     if (!keys) return;
+    // Symmetric with the cleanup above: a sign-OUT arriving while this was
+    // reading the subscription means claiming it for that session is wrong.
+    if (superseded()) return;
     await registerPushSubscription(sub.endpoint, keys.p256dh, keys.auth, navigator.userAgent);
   } catch {
     /* see above */
