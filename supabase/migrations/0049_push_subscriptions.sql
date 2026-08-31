@@ -215,11 +215,26 @@ begin
   -- 'https://fcm.googleapis.com@evil.example/' has a host of 'evil.example'
   -- and reads to a skimming human as a Google domain; comparing the entire
   -- authority means that string matches nothing, which is the answer that
-  -- cannot be got subtly wrong. A port fails for the same reason.
-  v_authority := lower(substring(p_endpoint from '^https://([^/?#]+)'));
+  -- cannot be got subtly wrong. A non-default port fails for the same reason.
+  --
+  -- lower() over the WHOLE endpoint, not just the authority, because the
+  -- scheme is case-insensitive too and this regex is not. That and the :443
+  -- strip below exist because the two implementations of this rule DISAGREED
+  -- on two inputs when they were first written, measured rather than
+  -- reasoned about: `URL` normalises both away, so the sender accepted
+  -- 'HTTPS://fcm.googleapis.com/…' and 'https://fcm.googleapis.com:443/…'
+  -- while this refused them. Neither was a hole — registration was the
+  -- stricter side, so no row could carry one — but "one list, one rule" is
+  -- the entire claim these two halves make, and a security control whose two
+  -- implementations differ is one nobody can reason about.
+  -- scripts/check-push-endpoint-parity.sh is the gate that found it.
+  v_authority := substring(lower(p_endpoint) from '^https://([^/?#]+)');
   if v_authority is null then
     return false;
   end if;
+  -- The default port, which `URL` deletes. Only this one: an explicit 8080
+  -- would open every internal service reachable on an allowlisted name.
+  v_authority := regexp_replace(v_authority, ':443$', '');
   if v_authority = any (v_hosts) then
     return true;
   end if;

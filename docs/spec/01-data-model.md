@@ -105,6 +105,17 @@ LEADING DOT, which is load-bearing rather than cosmetic: without it,
 `notify.windows.com` is also a suffix of `evilnotify.windows.com`, a domain
 anyone can register.
 
+The rule existing twice means the two halves can disagree, and they did: `URL`
+normalises an uppercase scheme and an explicit `:443` away and the POSIX regex
+did not, so the sender accepted two endpoints registration refused. Neither was
+a hole — registration is the stricter side, so no row could carry one — but
+"one list, one rule" is the whole claim the two halves make together.
+`app/scripts/push-service-hosts.test.ts` compares the two LISTS;
+`scripts/check-push-endpoint-parity.sh` asks both implementations the same
+questions from one case list (`scripts/push-endpoint-cases.txt`) and compares
+the ANSWERS. It is its own gate because no single test runner here has both a
+database and deno.
+
 **Stated residual:** a browser whose push service is not on that list cannot
 enable notifications. It is refused at registration, by name, so the failure is
 a sentence somebody can act on rather than a switch that reads "on" and never

@@ -86,6 +86,15 @@ elif [ -n "${LOCAL_DB_URL:-}" ] && have psql; then
   for f in supabase/tests/*.sql; do
     run "8. $(basename "$f")" psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f "$f"
   done
+  # 8c needs BOTH a database and deno, which is why it is its own script: the
+  # push-service allowlist exists in a migration AND in an edge library, and
+  # no single test runner here can ask both of them the same question. They
+  # disagreed on two inputs the day they were written.
+  if have deno; then
+    run "8c. push endpoint parity" scripts/check-push-endpoint-parity.sh
+  else
+    skip_gate "8c. push endpoint parity" "deno is not installed"
+  fi
 else
   skip_gate "7-8. database" "LOCAL_DB_URL is unset or psql is missing — docs/dev/local-stack.md"
 fi
