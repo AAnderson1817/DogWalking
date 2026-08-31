@@ -29,7 +29,7 @@ export const PLATE_VARIANT_RE = /-\d+w-[^.]+\.webp$/;
 export const PLATE_SOURCE_VARIANT_RE = /-\d+w\.webp$/;
 
 /**
- * How many of the plate's OWN variants sit in `src/assets/illustrations`.
+ * Which of the plate's OWN variants sit in `src/assets/illustrations`, by width.
  *
  * The stem test is the load-bearing half, and leaving it out was a real bug
  * (caught in review on this PR). `illustrations/` is a shared directory, so a
@@ -42,9 +42,24 @@ export const PLATE_SOURCE_VARIANT_RE = /-\d+w\.webp$/;
  * That is the worst shape available for this check: not a gate that fails to
  * fire, but one that fires on a repository that is fine, which is how a gate
  * gets deleted by whoever is trying to ship something unrelated.
+ *
+ * ONE implementation, exported, because the first fix for this scoped the
+ * build's copy and left the test's own identical scan of the same directory
+ * unscoped — so the suite still went red on a healthy tree. That is the
+ * "fixed one site and not its sibling" shape this repository keeps recording,
+ * and the way out of it is that there is no sibling to forget.
  */
+export function plateSourceVariantWidths(files: string[]): number[] {
+  return files
+    .map((f) => (f.startsWith(PLATE_BASENAME) ? /-(\d+)w\.webp$/.exec(f) : null))
+    .filter((match): match is RegExpExecArray => match !== null)
+    .map((match) => Number(match[1]))
+    .sort((a, b) => a - b);
+}
+
+/** The same question, asked by the build, which only needs how many. */
 export function plateSourceVariantCount(files: string[]): number {
-  return files.filter((f) => f.startsWith(PLATE_BASENAME) && PLATE_SOURCE_VARIANT_RE.test(f)).length;
+  return plateSourceVariantWidths(files).length;
 }
 
 export interface PlateFamily {

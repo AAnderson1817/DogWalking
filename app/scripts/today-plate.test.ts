@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { plateSourceVariantWidths } from "./today-plate-family.ts";
 
 /**
  * Review M17. Three copies of one fact — the plate's candidate widths — now
@@ -100,12 +101,16 @@ function sizeClauses(sizes: string): string[] {
   return out;
 }
 
-/** `<stem>-<width>w.webp` on disk, before Vite hashes it. */
-const variantWidthsOnDisk = readdirSync(ILLUSTRATIONS)
-  .map((file) => /-(\d+)w\.webp$/.exec(file))
-  .filter((match): match is RegExpExecArray => match !== null)
-  .map((match) => Number(match[1]))
-  .sort((a, b) => a - b);
+/**
+ * `<stem>-<width>w.webp` on disk, before Vite hashes it.
+ *
+ * Through the shared helper rather than a second regex here. This file used to
+ * scan the directory itself, unscoped, so `illustrations/` gaining any other
+ * responsive image — it is a shared directory — turned all three assertions
+ * below red on a perfectly healthy tree. Found in review, after the same
+ * defect had been fixed in `vite.config.ts` and not in its sibling.
+ */
+const variantWidthsOnDisk = plateSourceVariantWidths(readdirSync(ILLUSTRATIONS));
 
 describe("the Today plate's candidate set is one fact, not four", () => {
   it("generates exactly the variants that exist on disk", () => {

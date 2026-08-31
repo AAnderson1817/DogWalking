@@ -3,6 +3,7 @@ import {
   PLATE_SOURCE_VARIANT_RE,
   PlateFamilyError,
   plateSourceVariantCount,
+  plateSourceVariantWidths,
   todayPlateFamily,
 } from "./today-plate-family.ts";
 
@@ -87,6 +88,12 @@ describe("the build's Today plate family", () => {
       "some-other-scene.webp",
     ];
     expect(plateSourceVariantCount(onDisk)).toBe(3);
+    // The WIDTHS matter as much as the count: `today-plate.test.ts` compares
+    // this list against the generator and against `srcset`, so a foreign
+    // illustration leaking in turns three assertions red on a healthy tree.
+    // That is exactly what happened when only the build's copy was scoped —
+    // hence one shared helper rather than two scans of the same directory.
+    expect(plateSourceVariantWidths(onDisk)).toEqual([438, 640, 750]);
 
     // End to end: with that foreign illustration on disk, a correct bundle
     // must still be accepted.
