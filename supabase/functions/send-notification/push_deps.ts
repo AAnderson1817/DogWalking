@@ -21,7 +21,7 @@ import {
 } from "../_lib/webpush.ts";
 import { functionName, logServerError, requestId } from "../_lib/observe.ts";
 import type { adminClient } from "../_lib/admin.ts";
-import { type PushDeps, pushRecordPatch } from "./push.ts";
+import { type PushAttempt, type PushDeps, pushRecordPatch } from "./push.ts";
 
 /**
  * Read the VAPID configuration, or null when push was never set up.
@@ -87,17 +87,49 @@ export function makePushDeps(
     },
 
     async sendPush(sub, payload) {
+      // Everything before the fetch is OURS, and it is classified and logged
+      // here rather than thrown (Codex review on PR #85, twelfth round).
+      // Thrown, `deliverPush`'s catch flattened all of it to `status: 0` and
+      // recorded "the request to the push service did not complete" — false,
+      // since no request was made — while this function's own logging ran
+      // only after the fetch, so the fault was written down nowhere. A
+      // deployment whose VAPID keys were removed while devices existed showed
+      // an ordinary transient failure, forever.
+      const blocked = (
+        reason: "not_configured" | "payload",
+        message: string,
+        cause?: unknown,
+      ): PushAttempt => {
+        logServerError({
+          fn: functionName(req.url),
+          request_id: rid,
+          status: 500,
+          code: `push_${reason}`,
+          message,
+          cause,
+          context: { subscription_id: sub.id, endpoint_host: hostOf(sub.endpoint) },
+        });
+        return { status: 0, blocked: reason };
+      };
+
       if (!vapid) {
         // Reachable only when devices exist without keys — see vapidConfig().
-        throw new HttpError(
-          500,
-          "push_not_configured",
+        return blocked(
+          "not_configured",
           "push delivery is not configured, so this notification was not pushed",
           "VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY / VAPID_SUBJECT are unset in this deployment",
-          { subscription_id: sub.id },
         );
       }
-      const body = await encryptPushPayload(payload, { p256dh: sub.p256dh, auth: sub.auth });
+      let body: Uint8Array;
+      try {
+        body = await encryptPushPayload(payload, { p256dh: sub.p256dh, auth: sub.auth });
+      } catch (e) {
+        // Key material that will not import, or a payload past the record
+        // size. Neither is fixed by retrying THIS second, but both are fixed
+        // by a later notification with a shorter body or a re-registered
+        // device, so the row stays retryable and the fault is on the log.
+        return blocked("payload", "a push payload could not be encrypted", e);
+      }
       // Every request gets a deadline (Codex review on PR #85). An endpoint
       // that accepts the connection and then STALLS would otherwise hold this
       // invocation open — and devices are awaited sequentially, ahead of the

@@ -45,7 +45,7 @@ interface Call {
 }
 
 /** `makePushDeps` with the network replaced, and every request recorded. */
-function deps(respond: () => Response) {
+function deps(respond: () => Response, vapid: VapidConfig | null = VAPID) {
   const calls: Call[] = [];
   const fetchImpl = ((url: string | URL | Request, init?: RequestInit) => {
     calls.push({ url: String(url), init: init ?? {} });
@@ -56,7 +56,7 @@ function deps(respond: () => Response) {
     method: "POST",
     headers: { "x-request-id": "req-abc-123" },
   });
-  return { calls, push: makePushDeps(db, VAPID, req, fetchImpl) };
+  return { calls, push: makePushDeps(db, vapid, req, fetchImpl) };
 }
 
 /** Capture the JSON lines `logServerError` writes, without losing them. */
@@ -155,4 +155,46 @@ Deno.test("a 2xx logs nothing", async () => {
   const d = deps(() => new Response("", { status: 201 }));
   const { lines } = await captureErrors(() => d.push.sendPush(SUB, '{"title":"hi"}'));
   assertEquals(lines, []);
+});
+
+// ── Pre-flight failures: ours, classified, and logged ────────────────────
+//
+// Codex review on PR #85, twelfth round. Everything before the `fetch` used to
+// THROW, and `deliverPush`'s catch flattened it to `status: 0` — recorded as
+// "the request to the push service did not complete", which is false because
+// no request was made — while this file's logging ran only AFTER the fetch, so
+// the fault was written down nowhere at all. A deployment whose VAPID keys
+// were removed while devices existed reported an ordinary transient failure
+// forever. Same shape as the email arm's missing-key error one round earlier.
+
+Deno.test("no VAPID configuration: classified, logged, and never fetched", async () => {
+  const d = deps(() => new Response("", { status: 201 }), null);
+  const { result, lines } = await captureErrors(() => d.push.sendPush(SUB, '{"title":"hi"}'));
+  assertEquals(result, { status: 0, blocked: "not_configured" });
+  assertEquals(d.calls, [], "attempted a request with no keys to sign it");
+  assertEquals(lines.length, 1, `expected one log line: ${JSON.stringify(lines)}`);
+  const entry = JSON.parse(lines[0]);
+  assertEquals(entry.code, "push_not_configured");
+  assertEquals(entry.context.subscription_id, "sub-1");
+});
+
+Deno.test("an unencryptable payload is its own class, not a transport failure", async () => {
+  // Key material that will not import. Retryable at the row — a later
+  // notification or a re-registered device fixes it — but it is not the
+  // network, and recording it as the network is what hid it.
+  const broken = { ...SUB, p256dh: "not-a-key" };
+  const d = deps(() => new Response("", { status: 201 }));
+  const { result, lines } = await captureErrors(() => d.push.sendPush(broken, '{"title":"hi"}'));
+  assertEquals(result, { status: 0, blocked: "payload" });
+  assertEquals(d.calls, [], "attempted a request with a body it could not build");
+  assertEquals(JSON.parse(lines[0]).code, "push_payload");
+});
+
+Deno.test("the endpoint's path never reaches a pre-flight log line either", async () => {
+  // The path segment is the device's bearer credential. The post-fetch line
+  // already withholds it; these must too.
+  const d = deps(() => new Response("", { status: 201 }), null);
+  const { lines } = await captureErrors(() => d.push.sendPush(SUB, '{"title":"hi"}'));
+  assertEquals(JSON.parse(lines[0]).context.endpoint_host, "fcm.googleapis.com");
+  assert(!lines[0].includes("DEVICE-BEARER-TOKEN"), lines[0]);
 });

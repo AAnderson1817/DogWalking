@@ -509,8 +509,20 @@ options, which is precisely where both defects above lived.
 VAPID is read at send time and is absent-tolerant by ordering: subscriptions
 are looked up first, so a deployment with no keys has no devices and records
 `skipped` without ever needing them. Keys missing WITH devices present is a
-real misconfiguration — keys rotated out from under live subscriptions — and
-gets H17's loud 500.
+real misconfiguration — keys rotated out from under live subscriptions.
+
+It is CLASSIFIED and LOGGED rather than thrown (Codex review on PR #85).
+Everything before the `fetch` is ours — the missing keys, and a payload that
+will not encrypt — and thrown, `deliverPush`'s catch flattened both to
+`status: 0` and recorded "the request to the push service did not complete",
+which is false when no request was made, while `sendPush`'s own logging ran
+only after the fetch. So the fault was written down nowhere and a deployment
+whose keys had been removed showed an ordinary transient failure forever.
+`PushAttempt.blocked` carries the class, each gets its own recorded sentence,
+and all three stay retryable because a restored key, a shorter body or a
+re-registered device fixes them. Deliberately NOT a 500 like the email arm's:
+push must not fail the request, which is the channel isolation this function
+promises — the log is where it is loud.
 
 The payload lands on a LOCK SCREEN, so it carries a title, a body, a type tag
 and a deep link, and nothing else. 0038 already removed a credit balance from
