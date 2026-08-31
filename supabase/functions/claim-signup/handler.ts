@@ -39,11 +39,33 @@ export const PASSWORD_POLICY_MESSAGE =
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface ClaimSignupDeps {
+  /** fn_invite_signup_allow_attempt (0048). False when the budget is spent. */
+  allowAttempt(token: string): Promise<boolean>;
   /** fn_invite_signup_check: an invite_claim_outcome value. */
   checkInvite(token: string, email: string): Promise<string>;
   /** auth.admin.createUser with email_confirm false. 'exists' when GoTrue
    * says the address is already registered. */
   createUser(email: string, password: string): Promise<"created" | "exists">;
+}
+
+export const RATE_LIMIT_MESSAGE =
+  "Too many attempts for this invite. Wait a few minutes and try again.";
+
+/**
+ * How the RPC's answer becomes a decision, as a pure function so the rule is
+ * reachable from a test at all — importing `index.ts` executes
+ * `serveFunction` and binds a port, which is why the seam exists.
+ *
+ * Fails CLOSED: anything that is not literally `true` refuses. This is the
+ * OPPOSITE of the vault's account-has-password lookup, which fails open so a
+ * flaky connection cannot wall an operator away from a door code. Here the
+ * endpoint is public and creates accounts, and a limiter that opens under
+ * load is no limiter at all — the load is the attack. `null` in particular
+ * is what PostgREST returns for an RPC whose result it could not read, and a
+ * `data !== false` reading would let exactly that through.
+ */
+export function rpcAllowsAttempt(data: unknown): boolean {
+  return data === true;
 }
 
 const OUTCOME_MESSAGES: Record<string, string> = {
@@ -73,6 +95,28 @@ export async function handleClaimSignup(
   }
   if (!passwordMeetsPolicy(password)) {
     throw new HttpError(400, "weak_password", PASSWORD_POLICY_MESSAGE);
+  }
+
+  // 0048. Directly in front of the GUESS, and after the shape checks, which
+  // is 0035's rule: a request that never reaches the database is neither of
+  // the harms being bounded, and the password fumble is the thing a real
+  // person repeats most.
+  //
+  // On exhaustion this refuses WITHOUT calling checkInvite at all. That is
+  // the load-bearing half: no outcome is computed, so none can leak, and no
+  // refusal row is written — which is one of the two harms. A limiter that
+  // ran after the check, or that counted only refusals, would leave the
+  // CORRECT address unlimited while wrong ones were refused, and an attacker
+  // would read the answer straight off the status at no budget cost. That
+  // version is the bug wearing the fix's clothes.
+  //
+  // Every request reaching here counts, including one that will succeed.
+  if (!(await deps.allowAttempt(token))) {
+    // Deliberately NOT one of the 0039 outcome codes: `claimSignup` in the
+    // frontend remaps those onto InviteClaimError, which renders a TERMINAL
+    // dead-end screen. A rate-limited claimant must land on the ordinary,
+    // retryable form error instead.
+    throw new HttpError(429, "rate_limited", RATE_LIMIT_MESSAGE);
   }
 
   // The invite decides whether an account may exist, BEFORE one is created.

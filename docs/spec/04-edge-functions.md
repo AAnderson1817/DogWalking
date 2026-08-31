@@ -271,9 +271,12 @@ has no JWT yet — creating the account is the point — so `verify_jwt =
 false`, and no unverified-claim helper may ever be used in it.
 
 Body `{ token, email, password }`. The ordering is the security property:
-`fn_invite_signup_check(token, email)` — a service-role definer mirroring
-`fn_claim_invite`'s ladder exactly — runs **before** `auth.admin.createUser`,
-so a dead invite refuses (409, code = the outcome verbatim:
+`fn_invite_signup_allow_attempt(token)` (0048) runs after the shape checks
+and **before** the check, and `fn_invite_signup_check(token, email)` — a
+service-role definer mirroring `fn_claim_invite`'s ladder exactly — runs
+**before** `auth.admin.createUser`, so a spent budget refuses (429,
+`rate_limited`) having computed no outcome at all, and a dead invite refuses
+(409, code = the outcome verbatim:
 `not_found`/`already_claimed`/`expired`/`revoked`/`email_mismatch`) with no
 account created. An account created first would be public signup wearing an
 invite's clothes. A mismatch refused pre-account also spares the claimant an
@@ -308,15 +311,71 @@ was first written — `updateClient` had no importers — so the recovery was
 documented before it was reachable; it ships with the client/property edit
 work.
 
-Three further residuals, accepted and recorded rather than silently carried
+**Rate limit (0048), keyed on the client the invite belongs to.** This
+endpoint is public, creates accounts, and until 0048 nothing bounded it —
+which was a *regression*, not a gap: before H31 the same flow ran on
+`supabase.auth.signUp`, covered by GoTrue's own `sign_in_sign_ups` limiter
+(30 per 5 minutes per IP). H31 moved account creation behind `verify_jwt =
+false` and the service role, and either way that lands the control is gone —
+if GoTrue exempts `/admin/users` there is now no limit at all, and if it does
+not, the only IP GoTrue can see is the edge function's egress address, so one
+bucket is shared by every claimant in the world and one attacker exhausts it
+for everybody. Which of the two is true is an owner check, because it sizes
+the harm rather than deciding whether the fix is right.
+
+The key is **`client_id`, resolved from the token** — not the caller's IP.
+The attack requires a live token, which is a stable server-known identifier
+that IP rotation cannot change; an IP key would also lock out everyone behind
+one NAT, none of whom are the attacker; and 0016, the precedent, keys on the
+subject being protected rather than on the caller. Resolving the token first
+leaks nothing, because token existence is already public — the endpoint
+answers `not_found` for a token matching no client on the very first request,
+by design — so a 429 on the token-matches-a-client path tells an attacker
+nothing the first 409 did not. A token matching no client is therefore
+**allowed and records nothing**: refusing it would make the limiter the
+token-existence oracle this ordering exists to avoid, and recording it would
+hand an attacker unbounded growth from a caller-supplied key.
+
+Ten attempts per hour, and the sizing argument is that the limiter only has
+to outlast the token: an invite expires in 14 days, so the budget allows
+roughly 3,360 address guesses over a token's whole life against an address
+space that is not brute-forceable. Every request reaching the limiter counts,
+including one that will succeed — a limiter counting only refusals would
+leave the correct address unlimited while every wrong one was refused, so an
+attacker reads the answer straight off the status at no budget cost. On
+exhaustion the refusal happens **without calling the check at all**, so no
+outcome is computed and no `invite_claim_attempts` row is written. The code
+is `rate_limited`, deliberately not one of the 0039 outcome values, because
+`claimSignup` remaps those onto `InviteClaimError` and `ClaimInvite` renders
+that as a terminal dead-end — waiting fixes a 429, so it must stay on the
+form. The RPC's answer is read fail-CLOSED (`rpcAllowsAttempt`: only a
+literal `true` is a budget), the opposite of the vault's account-has-password
+lookup, because here the load is the attack.
+
+The trade, stated rather than hidden: a token holder can burn the legitimate
+claimant's budget — a denial of service against one invite. Accepted, and
+mitigated three ways: the limit is generous, the window self-heals within the
+hour, and the operator can reissue the invite. An IP key would avoid it and
+buy almost nothing, since the attacker controls their address and the victim
+does not.
+
+Two things this spec previously said about the absence were wrong, and are
+corrected here rather than left to be re-derived. It discounted the address
+oracle as "the same fact `fn_preview_invite` gives any authenticated holder,
+minus the sign-in" — false: `fn_preview_invite(p_token uuid)` takes no email
+and returns none, so it cannot confirm or deny an address at any rate, and
+unlike this endpoint it needs an account at all. And it deferred the fix
+"if either is ever observed in the trail" — but nothing reads
+`invite_claim_attempts`: no `api.ts` function, no view, no screen; its only
+consumers are `smoke.sql` and the migrations. A condition gated on an
+observation nothing can make is a permanent deferral wearing a trigger's
+clothes. Also worse than stated: both `fn_claim_invite` and
+`fn_revoke_invite` retain `invite_token`, so the log write handle is not "a
+REAL token" but every invite ever issued, claimed and revoked ones included,
+permanently.
+
+Two further residuals, accepted and recorded rather than silently carried
 (adversarial review):
-- **No rate limit.** A REAL token's refusals each append an
-  `invite_claim_attempts` row (probe visibility is the point), so a holder
-  can grow the log without an account; and on a live *bound* token the
-  claimed/email_mismatch split confirms a guessed address at one anonymous
-  request per guess — the same fact `fn_preview_invite` gives any
-  authenticated holder, minus the sign-in. The 0016 vault limiter is the
-  shape a fix would take if either is ever observed in the trail.
 - **The signup toggle narrows, not seals, operator acquisition.** An
   invite-minted account is an ordinary authenticated user: nothing stops it
   skipping the claim and creating an *operators* row at /onboard. With

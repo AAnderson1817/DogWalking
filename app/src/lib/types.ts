@@ -266,6 +266,27 @@ export type Database = {
         };
         Relationships: [];
       };
+      invite_signup_attempts: {
+        Row: {
+          id: string;
+          client_id: string;
+          ip: unknown | null;
+          attempted_at: string;
+        };
+        Insert: {
+          id?: string;
+          client_id: string;
+          ip?: unknown | null;
+          attempted_at?: string;
+        };
+        Update: {
+          id?: string;
+          client_id?: string;
+          ip?: unknown | null;
+          attempted_at?: string;
+        };
+        Relationships: [];
+      };
       job_runs: {
         Row: {
           id: string;
@@ -1269,6 +1290,15 @@ export type Database = {
         Args: Record<string, never>;
         Returns: unknown;
       };
+      fn_invite_signup_allow_attempt: {
+        Args: {
+          p_token: string;
+          p_ip: unknown;
+          p_limit: number;
+          p_window_seconds: number;
+        };
+        Returns: boolean;
+      };
       fn_invite_signup_check: {
         Args: {
           p_token: string;
@@ -1580,6 +1610,7 @@ export type CredentialAccessLog = Database["public"]["Tables"]["credential_acces
 export type CreditLedger = Database["public"]["Tables"]["credit_ledger"]["Row"];
 export type EmailSuppressions = Database["public"]["Tables"]["email_suppressions"]["Row"];
 export type InviteClaimAttempts = Database["public"]["Tables"]["invite_claim_attempts"]["Row"];
+export type InviteSignupAttempts = Database["public"]["Tables"]["invite_signup_attempts"]["Row"];
 export type JobRuns = Database["public"]["Tables"]["job_runs"]["Row"];
 export type Notifications = Database["public"]["Tables"]["notifications"]["Row"];
 export type Operators = Database["public"]["Tables"]["operators"]["Row"];
