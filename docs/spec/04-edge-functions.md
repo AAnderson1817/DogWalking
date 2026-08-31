@@ -520,7 +520,17 @@ only after the fetch. So the fault was written down nowhere and a deployment
 whose keys had been removed showed an ordinary transient failure forever.
 `PushAttempt.blocked` carries the class, each gets its own recorded sentence,
 and all three stay retryable because a restored key, a shorter body or a
-re-registered device fixes them. Deliberately NOT a 500 like the email arm's:
+re-registered device fixes them.
+
+EVERY pre-fetch step is classified, which is a structural rule rather than a
+list: the `fetch` call takes only precomputed values and nothing inside its
+argument can throw. The first version of this classified the encryption and
+left `vapidAuthorization` inside the options object, so a malformed
+`VAPID_SUBJECT` or an unimportable private key threw past it and was recorded
+as a network failure with nothing logged — the same defect, surviving in the
+sibling operation, because the fix enumerated the steps rather than covering
+them. The invariant is asserted directly: `blocked: "transport"` may not be
+claimed when no request was made. Deliberately NOT a 500 like the email arm's:
 push must not fail the request, which is the channel isolation this function
 promises — the log is where it is loud.
 

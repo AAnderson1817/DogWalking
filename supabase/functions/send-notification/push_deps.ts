@@ -120,15 +120,35 @@ export function makePushDeps(
           "VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY / VAPID_SUBJECT are unset in this deployment",
         );
       }
+      // EVERY pre-fetch step, not the ones I happened to think of (Codex
+      // review on PR #85, fourteenth round). Round twelve wrapped the
+      // encryption and left `vapidAuthorization` where it was — inside the
+      // `fetch` options object — so a malformed VAPID_SUBJECT or a private key
+      // that will not import threw past the classification, was flattened to
+      // `transport`, recorded the false network sentence and logged nothing:
+      // the exact defect round twelve fixed, surviving in the sibling
+      // operation. Enumerating the ways something can fail is how the next one
+      // is missed, so the structure is the rule now: the `fetch` call below
+      // takes only precomputed values, and nothing inside its argument can
+      // throw.
       let body: Uint8Array;
+      let authorization: string;
       try {
-        body = await encryptPushPayload(payload, { p256dh: sub.p256dh, auth: sub.auth });
-      } catch (e) {
         // Key material that will not import, or a payload past the record
         // size. Neither is fixed by retrying THIS second, but both are fixed
         // by a later notification with a shorter body or a re-registered
         // device, so the row stays retryable and the fault is on the log.
+        body = await encryptPushPayload(payload, { p256dh: sub.p256dh, auth: sub.auth });
+      } catch (e) {
         return blocked("payload", "a push payload could not be encrypted", e);
+      }
+      try {
+        // A bad subject or an unimportable private key. That is configuration,
+        // not this device — every device fails identically until somebody
+        // fixes the deployment — so it is classed with the missing keys above.
+        authorization = await vapidAuthorization(sub.endpoint, vapid);
+      } catch (e) {
+        return blocked("not_configured", "the VAPID credentials could not sign a request", e);
       }
       // Every request gets a deadline (Codex review on PR #85). An endpoint
       // that accepts the connection and then STALLS would otherwise hold this
@@ -154,7 +174,7 @@ export function makePushDeps(
         redirect: "manual",
         method: "POST",
         headers: {
-          Authorization: await vapidAuthorization(sub.endpoint, vapid),
+          Authorization: authorization,
           "Content-Encoding": "aes128gcm",
           "Content-Type": "application/octet-stream",
           // Four hours. A walk report is worth holding while a phone is off;

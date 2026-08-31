@@ -198,3 +198,98 @@ Deno.test("the endpoint's path never reaches a pre-flight log line either", asyn
   assertEquals(JSON.parse(lines[0]).context.endpoint_host, "fcm.googleapis.com");
   assert(!lines[0].includes("DEVICE-BEARER-TOKEN"), lines[0]);
 });
+
+/**
+ * One attempt, with a throw turned into a value.
+ *
+ * A pre-fetch step that escapes classification THROWS, and a bare await makes
+ * the test fail with the library's own message — which reads as a broken suite
+ * rather than a broken rule. This keeps the failing sentence ours.
+ */
+async function attempt(
+  d: ReturnType<typeof deps>,
+  sub: PushSubscription,
+): Promise<{ status: number; blocked?: string; threw?: unknown }> {
+  try {
+    return await d.push.sendPush(sub, '{"title":"hi"}');
+  } catch (e) {
+    return { status: -1, threw: e };
+  }
+}
+
+Deno.test("a bad VAPID subject or private key is configuration, not the network", async () => {
+  // Round twelve wrapped the encryption and left `vapidAuthorization` inside
+  // the `fetch` options object, so this threw past the classification and was
+  // recorded as a network failure with nothing on the log (Codex review on PR
+  // #85, fourteenth round) — the defect that round fixed, surviving in the
+  // sibling operation.
+  for (
+    const vapid of [
+      { ...VAPID, subject: "ops@sanpo.test" }, // no mailto:/https: scheme
+      { ...VAPID, privateKey: "not-a-key" },
+    ]
+  ) {
+    const d = deps(() => new Response("", { status: 201 }), vapid);
+    const { result, lines } = await captureErrors(() => attempt(d, SUB));
+    assertEquals(
+      result,
+      { status: 0, blocked: "not_configured" },
+      `a pre-fetch step escaped classification for ${JSON.stringify(vapid)}`,
+    );
+    assertEquals(d.calls, [], "signed nothing, yet made a request");
+    assertEquals(JSON.parse(lines[0]).code, "push_not_configured");
+  }
+});
+
+Deno.test("`transport` is claimed ONLY when a request was actually made", async () => {
+  // The invariant rather than the instance. Round twelve enumerated the
+  // pre-fetch steps it could think of and missed one; this fails for ANY
+  // future step added outside the classification, because such a step can
+  // only ever surface as `transport` with no request behind it.
+  const broken: Array<[string, () => ReturnType<typeof deps>]> = [
+    ["no vapid at all", () => deps(() => new Response("", { status: 201 }), null)],
+    ["bad subject", () =>
+      deps(() => new Response("", { status: 201 }), { ...VAPID, subject: "nope" })],
+    ["bad private key", () =>
+      deps(() => new Response("", { status: 201 }), { ...VAPID, privateKey: "not-a-key" })],
+  ];
+  for (const [name, make] of broken) {
+    const d = make();
+    const { result } = await captureErrors(() => attempt(d, SUB));
+    assert(
+      !(result as { threw?: unknown }).threw,
+      `${name}: a pre-fetch step threw past the classification instead of being blocked`,
+    );
+    if (d.calls.length === 0) {
+      assert(
+        result.blocked !== undefined && result.blocked !== "transport",
+        `${name}: reported a transport failure without making a request (${
+          JSON.stringify(result)
+        })`,
+      );
+    }
+  }
+  // A bad p256dh is the same rule reached through the other branch.
+  const enc = deps(() => new Response("", { status: 201 }));
+  const { result: encResult } = await captureErrors(() =>
+    attempt(enc, { ...SUB, p256dh: "not-a-key" })
+  );
+  assertEquals(enc.calls, []);
+  assertEquals(encResult.blocked, "payload");
+
+  // And the other direction: a genuine transport failure IS transport, with
+  // the request behind it — or the rule above is satisfied by never saying it.
+  const netCalls: Call[] = [];
+  const netFetch = ((url: string | URL | Request, init?: RequestInit) => {
+    netCalls.push({ url: String(url), init: init ?? {} });
+    return Promise.reject(new TypeError("connection reset"));
+  }) as unknown as typeof fetch;
+  const req = new Request("https://x.functions.supabase.co/send-notification", {
+    method: "POST",
+    headers: { "x-request-id": "req-abc-123" },
+  });
+  const live = makePushDeps({} as never, VAPID, req, netFetch);
+  const thrown = await live.sendPush(SUB, '{"title":"hi"}').then(() => null, (e) => e);
+  assertEquals(netCalls.length, 1, "the transport case must actually reach the network");
+  assert(thrown instanceof Error, "a real transport failure still surfaces");
+});
