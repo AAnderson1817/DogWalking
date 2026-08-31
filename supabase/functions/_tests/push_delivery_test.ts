@@ -156,3 +156,71 @@ Deno.test("status classification", () => {
   assertEquals(isPermanentPushFailure(429), false, "rate limited is a bad moment");
   assertEquals(isPermanentPushFailure(503), false);
 });
+
+// ── Codex review on PR #85 ───────────────────────────────────────────────
+
+Deno.test("the drain delivers BOTH channels, and each stays send-once", async () => {
+  // The backlog now selects a row owed EITHER channel, so a row picked up
+  // because its push failed must not re-email — and vice versa. The drain does
+  // not know which one put the row there, and does not need to.
+  const { drainBacklog } = await import("../send-notification/handler.ts");
+  const row = {
+    id: "n1",
+    operator_id: "op1",
+    client_id: "cl1",
+    type: "walk_complete",
+    title: "t",
+    body: "b",
+    walk_id: null,
+    email_attempts: 1,
+    email_status: "sent", // already emailed; only the push is owed
+    push_attempts: 1,
+    push_status: "failed",
+  };
+  const pushed: string[] = [];
+  const emailed: string[] = [];
+  const deps = {
+    getNotification: () => Promise.resolve(row),
+    backlogIds: () => Promise.resolve(["n1"]),
+    getClient: () => Promise.resolve({ full_name: "x", email: "a@b.test", unsubscribe_token: "t" }),
+    isSuppressed: () => Promise.resolve(false),
+    getOperator: () => Promise.resolve({ business_name: "B" }),
+    sendEmail: () => {
+      emailed.push("n1");
+      return Promise.resolve({ ok: true } as const);
+    },
+    record: () => Promise.resolve(),
+    renderEmail: () => "<html></html>",
+    unsubscribeUrl: () => "https://x",
+  };
+  const result = await drainBacklog(deps as never, (r) => {
+    pushed.push(r.id);
+    return Promise.resolve({ kind: "sent" as const });
+  });
+  assertEquals(pushed, ["n1"], "the drain did not retry the failed push");
+  assertEquals(emailed, [], "a row owed only a push was emailed again");
+  assertEquals(result.pushSent, 1);
+});
+
+Deno.test("a push failure in the drain never strands the rest of the backlog", async () => {
+  // One bad row must not throw the sweep. Same rule the email arm already has.
+  const { drainBacklog } = await import("../send-notification/handler.ts");
+  const rows: Record<string, unknown> = {
+    a: { id: "a", operator_id: "o", client_id: null, type: "t", title: "x", body: null, walk_id: null, email_attempts: 0, push_attempts: 0 },
+    b: { id: "b", operator_id: "o", client_id: null, type: "t", title: "x", body: null, walk_id: null, email_attempts: 0, push_attempts: 0 },
+  };
+  const seen: string[] = [];
+  const deps = {
+    getNotification: (id: string) => Promise.resolve(rows[id]),
+    backlogIds: () => Promise.resolve(["a", "b"]),
+    record: () => Promise.resolve(),
+  };
+  const result = await drainBacklog(deps as never, (r) => {
+    seen.push(r.id);
+    if (r.id === "a") return Promise.reject(new Error("db blip"));
+    return Promise.resolve({ kind: "sent" as const });
+  });
+  assertEquals(seen, ["a", "b"], "the sweep stopped at the first push failure");
+  assertEquals(result.pushFailed, 1);
+  assertEquals(result.pushSent, 1);
+});

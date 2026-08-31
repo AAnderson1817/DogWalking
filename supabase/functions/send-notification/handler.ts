@@ -214,7 +214,12 @@ export interface DrainResult {
   drained: number;
   sent: number;
   failed: number;
+  pushSent: number;
+  pushFailed: number;
 }
+
+/** Injected so `handler.ts` need not import the push arm's wiring. */
+export type PushDelivery = (row: NotificationRow) => Promise<Outcome>;
 
 /**
  * Retry everything the nightly job counted as still owed.
@@ -222,18 +227,42 @@ export interface DrainResult {
  * Carries on past a failure: one bad recipient must not strand the rest of the
  * backlog, which is what a throw-on-first-error loop would do.
  */
-export async function drainBacklog(deps: SendDeps): Promise<DrainResult> {
+export async function drainBacklog(
+  deps: SendDeps,
+  pushDelivery?: PushDelivery,
+): Promise<DrainResult> {
   const ids = await deps.backlogIds();
   let sent = 0;
   let failed = 0;
+  let pushSent = 0;
+  let pushFailed = 0;
   for (const id of ids) {
     const row = await deps.getNotification(id);
     if (!row) continue; // deleted between the count and the send
+
+    // Both channels, because the backlog now selects rows owed EITHER (Codex
+    // review on PR #85). Each is send-once on its own `*_status = 'sent'`, so
+    // a row selected because its push failed does not re-email, and vice
+    // versa — the drain does not need to know which one put it here.
+    //
+    // Push first and isolated, for the same reason the single-notification
+    // path does it: a database blip in the optional channel must not cost the
+    // email, and one bad row must not strand the rest of the backlog.
+    if (pushDelivery) {
+      try {
+        const p = await pushDelivery(row);
+        if (p.kind === "failed") pushFailed += 1;
+        else if (p.kind === "sent") pushSent += 1;
+      } catch {
+        pushFailed += 1;
+      }
+    }
+
     const outcome = await deliverNotification(row, deps);
     if (outcome.kind === "failed") failed += 1;
     else sent += 1;
   }
-  return { drained: ids.length, sent, failed };
+  return { drained: ids.length, sent, failed, pushSent, pushFailed };
 }
 
 /**
