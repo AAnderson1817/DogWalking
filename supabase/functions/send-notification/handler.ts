@@ -90,6 +90,30 @@ export function isPermanentSendFailure(status: number): boolean {
 }
 
 /**
+ * Is this channel's outcome already final for this notification?
+ *
+ * Only `pending` and `failed` are retryable, which is exactly the set
+ * `fn_notification_backlog` selects on — stated once here rather than as two
+ * status lists that can drift apart, the way the payment-status sets did.
+ *
+ * Both arms guarded on `=== "sent"` alone (Codex review on PR #85, ninth
+ * round), which left `skipped` — documented in both as TERMINAL — retryable in
+ * practice. The widened backlog selects a row when EITHER channel is owed, and
+ * `drainBacklog` then runs both, so a notification whose push was skipped for
+ * want of a device and whose email failed came back through the drain and
+ * pushed retroactively if the recipient had since registered one. "Your walk
+ * is complete" about a walk two days ago is the harm H17's backfill decision
+ * named, arriving by a different route.
+ *
+ * The reviewer named the push arm; the email arm had the identical hole, one
+ * function over. Fixing one and not its sibling is a shape this repository has
+ * recorded more than once, so there is one rule and both call it.
+ */
+export function isSettled(status: string | null | undefined): boolean {
+  return status != null && status !== "pending" && status !== "failed";
+}
+
+/**
  * Deliver one notification and record what happened.
  *
  * Returns the outcome rather than throwing, so a drain can carry on through a
@@ -107,10 +131,9 @@ export async function deliverNotification(
   // scoping added alongside this, somebody else's.
   //
   // Deliberately not `email_attempts > 0`: an attempt that FAILED must stay
-  // retryable, which is the whole point of the backlog 0029 added. Only a
-  // recorded `sent` is terminal.
-  if (row.email_status === "sent") {
-    return { kind: "skipped", reason: "already sent" };
+  // retryable, which is the whole point of the backlog 0029 added.
+  if (isSettled(row.email_status)) {
+    return { kind: "skipped", reason: `already ${row.email_status}` };
   }
 
   // Terminal, not a failure: an operator-only notification has no client to

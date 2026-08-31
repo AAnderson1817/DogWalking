@@ -15,7 +15,7 @@ import {
   pushPayload,
   pushRecordPatch,
 } from "../send-notification/push.ts";
-import type { Outcome } from "../send-notification/handler.ts";
+import { isSettled, type Outcome } from "../send-notification/handler.ts";
 
 const ROW: PushableRow = {
   id: "n1",
@@ -121,6 +121,29 @@ Deno.test("a thrown transport error is never read as 'this device is gone'", asy
   assertEquals(h.dropped, []);
   assertEquals(outcome.kind, "failed");
   assert(outcome.kind === "failed" && !outcome.permanent);
+});
+
+Deno.test("a SKIPPED push is terminal, and the drain must not resurrect it", async () => {
+  // Codex review on PR #85, ninth round. `skipped` means "there was nothing to
+  // deliver to and nothing about that will change" — but the guard tested only
+  // `sent`, and the widened backlog selects a row when EITHER channel is owed.
+  // So a notification whose push was skipped for want of a device and whose
+  // EMAIL failed came back through the nightly drain, and if the recipient had
+  // registered a device since, it pushed. "Your walk is complete" about a walk
+  // two days ago, on a lock screen — the harm H17's backfill decision named,
+  // arriving by a different route.
+  const h = harness([sub("a")], () => ({ status: 201 }));
+  const outcome = await deliverPush({ ...ROW, push_status: "skipped" }, h.deps);
+  assertEquals(outcome, { kind: "skipped", reason: "already skipped" });
+  assertEquals(h.sent, [], "a settled notification reached the push service");
+  assertEquals(h.recorded, [], "and was re-recorded, overwriting its outcome");
+});
+
+Deno.test("only pending and failed are retryable — the backlog's own set", async () => {
+  // The rule is the complement of `fn_notification_backlog`'s push predicate,
+  // stated once so the two cannot drift the way the payment-status sets did.
+  assertEquals([undefined, null, "pending", "failed"].map(isSettled), [false, false, false, false]);
+  assertEquals(["sent", "skipped"].map(isSettled), [true, true]);
 });
 
 Deno.test("an endpoint that is not a push service is never contacted", async () => {

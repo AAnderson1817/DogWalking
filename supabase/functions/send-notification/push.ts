@@ -20,7 +20,7 @@
 // `client_id is null` means the operator's own devices, which is the same
 // convention `notifications` and `push_subscriptions` already use.
 import { isPushServiceEndpoint } from "../_lib/webpush.ts";
-import type { Outcome } from "./handler.ts";
+import { isSettled, type Outcome } from "./handler.ts";
 
 export interface PushSubscription {
   id: string;
@@ -171,9 +171,11 @@ function deepLink(row: PushableRow): string {
  */
 export async function deliverPush(row: PushableRow, deps: PushDeps): Promise<Outcome> {
   // Send-once, matching the email arm. Not `push_attempts > 0`: a failed
-  // attempt must stay retryable, which is the whole point of the backlog.
-  if (row.push_status === "sent") {
-    return { kind: "skipped", reason: "already sent" };
+  // attempt must stay retryable, which is the whole point of the backlog —
+  // and not `=== "sent"` either, which left the TERMINAL `skipped` retryable
+  // (Codex review on PR #85). See `isSettled`.
+  if (isSettled(row.push_status)) {
+    return { kind: "skipped", reason: `already ${row.push_status}` };
   }
 
   const subs = await deps.getSubscriptions(row.operator_id, row.client_id);

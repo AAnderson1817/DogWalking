@@ -129,6 +129,16 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   next statement collides with it and psql dies on a syntax error hundreds of
   lines before your assertion. Same class as the entry above: exit non-zero,
   nothing proved. Append the `;`.
+- **No backticks inside a double-quoted shell string — including in comments.**
+  `psql "$DB" -c "..."` is a double-quoted string, so a backticked word in a
+  SQL comment inside it is COMMAND SUBSTITUTION: bash runs it, prints
+  `foo: command not found` to stderr, and splices the empty result into the
+  SQL. Harmless by luck, not by design. Third recorded instance in this repo
+  (`ops(deploy-retry)` had it twice in one warning string), and this one was
+  found only because a sabotage run surfaced the stderr that a passing run
+  hides. A grep for it is NOT reliable — shell quoting defeats a crude parser,
+  and mine produced a false positive on the first try — so this is a rule to
+  remember rather than a gate.
 - **Tightening a validation rule silently invalidates other suites' fixtures.**
   PR #85 added a push-service host allowlist; `push_delivery_test.ts` went red
   immediately (its fixtures were arbitrary hosts) and was fixed. `concurrency.sh`
