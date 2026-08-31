@@ -85,7 +85,16 @@ export function pushPayload(row: PushableRow): string {
     title: row.title,
     body: row.body ?? "",
     url: deepLink(row),
-    tag: row.type,
+    // The NOTIFICATION id, not the type (Codex review on PR #85). Tagging by
+    // type collapsed two distinct `walk_complete` events into one tray entry:
+    // an operator with two clients would see Max's walk replace Luna's and
+    // never know Luna's existed. Losing a notification is a worse outcome
+    // than a fuller tray.
+    //
+    // It still collapses what a tag is here for — a duplicate delivery of the
+    // SAME row, which is the residual left by send-once being a read-then-act
+    // (backlog item 1). Same id, same tag, one entry.
+    tag: row.id,
   });
 }
 

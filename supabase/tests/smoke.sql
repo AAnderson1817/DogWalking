@@ -2446,6 +2446,18 @@ begin
     raise exception 'FAIL: expiring twice abandoned the same push again (0049)';
   end if;
 
+  -- One row abandoned on BOTH channels is ONE abandoned row (Codex review on
+  -- PR #85). Summing the per-channel counts reported it twice and inflated
+  -- the nightly figure `fn_run_nightly_jobs` surfaces — the comment described
+  -- the intent while the arithmetic contradicted it.
+  insert into notifications (operator_id, client_id, type, title, body,
+                             email_status, email_attempts, push_status, push_attempts)
+  values ('99999999-0000-4000-a000-000000000001', null, 'walk_scheduled',
+          'Both channels dead', 'x', 'failed', 99, 'failed', 99);
+  if fn_expire_notification_backlog() <> 1 then
+    raise exception 'FAIL: a row abandoned on both channels was counted more than once (0049)';
+  end if;
+
   raise notice 'email retry bound and give-up note (0029) + push (0049): OK';
 end $$;
 

@@ -211,6 +211,19 @@ begin
   -- the keys arrive together. A caller who knows only the endpoint cannot
   -- produce the keys — they never leave the browser that made them, and 0049
   -- withholds them from `authenticated` for this reason among others.
+  -- Serialize the whole read-modify-write per RECIPIENT (Codex review on PR
+  -- #85, fourth round). The quota below is a count-then-delete, and under
+  -- READ COMMITTED each concurrent transaction sees only the committed rows
+  -- plus its own insert — so with nine devices already present, any number of
+  -- simultaneous calls each see ten, each delete nothing, and all commit. The
+  -- quota bounded nothing against exactly the caller it exists to bound, who
+  -- can trivially issue concurrent requests.
+  --
+  -- Same instrument as 0016's vault limiter and 0048's: an advisory lock on
+  -- the subject being protected, taken before the read.
+  perform pg_advisory_xact_lock(
+    hashtextextended(v_operator::text || ':' || coalesce(v_client::text, ''), 0));
+
   insert into push_subscriptions (operator_id, client_id, endpoint, p256dh, auth, user_agent)
   values (v_operator, v_client, p_endpoint, p_p256dh, p_auth, p_user_agent)
   on conflict (endpoint) do update
@@ -435,12 +448,14 @@ set search_path = public
 as $$
 declare
   v_count int;
-  v_push int;
+  v_email_ids uuid[];
+  v_push_ids uuid[];
 begin
   if not fn_is_service_session() then
     raise exception 'fn_expire_notification_backlog: service role required';
   end if;
 
+  with expired as (
   update notifications
      set email_status = 'failed',
          email_last_error = coalesce(email_last_error, '')
@@ -455,11 +470,13 @@ begin
      -- Idempotent: a row already carrying a give-up note must not accrue a
      -- second one every night for the rest of time.
      and coalesce(email_last_error, '') not like '%gave up after%'
-     and coalesce(email_last_error, '') not like '%aged out of%';
-
-  get diagnostics v_count = row_count;
+     and coalesce(email_last_error, '') not like '%aged out of%'
+  returning id
+  )
+  select coalesce(array_agg(id), '{}') into v_email_ids from expired;
 
   -- The push mirror, with the same idempotence guard for the same reason.
+  with expired as (
   update notifications
      set push_status = 'failed',
          push_last_error = coalesce(push_last_error, '')
@@ -472,12 +489,24 @@ begin
    where push_status in ('pending', 'failed')
      and (created_at <= now() - p_window or push_attempts >= p_max_attempts)
      and coalesce(push_last_error, '') not like '%gave up after%'
-     and coalesce(push_last_error, '') not like '%aged out of%';
-
-  get diagnostics v_push = row_count;
+     and coalesce(push_last_error, '') not like '%aged out of%'
+  returning id
+  )
+  select coalesce(array_agg(id), '{}') into v_push_ids from expired;
   -- One number, because the caller's question is "how many rows were
   -- abandoned tonight" and a row abandoned on both channels is still one row
-  -- somebody was not told. Splitting it would make the nightly figure need a
-  -- footnote to be read.
-  return v_count + v_push;
+  -- somebody was not told.
+  --
+  -- Which is why summing the two counts was wrong (Codex review on PR #85):
+  -- a row that expired on BOTH channels appeared in each and was reported
+  -- twice, inflating the nightly figure that `fn_run_nightly_jobs` surfaces —
+  -- the comment above described the intent and the arithmetic contradicted
+  -- it. The DISTINCT union is what the sentence actually says.
+  -- `array_agg` in a CTE rather than `returning … into`, which takes ONE row
+  -- and raises on more (found by running it, not by reading it — the
+  -- migration applied cleanly because PL/pgSQL resolves a body at EXECUTION,
+  -- the same reason `fn_book_walk`'s phantom `active` column shipped).
+  select count(distinct id) into v_count
+    from unnest(v_email_ids || v_push_ids) as id;
+  return v_count;
 end $$;

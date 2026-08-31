@@ -604,6 +604,53 @@ expect_eq "the reissued invite still starts with a clean budget" \
 psql "$DB" -q -c "drop function if exists fn_invite_signup_allow_attempt_barrier(uuid, inet, int, int);" >/dev/null
 
 
+# ── Case 7: the device quota under concurrent registration ───────────────
+#
+# Codex review on PR #85, fourth round. The quota is a count-then-delete, and
+# under READ COMMITTED each transaction sees only the committed rows plus its
+# own insert — so with the cap nearly reached, simultaneous calls each see a
+# compliant count, each delete nothing, and all commit. The bound held only
+# against a caller who registered one device at a time, which is not the
+# caller it exists to bound.
+#
+# Two real backends, because that is the only place this is visible: a single
+# transaction cannot observe its own isolation level.
+echo
+echo "== case 7: the per-recipient device quota holds under concurrency =="
+
+psql "$DB" -v ON_ERROR_STOP=1 -q -c "
+  delete from push_subscriptions where operator_id = '${NS}-000000000001';
+  insert into push_subscriptions (operator_id, client_id, endpoint, p256dh, auth)
+  select '${NS}-000000000001', null, 'https://push.example/seed-' || g,
+         repeat('A', 87), repeat('B', 22)
+    from generate_series(1, 9) g;"
+
+# Ten simultaneous registrations of DISTINCT endpoints, all racing.
+#
+# Explicit PIDs, never a bare `wait`: session A is a psql held open on a FIFO
+# and does not exit until `exec 3>&-` at the end of this file, so a bare
+# `wait` blocks until the script is killed. Case 5 collects PIDs for the same
+# reason; this one learned it the slow way.
+RACE_PIDS=""
+for i in $(seq 1 10); do
+  psql "$DB" -q -v ON_ERROR_STOP=1 -c "
+    set local request.jwt.claims = '{\"sub\":\"${NS}-000000000001\",\"role\":\"authenticated\"}';
+    select fn_register_push_subscription(
+      'https://push.example/race-$i', repeat('C', 87), repeat('D', 22));" \
+    >"$WORK/race$i.out" 2>&1 &
+  RACE_PIDS="$RACE_PIDS $!"
+done
+for pid in $RACE_PIDS; do wait "$pid" || true; done
+
+RACE_TOTAL="$(q "select count(*) from push_subscriptions where operator_id = '${NS}-000000000001'")"
+if [ "$RACE_TOTAL" -le 10 ]; then
+  pass "the quota held under 10 concurrent registrations (got $RACE_TOTAL)"
+else
+  fail "the quota was bypassed by concurrency" "expected <= 10, got $RACE_TOTAL"
+fi
+
+psql "$DB" -q -c "delete from push_subscriptions where operator_id = '${NS}-000000000001';" >/dev/null
+
 exec 3>&-
 wait $A_PID 2>/dev/null || true
 
