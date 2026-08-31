@@ -10,6 +10,10 @@ moved it here, where it can be maintained by the sessions that consume it.
 `docs/dev/owner-actions.md` is the companion list of things no file in this
 repository can do. Nothing here needs the owner; everything there does.
 
+`docs/dev/session-notes.md` is the other companion: how to bring a container
+up, which gates pass without checking anything, and the traps worth knowing
+before you hit them.
+
 ## Reserved — do NOT start without the owner
 
 - **CSV import (M23)** and **intake/agreements (M25)**: product-shaping,
