@@ -18,6 +18,7 @@ import { Link } from "react-router-dom";
 import { Button } from "@/components/Button";
 import { FormError, Input, Select } from "@/components/fields";
 import { MfaSection } from "@/components/MfaSection";
+import { PushSection } from "@/components/PushSection";
 import { Spinner } from "@/components/Spinner";
 import { EmptyState } from "@/components/EmptyState";
 import {
@@ -120,6 +121,7 @@ export default function Settings() {
       {operator && <SubscriptionSection operator={operator} onError={setError} />}
 
       <MfaSection />
+      <PushSection />
     </div>
   );
 }

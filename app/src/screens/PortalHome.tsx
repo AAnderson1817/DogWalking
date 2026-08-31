@@ -10,6 +10,7 @@ import { AccessTrail } from "@/components/AccessTrail";
 import { NotificationBell, NotificationList } from "@/components/NotificationInbox";
 import { LoadingState } from "@/components/StateField";
 import { WalkCard } from "@/components/WalkCard";
+import { PushSection } from "@/components/PushSection";
 import { YourDataPanel } from "@/components/YourDataPanel";
 import {
   getMyClient,
@@ -222,6 +223,7 @@ export default function PortalHome() {
           </div>
         </section>
       )}
+      <PushSection heading="Notifications on this device" />
       <YourDataPanel
         businessName={operator?.business_name ?? null}
         noticeAcceptedAt={client.notice_accepted_at}

@@ -55,6 +55,20 @@ function required(name: RequiredKey): string {
 }
 
 export const env = {
+  /**
+   * The VAPID public key, or "" when push was never set up.
+   *
+   * OPTIONAL, like the Mapbox token and for a sharper reason: minting the key
+   * pair is an owner action (docs/dev/owner-actions.md), and making it
+   * required would fail every build until somebody did it. Absent, the opt-in
+   * UI reports push as unavailable rather than offering a switch that cannot
+   * work, and the send path records `skipped` for want of any device — which
+   * is the honest state, not a silent failure.
+   */
+  get vapidPublicKey(): string {
+    return (import.meta.env.VITE_VAPID_PUBLIC_KEY as string | undefined) ?? "";
+  },
+
   get supabaseUrl(): string {
     return required("VITE_SUPABASE_URL");
   },

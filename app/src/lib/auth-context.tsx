@@ -18,6 +18,7 @@ import type { Session } from "@supabase/supabase-js";
 import { supabase } from "./supabase";
 import { deleteOutboxDatabase } from "./gps-outbox";
 import { clearAllWalkSnapshots } from "./walk-snapshot";
+import { forgetPushDeviceBeforeSignOut } from "./push";
 import { Sheet } from "@/components/Sheet";
 import { FormError, Input } from "@/components/fields";
 import { LoadingState } from "@/components/StateField";
@@ -200,6 +201,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signOut = useCallback(async () => {
+    // BEFORE the session goes, unlike the two cleanups below — and the
+    // difference is not stylistic. Those clear local storage and need no
+    // caller; `fn_remove_push_subscription` is scoped to the CALLER and cannot
+    // run once there is none. Leaving the row behind means that on a shared
+    // device the next person's notifications reach a browser registration the
+    // previous person owns (review M27).
+    await forgetPushDeviceBeforeSignOut();
     await supabase.auth.signOut();
     // Review M8. Sign-out used to clear the session and three pieces of React
     // state and nothing else, so this device kept raw GPS coordinates for
