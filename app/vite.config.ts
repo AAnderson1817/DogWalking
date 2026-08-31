@@ -8,6 +8,7 @@ import react from "@vitejs/plugin-react";
 // drives these directly.
 import {
   PLATE_SOURCE_VARIANT_RE,
+  PlateFamilyError,
   todayPlateFamily,
   type PlateFamily,
 } from "./scripts/today-plate-family.ts";
@@ -150,7 +151,7 @@ function stampServiceWorker(): Plugin {
         // still a correct precache. A plate that could not be resolved is NOT
         // that, and must not be swallowed by the same catch — the whole point
         // of `todayPlateFamily` throwing is that it stops the build.
-        if (error instanceof Error && error.message.includes("Today plate")) throw error;
+        if (error instanceof PlateFamilyError) throw error;
         assets = [];
         plate = null;
       }
