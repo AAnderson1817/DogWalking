@@ -233,6 +233,44 @@ begin
     raise exception 'fn_register_push_subscription: endpoint is registered to a different device';
   end if;
 
+  -- Bound the device count per recipient (Codex review on PR #85).
+  --
+  -- Nothing checks that an endpoint belongs to a real push service — the
+  -- shape check above accepts any https url, and a stricter host allowlist
+  -- would be brittle across providers — so an authenticated caller could
+  -- register unbounded fabricated endpoints. Every later notification loads
+  -- ALL of a recipient's rows and POSTs to each one sequentially BEFORE the
+  -- email arm runs, so that is unbounded outbound work per notification on a
+  -- shared runtime, and it delays or loses the sender's own email.
+  --
+  -- A quota rather than validation, because it bounds the work regardless of
+  -- how an endpoint got there. Ten is far more than a person has (phone,
+  -- tablet, two laptops is four) and small enough that the sequential sends
+  -- stay bounded.
+  --
+  -- Evicting the OLDEST rather than refusing the newest: the device in front
+  -- of somebody right now is the one that matters, and a refusal would make
+  -- an ordinary eleventh browser look broken. `last_seen_at` is the ordering
+  -- because re-registration refreshes it, so an actively used device is not
+  -- evicted by one that was opened once.
+  --
+  -- `id <> v_id` is the load-bearing clause, not a belt-and-braces one. Two
+  -- registrations inside ONE transaction share a `last_seen_at`, because
+  -- `now()` is transaction-constant (the 0028 lesson) — so the ordering
+  -- cannot separate them and the row just registered is as likely to be
+  -- evicted as any other. Excluding it states the property that actually
+  -- matters: registering a device never evicts that device. The `id`
+  -- tiebreaker makes the rest deterministic rather than arbitrary.
+  delete from push_subscriptions
+   where id in (
+     select id from push_subscriptions
+      where operator_id = v_operator
+        and client_id is not distinct from v_client
+        and id <> v_id
+      order by last_seen_at desc, id desc
+      offset 9
+   );
+
   return v_id;
 end $$;
 
@@ -369,3 +407,77 @@ as $$
      )
    order by n.created_at
 $$;
+
+
+-- ── Giving up has to be visible on the push channel too ──────────────────
+--
+-- Codex review on PR #85, third round. The widened backlog above excludes a
+-- push past `p_max_attempts` or older than `p_window` — but
+-- `fn_expire_notification_backlog` touched only the email fields, so such a
+-- row simply vanished from the drain: no give-up note in `push_last_error`,
+-- no contribution to the abandoned count, and `push_status` left `failed`
+-- forever with nothing that would ever look at it again.
+--
+-- That is the asymmetry of having mirrored H17's four states and its backlog
+-- predicate but not its EXPIRY. The whole argument for four states is that a
+-- row says what happened to it; a row that stops being retried without
+-- recording why says less than the two-state version it replaced.
+--
+-- Built from `pg_get_functiondef` of the live 0029 function (the 0040 lesson),
+-- with the email half byte-identical and a second statement beside it.
+create or replace function fn_expire_notification_backlog(
+  p_window interval default '24:00:00'::interval,
+  p_max_attempts integer default 5
+) returns integer
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_count int;
+  v_push int;
+begin
+  if not fn_is_service_session() then
+    raise exception 'fn_expire_notification_backlog: service role required';
+  end if;
+
+  update notifications
+     set email_status = 'failed',
+         email_last_error = coalesce(email_last_error, '')
+           || case when email_last_error is null then '' else ' | ' end
+           || case
+                when email_attempts >= p_max_attempts
+                  then format('gave up after %s attempts', email_attempts)
+                else format('aged out of the %s retry window', p_window)
+              end
+   where email_status in ('pending', 'failed')
+     and (created_at <= now() - p_window or email_attempts >= p_max_attempts)
+     -- Idempotent: a row already carrying a give-up note must not accrue a
+     -- second one every night for the rest of time.
+     and coalesce(email_last_error, '') not like '%gave up after%'
+     and coalesce(email_last_error, '') not like '%aged out of%';
+
+  get diagnostics v_count = row_count;
+
+  -- The push mirror, with the same idempotence guard for the same reason.
+  update notifications
+     set push_status = 'failed',
+         push_last_error = coalesce(push_last_error, '')
+           || case when push_last_error is null then '' else ' | ' end
+           || case
+                when push_attempts >= p_max_attempts
+                  then format('gave up after %s attempts', push_attempts)
+                else format('aged out of the %s retry window', p_window)
+              end
+   where push_status in ('pending', 'failed')
+     and (created_at <= now() - p_window or push_attempts >= p_max_attempts)
+     and coalesce(push_last_error, '') not like '%gave up after%'
+     and coalesce(push_last_error, '') not like '%aged out of%';
+
+  get diagnostics v_push = row_count;
+  -- One number, because the caller's question is "how many rows were
+  -- abandoned tonight" and a row abandoned on both channels is still one row
+  -- somebody was not told. Splitting it would make the nightly figure need a
+  -- footnote to be read.
+  return v_count + v_push;
+end $$;
