@@ -831,9 +831,22 @@ Both go through `createSerialRunner` rather than being fired and forgotten
 callback followed straight by a signed-in one produced — either completion
 order loses: the cleanup can unsubscribe the endpoint the new account just
 registered, or the reclaim can register one the cleanup is about to
-invalidate. Three rules: never concurrent; any repair not yet STARTED is superseded by a
-newer one; and a repair already RUNNING is TOLD, so it can stand down before
-the irreversible step. The third is not a refinement of the second — it is the
+invalidate. Three rules, all keyed on the AUTH TRANSITION rather than on when a repair was
+scheduled: never concurrent; any repair not yet STARTED once a newer transition
+has arrived is dropped; and a repair already RUNNING is TOLD, so it can stand
+down before the irreversible step.
+
+Keying on scheduling was wrong in both directions (Codex review on PR #85). The
+reclaim is scheduled only after `resolveRole` finishes — a database round trip,
+while a repair is two service-worker lookups — so a running cleanup never
+learned it had been superseded in time, and the stand-down was inert in
+production while passing a test whose role query resolved instantly. Worse, a
+role lookup begun BEFORE a sign-out could finish after it and queue its reclaim
+as the newest repair, making the sign-out's cleanup stand down while the
+previous account's subscription stayed live: the shared-device leak the cleanup
+exists to close, reintroduced by the stand-down added to protect the account
+switch. The version is now bumped where the transition arrives, and unmounting
+bumps it too — nothing a torn-down provider scheduled is current. The third is not a refinement of the second — it is the
 case that actually happens, because `applyRole` awaits a database query before
 queueing the reclaim, so a sign-out's cleanup has always started by then and
 the pre-start check can never reach it. Without the signal the cleanup

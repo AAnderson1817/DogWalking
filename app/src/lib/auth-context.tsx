@@ -127,11 +127,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // callback followed quickly by a signed-in one could run them CONCURRENTLY
   // (Codex review on PR #85). Both begin by reading
   // `pushManager.getSubscription()`, so either completion order is wrong.
-  // See `createSerialRunner` for the two rules and why they are tested there
+  // See `createSerialRunner` for the three rules and why they are tested there
   // rather than through this provider.
-  const runPushRepair = useRef<SerialRunner>(createSerialRunner()).current;
+  //
+  // The version is the AUTH TRANSITION's, bumped the moment one arrives rather
+  // than when a repair is scheduled (Codex review on PR #85, fifteenth round).
+  // Scheduling is too late in both directions: a running cleanup only learned
+  // it had been superseded once the reclaim was queued — after a database
+  // round trip, long after two service-worker lookups have finished, so it
+  // never learned in time — and a role lookup begun BEFORE a sign-out could
+  // finish after it and queue its reclaim as the newest repair, making the
+  // sign-out's cleanup stand down while the previous account's subscription
+  // stayed live. That is the shared-device leak the cleanup exists to close,
+  // reintroduced by the stand-down added to protect the account switch.
+  const transition = useRef(0);
+  const runPushRepair = useRef<SerialRunner>(
+    createSerialRunner(() => transition.current),
+  ).current;
 
-  const applyRole = useCallback(async (uid: string): Promise<Role> => {
+  const applyRole = useCallback(async (
+    uid: string,
+    // Defaults to the current transition: `refreshRole` is not a transition,
+    // it re-resolves the session already in hand.
+    version: number = transition.current,
+  ): Promise<Role> => {
     const resolved = await resolveRole(uid, realQueries);
     resolvedFor.current = uid;
     setRoleError(false);
@@ -148,7 +167,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Fire-and-forget and never throwing: it is a repair, not a precondition
     // for being signed in, and the RPC refuses a caller who is not yet an
     // operator or a client (mid-onboarding), which must not block anything.
-    runPushRepair(reclaimPushDevice);
+    runPushRepair(reclaimPushDevice, version);
     return resolved.role;
   }, [runPushRepair]);
 
@@ -157,6 +176,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     async function apply(next: Session | null) {
       if (cancelled) return;
+      // Bumped HERE — on arrival — not where a repair is scheduled. See the
+      // note beside `transition` above.
+      const version = ++transition.current;
       setSession(next);
       sessionRef.current = next;
       const uid = next?.user?.id ?? null;
@@ -177,12 +199,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // here with a live subscription. Fire-and-forget for the same reason
         // the reclaim is: a repair must not stand between anyone and being
         // signed out.
-        runPushRepair(forgetPushDeviceOnSignedOut);
+        runPushRepair(forgetPushDeviceOnSignedOut, version);
         return;
       }
       if (resolvedFor.current === uid) return; // role already resolved
       try {
-        if (!cancelled) await applyRole(uid);
+        if (!cancelled) await applyRole(uid, version);
       } catch {
         // Resolution failed (network/5xx/token race). Do NOT leave role=null
         // masquerading as "no persona"; flag the error so guards can offer a
@@ -202,6 +224,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
     return () => {
       cancelled = true;
+      // Nothing this provider scheduled is current any more. A role lookup
+      // already in flight still resolves and still queues its reclaim, and
+      // without this the repair would run against a torn-down provider —
+      // acting on a session nobody is in. Bumping the transition invalidates
+      // every in-flight repair by the same rule a newer transition does.
+      transition.current += 1;
       sub.subscription.unsubscribe();
     };
   }, [applyRole, runPushRepair]);

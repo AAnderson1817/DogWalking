@@ -43,6 +43,12 @@ const PUSH = vi.hoisted(() => {
   return {
     log,
     superseded,
+    // A function, not `delete PUSH.superseded.forget` at the call sites: the
+    // delete narrows the property to `never` for the rest of the test and the
+    // later read stops compiling. `tsc` caught it; vitest did not.
+    clearSupersede: () => {
+      for (const key of Object.keys(superseded)) delete superseded[key];
+    },
     forgetPushDeviceOnSignedOut: slow("forget"),
     reclaimPushDevice: slow("reclaim"),
     forgetPushDeviceBeforeSignOut: vi.fn(async () => {}),
@@ -51,6 +57,12 @@ const PUSH = vi.hoisted(() => {
 const AUTH = vi.hoisted(() => ({
   session: null as { user: { id: string } } | null,
   listener: null as null | ((event: string, session: unknown) => void),
+  // How long the ROLE QUERY takes. Codex's fifteenth-round finding named this
+  // directly: resolving it immediately hid the window the repairs race in.
+  // Real role resolution is a database round trip; a repair is two
+  // service-worker lookups, so in production the query is the SLOW one and a
+  // test that pretends otherwise proves the opposite of what it claims.
+  roleQueryMs: 60,
 }));
 
 vi.mock("./push", () => ({
@@ -79,15 +91,21 @@ vi.mock("./supabase", () => ({
       select: () => ({
         eq: () => ({
           maybeSingle: () =>
-            Promise.resolve({
-              data: {
-                id: "op-1",
-                trial_ends_at: null,
-                platform_subscription_status: "active",
-                platform_customer_id: null,
-              },
-              error: null,
-            }),
+            new Promise((resolve) =>
+              setTimeout(
+                () =>
+                  resolve({
+                    data: {
+                      id: "op-1",
+                      trial_ends_at: null,
+                      platform_subscription_status: "active",
+                      platform_customer_id: null,
+                    },
+                    error: null,
+                  }),
+                AUTH.roleQueryMs,
+              )
+            ),
         }),
       }),
     }),
@@ -172,8 +190,16 @@ describe("the repairs go through the serial runner", () => {
     await waitFor(() => expect(PUSH.log).toContain("forget:end"));
     PUSH.log.length = 0;
     PUSH.reclaimPushDevice.mockClear();
+    // Or the assertions below read the MOUNT's predicate, which is superseded
+    // for an unrelated reason — a vacuous pass, found by running.
+    PUSH.clearSupersede();
 
     AUTH.listener!("SIGNED_OUT", null);
+    // Long enough for the cleanup to actually START. Back to back, the
+    // sign-in's transition arrives first and the cleanup is DROPPED rather
+    // than run — rule 2, and the better outcome — so there would be no
+    // running repair to tell.
+    await waitFor(() => expect(PUSH.log).toContain("forget:start"));
     AUTH.listener!("SIGNED_IN", { user: { id: "op-1" } });
     await waitFor(() => expect(PUSH.reclaimPushDevice).toHaveBeenCalled());
 
@@ -183,5 +209,65 @@ describe("the repairs go through the serial runner", () => {
       wasSuperseded!(),
       "a cleanup running when the sign-in arrived was not told it had been superseded",
     ).toBe(true);
+  });
+
+  it("tells it the moment the sign-in ARRIVES, not when the role query finishes", async () => {
+    // The fifteenth round's first half. The role query is a database round
+    // trip and a repair is two service-worker lookups, so keyed on scheduling
+    // the cleanup had always finished before the reclaim was queued and
+    // `superseded()` was never true — the stand-down was inert in production
+    // while passing here, because the mock resolved instantly.
+    //
+    // This asks BEFORE the reclaim could possibly have been scheduled.
+    AUTH.session = null;
+    render(<AuthProvider>ready</AuthProvider>);
+    await waitFor(() => expect(AUTH.listener).not.toBeNull());
+    await waitFor(() => expect(PUSH.log).toContain("forget:end"));
+    PUSH.log.length = 0;
+    PUSH.reclaimPushDevice.mockClear();
+    PUSH.clearSupersede();
+
+    AUTH.listener!("SIGNED_OUT", null);
+    await waitFor(() => expect(PUSH.superseded.forget).toBeTypeOf("function"));
+    AUTH.listener!("SIGNED_IN", { user: { id: "op-1" } });
+
+    expect(
+      PUSH.reclaimPushDevice,
+      "the role query resolved too fast for this test to mean anything",
+    ).not.toHaveBeenCalled();
+    expect(
+      PUSH.superseded.forget!(),
+      "the cleanup was not told until the reclaim was scheduled — too late to stop it",
+    ).toBe(true);
+  });
+
+  it("a role lookup that finishes AFTER a sign-out does not claim the device", async () => {
+    // The dangerous direction, and a leak the stand-down introduced: a lookup
+    // begun before the sign-out finishes after it, queues its reclaim as the
+    // newest repair, and the sign-out's cleanup stands down — leaving the
+    // PREVIOUS account's live subscription on a signed-out device.
+    AUTH.session = null;
+    render(<AuthProvider>ready</AuthProvider>);
+    await waitFor(() => expect(AUTH.listener).not.toBeNull());
+    await waitFor(() => expect(PUSH.log).toContain("forget:end"));
+    PUSH.log.length = 0;
+    PUSH.reclaimPushDevice.mockClear();
+    PUSH.forgetPushDeviceOnSignedOut.mockClear();
+    PUSH.clearSupersede();
+
+    AUTH.listener!("SIGNED_IN", { user: { id: "op-1" } }); // slow role query starts
+    await new Promise((r) => setTimeout(r, 10));
+    AUTH.listener!("SIGNED_OUT", null); // …and is overtaken
+    await new Promise((r) => setTimeout(r, 200)); // long enough for it to land
+
+    expect(
+      PUSH.reclaimPushDevice,
+      "a reclaim from a superseded transition ran and kept the old account's device",
+    ).not.toHaveBeenCalled();
+    expect(PUSH.forgetPushDeviceOnSignedOut, "the sign-out's cleanup did not run").toHaveBeenCalled();
+    expect(
+      PUSH.superseded.forget!(),
+      "the cleanup was told to stand down by a repair it should have outranked",
+    ).toBe(false);
   });
 });

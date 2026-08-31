@@ -26,19 +26,27 @@ function overlapped(log: string[]): boolean {
 
 const settle = (ms = 150) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * The caller owns the version — it is the AUTH TRANSITION's, not the
+ * scheduling moment's. `transitions()` models a provider bumping it on
+ * arrival, which is the whole point of the fifteenth round's finding.
+ */
+function harness() {
+  let version = 0;
+  const run = createSerialRunner(() => version);
+  return { run, arrive: () => ++version, at: () => version };
+}
+
 describe("serial push repairs", () => {
   it("never runs two at once", async () => {
     // The second is scheduled once the first is genuinely IN FLIGHT, which is
-    // what the provider does — `applyRole` is async, so a sign-out's repair
-    // has always started before a following sign-in's is queued. Scheduling
-    // both in one tick would instead exercise rule 2 and assert nothing about
-    // overlap, which is how the first draft of this passed against a runner
-    // with no serialisation at all.
+    // what the provider does. Scheduling both against the same version would
+    // instead exercise rule 2 and assert nothing about overlap.
     const log: string[] = [];
-    const run = createSerialRunner();
-    run(tracked(log, "forget"));
+    const h = harness();
+    h.run(tracked(log, "forget"), h.arrive());
     await new Promise((r) => setTimeout(r, 5));
-    run(tracked(log, "reclaim"));
+    h.run(tracked(log, "reclaim"), h.at());
     await settle();
     expect(log.join(" "), "one of them did not run").toBe(
       "forget:start forget:end reclaim:start reclaim:end",
@@ -46,27 +54,42 @@ describe("serial push repairs", () => {
     expect(overlapped(log), log.join(" ")).toBe(false);
   });
 
-  it("drops every repair superseded before it starts, same tick included", async () => {
-    // The case that matters: a sign-out immediately superseded by a sign-in
-    // should reassign this device to the new account, NOT unsubscribe it
-    // first and leave that account with push silently off.
+  it("drops a repair whose transition has been superseded before it starts", async () => {
+    // Including one scheduled in the same tick: a sign-out immediately
+    // superseded by a sign-in should reassign this device to the new account,
+    // not unsubscribe it first and leave that account with push off.
     const log: string[] = [];
-    const run = createSerialRunner();
-    run(tracked(log, "first"));
-    run(tracked(log, "superseded"));
-    run(tracked(log, "latest"));
+    const h = harness();
+    h.run(tracked(log, "first"), h.arrive());
+    h.run(tracked(log, "superseded"), h.arrive());
+    h.run(tracked(log, "latest"), h.arrive());
     await settle();
     expect(log.join(" ")).toBe("latest:start latest:end");
   });
 
+  it("drops a LATE repair from a transition that has since been superseded", async () => {
+    // The dangerous direction (Codex review on PR #85, fifteenth round). A
+    // role lookup begun before a sign-out can finish after it; queueing its
+    // reclaim as the newest repair made the sign-out's cleanup stand down
+    // while the previous account's subscription stayed live — the
+    // shared-device leak the cleanup exists to close.
+    const log: string[] = [];
+    const h = harness();
+    const stale = h.arrive(); // the sign-in, whose role lookup is slow
+    h.arrive(); // …then the sign-out arrives
+    h.run(tracked(log, "stale-reclaim"), stale);
+    await settle();
+    expect(log.join(" "), "a repair from a superseded transition ran").toBe("");
+  });
+
   it("does not interrupt one that is already running", async () => {
     // There is nothing to interrupt it with, and a half-applied unsubscribe is
-    // worse than a completed one.
+    // worse than a completed one. It is TOLD instead — see below.
     const log: string[] = [];
-    const run = createSerialRunner();
-    run(tracked(log, "running"));
+    const h = harness();
+    h.run(tracked(log, "running"), h.arrive());
     await new Promise((r) => setTimeout(r, 5));
-    run(tracked(log, "next"));
+    h.run(tracked(log, "next"), h.arrive());
     await settle();
     expect(log.join(" ")).toBe("running:start running:end next:start next:end");
   });
@@ -76,43 +99,43 @@ describe("serial push repairs", () => {
     // stand between anyone and being signed out, and must not wedge the one
     // after it.
     const log: string[] = [];
-    const run = createSerialRunner();
-    run(() => Promise.reject(new Error("worker gone")));
-    run(tracked(log, "after"));
+    const h = harness();
+    h.run(() => Promise.reject(new Error("worker gone")), h.arrive());
+    h.run(tracked(log, "after"), h.at());
     await settle();
     expect(log.join(" ")).toBe("after:start after:end");
   });
 });
 
 describe("a running repair is told when it is superseded", () => {
-  it("reports true once a newer transition arrives mid-flight", async () => {
-    // Rule 2 cannot reach a repair that has already started, and `applyRole`
-    // awaits a database query before queueing the reclaim — so a sign-out's
-    // cleanup has ALWAYS started by then. Without this, it went on to
-    // unsubscribe and the newly signed-in account was left with push off.
+  it("reports true as soon as the next TRANSITION arrives, not when a repair is scheduled", async () => {
+    // The fifteenth round's other half. Keyed on scheduling, a running cleanup
+    // only learned it had been superseded once the reclaim was queued — after
+    // a database round trip, long after two service-worker lookups finish — so
+    // it never learned in time and unsubscribed anyway.
     const seen: boolean[] = [];
-    const run = createSerialRunner();
-    run(async (superseded) => {
-      seen.push(superseded()); // nothing has superseded it yet
+    const h = harness();
+    h.run(async (superseded) => {
+      seen.push(superseded());
       await new Promise((r) => setTimeout(r, 30));
-      seen.push(superseded()); // …but by now the sign-in has arrived
-    });
+      seen.push(superseded());
+    }, h.arrive());
     await new Promise((r) => setTimeout(r, 5));
-    run(async () => {});
+    h.arrive(); // the transition arrives; NO repair is scheduled for it yet
     await settle();
     expect(seen).toEqual([false, true]);
   });
 
   it("reports false throughout when nothing supersedes it", async () => {
-    // The other direction: a predicate that always says yes would make every
-    // repair stand down and quietly disable both of them.
+    // A predicate that always said yes would make every repair stand down and
+    // quietly disable both of them.
     const seen: boolean[] = [];
-    const run = createSerialRunner();
-    run(async (superseded) => {
+    const h = harness();
+    h.run(async (superseded) => {
       seen.push(superseded());
       await new Promise((r) => setTimeout(r, 20));
       seen.push(superseded());
-    });
+    }, h.arrive());
     await settle();
     expect(seen).toEqual([false, false]);
   });

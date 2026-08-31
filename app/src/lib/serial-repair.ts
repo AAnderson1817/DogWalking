@@ -34,26 +34,48 @@
  */
 export type Repair = (superseded: () => boolean) => Promise<void>;
 
-/** Schedules a repair. Returns nothing: these are best-effort by design. */
-export type SerialRunner = (repair: Repair) => void;
+/**
+ * Schedules a repair for a given auth transition. Returns nothing: these are
+ * best-effort by design.
+ *
+ * The VERSION comes from the caller and is the transition's, not the
+ * scheduling moment's (Codex review on PR #85, fifteenth round). Minting it
+ * here made "superseded" mean "a later repair was SCHEDULED", and the reclaim
+ * is scheduled only after `resolveRole` finishes — a database round trip,
+ * while a repair is two service-worker lookups. So in practice the cleanup had
+ * always finished first, `superseded()` was never true, and the whole
+ * stand-down was inert; the provider test hid it by resolving the role query
+ * immediately.
+ */
+export type SerialRunner = (repair: Repair, version: number) => void;
 
 /**
  * Two rules, and they are separate:
  *
  *   1. NEVER CONCURRENT. Each repair waits for the one before it, so no two
  *      ever hold a view of the subscription at the same time.
- *   2. LATEST WINS. Any repair that has not STARTED when a newer one is
- *      scheduled is dropped rather than applied late: applying it would act
- *      on a session that no longer exists.
+ *   2. LATEST WINS. Any repair that has not STARTED once a newer TRANSITION
+ *      has arrived is dropped rather than applied late: applying it would act
+ *      on a session that no longer exists. This also discards a repair whose
+ *      transition was superseded while its role lookup was still running — a
+ *      lookup begun before a sign-out can finish after it, and queueing its
+ *      reclaim would make the sign-out's cleanup stand down while the previous
+ *      account's subscription stayed live, which is the shared-device leak the
+ *      cleanup exists to close.
  *
- *   3. AND A RUNNING ONE CAN STAND DOWN. Rule 2 alone is not enough, because
- *      `applyRole` awaits a database query before queueing the reclaim — so
- *      a sign-out's cleanup has always started by the time the sign-in's
- *      repair is scheduled, and rule 2 can never reach it (Codex review on PR
+ *   3. AND A RUNNING ONE CAN STAND DOWN. Rule 2 alone is not enough: a
+ *      sign-out's cleanup has usually started by the time a following
+ *      transition is seen, and rule 2 cannot reach it (Codex review on PR
  *      #85). It unsubscribed the browser, the reclaim then found nothing to
  *      register, and the newly signed-in account was left with push silently
  *      off: the account-switch case 0049's reassigning upsert exists for,
  *      lost to the repair meant to protect it.
+ *
+ *      Both rules key on the TRANSITION, which is why the version is the
+ *      caller's. Keyed on scheduling instead, a running cleanup only learns it
+ *      was superseded once the reclaim is queued — which happens after a
+ *      database round trip, long after two service-worker lookups have
+ *      finished — so it never learned in time.
  *
  *      So a running repair is not INTERRUPTED — a half-applied unsubscribe is
  *      worse than a completed one — it is told, and stands down of its own
@@ -62,14 +84,14 @@ export type SerialRunner = (repair: Repair) => void;
  * A rejection never propagates: these run inside the auth transition and must
  * never stand between anyone and being signed in or out.
  */
-export function createSerialRunner(): SerialRunner {
-  let generation = 0;
+export function createSerialRunner(currentVersion: () => number): SerialRunner {
   let chain: Promise<void> = Promise.resolve();
-  return (repair) => {
-    const mine = ++generation;
+  return (repair, version) => {
     chain = chain
       .catch(() => {})
-      .then(() => (mine === generation ? repair(() => mine !== generation) : undefined))
+      .then(() =>
+        version === currentVersion() ? repair(() => version !== currentVersion()) : undefined
+      )
       .catch(() => {});
   };
 }
