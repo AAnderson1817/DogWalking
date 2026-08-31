@@ -32,6 +32,24 @@ const approved = {
   // stays "v1"; the PNG master is in git history at d313486.
   "../src/assets/illustrations/sanpo-today-indigo-emaki-background-approved-v1.webp":
     "a34625fd300b21fc6103dd603fdd919ab1f95641789731642f83b05e93d89b6c",
+  // Review M17. Responsive candidates, generated from the master above by
+  // `scripts/generate-today-plate-variants.mjs` (Chromium, quality 0.90) —
+  // which refuses to run unless that master hashes to the value on the line
+  // above, so a variant can only ever be the APPROVED artwork made smaller.
+  // The artwork is unchanged, so these stay "v1"; the widths are measured
+  // field widths, not a generic ladder (438 = the field at 1440x900, 640 =
+  // `--page-max`, 750 = 375 CSS px at DPR 2).
+  //
+  // Regenerating against a different Chromium build can produce different
+  // bytes for the same picture. That makes these hashes a record of a
+  // deliberate act rather than a derived value: change them in the same commit
+  // as the regeneration, and say why.
+  "../src/assets/illustrations/sanpo-today-indigo-emaki-background-approved-v1-438w.webp":
+    "8dd4dd820303f37ab253d30ec60156d5a046c33606b9447bce29ad8bba0a0fc3",
+  "../src/assets/illustrations/sanpo-today-indigo-emaki-background-approved-v1-640w.webp":
+    "776af55c40e526bdf09120fe09ac2ed880b959b64b32dd0c5d02a70271b4e03f",
+  "../src/assets/illustrations/sanpo-today-indigo-emaki-background-approved-v1-750w.webp":
+    "a2f328dd00841ff57334183775d17526f7220a8740c63d177dcb7f30cdf8a0d1",
   // Review M19. Five STATE MARKS on the same 24x24 / 1.75px round-cap grid as
   // the navigation masters. Added because Money and the walk surfaces drew
   // them as text glyphs, and Nunito does not contain three of them: verified

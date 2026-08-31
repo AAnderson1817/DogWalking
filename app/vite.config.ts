@@ -3,6 +3,14 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vitest/config";
 import react from "@vitejs/plugin-react";
+// Extracted so it is reachable from a test at all: a rule that only runs
+// inside a build is a rule nothing can prove. `scripts/today-plate-family.test.ts`
+// drives these directly.
+import {
+  PLATE_SOURCE_VARIANT_RE,
+  todayPlateFamily,
+  type PlateFamily,
+} from "./scripts/today-plate-family.ts";
 
 // Stamp the service worker with a per-build version AND the build's hashed
 // asset list so the shell precache is complete (phase 08; re-review fix —
@@ -99,9 +107,25 @@ function stampServiceWorker(): Plugin {
       let assets: string[] = [];
       const skipped: string[] = [];
       let bytes = 0;
+      let plate: PlateFamily | null = null;
+      // How many plate variants the SOURCE carries, so the bundle is checked
+      // against what exists rather than against a number written here that
+      // would rot the day a width is added.
+      //
+      // Read OUTSIDE the try on purpose. The catch below exists to tolerate a
+      // missing `dist/assets` — a `public`-only build — and `src/assets` is
+      // source, so it is always there. Reading it inside would let an ENOENT
+      // be swallowed by that tolerance and stamp a worker with no plate at
+      // all, from a green build.
+      const sourceVariantCount = readdirSync(
+        fileURLToPath(new URL("./src/assets/illustrations", import.meta.url)),
+      ).filter((f) => PLATE_SOURCE_VARIANT_RE.test(f)).length;
+
       try {
-        const files = readdirSync(assetsDir)
-          .filter((f) => SHELL_ASSET_EXTENSIONS.some((ext) => f.endsWith(ext)));
+        const all = readdirSync(assetsDir);
+        plate = todayPlateFamily(all, sourceVariantCount);
+
+        const files = all.filter((f) => SHELL_ASSET_EXTENSIONS.some((ext) => f.endsWith(ext)));
         for (const f of files) {
           const size = statSync(join(assetsDir, f)).size;
           // Non-JS assets — CSS, fonts, the Today plate — are all shell: they
@@ -111,13 +135,24 @@ function stampServiceWorker(): Plugin {
             skipped.push(`${f} (${(size / 1024).toFixed(0)} KiB)`);
             continue;
           }
+          // ...except the plate's smaller candidates. Exactly one plate is
+          // precached and the worker substitutes it for the rest; see
+          // `todayPlateFamily`.
+          if (plate.variants.includes(f)) {
+            skipped.push(`${f} (${(size / 1024).toFixed(0)} KiB)`);
+            continue;
+          }
           assets.push(`/assets/${f}`);
           bytes += size;
         }
-      } catch {
-        // No assets dir at all: a `public`-only build. The bare shell is still
-        // a correct precache, so this one is genuinely not an error.
+      } catch (error) {
+        // A missing assets dir is a `public`-only build, and a bare shell is
+        // still a correct precache. A plate that could not be resolved is NOT
+        // that, and must not be swallowed by the same catch — the whole point
+        // of `todayPlateFamily` throwing is that it stops the build.
+        if (error instanceof Error && error.message.includes("Today plate")) throw error;
         assets = [];
+        plate = null;
       }
       // Said out loud rather than silently decided, in both directions: what
       // was left out, and how big what stayed in actually is.
@@ -142,15 +177,29 @@ function stampServiceWorker(): Plugin {
       }
 
       const src = readFileSync(out, "utf8");
-      if (!src.includes("__BUILD_VERSION__") || !src.includes("\"__BUILD_ASSETS__\"")) {
+      if (
+        !src.includes("__BUILD_VERSION__")
+        || !src.includes("\"__BUILD_ASSETS__\"")
+        || !src.includes("\"__PLATE_FAMILY__\"")
+      ) {
         throw new Error(
           "sw.js is missing its build placeholders — the service worker would ship unstamped, "
-            + "with no cache versioning and no offline shell.",
+            + "with no cache versioning, no offline shell and no plate fallback.",
+        );
+      }
+      // A `public`-only build has no plate to name; every real build does, and
+      // `todayPlateFamily` has already thrown if it could not resolve one.
+      const plateStamp = plate ? { stem: plate.stem, fallback: plate.fallback } : null;
+      if (plate && !assets.includes(plate.fallback)) {
+        throw new Error(
+          `the Today plate fallback ${plate.fallback} is not in the precache, so the worker would `
+            + "substitute a file it does not hold and the plate would be blank on a cold offline start.",
         );
       }
       const stamped = src
         .replace("__BUILD_VERSION__", Date.now().toString(36))
-        .replace("\"__BUILD_ASSETS__\"", JSON.stringify(assets));
+        .replace("\"__BUILD_ASSETS__\"", JSON.stringify(assets))
+        .replace("\"__PLATE_FAMILY__\"", JSON.stringify(plateStamp));
       writeFileSync(out, stamped);
     },
   };

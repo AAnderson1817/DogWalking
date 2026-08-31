@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import todayBackground from "@/assets/illustrations/sanpo-today-indigo-emaki-background-approved-v1.webp";
 import { Badge } from "@/components/Badge";
 import { Card } from "@/components/Card";
 import { LoadError, loadErrorMessage } from "@/components/LoadError";
@@ -177,7 +176,6 @@ export default function Dashboard() {
   return (
     <div className="page today-emaki-page">
       <TodayIllustratedSchedule
-        backgroundSrc={todayBackground}
         dateLabel={todayDateLabel()}
         visits={visits}
         distanceLabel={distanceLabel}

@@ -1,5 +1,4 @@
 import { useSearchParams } from "react-router-dom";
-import todayBackground from "@/assets/illustrations/sanpo-today-indigo-emaki-background-approved-v1.webp";
 import { ApprovedIcon } from "@/components/ApprovedIcon";
 import { BottomNav } from "@/components/BottomNav";
 import {
@@ -69,7 +68,6 @@ export default function TodayPreview() {
     <>
       <div className="page today-emaki-page">
         <TodayIllustratedSchedule
-          backgroundSrc={todayBackground}
           dateLabel="Wednesday, July 22"
           visits={visits}
           distanceLabel="7.2 mi"

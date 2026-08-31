@@ -14,7 +14,6 @@ describe("TodayIllustratedSchedule", () => {
     const html = renderToStaticMarkup(
       <MemoryRouter>
         <TodayIllustratedSchedule
-          backgroundSrc="/approved-background.png"
           dateLabel="Wednesday, July 22"
           visits={visits}
           distanceLabel="7.2 mi"
@@ -42,7 +41,6 @@ describe("TodayIllustratedSchedule", () => {
     const html = renderToStaticMarkup(
       <MemoryRouter>
         <TodayIllustratedSchedule
-          backgroundSrc="/approved-background.png"
           dateLabel="Wednesday, July 22"
           visits={visits}
           paceLabel="On time"
@@ -62,7 +60,6 @@ describe("TodayIllustratedSchedule", () => {
     const html = renderToStaticMarkup(
       <MemoryRouter>
         <TodayIllustratedSchedule
-          backgroundSrc="/approved-background.png"
           dateLabel="Wednesday, July 22"
           visits={visits.map((visit) => ({ ...visit, href: `/clients/${visit.id}` }))}
           paceLabel="On time"
@@ -90,7 +87,6 @@ describe("TodayIllustratedSchedule", () => {
     const html = renderToStaticMarkup(
       <MemoryRouter>
         <TodayIllustratedSchedule
-          backgroundSrc="/approved-background.png"
           dateLabel="Wednesday, July 22"
           visits={visits}
           paceLabel="On time"
@@ -106,7 +102,6 @@ describe("TodayIllustratedSchedule", () => {
     const html = renderToStaticMarkup(
       <MemoryRouter>
         <TodayIllustratedSchedule
-          backgroundSrc="/approved-background.png"
           dateLabel="Wednesday, July 22"
           visits={[]}
           paceLabel="Schedule ready"

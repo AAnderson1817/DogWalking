@@ -11,6 +11,17 @@ const VERSION = "__BUILD_VERSION__";
 const SHELL_CACHE = `pawtrail-shell-${VERSION}`;
 // Replaced at build time with the hashed /assets file list.
 const BUILD_ASSETS = "__BUILD_ASSETS__";
+// Replaced at build time with {stem, fallback} for the Today plate, or null on
+// a `public`-only build. Review M17: the plate ships as four responsive
+// candidates and only the master is precached, so the worker has to be able to
+// answer for the other three.
+//
+// The stem is stamped rather than written here on purpose. Matching by stem —
+// not by an exact URL list — is what keeps this working across a deploy: a
+// page still running the previous build asks for the PREVIOUS hashed variant,
+// which no current list would contain, and that request is exactly the one
+// most likely to 404.
+const PLATE_FAMILY = "__PLATE_FAMILY__";
 
 const SHELL_URLS = [
   "/",
@@ -79,6 +90,20 @@ function isMutation(request) {
   return request.method !== "GET";
 }
 
+/**
+ * Is this one of the Today plate's responsive candidates?
+ *
+ * Scoped to `/assets/` and to the stamped stem, so it can never claim an
+ * unrelated image: substituting the plate for something else would be a
+ * silently wrong picture, which is worse than a missing one.
+ */
+function isPlateRequest(url) {
+  if (!PLATE_FAMILY || typeof PLATE_FAMILY.stem !== "string") return false;
+  if (!url.pathname.startsWith("/assets/")) return false;
+  const name = url.pathname.slice("/assets/".length);
+  return name.startsWith(PLATE_FAMILY.stem) && name.endsWith(".webp");
+}
+
 // Supabase REST/Storage + auth + realtime + edge functions: always live.
 function isNeverCache(url) {
   return (
@@ -104,14 +129,16 @@ self.addEventListener("fetch", (event) => {
       );
       return;
     }
-    event.respondWith(cacheFirst(request, SHELL_CACHE));
+    event.respondWith(
+      cacheFirst(request, SHELL_CACHE, isPlateRequest(url) ? PLATE_FAMILY.fallback : null),
+    );
   }
 });
 
 // Cache-first with background refresh. Hashed build assets are
 // content-addressed so a cached copy is always correct; the refresh keeps
 // non-hashed shell files (index.html, manifest) current for the next load.
-async function cacheFirst(request, cacheName) {
+async function cacheFirst(request, cacheName, fallbackUrl) {
   const cache = await caches.open(cacheName);
   const cached = await cache.match(request);
   if (cached) {
@@ -124,9 +151,30 @@ async function cacheFirst(request, cacheName) {
   }
   try {
     const response = await fetch(request);
-    if (response.ok) cache.put(request, response.clone());
-    return response;
+    if (response.ok) {
+      cache.put(request, response.clone());
+      return response;
+    }
+    // A non-ok answer is a real outcome for a hashed asset — the file rolled
+    // off after a fast redeploy — and for the plate it means a blank screen,
+    // because <img srcset> does NOT try another candidate when the picked one
+    // fails: it renders nothing. So a 404 falls back too, not just an offline
+    // fetch. Everything else keeps getting the server's own answer.
+    return (await plateFallback(cache, fallbackUrl)) ?? response;
   } catch {
-    return Response.error();
+    return (await plateFallback(cache, fallbackUrl)) ?? Response.error();
   }
+}
+
+/**
+ * The precached plate, standing in for a candidate this worker cannot produce.
+ *
+ * Seamless because every candidate is the same composition at the same ratio
+ * and the layout is CSS-driven: the substituted master renders at the field's
+ * width exactly as the intended candidate would, just from more pixels.
+ */
+async function plateFallback(cache, fallbackUrl) {
+  if (!fallbackUrl) return null;
+  const cached = await cache.match(fallbackUrl);
+  return cached ?? null;
 }
