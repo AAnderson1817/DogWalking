@@ -167,3 +167,92 @@ export async function encryptPushPayload(
   header[SALT_LEN + 4] = senderPublicRaw.length;
   return concat(header, senderPublicRaw, ciphertext);
 }
+
+// ── VAPID (RFC 8292) ─────────────────────────────────────────────────────
+//
+// The push service will not accept a message without proof that it comes from
+// the application server the browser subscribed to. That proof is an ES256 JWT
+// signed by the VAPID private key, sent alongside the matching public key.
+//
+// The keys are an OWNER ACTION: nothing in this repository can mint them,
+// because the public half has to be baked into the client bundle at build time
+// and the private half is a deploy secret. Absent them, the opt-in UI never
+// offers to subscribe, so there are no devices, so every notification records
+// `skipped` for want of a recipient — which is the honest state and not a
+// silent failure. See docs/dev/owner-actions.md.
+
+/** RFC 8292 §2: 24h is the ceiling; 12h leaves room for clock skew. */
+export const VAPID_TTL_SECONDS = 12 * 60 * 60;
+
+export interface VapidConfig {
+  /** base64url, the same 65-byte point the browser subscribed with. */
+  publicKey: string;
+  /** base64url, the 32-byte P-256 private scalar. */
+  privateKey: string;
+  /** RFC 8292 §2.1 — `mailto:` or `https:`, so a push service can complain. */
+  subject: string;
+}
+
+/** The `aud` claim is the push service ORIGIN, never the full endpoint. */
+export function pushAudience(endpoint: string): string {
+  return new URL(endpoint).origin;
+}
+
+function b64urlJson(value: unknown): string {
+  return bytesToB64url(enc.encode(JSON.stringify(value)));
+}
+
+/**
+ * Build the `Authorization: vapid t=…, k=…` header for one endpoint.
+ *
+ * `now` is injectable so the test can pin `exp`; production never passes it.
+ */
+export async function vapidAuthorization(
+  endpoint: string,
+  vapid: VapidConfig,
+  now: number = Date.now(),
+): Promise<string> {
+  if (!/^(mailto:|https:)/.test(vapid.subject)) {
+    // A push service that cannot reach a human on a misbehaving sender may
+    // simply stop accepting from the key. Refusing here names the setting.
+    throw new Error("VAPID subject must be a mailto: or https: URI");
+  }
+  const priv = b64urlToBytes(vapid.privateKey);
+  const pub = b64urlToBytes(vapid.publicKey);
+  if (priv.length !== 32) throw new Error(`VAPID private key must be 32 bytes, got ${priv.length}`);
+  if (pub.length !== KEY_LEN) throw new Error(`VAPID public key must be 65 bytes, got ${pub.length}`);
+
+  const key = await crypto.subtle.importKey(
+    "jwk",
+    {
+      kty: "EC",
+      crv: "P-256",
+      d: bytesToB64url(priv),
+      x: bytesToB64url(pub.slice(1, 33)),
+      y: bytesToB64url(pub.slice(33, 65)),
+      ext: true,
+    },
+    { name: "ECDSA", namedCurve: "P-256" },
+    false,
+    ["sign"],
+  );
+
+  const signingInput = `${b64urlJson({ typ: "JWT", alg: "ES256" })}.${
+    b64urlJson({
+      aud: pushAudience(endpoint),
+      exp: Math.floor(now / 1000) + VAPID_TTL_SECONDS,
+      sub: vapid.subject,
+    })
+  }`;
+  // WebCrypto emits the raw r‖s pair JWS wants. Node's default is DER, which
+  // is why an implementation ported from a Node example fails here with a
+  // signature the push service rejects and nothing else to look at.
+  const sig = new Uint8Array(
+    await crypto.subtle.sign(
+      { name: "ECDSA", hash: "SHA-256" },
+      key,
+      enc.encode(signingInput) as BufferSource,
+    ),
+  );
+  return `vapid t=${signingInput}.${bytesToB64url(sig)}, k=${vapid.publicKey}`;
+}

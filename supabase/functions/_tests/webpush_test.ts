@@ -16,7 +16,9 @@ import {
   b64urlToBytes,
   bytesToB64url,
   encryptPushPayload,
+  pushAudience,
   RECORD_SIZE,
+  vapidAuthorization,
 } from "../_lib/webpush.ts";
 
 const VECTOR = {
@@ -105,5 +107,88 @@ Deno.test("a malformed subscription is refused rather than encrypted to nobody",
   );
   await assertRejects(() =>
     encryptPushPayload("x", { p256dh: VECTOR.p256dh, auth: bytesToB64url(new Uint8Array(8)) })
+  );
+});
+
+// ── VAPID (RFC 8292) ─────────────────────────────────────────────────────
+//
+// ECDSA picks a fresh `k` per signature, so a byte comparison against the
+// reference is impossible by construction. The two segments that ARE
+// deterministic are pinned against `web-push`'s own output, and the signature
+// is verified under the advertised public key — which is the property that
+// actually matters, since a push service does exactly that and rejects the
+// message otherwise.
+const VAPID = {
+  publicKey:
+    "BHYKBshY3BflxTbegR9xB7-iTU_uOdZK_ZFY7rqrPPJbxO3PNMLAjRaw3NuIHYRwFLhAKusNb8UweMqU884c5M4",
+  privateKey: "u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7s",
+  subject: "mailto:ops@sanpo.test",
+  atMs: 1767225600000,
+  endpoint: "https://fcm.googleapis.com/fcm/send/abc123",
+  jwtHeaderB64: "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiJ9",
+  jwtPayloadB64:
+    "eyJhdWQiOiJodHRwczovL2ZjbS5nb29nbGVhcGlzLmNvbSIsImV4cCI6MTc2NzI2ODgwMCwic3ViIjoibWFpbHRvOm9wc0BzYW5wby50ZXN0In0",
+};
+
+Deno.test("the VAPID JWT header and claims match the reference implementation", async () => {
+  const header = await vapidAuthorization(
+    VAPID.endpoint,
+    { publicKey: VAPID.publicKey, privateKey: VAPID.privateKey, subject: VAPID.subject },
+    VAPID.atMs,
+  );
+  const jwt = header.replace(/^vapid t=/, "").split(",")[0];
+  const [h, p] = jwt.split(".");
+  assertEquals(h, VAPID.jwtHeaderB64);
+  assertEquals(p, VAPID.jwtPayloadB64, "claims differ from web-push's for the same inputs");
+  assert(header.endsWith(`, k=${VAPID.publicKey}`), `k= is not the public key: ${header}`);
+});
+
+Deno.test("the aud claim is the push service ORIGIN, not the endpoint", async () => {
+  // Sending the full endpoint as `aud` is the natural mistake and is rejected
+  // by the push service, with nothing on our side to look at.
+  assertEquals(pushAudience("https://fcm.googleapis.com/fcm/send/abc123"), "https://fcm.googleapis.com");
+  assertEquals(pushAudience("https://updates.push.services.mozilla.com/wpush/v2/xyz"), "https://updates.push.services.mozilla.com");
+});
+
+Deno.test("the signature verifies under the advertised key, and is raw r‖s", async () => {
+  // WebCrypto emits raw r‖s, which is what JWS wants; Node's default is DER.
+  // An implementation ported from a Node example produces a signature the push
+  // service rejects, and this is the assertion that catches it.
+  const header = await vapidAuthorization(
+    VAPID.endpoint,
+    { publicKey: VAPID.publicKey, privateKey: VAPID.privateKey, subject: VAPID.subject },
+    VAPID.atMs,
+  );
+  const jwt = header.replace(/^vapid t=/, "").split(",")[0];
+  const [h, p, s] = jwt.split(".");
+  const sig = b64urlToBytes(s);
+  assertEquals(sig.length, 64, "not a raw r‖s pair — DER would be ~70 and variable");
+
+  const pub = b64urlToBytes(VAPID.publicKey);
+  const key = await crypto.subtle.importKey(
+    "jwk",
+    { kty: "EC", crv: "P-256", x: bytesToB64url(pub.slice(1, 33)), y: bytesToB64url(pub.slice(33, 65)), ext: true },
+    { name: "ECDSA", namedCurve: "P-256" },
+    false,
+    ["verify"],
+  );
+  const ok = await crypto.subtle.verify(
+    { name: "ECDSA", hash: "SHA-256" },
+    key,
+    sig as BufferSource,
+    new TextEncoder().encode(`${h}.${p}`) as BufferSource,
+  );
+  assert(ok, "the push service would reject this signature");
+});
+
+Deno.test("a subject the push service cannot act on is refused", async () => {
+  // RFC 8292 §2.1. A push service that cannot reach a human about a
+  // misbehaving sender can simply stop accepting the key.
+  await assertRejects(() =>
+    vapidAuthorization(VAPID.endpoint, {
+      publicKey: VAPID.publicKey,
+      privateKey: VAPID.privateKey,
+      subject: "ops@sanpo.test",
+    })
   );
 });
