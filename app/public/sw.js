@@ -86,6 +86,90 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+// ── Push (review M27) ────────────────────────────────────────────────────
+//
+// A push event MUST end in a visible notification. Chrome permits a small
+// number of silent pushes and then shows "This site has been updated in the
+// background" on the user's behalf, and repeated offenders lose the
+// permission outright — so every path out of here, including a malformed or
+// absent payload, shows something. A generic notification is a worse product
+// than a specific one; NO notification is a broken one.
+self.addEventListener("push", (event) => {
+  event.waitUntil(showPush(event.data));
+});
+
+/**
+ * A payload-supplied path is never trusted as a destination.
+ *
+ * This mirrors `app/src/lib/internal-path.ts` (review M41): a target starting
+ * `//host` or `\host` is another ORIGIN once it becomes an href, so
+ * `clients.openWindow` on it navigates the user off-site. The payload is
+ * written by our own server today, which is exactly the kind of property that
+ * quietly stops being true — and the sink here is a real navigation, unlike
+ * the app-side call sites where every target is a literal.
+ *
+ * Duplicated rather than imported because a service worker has no module
+ * graph into `src/`. `service-worker.test.ts` pins both forms.
+ */
+function safePath(candidate) {
+  if (typeof candidate !== "string" || candidate === "") return "/";
+  for (let i = 0; i < candidate.length; i++) {
+    const code = candidate.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f) return "/";
+  }
+  if (candidate[0] !== "/") return "/";
+  if (candidate[1] === "/" || candidate[1] === "\\") return "/";
+  return candidate;
+}
+
+async function showPush(data) {
+  let payload = {};
+  try {
+    payload = data ? data.json() : {};
+  } catch {
+    // A body we cannot parse is still a push we must answer for.
+    payload = {};
+  }
+  const title = typeof payload.title === "string" && payload.title ? payload.title : "Sanpo";
+  await self.registration.showNotification(title, {
+    body: typeof payload.body === "string" ? payload.body : "",
+    // Collapses repeats of the same kind rather than stacking a lock screen
+    // full of them. The server sends the notification TYPE.
+    tag: typeof payload.tag === "string" && payload.tag ? payload.tag : "sanpo",
+    icon: "/icons/icon-192.png",
+    badge: "/icons/icon-192.png",
+    data: { url: safePath(payload.url) },
+  });
+}
+
+// Focus a tab that is already open rather than stacking another one, which is
+// what a person tapping a notification almost always means.
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const url = safePath(event.notification.data && event.notification.data.url);
+  event.waitUntil(openApp(url));
+});
+
+async function openApp(url) {
+  const all = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  for (const client of all) {
+    if (new URL(client.url).origin !== self.location.origin) continue;
+    await client.focus();
+    // `navigate` is not implemented everywhere, and a focused tab on the wrong
+    // screen is still better than a second tab — so a failure here is not
+    // allowed to lose the focus we just gained.
+    if (typeof client.navigate === "function") {
+      try {
+        await client.navigate(url);
+      } catch {
+        /* focused, but could not route */
+      }
+    }
+    return;
+  }
+  await self.clients.openWindow(url);
+}
+
 function isMutation(request) {
   return request.method !== "GET";
 }

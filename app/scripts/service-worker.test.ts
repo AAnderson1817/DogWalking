@@ -32,6 +32,18 @@ interface Handlers {
   fetch?: (event: FetchEventStub) => void;
   install?: (event: { waitUntil: (p: Promise<unknown>) => void }) => void;
   message?: (event: { data: unknown }) => void;
+  push?: (event: PushEventStub) => void;
+  notificationclick?: (event: NotificationClickStub) => void;
+}
+
+interface PushEventStub {
+  data: { json: () => unknown } | null;
+  waitUntil: (p: Promise<unknown>) => void;
+}
+
+interface NotificationClickStub {
+  notification: { close: () => void; data?: { url?: string } };
+  waitUntil: (p: Promise<unknown>) => void;
 }
 
 interface FetchEventStub {
@@ -57,10 +69,20 @@ interface SwHarness extends Handlers {
   network: Map<string, { ok: boolean; status: number; body: string }>;
   /** Whether the network is reachable at all. */
   offline: boolean;
+  /** Notifications the worker displayed. */
+  shown: Array<{ title: string; opts: Record<string, unknown> }>;
+  /** URLs handed to `clients.openWindow`. */
+  opened: string[];
+  /** URLs of window clients that were focused. */
+  focused: string[];
+  /** Targets passed to `client.navigate`. */
+  navigated: string[];
 }
 
 interface SwOptions {
   buildAssets?: string[];
+  /** Window clients already open, by URL. */
+  openWindows?: string[];
   /** What `vite.config.ts` stamps for the Today plate; null on a public-only build. */
   plateFamily?: { stem: string; fallback: string } | null;
   cache?: Map<string, { body: string }>;
@@ -76,6 +98,21 @@ function loadServiceWorker(options: SwOptions = {}): SwHarness {
   const cache = options.cache ?? new Map<string, { body: string }>();
   const network = options.network ?? new Map<string, { ok: boolean; status: number; body: string }>();
   const state = { offline: options.offline ?? false };
+  const shown: Array<{ title: string; opts: Record<string, unknown> }> = [];
+  const opened: string[] = [];
+  const focused: string[] = [];
+  const navigated: string[] = [];
+  const openWindows = (options.openWindows ?? []).map((url) => ({
+    url,
+    focus: () => {
+      focused.push(url);
+      return Promise.resolve();
+    },
+    navigate: (to: string) => {
+      navigated.push(to);
+      return Promise.resolve();
+    },
+  }));
   const source = SW_SOURCE
     .replace('"__BUILD_VERSION__"', JSON.stringify("test"))
     .replace('"__BUILD_ASSETS__"', JSON.stringify(options.buildAssets ?? ["/assets/index-abc123.js"]))
@@ -92,12 +129,29 @@ function loadServiceWorker(options: SwOptions = {}): SwHarness {
         if (name === "fetch") handlers.fetch = fn as Handlers["fetch"];
         if (name === "install") handlers.install = fn as Handlers["install"];
         if (name === "message") handlers.message = fn as Handlers["message"];
+        if (name === "push") handlers.push = fn as Handlers["push"];
+        if (name === "notificationclick") {
+          handlers.notificationclick = fn as Handlers["notificationclick"];
+        }
       },
       location: { origin: "https://app.sanpo.test" },
       skipWaiting: () => {
         skipWaitingCalls += 1;
       },
-      clients: { claim: () => Promise.resolve() },
+      clients: {
+        claim: () => Promise.resolve(),
+        matchAll: () => Promise.resolve(openWindows),
+        openWindow: (url: string) => {
+          opened.push(url);
+          return Promise.resolve();
+        },
+      },
+      registration: {
+        showNotification: (title: string, opts: Record<string, unknown>) => {
+          shown.push({ title, opts });
+          return Promise.resolve();
+        },
+      },
     },
     caches: {
       open: () =>
@@ -152,7 +206,40 @@ function loadServiceWorker(options: SwOptions = {}): SwHarness {
     get skipWaitingCalls() {
       return skipWaitingCalls;
     },
+    shown,
+    opened,
+    focused,
+    navigated,
   } as SwHarness;
+}
+
+/** Drives the push handler and awaits the notification it displayed. */
+async function push(h: SwHarness, payload: unknown | "malformed"): Promise<void> {
+  const waits: Array<Promise<unknown>> = [];
+  h.push?.({
+    data: payload === null
+      ? null
+      : {
+        json: () => {
+          if (payload === "malformed") throw new SyntaxError("not json");
+          return payload;
+        },
+      },
+    waitUntil: (pr) => void waits.push(pr),
+  });
+  await Promise.all(waits);
+}
+
+/** Drives a tap on a displayed notification. */
+async function click(h: SwHarness, url?: string): Promise<{ closed: number }> {
+  const waits: Array<Promise<unknown>> = [];
+  let closed = 0;
+  h.notificationclick?.({
+    notification: { close: () => void (closed += 1), data: url === undefined ? undefined : { url } },
+    waitUntil: (pr) => void waits.push(pr),
+  });
+  await Promise.all(waits);
+  return { closed };
 }
 
 /** Drives the fetch handler and awaits whatever it responded with. */
@@ -416,5 +503,64 @@ describe("the service worker substitutes the precached Today plate", () => {
     // A `public`-only build. The worker must not throw on `PLATE_FAMILY.stem`.
     const sw = loadServiceWorker({ plateFamily: null, offline: true });
     expect(await respond(sw, ORIGIN + VARIANT)).toEqual({ type: "error" });
+  });
+});
+
+describe("push (review M27)", () => {
+  it("always displays a notification, even for a payload it cannot read", async () => {
+    // Chrome allows a handful of silent pushes, then shows "This site has been
+    // updated in the background" ITSELF, and revokes the permission from
+    // repeat offenders. So every path out of the handler must show something:
+    // a generic notification is a worse product, no notification is a broken
+    // one — and the permission is not recoverable without asking again.
+    for (const payload of ["malformed", null, {}, { title: "" }] as const) {
+      const h = loadServiceWorker();
+      await push(h, payload);
+      expect(h.shown.length, `payload ${JSON.stringify(payload)} showed nothing`).toBe(1);
+      expect(h.shown[0].title).toBe("Sanpo");
+    }
+  });
+
+  it("uses the server's title, body and tag when they are there", async () => {
+    const h = loadServiceWorker();
+    await push(h, { title: "Walk complete", body: "Luna had a great walk.", tag: "walk_complete", url: "/portal/walks/1" });
+    expect(h.shown[0].title).toBe("Walk complete");
+    expect(h.shown[0].opts.body).toBe("Luna had a great walk.");
+    // The tag collapses repeats of one kind rather than stacking a lock screen.
+    expect(h.shown[0].opts.tag).toBe("walk_complete");
+    expect(h.shown[0].opts.data).toEqual({ url: "/portal/walks/1" });
+  });
+
+  it("refuses an off-origin destination in the payload", async () => {
+    // The M41 open-redirect rule, at a sink that is a real navigation. The
+    // payload is written by our own server today — the kind of property that
+    // quietly stops being true.
+    for (const url of ["//evil.example", "/\\evil.example", "https://evil.example", "javascript:alert(1)", "walks/1", "/\tevil"]) {
+      const h = loadServiceWorker();
+      await push(h, { title: "x", url });
+      expect((h.shown[0].opts.data as { url: string }).url, `accepted ${url}`).toBe("/");
+    }
+  });
+
+  it("a tap focuses an open tab rather than stacking another", async () => {
+    const h = loadServiceWorker({ openWindows: ["https://app.sanpo.test/calendar"] });
+    const { closed } = await click(h, "/portal/walks/1");
+    expect(closed).toBe(1);
+    expect(h.focused).toEqual(["https://app.sanpo.test/calendar"]);
+    expect(h.navigated).toEqual(["/portal/walks/1"]);
+    expect(h.opened).toEqual([]);
+  });
+
+  it("a tap with nothing open opens a window at the deep link", async () => {
+    const h = loadServiceWorker({ openWindows: [] });
+    await click(h, "/portal/walks/1");
+    expect(h.opened).toEqual(["/portal/walks/1"]);
+  });
+
+  it("a tap never navigates off-origin, and never to a foreign tab", async () => {
+    const h = loadServiceWorker({ openWindows: ["https://evil.example/app"] });
+    await click(h, "//evil.example");
+    expect(h.focused, "focused a tab on another origin").toEqual([]);
+    expect(h.opened).toEqual(["/"]);
   });
 });
