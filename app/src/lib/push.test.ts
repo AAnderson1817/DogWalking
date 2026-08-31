@@ -4,8 +4,32 @@
 // `PushManager` and `serviceWorker` exist in neither vitest project — a test
 // that mocked them would be testing the mock. What matters is which of the
 // five states the UI is told to show, and that is pure.
-import { describe, expect, it } from "vitest";
-import { base64UrlToBytes, canToggle, type PushEnvironment, pushState, subscriptionKeys } from "./push";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  base64UrlToBytes,
+  canToggle,
+  disablePush,
+  enablePush,
+  forgetPushDeviceBeforeSignOut,
+  type PushEnvironment,
+  pushState,
+  subscriptionKeys,
+} from "./push";
+
+const API = vi.hoisted(() => ({
+  registerPushSubscription: vi.fn(async () => "id"),
+  removePushSubscription: vi.fn(async () => true),
+}));
+vi.mock("./api", () => ({
+  registerPushSubscription: API.registerPushSubscription,
+  removePushSubscription: API.removePushSubscription,
+}));
+vi.mock("./env", () => ({ env: { vapidPublicKey: "BHYK" } }));
+
+beforeEach(() => {
+  API.registerPushSubscription.mockReset().mockResolvedValue("id");
+  API.removePushSubscription.mockReset().mockResolvedValue(true);
+});
 
 const BASE: PushEnvironment = {
   supported: true,
@@ -71,5 +95,83 @@ describe("key encoding", () => {
     expect(subscriptionKeys(with_ as never)).toEqual({ p256dh: "AQI", auth: "Aw" });
     const missing = { getKey: (n: string) => (n === "p256dh" ? new Uint8Array([1]).buffer : null) };
     expect(subscriptionKeys(missing as never)).toBeNull();
+  });
+});
+
+// ── Codex review on PR #85 ───────────────────────────────────────────────
+//
+// Two failure paths that both end with the browser and the server disagreeing
+// about whether this device is subscribed — which on a SHARED device means
+// somebody receives another account's notifications.
+describe("enable/disable failure paths", () => {
+  interface FakeSub {
+    endpoint: string;
+    unsubscribed: boolean;
+    unsubscribe: () => Promise<boolean>;
+    getKey: (n: string) => ArrayBuffer | null;
+  }
+  function fakeSub(endpoint = "https://push.example/a"): FakeSub {
+    const s: FakeSub = {
+      endpoint,
+      unsubscribed: false,
+      unsubscribe: () => {
+        s.unsubscribed = true;
+        return Promise.resolve(true);
+      },
+      getKey: (n) => (n === "p256dh" ? new Uint8Array(65).buffer : new Uint8Array(16).buffer),
+    };
+    return s;
+  }
+
+  function stubBrowser(sub: FakeSub | null, existing: FakeSub | null = sub) {
+    vi.stubGlobal("PushManager", class {});
+    vi.stubGlobal("Notification", {
+      permission: "granted",
+      requestPermission: () => Promise.resolve("granted" as NotificationPermission),
+    });
+    vi.stubGlobal("navigator", {
+      userAgent: "test",
+      serviceWorker: {
+        getRegistration: () =>
+          Promise.resolve({
+            pushManager: {
+              subscribe: () => Promise.resolve(sub),
+              getSubscription: () => Promise.resolve(existing),
+            },
+          }),
+      },
+    });
+  }
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("rolls the browser subscription back when the server will not record it", async () => {
+    // Otherwise readPushEnvironment reports `subscribed`, the UI says `on`,
+    // and — because `on` offers only the OFF action — the device stays
+    // falsely enabled until somebody toggles twice.
+    const sub = fakeSub();
+    stubBrowser(sub);
+    API.registerPushSubscription.mockRejectedValue(new Error("network"));
+    await expect(enablePush()).rejects.toThrow("network");
+    expect(sub.unsubscribed, "left the browser subscribed with no server row").toBe(true);
+  });
+
+  it("unsubscribes locally even when the removal RPC fails", async () => {
+    // The sign-out path swallows this error by design, so a failed RPC used to
+    // skip the local unsubscribe entirely and leave a shared device receiving
+    // the PREVIOUS account's notifications.
+    const sub = fakeSub();
+    stubBrowser(null, sub);
+    API.removePushSubscription.mockRejectedValue(new Error("offline"));
+    await expect(disablePush()).rejects.toThrow("offline");
+    expect(sub.unsubscribed, "the browser kept a live subscription").toBe(true);
+  });
+
+  it("sign-out never throws, and still forgets the device locally", async () => {
+    const sub = fakeSub();
+    stubBrowser(null, sub);
+    API.removePushSubscription.mockRejectedValue(new Error("offline"));
+    await forgetPushDeviceBeforeSignOut();
+    expect(sub.unsubscribed).toBe(true);
   });
 });

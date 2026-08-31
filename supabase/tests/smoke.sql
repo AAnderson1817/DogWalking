@@ -2312,11 +2312,18 @@ begin
     raise exception 'FAIL: a pending notification is not in the backlog';
   end if;
 
-  -- Sent leaves the backlog.
+  -- Sent leaves the backlog — but since 0049 "sent" means BOTH channels are
+  -- settled, not just email. A row whose email went out and whose push has
+  -- never been attempted is still owed a push, and the predicate says so;
+  -- asserting on email alone here would now be asserting the old semantics.
   update notifications set email_status = 'sent', email_sent_at = now(), email_attempts = 1
    where id = v_n;
+  if not exists (select 1 from fn_notification_backlog() where id = v_n) then
+    raise exception 'FAIL: a row owed a push left the backlog because its email was sent (0049)';
+  end if;
+  update notifications set push_status = 'skipped' where id = v_n;
   if exists (select 1 from fn_notification_backlog() where id = v_n) then
-    raise exception 'FAIL: a sent notification is still in the backlog';
+    raise exception 'FAIL: a notification with both channels settled is still in the backlog';
   end if;
 
   -- Skipped is TERMINAL. An operator-only notification, or a client with no
@@ -2331,18 +2338,47 @@ begin
   values ('99999999-0000-4000-a000-000000000001', null,
           'walk_scheduled', 'Operator-only', 'test', 'skipped')
   returning id into v_skipped;
+  -- Settle the push channel too, or this row sits in the backlog for a reason
+  -- that has nothing to do with the rule under test (0049).
+  update notifications set push_status = 'skipped' where id = v_skipped;
   if exists (select 1 from fn_notification_backlog() where id = v_skipped) then
     raise exception 'FAIL: a skipped notification is in the retry backlog';
   end if;
 
-  -- Failed is retryable.
+  -- Failed is retryable. Push stays settled from above, so this assertion is
+  -- about the EMAIL channel, which is what it claims to be about.
   update notifications set email_status = 'failed', email_attempts = 1,
          email_last_error = 'resend 500' where id = v_n;
   if not exists (select 1 from fn_notification_backlog() where id = v_n) then
     raise exception 'FAIL: a failed notification is not retryable';
   end if;
 
-  raise notice 'email delivery states (0029): OK';
+  -- 0049, Codex review on PR #85: a row whose EMAIL succeeded and whose PUSH
+  -- failed is still owed something. The predicate filtered on email_status
+  -- alone, so such a row was never selected again and stayed failed forever —
+  -- "retryable" written down and connected to nothing.
+  update notifications
+     set email_status = 'sent', email_attempts = 1, email_last_error = null,
+         push_status = 'failed', push_attempts = 1
+   where id = v_n;
+  if not exists (select 1 from fn_notification_backlog() where id = v_n) then
+    raise exception 'FAIL: a notification owed only a PUSH retry is not in the backlog (0049)';
+  end if;
+
+  -- And both terminal means done: neither channel is owed anything.
+  update notifications set push_status = 'sent', push_sent_at = now() where id = v_n;
+  if exists (select 1 from fn_notification_backlog() where id = v_n) then
+    raise exception 'FAIL: a fully delivered notification is still in the backlog (0049)';
+  end if;
+
+  -- The attempt ceiling applies per channel, or a push that will never
+  -- succeed is retried every night forever (the 0029 rule).
+  update notifications set push_status = 'failed', push_attempts = 99 where id = v_n;
+  if exists (select 1 from fn_notification_backlog() where id = v_n) then
+    raise exception 'FAIL: a push past the attempt ceiling is still retried (0049)';
+  end if;
+
+  raise notice 'email delivery states (0029) + push backlog (0049): OK';
 end $$;
 
 -- Retrying has to stop. Without a bound, a permanently-rejected recipient is
@@ -2358,11 +2394,17 @@ begin
    where operator_id = '99999999-0000-4000-a000-000000000001'
      and title = 'Walk report ready';
 
+  -- `push_status = 'skipped'` settles the OTHER channel, so this block is
+  -- about the email attempt ceiling — which is what it claims to be about.
+  -- Without it 0049's widened backlog selects the row for its never-attempted
+  -- push and the assertion fails for a reason unrelated to the rule.
   insert into notifications (operator_id, client_id, type, title, body,
-                             email_status, email_attempts, email_last_error)
+                             email_status, email_attempts, email_last_error,
+                             push_status)
   values ('99999999-0000-4000-a000-000000000001',
           '99999999-0000-4000-c000-00000000000a',
-          'walk_complete', 'Attempt ceiling', 'test', 'failed', 5, 'resend 422')
+          'walk_complete', 'Attempt ceiling', 'test', 'failed', 5, 'resend 422',
+          'skipped')
   returning id into v_n;
 
   if exists (select 1 from fn_notification_backlog() where id = v_n) then

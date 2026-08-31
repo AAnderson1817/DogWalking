@@ -229,7 +229,13 @@ Deno.test("a row deleted between the count and the send is skipped, not fatal", 
 
 Deno.test("an empty backlog is a no-op", async () => {
   const { deps, sentTo } = makeDeps({ backlog: [] });
-  assertEquals(await drainBacklog(deps), { drained: 0, sent: 0, failed: 0 });
+  assertEquals(await drainBacklog(deps), {
+    drained: 0,
+    sent: 0,
+    failed: 0,
+    pushSent: 0,
+    pushFailed: 0,
+  });
   assertEquals(sentTo.length, 0);
 });
 

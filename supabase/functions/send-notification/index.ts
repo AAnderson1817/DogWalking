@@ -12,6 +12,7 @@
 // retryable ('failed') state, and the nightly job counts what is still owed.
 import { isServiceAuth, jsonOk, readJson, requireOperator, serveFunction, HttpError } from "../_lib/http.ts";
 import { encryptPushPayload, vapidAuthorization, type VapidConfig } from "../_lib/webpush.ts";
+import type { Outcome } from "./handler.ts";
 import {
   deliverPush,
   type PushableRow,
@@ -61,7 +62,7 @@ const COLS =
  * and must then be careful about every path out, and every other edge function
  * here gets this right by construction.
  */
-function makeDeps(apiKey: string, operatorId: string | null): SendDeps {
+function makeDeps(apiKey: string | null, operatorId: string | null): SendDeps {
   const db = adminClient();
   return {
     async getNotification(id) {
@@ -136,6 +137,15 @@ function makeDeps(apiKey: string, operatorId: string | null): SendDeps {
     },
 
     async sendEmail({ to, subject, html, headers }) {
+      if (!apiKey) {
+        // H17's loud failure, at the moment email is actually attempted.
+        throw new HttpError(
+          500,
+          "email_not_configured",
+          "email delivery is not configured, so this notification was not emailed",
+          "the Resend API key env var is unset in this deployment",
+        );
+      }
       const res = await fetch("https://api.resend.com/emails", {
         method: "POST",
         headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
@@ -286,26 +296,28 @@ serveFunction(async (req) => {
 
   const body = await readJson<Body>(req);
 
-  // A missing key is a 500, not a 200. It used to return
-  // `{ skipped: true, reason: "email delivery not configured" }`, so a
-  // production deploy that forgot the secret reported uniform success forever
-  // while sending zero email — and because these notifications include
-  // payment_failed and walk_cancelled, nobody outside the app ever heard
-  // anything at all. This now fails loudly and, since review H14, writes a
-  // structured log line naming what is missing.
-  const apiKey = Deno.env.get("RESEND_API_KEY");
-  if (!apiKey) {
-    throw new HttpError(
-      500,
-      "email_not_configured",
-      "email delivery is not configured, so this notification was not emailed",
-      "the Resend API key env var is unset in this deployment",
-      { notification_id: body?.notification_id ?? body?.record?.id },
-    );
-  }
-
-  const deps = makeDeps(apiKey, operator?.id ?? null);
+  // ── Push first, and BEFORE the email configuration check ───────────────
+  //
+  // Codex review on PR #85. The check below throws when RESEND_API_KEY is
+  // missing (H17's deliberate loud failure), and it used to run first — so on
+  // a deployment with push configured and email not, execution never reached
+  // the push call at all. That contradicted the ordering guarantee documented
+  // one paragraph down, and it meant even OPERATOR-ONLY notifications, which
+  // skip email by definition, could not be pushed until an unrelated provider
+  // was configured.
   const pushDeps = makePushDeps(adminClient(), vapidConfig());
+
+  // A missing key is still a 500, not a 200 — H17's rule, unchanged: this used
+  // to return `{ skipped: true }`, so a deploy that forgot the secret reported
+  // uniform success forever while sending zero email.
+  //
+  // What moved (Codex review on PR #85) is WHERE it fires. As a precondition
+  // for the whole request it also blocked push, and it failed notifications
+  // that have no email to send at all — an operator-only row skips email by
+  // definition. It now throws inside `sendEmail`, so it still fails loudly for
+  // anything that genuinely needed the provider, and only for those.
+  const apiKey = Deno.env.get("RESEND_API_KEY") ?? null;
+  const deps = makeDeps(apiKey, operator?.id ?? null);
 
   if (body?.action === "drain") {
     if (!isService) {
@@ -314,7 +326,9 @@ serveFunction(async (req) => {
     // 200 even when some rows failed: each records its own outcome and stays in
     // the backlog, so reporting success for the ATTEMPT is honest. A non-2xx
     // would make the caller retry the whole sweep immediately.
-    return jsonOk(await drainBacklog(deps));
+    return jsonOk(
+      await drainBacklog(deps, (row) => deliverPush(row as unknown as PushableRow, pushDeps)),
+    );
   }
 
   const id = body?.notification_id ?? body?.record?.id;
@@ -338,7 +352,24 @@ serveFunction(async (req) => {
   // A push failure does not fail the request. They are separate promises to
   // the same person, the row records which one broke, and turning a dead
   // Android endpoint into a 502 would put the EMAIL back in the backlog too.
-  const pushOutcome = await deliverPush(row as unknown as PushableRow, pushDeps);
+  //
+  // The catch is what makes that true (Codex review on PR #85). `deliverPush`
+  // only handles per-ENDPOINT transport errors internally; a failure in
+  // `getSubscriptions` or `recordPush` — a database blip in the optional
+  // channel — rejected here and stopped `deliverNotification` from ever
+  // running. The push row keeps whatever state it had and the nightly drain
+  // retries it; the email goes out now, which is the whole point of the two
+  // channels not gating each other.
+  let pushOutcome: Outcome;
+  try {
+    pushOutcome = await deliverPush(row as unknown as PushableRow, pushDeps);
+  } catch (e) {
+    pushOutcome = {
+      kind: "failed",
+      error: e instanceof Error ? e.message : String(e),
+      permanent: false,
+    };
+  }
 
   const outcome = await deliverNotification(row, deps);
   if (outcome.kind === "failed") throw failureResponse(row, outcome);

@@ -121,25 +121,51 @@ export async function enablePush(): Promise<PushState> {
     await sub.unsubscribe();
     return "off";
   }
-  await registerPushSubscription(sub.endpoint, keys.p256dh, keys.auth, navigator.userAgent);
+  try {
+    await registerPushSubscription(sub.endpoint, keys.p256dh, keys.auth, navigator.userAgent);
+  } catch (e) {
+    // Roll the browser subscription back (Codex review on PR #85). Leaving it
+    // makes `readPushEnvironment` report `subscribed`, so the UI says `on`
+    // while the server holds no row — and because `on` offers only the OFF
+    // action, the device stays falsely enabled until somebody toggles twice.
+    // The missing-keys branch above already did this; the failure path did
+    // not, which is the inconsistency that made it wrong.
+    await sub.unsubscribe().catch(() => {});
+    throw e;
+  }
   return "on";
 }
 
 /**
- * Forget this device, on the server AND in the browser.
+ * Forget this device, in the browser AND on the server.
  *
- * Both halves, in that order. Dropping only the server row leaves the browser
- * holding a subscription it will hand back unchanged on the next `subscribe()`
- * — which is fine — but dropping only the browser's leaves a row pointing at
- * an endpoint nothing will ever accept, and the send path only learns that by
- * being told 410 by the push service.
+ * The browser half goes FIRST and is never skipped, which reverses the order
+ * this shipped with (Codex review on PR #85). The original reasoning — that a
+ * server row pointing at a dead endpoint is the worse leftover — had it
+ * backwards on both counts:
+ *
+ *   - A stale server row SELF-HEALS. The push service answers 410 and the
+ *     send path deletes the registration; that path exists and is tested.
+ *   - A browser left subscribed does not. On the sign-out path the error is
+ *     swallowed by design, so a failed RPC used to skip the local unsubscribe
+ *     entirely and leave the device receiving the PREVIOUS account's
+ *     notifications — the exact shared-device hazard 0049's reassigning
+ *     upsert exists to prevent, arrived at from the other side.
+ *
+ * The server call still runs, and still throws, so the UI can say the row may
+ * not have been removed. It just no longer decides whether the local half
+ * happens.
  */
 export async function disablePush(): Promise<PushState> {
   const reg = await registration();
   const sub = reg ? await reg.pushManager.getSubscription() : null;
   if (sub) {
-    await removePushSubscription(sub.endpoint);
-    await sub.unsubscribe();
+    const { endpoint } = sub;
+    try {
+      await sub.unsubscribe();
+    } finally {
+      await removePushSubscription(endpoint);
+    }
   }
   return pushSupported() ? (env.vapidPublicKey ? "off" : "unconfigured") : "unsupported";
 }

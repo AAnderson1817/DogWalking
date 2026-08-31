@@ -308,3 +308,40 @@ begin
     raise exception '0049: the purge trigger was not installed — refusing';
   end if;
 end $$;
+
+
+-- ── The nightly drain has to see push failures too ───────────────────────
+--
+-- Codex review on PR #85. `deliverPush` records `failed` for a transient push
+-- service error and calls it retryable — but `fn_notification_backlog`
+-- filtered on `email_status` alone, so a notification whose email SUCCEEDED
+-- and whose push failed was never selected again and stayed failed forever.
+-- "Retryable" was written down and connected to nothing, which is the shape
+-- this repository keeps finding.
+--
+-- The return type is unchanged on purpose: the caller reads `id` and nothing
+-- else, and changing the shape would need a DROP (a `create or replace`
+-- cannot alter a return type), which for a function the deploy re-applies is
+-- more risk than the widening is worth.
+--
+-- Built from `pg_get_functiondef` of the live 0029 function rather than from
+-- its migration text — the 0040 lesson: a body written from an older source
+-- silently deletes whatever a later migration added.
+create or replace function fn_notification_backlog(
+  p_window interval default '24:00:00'::interval,
+  p_max_attempts integer default 5
+) returns table(id uuid, email_status email_delivery_status, email_attempts integer, created_at timestamptz)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select n.id, n.email_status, n.email_attempts, n.created_at
+    from notifications n
+   where n.created_at > now() - p_window
+     and (
+       (n.email_status in ('pending', 'failed') and n.email_attempts < p_max_attempts)
+       or (n.push_status in ('pending', 'failed') and n.push_attempts < p_max_attempts)
+     )
+   order by n.created_at
+$$;
