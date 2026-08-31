@@ -4980,6 +4980,74 @@ begin
   raise notice 'nothing else rewrites clients.email in a BEFORE trigger (0046): OK';
 end $$;
 
+-- ── 0047: the walk photo integrity record ────────────────────────────────
+--
+-- Two properties, neither of which is a restatement of the DDL.
+--
+-- FIRST, `ignoreDuplicates` in both writers is load-bearing for INTEGRITY and
+-- not merely for row counts. `complete-walk` replays every photo path from the
+-- completion request, and it has paths and no bytes — so it cannot compute a
+-- digest and must not invent one. Its upsert is ON CONFLICT DO NOTHING; if it
+-- were ever DO UPDATE, replaying a path would blank the digest the browser
+-- recorded, and there is no UPDATE grant with which to put it back.
+--
+-- SECOND, the digest is write-once. That is what makes it a record of the past
+-- rather than a description of the present, and it is enforced by the grant.
+do $$
+declare
+  v_walk uuid; v_op uuid; v_sha text := repeat('a', 64); v_after text;
+begin
+  select id, operator_id into v_walk, v_op from walks limit 1;
+  if v_walk is null then raise exception 'FAIL: no walk fixture for the 0047 block'; end if;
+
+  insert into walk_photos (walk_id, operator_id, storage_path, sha256, byte_size)
+  values (v_walk, v_op, 'smoke/0047.jpg', v_sha, 4242);
+
+  -- The complete-walk replay, exactly as postgrest issues it for
+  -- `ignoreDuplicates: true` — and note it sends the unmentioned columns as
+  -- explicit NULLs, which is why DO UPDATE would erase rather than skip.
+  insert into walk_photos (walk_id, operator_id, storage_path, taken_at, sha256, byte_size)
+  values (v_walk, v_op, 'smoke/0047.jpg', now(), null, null)
+  on conflict (walk_id, storage_path) do nothing;
+
+  select sha256 into v_after from walk_photos
+   where walk_id = v_walk and storage_path = 'smoke/0047.jpg';
+  if v_after is distinct from v_sha then
+    raise exception 'FAIL: a completion replay erased the digest recorded at upload (0047) — got %', coalesce(v_after, '<null>');
+  end if;
+
+  -- Write-once, by grant. If UPDATE ever appears here the digest stops being
+  -- evidence of anything, because its own writer could rewrite it.
+  if has_table_privilege('authenticated', 'walk_photos', 'UPDATE') then
+    raise exception 'FAIL: authenticated can UPDATE walk_photos, so a recorded digest is rewritable (0047)';
+  end if;
+
+  -- The stored form is exactly what the verification script compares against:
+  -- `sha256sum` emits lower-case hex, so upper-case or truncated values are
+  -- refused at write time rather than discovered at verification time.
+  begin
+    insert into walk_photos (walk_id, operator_id, storage_path, sha256)
+    values (v_walk, v_op, 'smoke/0047-upper.jpg', upper(v_sha));
+    raise exception 'FAIL: upper-case hex was accepted into walk_photos.sha256 (0047)';
+  exception when check_violation then null;
+  end;
+
+  -- A zero-byte object is a failed upload wearing a successful one's clothes.
+  begin
+    insert into walk_photos (walk_id, operator_id, storage_path, byte_size)
+    values (v_walk, v_op, 'smoke/0047-zero.jpg', 0);
+    raise exception 'FAIL: byte_size 0 was accepted into walk_photos (0047)';
+  exception when check_violation then null;
+  end;
+
+  -- And NULL stays legal: rows predating 0047, and rows complete-walk won the
+  -- race for, are permanently "not recorded" and must not be refused.
+  insert into walk_photos (walk_id, operator_id, storage_path)
+  values (v_walk, v_op, 'smoke/0047-null.jpg');
+
+  raise notice 'the walk photo digest survives a completion replay and is write-once (0047): OK';
+end $$;
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;

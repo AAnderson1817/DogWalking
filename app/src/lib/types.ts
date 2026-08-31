@@ -963,6 +963,8 @@ export type Database = {
           caption: string | null;
           taken_at: string | null;
           created_at: string;
+          sha256: string | null;
+          byte_size: number | null;
         };
         Insert: {
           id?: string;
@@ -972,6 +974,8 @@ export type Database = {
           caption?: string | null;
           taken_at?: string | null;
           created_at?: string;
+          sha256?: string | null;
+          byte_size?: number | null;
         };
         Update: {
           id?: string;
@@ -981,6 +985,8 @@ export type Database = {
           caption?: string | null;
           taken_at?: string | null;
           created_at?: string;
+          sha256?: string | null;
+          byte_size?: number | null;
         };
         Relationships: [];
       };

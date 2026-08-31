@@ -3,6 +3,7 @@
 // later-phase surfaces exist as typed stubs so screens can bind early.
 import { businessWallClockToMs } from "./format";
 import { LOW_CREDIT_SUBSCRIPTION_STATUSES } from "./selectors";
+import { photoSha256 } from "./photo-digest";
 import { supabase } from "./supabase";
 import type { Database } from "./types";
 import type {
@@ -356,18 +357,30 @@ export async function listWalkPhotos(walkId: string): Promise<WalkPhotos[]> {
  * repeat, and complete-walk's own upsert uses the same conflict target, so a
  * path written here and sent again at completion is a no-op rather than a
  * second row.
+ *
+ * Since 0047 that flag is load-bearing for INTEGRITY and not merely for row
+ * counts. complete-walk replays these paths from the completion request with
+ * no bytes and therefore no digest; measured on this schema, a DO NOTHING
+ * replay preserves `sha256` while a DO UPDATE replay erases it. Turning
+ * `ignoreDuplicates` off in either writer would silently blank the digests of
+ * every photo that reaches completion.
  */
 export async function insertWalkPhoto(
   operatorId: string,
   walkId: string,
-  storagePath: string,
+  photo: UploadedWalkPhoto,
 ): Promise<void> {
   const { error } = await supabase.from("walk_photos").upsert(
     {
       walk_id: walkId,
       operator_id: operatorId,
-      storage_path: storagePath,
+      storage_path: photo.path,
       taken_at: new Date().toISOString(),
+      // 0047. Written once, with the row: there is no UPDATE grant on this
+      // table for any API role, so a digest omitted here can never be filled
+      // in later. `null` is the honest value when the runtime could not hash.
+      sha256: photo.sha256,
+      byte_size: photo.byteSize,
     },
     { onConflict: "walk_id,storage_path", ignoreDuplicates: true },
   );
@@ -1112,17 +1125,43 @@ export function materializeWalks(): Promise<{ created: number }> {
 }
 
 // ── storage ────────────────────────────────────────────────────────────────
+export interface UploadedWalkPhoto {
+  path: string;
+  /** Lower-case hex SHA-256 of the bytes uploaded, or null if not recorded. */
+  sha256: string | null;
+  byteSize: number;
+}
+
+/**
+ * Upload a photo and describe the bytes that were uploaded (migration 0047).
+ *
+ * The digest is taken HERE, of `file`, in the same expression that uploads it,
+ * so the recorded value and the stored object cannot describe different bytes.
+ * That is the whole reason this returns an object instead of a path: the
+ * caller holds `file` (the camera original) and `compressed` on adjacent
+ * lines, and `sha256(file)` reads perfectly naturally and is wrong on every
+ * photo forever — `compressImage` re-encodes to JPEG, so the original's digest
+ * matches nothing. With no reader until the DR script runs, that would ship
+ * green and poison the whole corpus. A caller that cannot see the bytes cannot
+ * make that mistake.
+ *
+ * A fresh `randomUUID` path per call, and storage-js defaults to
+ * `upsert: false` (measured on the wire: `x-upsert: "false"`), so an object is
+ * written once and never replaced. The digest is therefore stable for the life
+ * of the object by construction rather than by care.
+ */
 export async function uploadWalkPhoto(
   operatorId: string,
   walkId: string,
   file: Blob,
-): Promise<string> {
+): Promise<UploadedWalkPhoto> {
   const path = `${operatorId}/${walkId}/${crypto.randomUUID()}.jpg`;
+  const sha256 = await photoSha256(file);
   const { error } = await supabase.storage.from("walk-photos").upload(path, file, {
     contentType: "image/jpeg",
   });
   if (error) throw new Error(error.message);
-  return path;
+  return { path, sha256, byteSize: file.size };
 }
 
 export async function signedPhotoUrl(path: string, expiresIn = 3600): Promise<string> {
