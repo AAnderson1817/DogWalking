@@ -11,6 +11,7 @@ import {
   disablePush,
   enablePush,
   forgetPushDeviceBeforeSignOut,
+  forgetPushDeviceOnSignedOut,
   type PushEnvironment,
   pushState,
   readPushEnvironment,
@@ -258,6 +259,45 @@ describe("enable/disable failure paths", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("a session that ends WITHOUT sign-out still loses the browser subscription", async () => {
+    // Push delivery is independent of the page's auth state, so a surviving
+    // subscription keeps displaying the PREVIOUS account's notifications on a
+    // signed-out — possibly handed-over — device. `reclaimPushDevice` repairs
+    // that at the next sign-in, which is too late; this is the same hazard
+    // reached from the direction the reclaim cannot cover.
+    const sub = fakeSub();
+    stubBrowser(null, sub);
+    await forgetPushDeviceOnSignedOut();
+    expect(sub.unsubscribed, "left the browser subscribed with no session").toBe(true);
+  });
+
+  it("and does NOT reach for the removal RPC, which has no caller to scope to", async () => {
+    // `fn_remove_push_subscription` is scoped to its caller and there is none.
+    // Calling it would 401; the row is left to self-heal on the 404/410 the
+    // unsubscribe above guarantees.
+    const sub = fakeSub();
+    stubBrowser(null, sub);
+    await forgetPushDeviceOnSignedOut();
+    expect(API.removePushSubscription).not.toHaveBeenCalled();
+  });
+
+  it("is a silent no-op when there is nothing subscribed", async () => {
+    // It runs on EVERY resolution that yields no session — including every
+    // page load by a signed-out visitor — so the ordinary case must cost
+    // nothing and must never throw into the auth transition.
+    stubBrowser(null, null);
+    await expect(forgetPushDeviceOnSignedOut()).resolves.toBeUndefined();
+  });
+
+  it("never throws into the auth transition when the unsubscribe fails", async () => {
+    // A cleanup that can prevent somebody being signed out is worse than the
+    // leak it closes. The failure is not permanent: the next load retries.
+    const sub = fakeSub();
+    sub.unsubscribe = () => Promise.reject(new Error("worker gone"));
+    stubBrowser(null, sub);
+    await expect(forgetPushDeviceOnSignedOut()).resolves.toBeUndefined();
   });
 
   it("subscribes when the active worker says it handles push", async () => {

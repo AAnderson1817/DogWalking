@@ -283,6 +283,45 @@ export async function disablePush(): Promise<PushState> {
 }
 
 /**
+ * Drop this browser's subscription the moment there is NO session.
+ *
+ * `reclaimPushDevice` below repairs a surviving subscription at the next
+ * sign-in, and that is too late (Codex review on PR #85). Push delivery is
+ * entirely independent of the page's auth state: between an ungraceful
+ * session end — a failed refresh token, cleared auth storage, a tab killed
+ * mid-session — and whenever somebody next signs in, the push service keeps
+ * delivering and the service worker keeps DISPLAYING the previous account's
+ * notifications, on a device that is signed out or already in somebody else's
+ * hands. Client names on a stranger's lock screen is the hazard the whole of
+ * 0049's shared-device design exists for, reached from the one direction the
+ * reclaim could not cover.
+ *
+ * Local only, and that is not a compromise: `fn_remove_push_subscription` is
+ * scoped to the caller, and there is no caller. Unsubscribing invalidates the
+ * endpoint at the push service, so the next delivery attempt gets 404/410 and
+ * `deliverPush` drops the row — the self-heal that path already implements.
+ *
+ * The cost is honest and stated rather than hidden: a session that ends for
+ * any reason now costs this device its push registration, so the person turns
+ * notifications back on. That is already true of every deliberate sign-out
+ * (which unsubscribes locally first), it is the safe direction, and the
+ * alternative is a live subscription owned by an account with no session.
+ *
+ * Best-effort, because it runs inside the auth transition and must never
+ * prevent anyone from being signed out. A failure is not permanent: this runs
+ * on EVERY resolution that yields no session, so the next page load retries.
+ */
+export async function forgetPushDeviceOnSignedOut(): Promise<void> {
+  try {
+    const reg = await registration();
+    const sub = reg ? await reg.pushManager.getSubscription() : null;
+    if (sub) await sub.unsubscribe();
+  } catch {
+    /* see above — retried on the next resolution that yields no session */
+  }
+}
+
+/**
  * Claim any existing browser subscription for whoever is signed in NOW.
  *
  * The sign-out cleanup below only covers the graceful path. A session can end
