@@ -295,12 +295,18 @@ export function selectsWildcard(arg: string): boolean {
 
 describe("column-level SELECT grants and wildcard selects", () => {
   it("finds the tables whose SELECT is column-restricted", () => {
-    // A guard that matched nothing would pass for the wrong reason. These two
-    // are the whole set today, and both are deliberate: invariant 2 withholds
-    // the vault ciphertext, 0038/0043 withhold the four client columns.
+    // A guard that matched nothing would pass for the wrong reason. These
+    // three are the whole set today, and each is deliberate: invariant 2
+    // withholds the vault ciphertext, 0038/0043 withhold the four client
+    // columns, and 0049 withholds the per-device push encryption secrets.
+    //
+    // This list is meant to be edited when a table joins the set — that edit
+    // is the moment somebody notices a new table can never be read with
+    // `select("*")`. 0049 is the first time it fired for that reason.
     expect([...columnRestrictedTables().keys()].sort()).toEqual([
       "access_credentials",
       "clients",
+      "push_subscriptions",
     ]);
   });
 

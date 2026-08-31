@@ -19,6 +19,10 @@ const ITEMS: Notifications[] = [
     email_attempts: 1,
     email_sent_at: "2026-08-05T14:43:00Z",
     email_last_error: null,
+  push_status: "skipped",
+  push_attempts: 0,
+  push_sent_at: null,
+  push_last_error: null,
   },
 ];
 
