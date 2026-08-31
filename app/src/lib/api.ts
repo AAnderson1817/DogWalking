@@ -989,6 +989,40 @@ export function createOperatorPortal(): Promise<{ url: string }> {
  * InviteClaimError the RPC path throws so the dead-end sentences stay
  * differentiated (H4).
  */
+/**
+ * Register this browser for push (0049).
+ *
+ * The RPC resolves the persona itself — an operator registers their own
+ * device, a client theirs — so nothing here names an operator_id, and a caller
+ * cannot register a device against somebody else's tenant. It upserts on the
+ * endpoint and REASSIGNS ownership, which is what makes a shared phone safe:
+ * a push endpoint identifies a browser, not a person.
+ */
+export async function registerPushSubscription(
+  endpoint: string,
+  p256dh: string,
+  auth: string,
+  userAgent: string,
+): Promise<string> {
+  const { data, error } = await supabase.rpc("fn_register_push_subscription", {
+    p_endpoint: endpoint,
+    p_p256dh: p256dh,
+    p_auth: auth,
+    p_user_agent: userAgent,
+  });
+  if (error) throw error;
+  return data as string;
+}
+
+/** Forget this browser. Scoped to the caller by the function, not by a filter. */
+export async function removePushSubscription(endpoint: string): Promise<boolean> {
+  const { data, error } = await supabase.rpc("fn_remove_push_subscription", {
+    p_endpoint: endpoint,
+  });
+  if (error) throw error;
+  return data === true;
+}
+
 export async function claimSignup(
   token: string,
   email: string,
