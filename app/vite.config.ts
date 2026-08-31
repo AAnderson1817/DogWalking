@@ -7,7 +7,7 @@ import react from "@vitejs/plugin-react";
 // inside a build is a rule nothing can prove. `scripts/today-plate-family.test.ts`
 // drives these directly.
 import {
-  PLATE_SOURCE_VARIANT_RE,
+  plateSourceVariantCount,
   PlateFamilyError,
   todayPlateFamily,
   type PlateFamily,
@@ -118,9 +118,9 @@ function stampServiceWorker(): Plugin {
       // source, so it is always there. Reading it inside would let an ENOENT
       // be swallowed by that tolerance and stamp a worker with no plate at
       // all, from a green build.
-      const sourceVariantCount = readdirSync(
-        fileURLToPath(new URL("./src/assets/illustrations", import.meta.url)),
-      ).filter((f) => PLATE_SOURCE_VARIANT_RE.test(f)).length;
+      const sourceVariantCount = plateSourceVariantCount(
+        readdirSync(fileURLToPath(new URL("./src/assets/illustrations", import.meta.url))),
+      );
 
       try {
         const all = readdirSync(assetsDir);

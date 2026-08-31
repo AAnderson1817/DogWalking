@@ -28,6 +28,25 @@ export const PLATE_VARIANT_RE = /-\d+w-[^.]+\.webp$/;
 /** The same thing before Vite hashes it: `<stem>-<width>w.webp` on disk. */
 export const PLATE_SOURCE_VARIANT_RE = /-\d+w\.webp$/;
 
+/**
+ * How many of the plate's OWN variants sit in `src/assets/illustrations`.
+ *
+ * The stem test is the load-bearing half, and leaving it out was a real bug
+ * (caught in review on this PR). `illustrations/` is a shared directory, so a
+ * second responsive illustration — `some-other-scene-320w.webp` — matches the
+ * width pattern perfectly well. Counting it here while `todayPlateFamily`
+ * counts only files carrying the plate's basename makes the two disagree by
+ * one, and the build then fails EVERY time with a plate-variant mismatch while
+ * every Today candidate is present and correct.
+ *
+ * That is the worst shape available for this check: not a gate that fails to
+ * fire, but one that fires on a repository that is fine, which is how a gate
+ * gets deleted by whoever is trying to ship something unrelated.
+ */
+export function plateSourceVariantCount(files: string[]): number {
+  return files.filter((f) => f.startsWith(PLATE_BASENAME) && PLATE_SOURCE_VARIANT_RE.test(f)).length;
+}
+
 export interface PlateFamily {
   stem: string;
   fallback: string;
