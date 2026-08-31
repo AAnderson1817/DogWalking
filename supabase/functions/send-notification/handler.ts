@@ -69,6 +69,22 @@ export interface SendDeps {
      */
     headers: Record<string, string>;
   }): Promise<{ ok: true } | { ok: false; status: number; detail: string }>;
+  /**
+   * Throw if this deployment cannot send email at all.
+   *
+   * Called from OUTSIDE the try that wraps the provider, because inside it a
+   * configuration error is indistinguishable from Resend having a bad minute
+   * and is recorded as a retryable failure (Codex review on PR #85). That is
+   * how H17's deliberately loud 500 became a 502 on the webhook path and a
+   * 200 on the drain — a deploy that forgot RESEND_API_KEY reporting success
+   * forever, which is the exact defect H17 exists to prevent, reintroduced by
+   * the round-five change that moved this check to make room for push.
+   *
+   * It lives on the deps rather than as a boolean so the throw stays in the
+   * layer that owns HTTP status codes, and so `handler.ts` still knows nothing
+   * about the environment.
+   */
+  assertEmailConfigured(): void;
   /** Stamp the outcome. The whole point of H17: no path leaves the row silent. */
   record(id: string, outcome: Outcome, previousAttempts: number): Promise<void>;
   renderEmail(business: string, title: string, body: string, unsubscribeUrl: string): string;
@@ -189,6 +205,12 @@ export async function deliverNotification(
     return outcome;
   }
 
+  // Now — and only now — is email genuinely owed: the row is client-facing,
+  // the address exists, and it is not suppressed. Every branch above is
+  // TERMINAL and is better recorded than 500'd, because none of them changes
+  // when the key appears. This one does, so it is the configuration error.
+  deps.assertEmailConfigured();
+
   const business = operator?.business_name ?? "Your walker";
   const unsubscribeUrl = deps.unsubscribeUrl(client.unsubscribe_token);
   let result: Awaited<ReturnType<SendDeps["sendEmail"]>>;
@@ -281,9 +303,22 @@ export async function drainBacklog(
       }
     }
 
-    const outcome = await deliverNotification(row, deps);
-    if (outcome.kind === "failed") failed += 1;
-    else sent += 1;
+    // One bad row must not strand the rest of the backlog — the rule the
+    // comment above the push arm already states, which the email arm did not
+    // honour (Codex review on PR #85). A configuration error now throws from
+    // `deliverNotification` so the single-row path is loud again, and here
+    // that must not abort the drain and take the remaining rows' PUSH with it.
+    //
+    // The drain stays loud by a different mechanism, which is why it can
+    // afford to continue: nothing gets sent, the backlog survives, and the
+    // nightly ops check goes red on a backlog that outlives its retry.
+    try {
+      const outcome = await deliverNotification(row, deps);
+      if (outcome.kind === "failed") failed += 1;
+      else sent += 1;
+    } catch {
+      failed += 1;
+    }
   }
   return { drained: ids.length, sent, failed, pushSent, pushFailed };
 }

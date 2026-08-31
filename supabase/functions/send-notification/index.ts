@@ -131,19 +131,25 @@ function makeDeps(apiKey: string | null, operatorId: string | null): SendDeps {
       return `${base}?t=${encodeURIComponent(token)}`;
     },
 
+    assertEmailConfigured() {
+      if (apiKey) return;
+      // H17's loud failure, at the last point it can still BE loud. This used
+      // to live inside `sendEmail`, where `deliverNotification`'s catch turned
+      // it into an ordinary retryable delivery failure (Codex review on PR
+      // #85) — a deploy that forgot the key answering 502, or 200 from the
+      // drain, which is the uniform success H17 exists to prevent.
+      throw new HttpError(
+        500,
+        "email_not_configured",
+        "email delivery is not configured, so this notification was not emailed",
+        "the Resend API key env var is unset in this deployment",
+      );
+    },
+
     async sendEmail({ to, subject, html, headers }) {
-      if (!apiKey) {
-        // H17's loud failure, at the moment email is actually attempted.
-        throw new HttpError(
-          500,
-          "email_not_configured",
-          "email delivery is not configured, so this notification was not emailed",
-          "the Resend API key env var is unset in this deployment",
-        );
-      }
       const res = await fetch("https://api.resend.com/emails", {
         method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${apiKey ?? ""}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           from: Deno.env.get("NOTIFY_FROM_EMAIL") ?? "Sanpo <notifications@sanpocare.com>",
           to: [to],
@@ -206,8 +212,14 @@ serveFunction(async (req) => {
   // What moved (Codex review on PR #85) is WHERE it fires. As a precondition
   // for the whole request it also blocked push, and it failed notifications
   // that have no email to send at all — an operator-only row skips email by
-  // definition. It now throws inside `sendEmail`, so it still fails loudly for
-  // anything that genuinely needed the provider, and only for those.
+  // definition.
+  //
+  // Round five moved it inside `sendEmail`, which was too far: that call sits
+  // in a try that records any throw as a retryable delivery failure, so the
+  // loud 500 quietly became `resend unreachable` on the row and a 502 (webhook)
+  // or 200 (drain) to the caller. The comment here asserted the opposite,
+  // which is worse than the bug. It is now `assertEmailConfigured`, called by
+  // `deliverNotification` after every terminal skip and OUTSIDE that try.
   const apiKey = Deno.env.get("RESEND_API_KEY") ?? null;
   const deps = makeDeps(apiKey, operator?.id ?? null);
 

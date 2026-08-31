@@ -18,6 +18,7 @@ import type { Session } from "@supabase/supabase-js";
 import { supabase } from "./supabase";
 import { deleteOutboxDatabase } from "./gps-outbox";
 import { clearAllWalkSnapshots } from "./walk-snapshot";
+import { createSerialRunner, type SerialRunner } from "./serial-repair";
 import {
   forgetPushDeviceBeforeSignOut,
   forgetPushDeviceOnSignedOut,
@@ -121,6 +122,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [roleError, setRoleError] = useState(false);
   const resolvedFor = useRef<string | null>(null);
   const sessionRef = useRef<Session | null>(null);
+  // The two push repairs are opposites — one unsubscribes this browser, the
+  // other re-registers it — and both were fire-and-forget, so a null-session
+  // callback followed quickly by a signed-in one could run them CONCURRENTLY
+  // (Codex review on PR #85). Both begin by reading
+  // `pushManager.getSubscription()`, so either completion order is wrong.
+  // See `createSerialRunner` for the two rules and why they are tested there
+  // rather than through this provider.
+  const runPushRepair = useRef<SerialRunner>(createSerialRunner()).current;
 
   const applyRole = useCallback(async (uid: string): Promise<Role> => {
     const resolved = await resolveRole(uid, realQueries);
@@ -139,9 +148,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Fire-and-forget and never throwing: it is a repair, not a precondition
     // for being signed in, and the RPC refuses a caller who is not yet an
     // operator or a client (mid-onboarding), which must not block anything.
-    void reclaimPushDevice();
+    runPushRepair(reclaimPushDevice);
     return resolved.role;
-  }, []);
+  }, [runPushRepair]);
 
   useEffect(() => {
     let cancelled = false;
@@ -168,7 +177,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // here with a live subscription. Fire-and-forget for the same reason
         // the reclaim is: a repair must not stand between anyone and being
         // signed out.
-        void forgetPushDeviceOnSignedOut();
+        runPushRepair(forgetPushDeviceOnSignedOut);
         return;
       }
       if (resolvedFor.current === uid) return; // role already resolved
@@ -195,7 +204,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       cancelled = true;
       sub.subscription.unsubscribe();
     };
-  }, [applyRole]);
+  }, [applyRole, runPushRepair]);
 
   const refreshRole = useCallback(async (): Promise<Role> => {
     const uid = sessionRef.current?.user?.id;
