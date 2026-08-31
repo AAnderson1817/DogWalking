@@ -272,6 +272,55 @@ describe("the repairs go through the serial runner", () => {
   });
 });
 
+describe("a repeated event for the SAME user is not a transition", () => {
+  it("a token refresh does not make an in-flight reclaim stand down", async () => {
+    // supabase-js re-emits SIGNED_IN for an already-signed-in user (a
+    // refocused tab) and TOKEN_REFRESHED on a timer, both with the same
+    // session (Codex review on PR #85, seventeenth round). Treating those as
+    // transitions superseded a reclaim mid-flight, and the `resolvedFor` early
+    // return scheduled no replacement — so on a shared device the surviving
+    // subscription stayed owned by the PREVIOUS account while the UI said on.
+    AUTH.session = null;
+    render(<AuthProvider>ready</AuthProvider>);
+    await waitFor(() => expect(AUTH.listener).not.toBeNull());
+    await waitFor(() => expect(PUSH.log).toContain("forget:end"));
+    PUSH.log.length = 0;
+    PUSH.clearSupersede();
+
+    AUTH.listener!("SIGNED_IN", { user: { id: "op-1" } });
+    await waitFor(() => expect(PUSH.log).toContain("reclaim:start"));
+    AUTH.listener!("TOKEN_REFRESHED", { user: { id: "op-1" } });
+    AUTH.listener!("SIGNED_IN", { user: { id: "op-1" } });
+
+    const wasSuperseded = PUSH.superseded.reclaim;
+    expect(wasSuperseded, "the reclaim was handed no supersede signal").toBeTypeOf("function");
+    expect(
+      wasSuperseded!(),
+      "a same-user event superseded the reclaim, and nothing replaced it",
+    ).toBe(false);
+  });
+
+  it("but a DIFFERENT user still supersedes it", async () => {
+    // The other direction, or "never supersede" would satisfy the case above
+    // and put back the account-switch leak.
+    AUTH.session = null;
+    render(<AuthProvider>ready</AuthProvider>);
+    await waitFor(() => expect(AUTH.listener).not.toBeNull());
+    await waitFor(() => expect(PUSH.log).toContain("forget:end"));
+    PUSH.log.length = 0;
+    PUSH.clearSupersede();
+
+    AUTH.listener!("SIGNED_IN", { user: { id: "op-1" } });
+    await waitFor(() => expect(PUSH.log).toContain("reclaim:start"));
+    AUTH.listener!("SIGNED_IN", { user: { id: "op-2" } });
+
+    expect(
+      PUSH.superseded.reclaim!(),
+      "a reclaim for the previous account was not superseded by a new one",
+    ).toBe(true);
+  });
+});
+
 describe("sign-out is never held up by its own cleanup", () => {
   it("proceeds once the bounded cleanup times out", async () => {
     // `forgetPushDeviceBeforeSignOut` catches rejections, but a promise that

@@ -146,6 +146,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // stayed live. That is the shared-device leak the cleanup exists to close,
   // reintroduced by the stand-down added to protect the account switch.
   const transition = useRef(0);
+  // The uid the current version belongs to. `undefined` until the first
+  // resolution, so an opening null session is itself a change.
+  const identity = useRef<string | null | undefined>(undefined);
   const runPushRepair = useRef<SerialRunner>(
     createSerialRunner(() => transition.current),
   ).current;
@@ -181,12 +184,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     async function apply(next: Session | null) {
       if (cancelled) return;
-      // Bumped HERE — on arrival — not where a repair is scheduled. See the
-      // note beside `transition` above.
-      const version = ++transition.current;
       setSession(next);
       sessionRef.current = next;
       const uid = next?.user?.id ?? null;
+      // Bumped on arrival — see the note beside `transition` — but ONLY when
+      // the IDENTITY changes (Codex review on PR #85, seventeenth round).
+      //
+      // supabase-js emits SIGNED_IN again for an already-signed-in user (a
+      // refocused tab) and TOKEN_REFRESHED with the same session on a timer.
+      // Treating those as transitions superseded a reclaim that was between
+      // its service-worker lookups and its RPC, and the `resolvedFor` early
+      // return below then scheduled no replacement — so on a shared device the
+      // surviving subscription stayed owned by the PREVIOUS account while the
+      // UI reported push as on. The version means "whose session is this",
+      // and a token refresh does not change the answer.
+      if (identity.current !== uid) {
+        identity.current = uid;
+        transition.current += 1;
+      }
+      const version = transition.current;
       if (!uid) {
         resolvedFor.current = null;
         setRole(null);
