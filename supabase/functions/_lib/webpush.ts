@@ -37,6 +37,7 @@ const NONCE_INFO = enc.encode("Content-Encoding: nonce\0");
 export const RECORD_SIZE = 4096;
 const SALT_LEN = 16;
 const KEY_LEN = 65; // uncompressed P-256 point
+const TAG_LEN = 16; // AES-GCM authentication tag
 
 export interface PushKeys {
   /** The subscription's `p256dh`, base64url — an uncompressed P-256 point. */
@@ -150,6 +151,17 @@ export async function encryptPushPayload(
   // RFC 8188 §2: the record's padding delimiter is 0x02 for the LAST record,
   // 0x01 otherwise. One record here, so it is always 0x02.
   const plaintext = concat(enc.encode(payload), new Uint8Array([2]));
+  // …and one record is only legal while it FITS (Codex review on PR #85).
+  // The header declares `rs`, so a longer payload emits framing that
+  // contradicts its own header: the push service rejects it, or a browser
+  // cannot decrypt it. Refusing names the payload as the problem instead,
+  // and the caller clamps (see `pushPayload`) so this is a backstop rather
+  // than a path anything should reach.
+  if (plaintext.length + TAG_LEN > RECORD_SIZE) {
+    throw new Error(
+      `push payload is ${plaintext.length + TAG_LEN} bytes, over the ${RECORD_SIZE}-byte record size`,
+    );
+  }
   const aesKey = await crypto.subtle.importKey("raw", cek as BufferSource, "AES-GCM", false, [
     "encrypt",
   ]);

@@ -21,13 +21,21 @@ import { registerPushSubscription, removePushSubscription } from "./api";
  *   off           available, permitted or not yet asked, not subscribed.
  *   on            subscribed on this device.
  */
-export type PushState = "unsupported" | "unconfigured" | "denied" | "off" | "on";
+export type PushState =
+  | "unsupported"
+  | "unconfigured"
+  | "denied"
+  | "stale-worker"
+  | "off"
+  | "on";
 
 export interface PushEnvironment {
   supported: boolean;
   vapidKey: string;
   permission: NotificationPermission | null;
   subscribed: boolean;
+  /** A newer worker is installed and WAITING, so the active one is older. */
+  updatePending: boolean;
 }
 
 export function pushState(e: PushEnvironment): PushState {
@@ -37,6 +45,17 @@ export function pushState(e: PushEnvironment): PushState {
   if (!e.supported) return "unsupported";
   if (!e.vapidKey) return "unconfigured";
   if (e.permission === "denied") return "denied";
+  // A newer worker is waiting, which means the ACTIVE one is from a previous
+  // build — and on an upgrade from before M27 that worker has no `push`
+  // handler at all (Codex review on PR #85). `getRegistration()` returns it
+  // regardless, so subscribing here produces a registration whose deliveries
+  // land on a worker that ignores them: every push silent until the person
+  // happens to accept the update.
+  //
+  // Reported ahead of `on` deliberately. A device that IS subscribed under a
+  // stale worker is the case that matters — saying `on` there would claim
+  // notifications work while none can be displayed.
+  if (e.updatePending) return "stale-worker";
   return e.subscribed ? "on" : "off";
 }
 
@@ -99,6 +118,7 @@ export async function readPushEnvironment(): Promise<PushEnvironment> {
     vapidKey: env.vapidPublicKey,
     permission: supported ? Notification.permission : null,
     subscribed: existing !== null,
+    updatePending: reg?.waiting != null,
   };
 }
 
@@ -106,6 +126,8 @@ export async function readPushEnvironment(): Promise<PushEnvironment> {
 export async function enablePush(): Promise<PushState> {
   const reg = await registration();
   if (!reg || !env.vapidPublicKey) return "unconfigured";
+  // Refuse rather than create a subscription the active worker cannot serve.
+  if (reg.waiting != null) return "stale-worker";
 
   const permission = await Notification.requestPermission();
   if (permission !== "granted") return permission === "denied" ? "denied" : "off";

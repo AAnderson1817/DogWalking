@@ -230,3 +230,24 @@ Deno.test("a push failure in the drain never strands the rest of the backlog", a
   assertEquals(result.pushFailed, 1);
   assertEquals(result.pushSent, 1);
 });
+
+Deno.test("the payload is clamped so one record can always frame it", async () => {
+  // `title` and `body` are unconstrained text and operator notifications embed
+  // a client's name, so nothing upstream bounds them. Over the declared record
+  // size the framing contradicts its own header: the service rejects it, or
+  // the browser cannot decrypt. A truncated sentence on a lock screen beats a
+  // notification that does not arrive.
+  const { encryptPushPayload } = await import("../_lib/webpush.ts");
+  const huge = { ...ROW, title: "T".repeat(5000), body: "B".repeat(20000) };
+  const payload = pushPayload(huge);
+  assert(payload.length < 1000, `payload is ${payload.length} bytes`);
+  const parsed = JSON.parse(payload);
+  assert(parsed.title.endsWith("…"), "a clamped title should say it was clamped");
+  assert(parsed.body.endsWith("…"));
+  // And it genuinely encrypts, which is the property the clamp exists for.
+  const body = await encryptPushPayload(payload, {
+    p256dh: "BDgBTGA8idqXEkJjIO5TqUx5Xdo7kLtbB5Guj120hrfbJeOqNo7eN7llZvZlkPieoqyDS81hVBuQc4y8gpRwbJY",
+    auth: "ZmVkY2JhOTg3NjU0MzIxMA",
+  });
+  assert(body.length > 86);
+});
