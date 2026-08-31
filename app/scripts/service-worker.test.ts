@@ -51,16 +51,40 @@ interface SwHarness extends Handlers {
   reject: Set<string>;
   /** Whether the worker asked to take over immediately. */
   skipWaitingCalls: number;
+  /** What the fake cache already holds, keyed by URL. */
+  cache: Map<string, { body: string }>;
+  /** URLs the fake network answers, and how. */
+  network: Map<string, { ok: boolean; status: number; body: string }>;
+  /** Whether the network is reachable at all. */
+  offline: boolean;
 }
 
-function loadServiceWorker(): SwHarness {
+interface SwOptions {
+  buildAssets?: string[];
+  /** What `vite.config.ts` stamps for the Today plate; null on a public-only build. */
+  plateFamily?: { stem: string; fallback: string } | null;
+  cache?: Map<string, { body: string }>;
+  network?: Map<string, { ok: boolean; status: number; body: string }>;
+  offline?: boolean;
+}
+
+function loadServiceWorker(options: SwOptions = {}): SwHarness {
   const handlers: Handlers = {};
   const added: string[] = [];
   const reject = new Set<string>();
   let skipWaitingCalls = 0;
+  const cache = options.cache ?? new Map<string, { body: string }>();
+  const network = options.network ?? new Map<string, { ok: boolean; status: number; body: string }>();
+  const state = { offline: options.offline ?? false };
   const source = SW_SOURCE
     .replace('"__BUILD_VERSION__"', JSON.stringify("test"))
-    .replace('"__BUILD_ASSETS__"', JSON.stringify(["/assets/index-abc123.js"]));
+    .replace('"__BUILD_ASSETS__"', JSON.stringify(options.buildAssets ?? ["/assets/index-abc123.js"]))
+    // Filled the way the build fills it, so what runs here is what ships.
+    // Defaulting to null rather than leaving the literal is deliberate: the
+    // placeholder string is truthy, so an unfilled worker would take the
+    // "no plate" path for the wrong reason and the tests below would pass
+    // without ever exercising the rule.
+    .replace('"__PLATE_FAMILY__"', JSON.stringify(options.plateFamily ?? null));
 
   const context: Record<string, unknown> = {
     self: {
@@ -78,8 +102,14 @@ function loadServiceWorker(): SwHarness {
     caches: {
       open: () =>
         Promise.resolve({
-          match: () => Promise.resolve(undefined),
-          put: () => undefined,
+          // `cache.match` takes a Request in the worker and a URL string for
+          // the fallback lookup, so the stub accepts both.
+          match: (key: string | { url: string }) =>
+            Promise.resolve(cache.get(typeof key === "string" ? key : new URL(key.url).pathname)),
+          put: (key: string | { url: string }, value: { body: string }) => {
+            cache.set(typeof key === "string" ? key : new URL(key.url).pathname, value);
+            return undefined;
+          },
           add: (url: string) => {
             added.push(url);
             return reject.has(url)
@@ -92,9 +122,14 @@ function loadServiceWorker(): SwHarness {
       match: () => Promise.resolve(undefined),
       delete: () => Promise.resolve(true),
     },
-    fetch: () => Promise.resolve({ ok: true, clone: () => ({}) }),
+    fetch: (request: string | { url: string }) => {
+      if (state.offline) return Promise.reject(new Error("offline"));
+      const path = new URL(typeof request === "string" ? request : request.url).pathname;
+      const answer = network.get(path) ?? { ok: true, status: 200, body: `network:${path}` };
+      return Promise.resolve({ ...answer, clone: () => ({ body: answer.body }) });
+    },
     URL,
-    Response: { error: () => ({}) },
+    Response: { error: () => ({ type: "error" }) },
     Promise,
     Array,
     Error,
@@ -106,10 +141,33 @@ function loadServiceWorker(): SwHarness {
     ...handlers,
     added,
     reject,
+    cache,
+    network,
+    get offline() {
+      return state.offline;
+    },
+    set offline(value: boolean) {
+      state.offline = value;
+    },
     get skipWaitingCalls() {
       return skipWaitingCalls;
     },
   } as SwHarness;
+}
+
+/** Drives the fetch handler and awaits whatever it responded with. */
+async function respond(
+  handlers: Handlers,
+  url: string,
+): Promise<{ body?: string; type?: string } | undefined> {
+  let answered: unknown;
+  handlers.fetch?.({
+    request: { url, method: "GET", mode: "cors" },
+    respondWith: (r) => {
+      answered = r;
+    },
+  });
+  return (await answered) as { body?: string; type?: string } | undefined;
 }
 
 /** Runs the install handler and reports whether it resolved or rejected. */
@@ -253,5 +311,110 @@ describe("the service worker's install", () => {
     sw.message?.({ data: null });
     sw.message?.({ data: "SKIP_WAITING" });
     expect(sw.skipWaitingCalls).toBe(0);
+  });
+});
+
+/**
+ * Review M17. The Today plate ships as four responsive candidates and only the
+ * master is precached, so the worker has to be able to answer for the other
+ * three — otherwise the change trades a byte saving for a blank primary screen
+ * offline.
+ *
+ * That trade is not hypothetical. Measured in Chromium: when the candidate an
+ * `<img srcset>` picks fails to load, the browser does NOT try another one.
+ * `naturalWidth` stays 0 and nothing is painted. So "the picked variant is not
+ * in the cache and the network is gone" is exactly the cold offline start the
+ * `perf(today-field)` work existed to protect.
+ *
+ * The substitution is sound because every candidate is the same composition at
+ * the same ratio and the layout is CSS-driven — measured, serving the 875x1798
+ * master for a 438w URL renders at ratio 2.0548 against the plate's 2.0549.
+ */
+describe("the service worker substitutes the precached Today plate", () => {
+  const STEM = "sanpo-today-indigo-emaki-background-approved-v1";
+  const MASTER = `/assets/${STEM}-B7ae2uy3.webp`;
+  const VARIANT = `/assets/${STEM}-438w-Le3xnTjr.webp`;
+  const ORIGIN = "https://app.sanpo.test";
+  const PLATE = { stem: STEM, fallback: MASTER };
+
+  /** A worker whose cache already holds the precached master, as after install. */
+  function installed(extra: Partial<SwOptions> = {}) {
+    const cache = new Map([[MASTER, { body: "the-master-plate" }]]);
+    return loadServiceWorker({ plateFamily: PLATE, buildAssets: [MASTER], cache, ...extra });
+  }
+
+  it("serves the master when the picked variant is uncached and the network is gone", async () => {
+    const sw = installed({ offline: true });
+    // The exact cold-offline-start case: installed on a visit that never
+    // rendered Today, so the variant this device picks was never fetched.
+    expect(await respond(sw, ORIGIN + VARIANT)).toEqual({ body: "the-master-plate" });
+  });
+
+  it("serves the master when the variant 404s after a redeploy", async () => {
+    // A page still running the previous build asks for the PREVIOUS hashed
+    // variant. That file is gone, and a 404 paints nothing just as an offline
+    // failure does — so it falls back too, not only the throw.
+    const sw = installed({
+      network: new Map([[VARIANT, { ok: false, status: 404, body: "gone" }]]),
+    });
+    expect(await respond(sw, ORIGIN + VARIANT)).toEqual({ body: "the-master-plate" });
+  });
+
+  it("still prefers the real variant when it is cached", async () => {
+    // Cache-first is not bypassed: a device that HAS its own candidate must
+    // keep getting it, or the fallback quietly becomes the only plate anyone
+    // ever sees and the whole change is inert.
+    const cache = new Map([
+      [MASTER, { body: "the-master-plate" }],
+      [VARIANT, { body: "the-438w-variant" }],
+    ]);
+    const sw = loadServiceWorker({ plateFamily: PLATE, cache, offline: true });
+    expect(await respond(sw, ORIGIN + VARIANT)).toEqual({ body: "the-438w-variant" });
+  });
+
+  it("prefers the network's own answer over the fallback when it is good", async () => {
+    const sw = installed({
+      network: new Map([[VARIANT, { ok: true, status: 200, body: "fresh-438w" }]]),
+    });
+    // The server's own Response is passed through, so this asserts the body
+    // rather than the shape: what matters is that it is the network's answer
+    // and not the cached master.
+    expect((await respond(sw, ORIGIN + VARIANT))?.body).toBe("fresh-438w");
+  });
+
+  it("does NOT substitute the plate for any other asset", async () => {
+    // The fallback is scoped, and this is the assertion that keeps it scoped:
+    // answering an unrelated request with the plate would be a silently WRONG
+    // picture, which is worse than a missing one.
+    const sw = installed({ offline: true });
+    for (const other of [
+      "/assets/index-abc123.js",
+      "/assets/index-CHGlXcTt.css",
+      "/assets/sanpo-corporate-master-approved-v1-Y8xx-dg2.svg",
+      // Same stem, different directory — the rule is scoped to /assets/.
+      `/img/${STEM}-438w.webp`,
+      // Right directory, wrong stem.
+      "/assets/some-other-illustration-438w.webp",
+      // Right stem, not an image the plate family contains.
+      `/assets/${STEM}-438w.js`,
+    ]) {
+      expect(await respond(sw, ORIGIN + other), `${other} was answered with the plate`).toEqual({
+        type: "error",
+      });
+    }
+  });
+
+  it("falls back for the master's own URL too", async () => {
+    // The master is precached, so this normally hits the cache. But a worker
+    // whose install partially failed (per-URL `allSettled`) can be missing it,
+    // and then the fallback lookup is simply a miss rather than a crash.
+    const sw = loadServiceWorker({ plateFamily: PLATE, cache: new Map(), offline: true });
+    expect(await respond(sw, ORIGIN + MASTER)).toEqual({ type: "error" });
+  });
+
+  it("does nothing when the build stamped no plate", async () => {
+    // A `public`-only build. The worker must not throw on `PLATE_FAMILY.stem`.
+    const sw = loadServiceWorker({ plateFamily: null, offline: true });
+    expect(await respond(sw, ORIGIN + VARIANT)).toEqual({ type: "error" });
   });
 });

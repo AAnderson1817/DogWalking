@@ -25,20 +25,7 @@ before you hit them.
 
 ## Open
 
-### 1. Today illustration responsive variants (M17)
-One 875×1798 WebP is served to every device (~34–47% upscale on common
-phones). Add `srcset`/`sizes` variants.
-- The composition is LOCKED (CLAUDE.md, Ownership) — resizing only, never
-  recomposition. Update the hash list in
-  `app/scripts/verify-sanpo-assets.mjs` in the same commit, with the reason.
-- Check the service-worker asset stamping in `app/vite.config.ts`: the
-  precache filter includes `.webp`, and Today's offline cold start must keep
-  working (see the `perf(today-field)` entry for why).
-- Both e2e suites must stay green: `today-contrast.spec.ts` reads rendered
-  PIXELS, `indigo-emaki-today.spec.ts` asserts rendered GEOMETRY. A new spec
-  file also needs its own named CI step.
-
-### 2. `walk_photos` integrity checksum
+### 1. `walk_photos` integrity checksum
 No checksum or byte size, so a restore cannot verify photo evidence (flagged
 in `disaster-recovery.md`). New migration: nullable `sha256` + `byte_size`;
 compute in the browser at upload (`crypto.subtle.digest`) alongside the
@@ -46,7 +33,7 @@ existing upload-time row insert (`fix(walk-durability)` has that path). No
 backfill — a guessed checksum is indistinguishable from a real one. Verifying
 on the read path is a follow-up, not that PR.
 
-### 3. `claim-signup` rate limit
+### 2. `claim-signup` rate limit
 Public (`verify_jwt=false`) and its success path calls
 `auth.admin.createUser`; no rate limit (a stated residual in spec 04). Follow
 the `0016` `vault_rate_limit_attempts` shape, keyed for an unauthenticated
@@ -54,7 +41,7 @@ caller. Two properties must survive: the endpoint stays a non-oracle
 (identical answers wherever it gives them today), and a legitimate claimant
 retrying after a failed `createUser` is not locked out. Red-first on both.
 
-### 4. Push notifications (M27) — the largest item
+### 3. Push notifications (M27) — the largest item
 No push handler in `app/public/sw.js`, no VAPID keys, no subscriptions table.
 Scope: subscriptions table (tenant table ⇒ `operator_id` + RLS, invariant 7),
 SW `push`/`notificationclick` handlers (mind the network-only rules from
@@ -64,7 +51,7 @@ insert. Honest delivery states: copy H17's email machinery. VAPID key
 generation is an **owner action** — add it to `owner-actions.md` in the same
 commit and degrade gracefully without it.
 
-### 5. Small batch (one PR)
+### 4. Small batch (one PR)
 - `fn_walk_cost` is LOAD-BEARING (`fn_debit_walk` calls it, smoke pins it) —
   do NOT touch it. The dead code is `api.ts`'s `walkCost()` wrapper, itself
   with zero importers: delete it, or wire it where a persisted walk's display
@@ -79,7 +66,7 @@ commit and degrade gracefully without it.
   the deliberate thin-wrapper exception (its logic is SQL-side);
   `charge-overage` is already covered through `_lib/overage*.ts`.
 
-### 6. Tell the operator when an edited address is already suppressed
+### 5. Tell the operator when an edited address is already suppressed
 Also recorded in spec 04. Editing a client's address to one already in
 `email_suppressions` makes every future client-facing email skip
 permanently and terminally, with no signal in the UI. Whether to surface it
@@ -88,6 +75,13 @@ a product question.
 
 ## Done
 
+- **Today illustration responsive variants (M17)** — the plate now ships as
+  four candidates (438/640/750/875w) behind one `srcset`, with only the master
+  precached and the service worker substituting it for the rest. The review's
+  other half, a 2x master, turned out to be **impossible from inside this
+  repository**: 875x1798 is every pixel that exists, so a DPR-3 phone still
+  upscales. That is now owner action #13. See the `perf(today-plate)`
+  status-log entry.
 - **The two migration-gated security items** — `fn_rotate_invite` refusing a
   purged client (it used to clear the purge's own revocation and hand a
   tombstone a live 14-day token, which the NULL-email ladder rung then let a

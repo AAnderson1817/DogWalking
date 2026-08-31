@@ -493,6 +493,17 @@ jobs:
         working-directory: app
         run: npx playwright test --config playwright.config.mjs e2e/tint-contrast.spec.ts
 
+      # Review M17. `sizes` is the one part of the responsive plate that CANNOT
+      # be checked by looking at the screen: every candidate is the same
+      # picture, so a wrong value downloads the wrong file and the page still
+      # renders perfectly. This asserts the browser's pick against the width it
+      # actually painted, across 7 viewports x 3 device pixel ratios. Confirmed
+      # red against a naive `sizes="100vw"`, which fails exactly the four DPR-1
+      # cases the change exists for.
+      - name: Today plate responsive candidates
+        working-directory: app
+        run: npx playwright test --config playwright.config.mjs e2e/today-plate-srcset.spec.ts
+
       # Review M20. Two properties only a rendered page can answer: whether a
       # day column gains anything from a wider screen (it gained NOTHING between
       # 768 and 1440 — measured 86.84px at both), and whether a pet name stays

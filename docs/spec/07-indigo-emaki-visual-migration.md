@@ -79,6 +79,54 @@ warmer paper. That is a mount, and it is deliberate: the plate is a painting
 with a fixed ratio, and a mount is what a painting gets when the wall is wider
 than the frame.
 
+### The plate is served in four sizes (review M17)
+
+One `875 x 1798` WebP went to every device. The field is never wider than
+`640` CSS px, so a DPR-1 laptop painting a `438px` field was downloading `875`
+pixels of width to show `438` — and at `1440x900`, the desktop viewport this
+document names for testing, that is the common case rather than an edge one.
+
+The plate now ships as four candidates behind one `<img srcset>`. The widths
+are MEASURED field widths rather than a generic `1x/2x` ladder, so each is the
+exact size some real device asks for:
+
+| Width | Why it exists | Bytes |
+| --- | --- | --- |
+| `438w` | the field at `1440x900` — `900 x 875/1798 = 438.0` | 90 KiB |
+| `640w` | the field's maximum: `--page-max` caps there | 179 KiB |
+| `750w` | `375` CSS px at DPR 2, the commonest DPR-2 phone | 218 KiB |
+| `875w` | the master — every DPR-3 device, and every need above 750 | 437 KiB |
+
+`sizes` restates `--page-max`, because it is resolved before layout and cannot
+ask the element how wide it will be. `clamp()`, `calc()`, `min()` and `dvh` are
+all legal there and Chromium honours them — verified against the real page,
+where every candidate picked matched the width actually rendered.
+`scripts/today-plate.test.ts` reads both expressions out of `components.css`
+and fails when they drift; that guard is the only thing making the duplication
+safe. `e2e/today-plate-srcset.spec.ts` then checks the browser's actual pick
+against the width it actually painted, across seven viewports and three device
+pixel ratios.
+
+**The upscale half of M17 is NOT fixed, and cannot be from inside this
+repository.** The review also asked for a 2x master; `875 x 1798` is every
+pixel that exists, in the tree or in its history.
+`docs/reference/sanpo-today-locked-composition.png` is the same dimensions and
+looks like a master, but is the composition mockup — artwork *plus* UI,
+measured `18.57 dB` PSNR against the plate — and its own README says it must
+not be embedded. The lossless PNG master of the plate itself does exist in
+history, at the same `875 x 1798`. So a DPR-3 phone still upscales exactly as much as it did before.
+A 2x master is new artwork, which is an owner decision and a locked-composition
+change, not a code change.
+
+What the downscales do NOT do is change what anyone sees. Measured at the
+display widths each candidate serves, a variant differs from the master by
+`33.2-38.9 dB` PSNR — the same neighbourhood as the `38.8 dB` the original
+PNG-to-WebP re-encode shipped at. And `e2e/today-contrast.spec.ts`, which
+samples the rendered pixels, moved every ratio it measures UPWARD by
+`0.02-0.09` with none crossing a floor: a high-quality downscale averages out
+the artwork's darkest speckles, so the backdrop under the schedule gets
+slightly more uniform.
+
 ### The field is not the plate
 
 The illustrated plate and the field that contains it are two different boxes,

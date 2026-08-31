@@ -362,6 +362,39 @@ opaque URL in the footer. Point this at a friendlier domain that proxies to
 `/functions/v1/unsubscribe` and the link becomes readable. Nothing breaks if it
 stays unset.
 
+## Artwork
+
+### 13. A 2x Today plate, if the softness on modern phones is worth it — review M17
+
+The approved plate is `875 x 1798`, and that is every pixel of it that exists
+anywhere in this repository. `docs/reference/sanpo-today-locked-composition.png`
+is the same dimensions and is the composition mockup (artwork *plus* UI —
+measured `18.57 dB` PSNR against the plate), and its own README says it must
+not be embedded.
+
+So M17's first half is done — the plate now ships in four sizes and a device
+that needs fewer than 875 pixels stops downloading all of them — and its second
+half **cannot be done from here**. A DPR-3 phone paints 960–1290 device pixels
+across a plate that has 875, so it upscales 10–47%, exactly as it did before.
+Nothing in the codebase can add detail that was never drawn.
+
+**What is true until this is done:** the artwork is slightly soft on modern
+flagship phones, which is where the review argued it matters most for how the
+product reads. It is not a defect and nothing is broken; every gate is green
+and the composition is exact.
+
+**What it would take:** the `875 x 1798` composition re-rendered at
+`1750 x 3596`, byte-identical in layout. Then `VARIANT_WIDTHS` in
+`app/scripts/generate-today-plate-variants.mjs` gains the larger widths, the
+new master replaces the old one, and the hashes in
+`app/scripts/verify-sanpo-assets.mjs` are updated in the same commit. The
+review costed a 2x master at "near 1.5 MiB" — with the responsive candidates
+now in place that weight only reaches the devices that can use it, which is
+the thing that was not true before.
+
+This is a spending and design decision, and the composition is LOCKED
+(`CLAUDE.md`, Ownership): a re-render is a resize, never a recomposition.
+
 ## Keeping this honest
 
 When a pull request creates one of these, add it here in the same commit rather

@@ -429,7 +429,8 @@ report, and END WALK is the one action that does that.
 `manifest.webmanifest` (name Sanpo, theme `#FEF6EA`, display standalone,
 byte-approved Sanpo icons at 192/512 including maskable entries), service
 worker: precache the built app shell (the hashed `.js`/`.css`/`.woff2`/`.webp`/
-`.svg` assets, stamped into `__BUILD_ASSETS__` by `vite.config.ts`), IndexedDB
+`.svg` assets, stamped into `__BUILD_ASSETS__` by `vite.config.ts`, minus the
+Today plate's smaller candidates — see below), IndexedDB
 GPS outbox with background flush + `beforeunload` guard.
 
 ### What goes in the precache, and what does not (review M6)
@@ -452,6 +453,45 @@ a `sw.js` whose placeholders are missing (an unstamped worker has no cache
 versioning **and** no precached chunks, from a green build), and a precache
 containing no JavaScript at all. CI re-asserts both on the shipped `dist/sw.js`
 plus the absence of any lazily-imported chunk.
+
+### One plate in the precache, and a substitution for the rest (review M17)
+
+The Today plate ships as four responsive candidates (spec 07). Only the master
+is precached, and the worker substitutes it for any candidate it cannot
+produce.
+
+Both halves of that are forced. Precaching all four puts ~923 KiB of artwork in
+every install to serve the ~180 KiB one device picks, which re-inflates exactly
+the budget the `mapbox-gl` work reclaimed. Precaching none is worse: measured
+in Chromium, an `<img srcset>` does **not** fall back to another candidate when
+the picked one fails — `naturalWidth` stays 0 and nothing is painted. So a
+partial precache without a substitution rule can leave the operator's primary
+screen with no artwork at all, which is the state the single precached plate
+used to make impossible.
+
+The substitution is seamless because every candidate is the same composition at
+the same ratio and the layout is CSS-driven: measured, serving the `875x1798`
+master for a `438w` URL renders at ratio `2.0548` against the plate's `2.0549`.
+
+Matching is by a build-STAMPED stem, not by an exact URL list and not by a
+convention written into `sw.js`. An exact list cannot answer for a page still
+running the previous build, which asks for the previous hashed variant — and
+that request is precisely the one most likely to 404. A stem written into the
+worker would silently match nothing the day the asset is renamed, so the build
+derives it from the emitted files and fails if it cannot.
+
+A non-ok response falls back too, not only a failed fetch: for this one asset a
+404 and an offline failure have the same outcome on screen.
+
+**Honest scope.** The mechanism is proven by `scripts/service-worker.test.ts`,
+which drives the real fetch handler and is red without the rule. The
+reachability of the gap is argued from the worker's own lifecycle — the first
+visit is uncontrolled, so nothing is runtime-cached, and `activate` deletes the
+previous version's cache — rather than from an end-to-end reproduction. Several
+were attempted in a real browser and none produced the blank plate, because
+Chromium's own HTTP cache answered the request first in every arrangement
+tried. So this rule is a backstop whose cost is about twenty-five lines, not a
+fix for a failure that was observed in the wild.
 
 ### Install is per-URL, and taking over is the page's decision
 

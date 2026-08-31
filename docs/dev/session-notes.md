@@ -71,6 +71,14 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   apply the sabotage, verify the diff is non-empty, run, then restore from
   that copy. Restoring from a snapshot taken *before* the fix silently reverts
   it — that is how the sixth one happened.
+- **Then check the restore actually happened.** The seventh instance was not a
+  wrong snapshot but a restore that never ran: the sabotage was one link of a
+  `cd app && SNAP=… && cp …` chain, the `cd` failed because the shell was
+  already there, and every later link — including the restore — was skipped
+  in silence. Issuing a restore is not the same as having restored. Assert the
+  file is back (`grep -c` for something the sabotage removed) before believing
+  any green run, and remember that a `validate.sh` started before a sabotage
+  and finishing after it has told you nothing.
 - **A vitest file claimed by neither project runs nowhere, silently.** `node`
   takes `src/lib/**/*.test.ts` and `scripts/**/*.test.ts`; `dom` takes
   components / screens / hooks / prototypes plus `src/lib/**/*.test.tsx`. The
