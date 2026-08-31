@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { PLATE_SOURCE_VARIANT_RE, PlateFamilyError, todayPlateFamily } from "./today-plate-family.ts";
+import {
+  PLATE_SOURCE_VARIANT_RE,
+  PlateFamilyError,
+  plateSourceVariantCount,
+  todayPlateFamily,
+} from "./today-plate-family.ts";
 
 /**
  * Review M17. The build decides which Today plate goes in the precache and
@@ -64,6 +69,30 @@ describe("the build's Today plate family", () => {
     ]) {
       expect(bad).toThrow(PlateFamilyError);
     }
+  });
+
+  it("counts only the PLATE's source variants, not every responsive image", () => {
+    // Found in review. `src/assets/illustrations/` is a shared directory, so a
+    // second responsive illustration matches the width pattern perfectly well.
+    // Counting it here while `todayPlateFamily` counts only the plate's own
+    // files makes the two disagree by one — and the build then fails EVERY
+    // time, on a repository where every Today candidate is present and
+    // correct. A gate that fires on a healthy tree is how gates get deleted.
+    const onDisk = [
+      `${STEM}.webp`,
+      `${STEM}-438w.webp`,
+      `${STEM}-640w.webp`,
+      `${STEM}-750w.webp`,
+      "some-other-scene-320w.webp",
+      "some-other-scene.webp",
+    ];
+    expect(plateSourceVariantCount(onDisk)).toBe(3);
+
+    // End to end: with that foreign illustration on disk, a correct bundle
+    // must still be accepted.
+    expect(() =>
+      todayPlateFamily([...OTHERS, ...VARIANTS, MASTER], plateSourceVariantCount(onDisk)),
+    ).not.toThrow();
   });
 
   it("counts source variants by the un-hashed name Vite starts from", () => {
