@@ -261,6 +261,17 @@ describe("enable/disable failure paths", () => {
     }
   });
 
+  it("the reclaim stands down too, if a sign-out overtakes it", async () => {
+    // Symmetric: registering a device for a session that has just ended is
+    // the shared-device hazard from the other side.
+    const sub = fakeSub();
+    stubBrowser(null, sub);
+    await reclaimPushDevice(() => true);
+    expect(API.registerPushSubscription).not.toHaveBeenCalled();
+    await reclaimPushDevice(() => false);
+    expect(API.registerPushSubscription).toHaveBeenCalled();
+  });
+
   it("a session that ends WITHOUT sign-out still loses the browser subscription", async () => {
     // Push delivery is independent of the page's auth state, so a surviving
     // subscription keeps displaying the PREVIOUS account's notifications on a
@@ -271,6 +282,27 @@ describe("enable/disable failure paths", () => {
     stubBrowser(null, sub);
     await forgetPushDeviceOnSignedOut();
     expect(sub.unsubscribed, "left the browser subscribed with no session").toBe(true);
+  });
+
+  it("stands down before unsubscribing when a sign-in has superseded it", async () => {
+    // The account-switch case (Codex review on PR #85). `applyRole` awaits a
+    // database query before queueing the reclaim, so this cleanup has always
+    // STARTED by then — unsubscribing here loses the subscription that
+    // 0049's reassigning upsert exists to hand to the new account, and leaves
+    // them with push silently off.
+    const sub = fakeSub();
+    stubBrowser(null, sub);
+    await forgetPushDeviceOnSignedOut(() => true);
+    expect(sub.unsubscribed, "unsubscribed a device the new session is about to claim").toBe(false);
+  });
+
+  it("but still unsubscribes when nothing superseded it", async () => {
+    // A predicate read as "always superseded" would disable the repair
+    // entirely and put back the leak it exists to close.
+    const sub = fakeSub();
+    stubBrowser(null, sub);
+    await forgetPushDeviceOnSignedOut(() => false);
+    expect(sub.unsubscribed).toBe(true);
   });
 
   it("and does NOT reach for the removal RPC, which has no caller to scope to", async () => {

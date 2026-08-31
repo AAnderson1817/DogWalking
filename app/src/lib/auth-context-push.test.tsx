@@ -28,14 +28,21 @@ const PUSH = vi.hoisted(() => {
   // question these tests ask is about OVERLAP, which a call counter cannot
   // see (Codex review on PR #85).
   const log: string[] = [];
+  // The predicate each repair is handed is captured, so a test can ask — after
+  // the next transition has arrived — whether a repair ALREADY RUNNING would
+  // learn it had been superseded. That is the whole of the thirteenth round's
+  // finding, and it is not visible from call counts.
+  const superseded: Record<string, () => boolean> = {};
   const slow = (name: string, ms = 20) =>
-    vi.fn(async () => {
+    vi.fn(async (isSuperseded: () => boolean = () => false) => {
+      superseded[name] = isSuperseded;
       log.push(`${name}:start`);
       await new Promise((r) => setTimeout(r, ms));
       log.push(`${name}:end`);
     });
   return {
     log,
+    superseded,
     forgetPushDeviceOnSignedOut: slow("forget"),
     reclaimPushDevice: slow("reclaim"),
     forgetPushDeviceBeforeSignOut: vi.fn(async () => {}),
@@ -150,5 +157,31 @@ describe("the repairs go through the serial runner", () => {
       } else running -= 1;
     }
     expect(running, `unbalanced log: ${PUSH.log.join(" ")}`).toBe(0);
+  });
+
+  it("a cleanup already running learns that the sign-in superseded it", async () => {
+    // `applyRole` awaits a database query before queueing the reclaim, so the
+    // sign-out's cleanup has always STARTED by then and the runner's
+    // pre-start check can never reach it. Without the signal it unsubscribes,
+    // the reclaim then finds nothing, and the newly signed-in account is left
+    // with push silently off — the account-switch case 0049's reassigning
+    // upsert exists for.
+    AUTH.session = null;
+    render(<AuthProvider>ready</AuthProvider>);
+    await waitFor(() => expect(AUTH.listener).not.toBeNull());
+    await waitFor(() => expect(PUSH.log).toContain("forget:end"));
+    PUSH.log.length = 0;
+    PUSH.reclaimPushDevice.mockClear();
+
+    AUTH.listener!("SIGNED_OUT", null);
+    AUTH.listener!("SIGNED_IN", { user: { id: "op-1" } });
+    await waitFor(() => expect(PUSH.reclaimPushDevice).toHaveBeenCalled());
+
+    const wasSuperseded = PUSH.superseded.forget;
+    expect(wasSuperseded, "the cleanup was handed no supersede signal").toBeTypeOf("function");
+    expect(
+      wasSuperseded!(),
+      "a cleanup running when the sign-in arrived was not told it had been superseded",
+    ).toBe(true);
   });
 });

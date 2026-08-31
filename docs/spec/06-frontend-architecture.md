@@ -831,13 +831,23 @@ Both go through `createSerialRunner` rather than being fired and forgotten
 callback followed straight by a signed-in one produced — either completion
 order loses: the cleanup can unsubscribe the endpoint the new account just
 registered, or the reclaim can register one the cleanup is about to
-invalidate. Two rules: never concurrent, and any repair not yet STARTED is
-superseded by a newer one (same tick included, which is the case that matters
-— a sign-out immediately superseded by a sign-in should reassign this device,
-not unsubscribe it and leave that account with push silently off). The rules
-are tested in `serial-repair.test.ts` rather than through the provider,
-because `applyRole` is async so the provider can only ever exercise the
-sequential case; the provider test pins the wiring.
+invalidate. Three rules: never concurrent; any repair not yet STARTED is superseded by a
+newer one; and a repair already RUNNING is TOLD, so it can stand down before
+the irreversible step. The third is not a refinement of the second — it is the
+case that actually happens, because `applyRole` awaits a database query before
+queueing the reclaim, so a sign-out's cleanup has always started by then and
+the pre-start check can never reach it. Without the signal the cleanup
+unsubscribed, the reclaim found nothing to register, and the newly signed-in
+account was left with push silently off: the account-switch case 0049's
+reassigning upsert exists for, lost to the repair meant to protect it. A
+running repair is never interrupted — a half-applied unsubscribe is worse than
+a completed one — it checks `superseded()` immediately before the unsubscribe
+or the RPC, and returns.
+
+The rules are tested in `serial-repair.test.ts` rather than through the
+provider, because the provider can only exercise the sequential case; the
+provider test pins the wiring, including that a cleanup already running does
+learn the sign-in superseded it.
 
 The stated cost: a session ending for any reason now costs this device its
 registration, so the person turns notifications back on. That is already true

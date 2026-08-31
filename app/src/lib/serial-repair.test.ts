@@ -83,3 +83,37 @@ describe("serial push repairs", () => {
     expect(log.join(" ")).toBe("after:start after:end");
   });
 });
+
+describe("a running repair is told when it is superseded", () => {
+  it("reports true once a newer transition arrives mid-flight", async () => {
+    // Rule 2 cannot reach a repair that has already started, and `applyRole`
+    // awaits a database query before queueing the reclaim — so a sign-out's
+    // cleanup has ALWAYS started by then. Without this, it went on to
+    // unsubscribe and the newly signed-in account was left with push off.
+    const seen: boolean[] = [];
+    const run = createSerialRunner();
+    run(async (superseded) => {
+      seen.push(superseded()); // nothing has superseded it yet
+      await new Promise((r) => setTimeout(r, 30));
+      seen.push(superseded()); // …but by now the sign-in has arrived
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    run(async () => {});
+    await settle();
+    expect(seen).toEqual([false, true]);
+  });
+
+  it("reports false throughout when nothing supersedes it", async () => {
+    // The other direction: a predicate that always says yes would make every
+    // repair stand down and quietly disable both of them.
+    const seen: boolean[] = [];
+    const run = createSerialRunner();
+    run(async (superseded) => {
+      seen.push(superseded());
+      await new Promise((r) => setTimeout(r, 20));
+      seen.push(superseded());
+    });
+    await settle();
+    expect(seen).toEqual([false, false]);
+  });
+});
