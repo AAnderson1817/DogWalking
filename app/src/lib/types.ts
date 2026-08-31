@@ -1409,6 +1409,13 @@ export type Database = {
         };
         Returns: number;
       };
+      fn_note_push_failure: {
+        Args: {
+          p_id: string;
+          p_error: string;
+        };
+        Returns: unknown;
+      };
       fn_notification_backlog: {
         Args: {
           p_window: unknown;

@@ -5647,6 +5647,62 @@ begin
   reset role;
   perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
 
+  -- 13. The failure counter increments, records the LATEST error, and is
+  -- writable only by the sender (Codex review on PR #85).
+  --
+  -- This block deliberately does NOT claim to prove atomicity: two SEQUENTIAL
+  -- calls reach +2 under a read-modify-write too, because each takes its own
+  -- snapshot. Verified by sabotage — a read-modify-write body passes this
+  -- block unchanged. The lost update needs two backends, so it is
+  -- concurrency.sh case 9; what is checked here is the arithmetic and the
+  -- caller.
+  update push_subscriptions set failure_count = 5 where id = v_id;
+  perform fn_note_push_failure(v_id, 'the push service answered 500');
+  perform fn_note_push_failure(v_id, 'the push service answered 503');
+  select failure_count into v_rows from push_subscriptions where id = v_id;
+  if v_rows <> 7 then
+    raise exception 'FAIL: two failures counted as % rather than 2 (0049)', v_rows - 5;
+  end if;
+  if (select last_error from push_subscriptions where id = v_id)
+     <> 'the push service answered 503' then
+    raise exception 'FAIL: the latest failure is not the one recorded (0049)';
+  end if;
+
+  -- And only the sender may write it: a client incrementing another device's
+  -- counter would make the signal worthless.
+  --
+  -- EXECUTE is granted first, inside this rolled-back suite, because without
+  -- it the call fails on the missing grant and this block passes without ever
+  -- reaching the body — green for the wrong reason, which is what the sabotage
+  -- found. Granting it is the only way the body's guard is anything but
+  -- decoration (the 0048 precedent), and the REVOKE is asserted separately
+  -- below so both halves are covered.
+  if has_function_privilege('authenticated', 'fn_note_push_failure(uuid, text)', 'EXECUTE') then
+    raise exception 'FAIL: authenticated holds EXECUTE on fn_note_push_failure (0049)';
+  end if;
+  grant execute on function fn_note_push_failure(uuid, text) to authenticated;
+  -- SESSION AUTHORIZATION, not `set local role`: `fn_is_service_session()`
+  -- accepts `session_user = 'postgres'`, and `set local role` leaves
+  -- session_user alone — so the guard passed and this block reported a forgery
+  -- that had not happened. The 0028 entry records the same trap. Found by the
+  -- sabotage, which stayed green either way until this line changed.
+  set local session authorization authenticated;
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  begin
+    perform fn_note_push_failure(v_id, 'forged');
+    raise exception 'FAIL: an operator can forge device health (0049)';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%service role only%' then
+      raise exception 'FAIL: refused for the wrong reason (0049): %', sqlerrm;
+    end if;
+  end;
+  -- `reset role` does NOT undo session authorization (the 0038 lesson).
+  reset session authorization;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  revoke execute on function fn_note_push_failure(uuid, text) from authenticated;
+
   raise notice 'push subscriptions: persona-scoped, device-reassigning, purged with the client (0049): OK';
 end $$;
 

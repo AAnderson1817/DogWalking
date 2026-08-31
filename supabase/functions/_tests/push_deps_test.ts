@@ -296,66 +296,48 @@ Deno.test("`transport` is claimed ONLY when a request was actually made", async 
 
 // ── Device health bookkeeping ────────────────────────────────────────────
 
-/** A `db` double whose two `push_subscriptions` calls can each fail. */
-function healthDb(opts: { readError?: boolean; writeError?: boolean } = {}) {
-  const updates: Array<Record<string, unknown>> = [];
+/** A `db` double whose `fn_note_push_failure` RPC can fail. */
+function healthDb(opts: { rpcError?: boolean } = {}) {
+  const rpcs: Array<{ name: string; args: Record<string, unknown> }> = [];
   const db = {
-    from: () => ({
-      select: () => ({
-        eq: () => ({
-          maybeSingle: () =>
-            Promise.resolve(
-              opts.readError
-                ? { data: null, error: { message: "read failed" } }
-                : { data: { failure_count: 7 }, error: null },
-            ),
-        }),
-      }),
-      update: (patch: Record<string, unknown>) => ({
-        eq: () => {
-          updates.push(patch);
-          return Promise.resolve({ error: opts.writeError ? { message: "write failed" } : null });
-        },
-      }),
-    }),
+    rpc: (name: string, args: Record<string, unknown>) => {
+      rpcs.push({ name, args });
+      return Promise.resolve({ error: opts.rpcError ? { message: "rpc failed" } : null });
+    },
+    from: () => {
+      throw new Error("noteFailure must not read-modify-write any more");
+    },
   };
   const req = new Request("https://x.functions.supabase.co/send-notification", {
     method: "POST",
     headers: { "x-request-id": "req-abc-123" },
   });
-  return { updates, push: makePushDeps(db as never, VAPID, req, (() => {}) as never) };
+  return { rpcs, push: makePushDeps(db as never, VAPID, req, (() => {}) as never) };
 }
 
-Deno.test("an unreadable failure count is left ALONE, not reset to 1", async () => {
-  // supabase-js reports failures in the RESOLVED result, so `const { data }`
-  // alone turned an unreadable row into a zero and the next write reset a
-  // device's failure_count to 1 — health data destroyed by the call that
-  // exists to keep it (Codex review on PR #85, sixteenth round). That is
-  // `dropSubscription`'s tenth-round defect surviving in the method beside it.
-  const h = healthDb({ readError: true });
-  const { lines } = await captureErrors(() => h.push.noteFailure("sub-1", "the push service answered 500"));
-  assertEquals(h.updates, [], "clobbered a counter it could not read");
-  assertEquals(lines.length, 1, `expected one log line: ${JSON.stringify(lines)}`);
-  assertEquals(JSON.parse(lines[0]).context.subscription_id, "sub-1");
-});
-
-Deno.test("a readable count is incremented, not replaced", async () => {
-  // The other direction: skipping on every read would quietly disable the
-  // counter and satisfy the case above.
+Deno.test("a device failure is counted in ONE statement, never read-modify-write", async () => {
+  // Two notifications delivered concurrently to the same failing device both
+  // read the old count and both wrote the same value, losing a failure during
+  // exactly the burst the counter exists to show (Codex review on PR #85,
+  // eighteenth round). The `from` stub throws, so any surviving read fails
+  // this test rather than passing quietly.
   const h = healthDb();
-  const { lines } = await captureErrors(() => h.push.noteFailure("sub-1", "the push service answered 500"));
-  assertEquals(h.updates.length, 1);
-  assertEquals(h.updates[0].failure_count, 8);
+  const { lines } = await captureErrors(() =>
+    h.push.noteFailure("sub-1", "the push service answered 500")
+  );
+  assertEquals(h.rpcs.length, 1);
+  assertEquals(h.rpcs[0].name, "fn_note_push_failure");
+  assertEquals(h.rpcs[0].args, { p_id: "sub-1", p_error: "the push service answered 500" });
   assertEquals(lines, [], "a healthy write must not log");
 });
 
-Deno.test("a failed WRITE is logged and swallowed, never thrown", async () => {
+Deno.test("a failed count is logged and swallowed, never thrown", async () => {
   // Per-device health is diagnostic. Throwing here would abort the fanout and
   // lose a live notification over bookkeeping — the round-ten defect in the
   // other direction.
-  const h = healthDb({ writeError: true });
+  const h = healthDb({ rpcError: true });
   const { lines } = await captureErrors(() => h.push.noteFailure("sub-1", "boom"));
-  assertEquals(h.updates.length, 1, "did not attempt the write");
   assertEquals(lines.length, 1);
   assertEquals(JSON.parse(lines[0]).code, "db_error");
+  assertEquals(JSON.parse(lines[0]).context.subscription_id, "sub-1");
 });

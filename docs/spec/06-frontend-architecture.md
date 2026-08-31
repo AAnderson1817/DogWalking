@@ -811,7 +811,15 @@ unsubscribe or a hung RPC left the await pending forever and the button did
 nothing while the person walked away from a shared device still signed in
 (Codex review on PR #85). Three seconds, then sign out regardless — losing the
 cleanup is survivable and this is not, and the SIGNED_OUT transition retries
-the local half anyway. This is the opposite of the M8 outbox and snapshot
+the local half anyway.
+
+The deadline also ABANDONS it, rather than merely stopping the wait: a timeout
+does not cancel, so a stalled `unsubscribe()` settling after somebody else has
+signed in would fall through to `fn_remove_push_subscription` under the NEW
+session — which is caller-scoped, so it deletes the row that account has just
+reclaimed, leaving their UI saying `on` over nothing. The late `unsubscribe()`
+itself cannot be recalled and that residual is the ordinary cost of signing
+out; the server row going with it is the state the UI cannot show. This is the opposite of the M8 outbox and snapshot
 cleanups beside it: those are
 local storage and need no caller, while `fn_remove_push_subscription` is
 scoped to the caller. Leaving the row behind means that on a shared device the
