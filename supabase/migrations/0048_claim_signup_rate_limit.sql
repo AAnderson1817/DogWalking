@@ -174,6 +174,60 @@ begin
   -- Edge isolates are ephemeral and parallel, so the count must serialize in
   -- Postgres (the reason 0016 exists at all).
   perform pg_advisory_xact_lock(hashtextextended(v_client::text, 0));
+
+  -- Re-read the client under the lock and confirm it STILL carries this
+  -- token (Codex review on PR #84, second round). The lookup above happens
+  -- before serialization and the reset trigger takes no advisory lock, so a
+  -- request that resolved the OLD token can sit in this queue while an
+  -- operator rotates or purges the invite, and then insert against a client
+  -- that still exists. Reproduced in `concurrency.sh` case 6: the reissue
+  -- cleared the burned budget and the stale attempt put a row straight back.
+  --
+  -- Two harms, and the second is the worse one. The reissued invite does not
+  -- get the fresh budget the trigger exists to hand it; and the PURGE path
+  -- rotates the token the same way, so a stale attempt re-creates an `ip`
+  -- row for a client whose personal data was erased on request.
+  --
+  -- A row lock rather than a bare re-read, and it is load-bearing: the
+  -- re-read alone still leaves the window between it and the insert, and that
+  -- window is exactly where the purge case does its damage.
+  --
+  -- On the MODE, measured rather than reasoned about — the first version of
+  -- this comment had it wrong. `clients_invite_token_key` makes
+  -- `invite_token` UNIQUE, so rotating it is a KEY update and the rotation
+  -- takes `for update`, which conflicts with every mode including `for key
+  -- share`; a sabotage weakening this line to `for key share` therefore did
+  -- NOT go red, which is how the error surfaced. `for no key update` is
+  -- still the right choice, for a reason that does not depend on that
+  -- uniqueness: it conflicts with a non-key UPDATE too, so a later migration
+  -- dropping the unique index cannot silently reopen this window. `for
+  -- update` would be heavier for nothing — it also blocks the `for key share`
+  -- an unrelated child insert takes on this row.
+  --
+  -- This reverses a position stated earlier in this file's history, so it is
+  -- worth saying why rather than quietly changing sides. The argument against
+  -- locking the client row was that it hands an unauthenticated caller a lock
+  -- on `clients`. That was overstated: the lock is held for the remainder of
+  -- ONE rpc, which is a single autocommit statement the caller cannot
+  -- prolong, and callers bearing the same token already serialize on the
+  -- advisory lock above, so it adds no contention they were not already
+  -- subject to. The objection is sound against a caller that can hold a
+  -- transaction open; this one cannot.
+  --
+  -- Lock order is advisory -> clients -> invite_signup_attempts, and the
+  -- rotation's is clients -> invite_signup_attempts (via the trigger). Both
+  -- take clients before attempts, so there is no cycle — the 0037 rule.
+  --
+  -- A stale token is ALLOWED and records nothing, exactly as an unknown one
+  -- is: it no longer matches any client, so the check answers `not_found`.
+  select id into v_client
+    from clients
+   where id = v_client and invite_token = p_token
+     for no key update;
+  if v_client is null then
+    return true;
+  end if;
+
   v_cutoff := now() - make_interval(secs => p_window_seconds);
 
   delete from invite_signup_attempts

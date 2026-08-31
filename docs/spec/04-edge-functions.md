@@ -367,13 +367,34 @@ them, where clearing rows carrying an `ip` is the point rather than a side
 effect. An IP key would avoid the denial of service and buy almost nothing,
 since the attacker controls their address and the victim does not.
 
-A client deleted between the limiter's unlocked token lookup and its insert
-leaves the FK to raise, which on a public endpoint is a 500 for a request the
-check would have answered `not_found`. The limiter catches
-`foreign_key_violation` and **allows**, so the caller reaches that answer —
-`fn_invite_signup_check` already handled the same permitted race the same way
-(0045). Deliberately not closed by locking the client row instead: that would
-let an unauthenticated caller hold a lock on `clients`.
+The first token lookup happens before the limiter serialises, so it is
+re-read under the advisory lock and confirmed to still carry this token, with
+`for no key update` held until the insert (Codex review on PR #84, second
+round). Without that, a request bearing the OLD token could queue behind the
+lock while an operator rotated or purged the invite and then insert against a
+client that still exists — the reissued invite would not get the fresh budget
+the trigger exists to hand it, and on the purge path a stale attempt would
+re-create an `ip` row for a client whose data was erased on request. A stale
+token is allowed and records nothing, exactly as an unknown one is.
+`concurrency.sh` case 6 reproduces it and 6b demonstrates that the row lock
+actually blocks a rotation and that the two orders do not deadlock.
+
+That reverses an earlier position in this spec, so it is worth saying why
+rather than quietly changing sides: the argument against locking the client
+row was that it hands an unauthenticated caller a lock on `clients`, and that
+was overstated. The lock is held for the remainder of one RPC — a single
+autocommit statement the caller cannot prolong — and callers bearing the same
+token already serialise on the advisory lock, so it adds no contention they
+were not already subject to. The objection is sound against a caller that can
+hold a transaction open; this one cannot.
+
+A client deleted before the insert would still leave the FK to raise, which on
+a public endpoint is a 500 for a request the check would have answered
+`not_found`. The limiter catches `foreign_key_violation` and **allows**, so
+the caller reaches that answer — `fn_invite_signup_check` already handled the
+same permitted race the same way (0045). Kept as defence in depth now that the
+row lock makes it near-unreachable, rather than deleted on the strength of my
+own lock-conflict reasoning being exactly right.
 
 Two things this spec previously said about the absence were wrong, and are
 corrected here rather than left to be re-derived. It discounted the address
