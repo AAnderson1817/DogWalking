@@ -88,8 +88,23 @@ db_cleanup() {
     delete from schedule_pets where operator_id::text like '${NS}%';
     delete from recurring_schedules where operator_id::text like '${NS}%';
     delete from walks where operator_id::text like '${NS}%';
+    -- Codex review on PR #85, ninth round. Cases 7, 8 and 8b commit push rows,
+    -- and without this a run that dies mid-case leaves them behind. The
+    -- reviewer expected the operator delete to REFUSE on the ON DELETE
+    -- RESTRICT foreign key, but session_replication_role = replica above
+    -- disables FK triggers, so it succeeds silently and orphans them.
+    -- Measured, not assumed. That is worse: endpoint is UNIQUE, so the next
+    -- run's seed insert dies on uq_push_subscriptions_endpoint and the suite
+    -- cannot start at all -- cleanup as a PRECONDITION, the failure
+    -- ops(smoke-identity) already paid for once.
+    --
+    -- No backticks anywhere in this comment: it sits inside a double-quoted
+    -- shell string, where they are command substitution. That is the
+    -- ops(deploy-retry) trap and this is its third recorded instance.
+    delete from push_subscriptions where operator_id::text like '${NS}%';
     drop function if exists fn_debit_walk_barrier(uuid);
     drop function if exists fn_invite_signup_allow_attempt_barrier(uuid, inet, int, int);
+    drop function if exists fn_register_push_subscription_barrier(text, text, text, text);
     delete from invite_signup_attempts where client_id in
       (select id from clients where operator_id::text like '${NS}%');
     delete from pets where operator_id::text like '${NS}%';
@@ -107,6 +122,26 @@ db_cleanup() {
 cleanup() { db_cleanup; rm -rf "$WORK"; }
 trap cleanup EXIT
 db_cleanup
+
+# Cleanup is HOUSEKEEPING, but the run cannot start on top of its leftovers, so
+# say so here rather than letting it surface later as something unrecognisable.
+# Codex review on PR #85: without the push delete above, a run that died
+# mid-case left rows whose `endpoint` is UNIQUE, and the next run's seed insert
+# failed with `uq_push_subscriptions_endpoint` — a message that says nothing
+# about the previous run. Same shape as the collision ops(smoke-identity)
+# spent four rounds diagnosing.
+LEFTOVERS="$(psql "$DB" -At -c "
+  select coalesce(sum(n), 0) from (
+    select count(*) n from push_subscriptions where operator_id::text like '${NS}%'
+    union all select count(*) from clients   where operator_id::text like '${NS}%'
+    union all select count(*) from operators where id::text like '${NS}%'
+  ) t")"
+if [ "$LEFTOVERS" != "0" ]; then
+  echo "FAIL: the ${NS} namespace still holds $LEFTOVERS row(s) after cleanup." >&2
+  echo "      A previous run's fixtures survived db_cleanup — fix that rather" >&2
+  echo "      than deleting them by hand, or the next run hits it too." >&2
+  exit 1
+fi
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
 # Committed, not rolled back: the whole point is that a second backend can see
@@ -797,12 +832,15 @@ begin
   v_def := replace(v_def, 'FUNCTION public.fn_register_push_subscription(',
                           'FUNCTION public.fn_register_push_subscription_barrier(');
   -- Anchored on the ASSIGNMENT and advanced to the END of that statement, so
-  -- the injection point depends on neither the lock mode nor the `purged_at`
+  -- the injection point depends on neither the lock mode nor the purged_at
   -- predicate. Anchoring on either would make removing it ABORT this case
-  -- instead of failing its assertion — and removing them is exactly what the
+  -- instead of failing its assertion, and removing them is exactly what the
   -- assertions below are here to report. Case 6b's comment says the same of
   -- its own anchor; this one was first written against the predicate and the
   -- sabotage caught it.
+  --
+  -- And no backticks: this is inside a double-quoted shell string, where they
+  -- are command substitution (the ops(deploy-retry) trap).
   v_at := position('select operator_id into v_operator' in v_def);
   if v_at = 0 then
     raise exception 'case 8b: no client lookup found in fn_register_push_subscription';

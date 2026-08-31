@@ -452,6 +452,17 @@ accepted; `skipped` (TERMINAL) when there are no registrations, or when every
 one turned out to be gone; `failed` (retryable) when they had devices and all
 of them failed. Per-device health lives on the subscription row.
 
+TERMINAL means terminal in the guard as well as in the prose. Both arms tested
+`status === "sent"` alone, which left `skipped` retryable in practice (Codex
+review on PR #85): the widened backlog selects a row when EITHER channel is
+owed and `drainBacklog` then runs both, so a notification whose push was
+skipped for want of a device and whose email failed came back through the
+drain and pushed retroactively once the recipient registered one. `isSettled`
+states the rule once — only `pending` and `failed` are retryable, the
+complement of `fn_notification_backlog`'s own predicate — and both arms call
+it, because the reviewer named push and the email arm had the identical hole
+one function over.
+
 An endpoint that is not a push service is never CONTACTED at all — the check
 is a `continue` before the request exists, not a classification of one that
 failed (Codex review on PR #85; the host list and its residuals are in spec
