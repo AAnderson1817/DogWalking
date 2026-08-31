@@ -5048,6 +5048,164 @@ begin
   raise notice 'the walk photo digest survives a completion replay and is write-once (0047): OK';
 end $$;
 
+-- ── 0048: the claim-signup rate limit ────────────────────────────────────
+--
+-- `claim-signup` is the one genuinely public endpoint that creates accounts,
+-- and until 0048 nothing bounded it. This block pins the four properties the
+-- design rests on; none of them is a restatement of the DDL.
+--
+-- Note on `now()`: it is TRANSACTION-constant, so every row this block writes
+-- carries the same `attempted_at` and the window cannot elapse on its own
+-- (the 0028 lesson). The window is therefore crossed by backdating the rows,
+-- which is also the only way to test the prune at all.
+do $$
+declare
+  v_op      uuid := '99999999-0000-4000-a000-000000000001';
+  v_cl      uuid := '99999999-0000-4000-c000-0000000000f8';
+  v_cl2     uuid := '99999999-0000-4000-c000-0000000000f9';
+  v_tok     uuid := '99999999-0000-4000-b000-0000000000f8';
+  v_tok2    uuid := '99999999-0000-4000-b000-0000000000f9';
+  v_unknown uuid := '99999999-0000-4000-b000-00000000dead';
+  v_allowed int := 0;
+  v_rows    int;
+  v_total   int;
+  v_ok      boolean;
+  i         int;
+begin
+  reset session authorization;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  insert into clients (id, operator_id, full_name, status, invite_token)
+  values (v_cl,  v_op, '0048 Rate Limit',   'invited', v_tok),
+         (v_cl2, v_op, '0048 Rate Limit 2', 'invited', v_tok2);
+
+  -- 1. A token matching no client is ALLOWED and records nothing.
+  --
+  -- Both halves matter. Refusing it would make the limiter a token-existence
+  -- oracle — the one thing this ordering exists to avoid, since the endpoint
+  -- already answers `not_found` for such a token on request one. And writing
+  -- a row would hand an attacker an unbounded growth vector, because the
+  -- token is caller-supplied and random uuids are free.
+  select count(*) into v_total from invite_signup_attempts;
+  for i in 1..5 loop
+    -- Wrapped: without the null-client branch the insert hits its NOT NULL and
+    -- the function RAISES, which without this reads as a broken suite rather
+    -- than as a public endpoint that 500s on every unknown token.
+    begin
+      v_ok := fn_invite_signup_allow_attempt(p_token => v_unknown);
+    exception when others then
+      if sqlerrm like 'FAIL:%' then raise; end if;
+      raise exception 'FAIL: a token matching no client raised "%" (0048) — the endpoint 500s where it should answer not_found', sqlerrm;
+    end;
+    if not v_ok then
+      raise exception 'FAIL: a token matching no client was refused (0048) — the limiter is a token-existence oracle';
+    end if;
+  end loop;
+  if (select count(*) from invite_signup_attempts) <> v_total then
+    raise exception 'FAIL: a token matching no client wrote a row (0048) — unbounded growth from a caller-supplied key';
+  end if;
+
+  -- 2. A real token gets exactly `p_limit` attempts, then is refused.
+  --
+  -- Every attempt counts, including the ones that would SUCCEED — a limiter
+  -- counting only refusals would leave the correct address unlimited while
+  -- every wrong one was refused, which is the oracle wearing the fix's
+  -- clothes. That ordering lives in the edge handler; what is pinned here is
+  -- that the function itself charges every call.
+  for i in 1..10 loop
+    if fn_invite_signup_allow_attempt(p_token => v_tok, p_ip => '203.0.113.7') then
+      v_allowed := v_allowed + 1;
+    end if;
+  end loop;
+  if v_allowed <> 10 then
+    raise exception 'FAIL: the first 10 attempts did not all pass (0048) — % allowed', v_allowed;
+  end if;
+  for i in 1..3 loop
+    if fn_invite_signup_allow_attempt(p_token => v_tok) then
+      raise exception 'FAIL: attempt % passed after the budget was spent (0048)', 10 + i;
+    end if;
+  end loop;
+
+  select count(*) into v_rows from invite_signup_attempts where client_id = v_cl;
+  if v_rows <> 10 then
+    raise exception 'FAIL: % rows recorded for a 10-attempt budget (0048) — a refused attempt must not be charged twice', v_rows;
+  end if;
+
+  -- 3. A second client's budget is its own.
+  --
+  -- The key is the client the invite belongs to. A limiter keyed on anything
+  -- global — or on the caller, whose IP the attacker controls and the victim
+  -- does not — would refuse this.
+  if not fn_invite_signup_allow_attempt(p_token => v_tok2) then
+    raise exception 'FAIL: one client exhausting its budget refused another client (0048)';
+  end if;
+
+  -- 4. The window self-heals, and the table has a CEILING.
+  --
+  -- This is the assertion that makes "no retention sweep is needed" a
+  -- property rather than an omission: the function prunes the key's expired
+  -- rows before counting, so crossing a window replaces the old rows rather
+  -- than adding to them. Without the prune the count would still be correct
+  -- (it filters on the cutoff) and the table would grow at 10 rows per client
+  -- per hour, forever.
+  update invite_signup_attempts
+     set attempted_at = now() - interval '2 hours'
+   where client_id = v_cl;
+
+  if not fn_invite_signup_allow_attempt(p_token => v_tok) then
+    raise exception 'FAIL: the budget did not heal after the window elapsed (0048)';
+  end if;
+  select count(*) into v_rows from invite_signup_attempts where client_id = v_cl;
+  if v_rows > 10 then
+    raise exception 'FAIL: % rows for one client after crossing a window (0048) — expired rows are not pruned, so the table has no ceiling', v_rows;
+  end if;
+
+  -- 5. Service role only, by GRANT.
+  set local session authorization authenticated;
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  begin
+    perform fn_invite_signup_allow_attempt(p_token => v_tok);
+    raise exception 'FAIL: authenticated can execute fn_invite_signup_allow_attempt (0048)';
+  exception when insufficient_privilege then null;
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+  reset session authorization;
+
+  -- 6. And service role only IN THE BODY, which is the half a future GRANT
+  -- cannot undo. Granting execute here (rolled back with the suite) is the
+  -- only way to reach the body as a non-service caller at all; without this
+  -- the body guard would be untested and one `grant execute` away from
+  -- letting any signed-in user spend, and inspect, another tenant's budget.
+  grant execute on function fn_invite_signup_allow_attempt(uuid, inet, int, int)
+    to authenticated;
+  set local session authorization authenticated;
+  begin
+    perform fn_invite_signup_allow_attempt(p_token => v_tok);
+    raise exception 'FAIL: the body has no service-role guard (0048) — one GRANT is all that stands in front of it';
+  exception when insufficient_privilege then
+    raise exception 'FAIL: the grant under test did not take (0048)';
+       when others then if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+  reset session authorization;
+  revoke execute on function fn_invite_signup_allow_attempt(uuid, inet, int, int)
+    from authenticated;
+
+  -- 7. The ledger itself: RLS on AND forced, no API-role privileges. 0032
+  -- exists because `vault_rate_limit_attempts` — the table this one is
+  -- modelled on — shipped with a REVOKE and no RLS at all.
+  select relrowsecurity and relforcerowsecurity into v_ok
+    from pg_class where oid = 'invite_signup_attempts'::regclass;
+  if not v_ok then
+    raise exception 'FAIL: invite_signup_attempts does not have RLS enabled AND forced (0048)';
+  end if;
+  if has_table_privilege('anon', 'invite_signup_attempts', 'SELECT, INSERT, UPDATE, DELETE')
+     or has_table_privilege('authenticated', 'invite_signup_attempts', 'SELECT, INSERT, UPDATE, DELETE') then
+    raise exception 'FAIL: an API role holds a privilege on invite_signup_attempts (0048)';
+  end if;
+
+  raise notice 'the public signup endpoint has a per-client budget with a ceiling (0048): OK';
+end $$;
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;

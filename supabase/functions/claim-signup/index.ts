@@ -18,11 +18,29 @@
 import { jsonOk, readJson, serveFunction } from "../_lib/http.ts";
 import { HttpError } from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
-import { type ClaimSignupDeps, handleClaimSignup } from "./handler.ts";
+import { type ClaimSignupDeps, handleClaimSignup, rpcAllowsAttempt } from "./handler.ts";
 
-function makeDeps(): ClaimSignupDeps {
+function makeDeps(req: Request): ClaimSignupDeps {
   const db = adminClient();
+  // First hop of x-forwarded-for = the caller as seen by the edge gateway,
+  // the same idiom credential-vault uses. Forensic only — 0048 keys the limit
+  // on the CLIENT the invite belongs to, never on the caller, because the
+  // attacker controls their address and the victim does not.
+  const clientIp = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null;
   return {
+    async allowAttempt(token) {
+      const { data, error } = await db.rpc("fn_invite_signup_allow_attempt", {
+        p_token: token,
+        p_ip: clientIp,
+      });
+      if (error) {
+        throw new HttpError(500, "db_error", "rate check failed", error);
+      }
+      // Fail CLOSED — the rule itself lives in handler.ts, where a test can
+      // reach it.
+      return rpcAllowsAttempt(data);
+    },
+
     async checkInvite(token, email) {
       const { data, error } = await db.rpc("fn_invite_signup_check", {
         p_token: token,
@@ -71,5 +89,5 @@ function makeDeps(): ClaimSignupDeps {
 
 serveFunction(async (req) => {
   const body = await readJson<unknown>(req);
-  return jsonOk(await handleClaimSignup(body, makeDeps()));
+  return jsonOk(await handleClaimSignup(body, makeDeps(req)));
 });

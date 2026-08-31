@@ -25,15 +25,7 @@ before you hit them.
 
 ## Open
 
-### 1. `claim-signup` rate limit
-Public (`verify_jwt=false`) and its success path calls
-`auth.admin.createUser`; no rate limit (a stated residual in spec 04). Follow
-the `0016` `vault_rate_limit_attempts` shape, keyed for an unauthenticated
-caller. Two properties must survive: the endpoint stays a non-oracle
-(identical answers wherever it gives them today), and a legitimate claimant
-retrying after a failed `createUser` is not locked out. Red-first on both.
-
-### 2. Push notifications (M27) — the largest item
+### 1. Push notifications (M27) — the largest item
 No push handler in `app/public/sw.js`, no VAPID keys, no subscriptions table.
 Scope: subscriptions table (tenant table ⇒ `operator_id` + RLS, invariant 7),
 SW `push`/`notificationclick` handlers (mind the network-only rules from
@@ -43,7 +35,7 @@ insert. Honest delivery states: copy H17's email machinery. VAPID key
 generation is an **owner action** — add it to `owner-actions.md` in the same
 commit and degrade gracefully without it.
 
-### 3. Small batch (one PR)
+### 2. Small batch (one PR)
 - `fn_walk_cost` is LOAD-BEARING (`fn_debit_walk` calls it, smoke pins it) —
   do NOT touch it. The dead code is `api.ts`'s `walkCost()` wrapper, itself
   with zero importers: delete it, or wire it where a persisted walk's display
@@ -58,7 +50,7 @@ commit and degrade gracefully without it.
   the deliberate thin-wrapper exception (its logic is SQL-side);
   `charge-overage` is already covered through `_lib/overage*.ts`.
 
-### 4. Tell the operator when an edited address is already suppressed
+### 3. Tell the operator when an edited address is already suppressed
 Also recorded in spec 04. Editing a client's address to one already in
 `email_suppressions` makes every future client-facing email skip
 permanently and terminally, with no signal in the UI. Whether to surface it
@@ -66,6 +58,14 @@ permanently and terminally, with no signal in the UI. Whether to surface it
 a product question.
 
 ## Done
+
+- **`claim-signup` rate limit** — migration `0048`. Keyed on the CLIENT the
+  invite belongs to, not on the caller: the backlog said "keyed for an
+  unauthenticated caller" and an IP key would have bounded nothing the
+  attacker cannot escape while locking out everyone behind one NAT. Two of
+  spec 04's reasons for accepting the absence turned out to be false, and the
+  honest justification is different from both: H31 *removed* a rate limit
+  that used to cover this flow. See the `security(0048)` status-log entry.
 
 - **`walk_photos` integrity checksum** — migration `0047`, nullable `sha256` +
   `byte_size` written by the browser at upload, with

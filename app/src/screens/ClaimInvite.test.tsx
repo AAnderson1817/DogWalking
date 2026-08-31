@@ -9,7 +9,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ClaimInvite from "./ClaimInvite";
-import { INVITE_CLAIM_MESSAGE, InviteClaimError } from "@/lib/api";
+import { EdgeError, INVITE_CLAIM_MESSAGE, InviteClaimError } from "@/lib/api";
 import type { AuthState, Role } from "@/lib/auth-context";
 
 const TOKEN = "99999999-0000-4000-e000-000000000001";
@@ -131,6 +131,26 @@ describe("ClaimInvite signup (H31)", () => {
     await fillAndSubmit(user);
 
     expect(await screen.findByText(INVITE_CLAIM_MESSAGE.expired)).toBeInTheDocument();
+    expect(SUPA.signInWithPassword).not.toHaveBeenCalled();
+  });
+
+  it("a rate-limited attempt stays on the form — it is retryable, not a dead end", async () => {
+    // 0048. `claimSignup` remaps any code in INVITE_CLAIM_MESSAGE onto
+    // InviteClaimError, which this screen renders as a TERMINAL dead-end with
+    // no way back. The rate limit is the opposite kind of refusal: waiting
+    // fixes it. So the code must never collide with an invite outcome, and
+    // the proof of that is at this end — the form must still be there.
+    API.claimSignup.mockRejectedValueOnce(
+      new EdgeError("Too many attempts for this invite. Wait a few minutes and try again.", "rate_limited"),
+    );
+    renderScreen();
+    const user = userEvent.setup();
+    await fillAndSubmit(user);
+
+    expect(await screen.findByText(/Too many attempts for this invite/)).toBeInTheDocument();
+    // Still on the form, and still submittable — which is what "retryable"
+    // means here and what the dead-end stage would have removed.
+    expect(screen.getByRole("button", { name: "Create account" })).toBeEnabled();
     expect(SUPA.signInWithPassword).not.toHaveBeenCalled();
   });
 

@@ -46,8 +46,11 @@ not quietly rot:
 | §11 `RESEND_API_KEY` | `Nightly ops check` goes red when an email backlog survives its retry |
 | §1a platform webhook + secret | Nothing automated from here — Stripe's own webhook delivery log (every delivery 500s while the secret is missing) is the only signal |
 | §1b signup toggle | Nothing automated, by design — it is a business decision, and neither setting is a defect |
+| §15 GoTrue admin rate limit | Nothing automated — no GoTrue in this environment. Sizes a harm; blocks nothing |
+| §16 email confirmations | Nothing automated yet; the check needs a key name only a live `/config/auth` response carries |
 
-Several of these have no automated signal at all — §1, §1a, §1b, §4 and §6 —
+Several of these have no automated signal at all — §1, §1a, §1b, §4, §6, §15
+and §16 —
 and that is worth knowing about them specifically, because they are the ones
 whose absence is invisible from inside the product. (This sentence used to say
 "two", which was already an undercount before H31 — §1's own text describes a
@@ -395,6 +398,15 @@ the thing that was not true before.
 This is a spending and design decision, and the composition is LOCKED
 (`CLAUDE.md`, Ownership): a re-render is a resize, never a recomposition.
 
+## Questions, not tasks
+
+These three are not settings to change. They are facts about the deployed
+projects or about Supabase that cannot be established from this repository —
+there is no GoTrue and no Supabase CLI in this environment, and supabase.com is
+blocked by the egress proxy. None of them blocks anything; each one decides how
+a document or a runbook should describe something that already ships. §14 was
+filed under Artwork by the pull request that added it, which was simply wrong.
+
 ### 14. Confirm whether Supabase's backup includes the `storage` schema — migration 0047
 
 One fact decides how much `walk_photos.sha256` actually adds, and it cannot be
@@ -418,6 +430,66 @@ select count(*), count(metadata) from storage.objects;
 
 Nothing is blocked on this. It only changes how the DR document describes the
 value of a column that is already being written.
+
+### 15. Does GoTrue rate-limit `POST /admin/users`? — migration 0048
+
+`0048` gives `claim-signup` its own per-client budget, so this question does
+not block anything. It sizes the harm it was closing, and the answer cannot be
+established from here — there is no GoTrue in this environment and
+supabase.com is blocked by the egress proxy.
+
+Before H31, invited clients got their account from public `supabase.auth.signUp`,
+covered by `[auth.rate_limit] sign_in_sign_ups = 30` per 5 minutes **per IP**.
+H31 moved account creation into an edge function calling
+`auth.admin.createUser` with the service role. Either answer is worth knowing:
+
+- **Exempt** — then between H31 and `0048` the endpoint had no bound at all.
+- **Not exempt** — then it is worse, because the only IP GoTrue can see is the
+  edge function's egress address. Every claimant in the world shares one
+  30-per-5-minutes bucket, and one attacker exhausts it for everybody.
+
+**What is true until this is answered:** `0048`'s own limiter is unaffected
+either way — it is keyed in Postgres on the client the invite belongs to and
+does not depend on GoTrue's behaviour. What stays unknown is whether a burst
+of legitimate claims across *different* invites can still exhaust a shared
+GoTrue bucket and refuse them all. If the answer is "not exempt", that is a
+real second limit sitting behind ours, and the remedy is a dashboard change
+to `sign_in_sign_ups`, not code.
+
+Answering it is a Supabase support question or one test against a staging
+project: call `POST /auth/v1/admin/users` more than 30 times inside five
+minutes with the service role and see whether the 31st is refused.
+
+### 16. Is `enable_confirmations` on for the deployed projects? — migration 0048
+
+`claim-signup` creates accounts with `email_confirm: false`, deliberately:
+typing an address proves nothing, and an unbound invite would otherwise let a
+link-holder camp a stranger's address. What happens next depends entirely on a
+dashboard setting no file here records.
+
+- **Confirmations ON** — an account created for a guessed address is inert
+  until someone clicks a link in that inbox. The worst case is address
+  squatting: the real client cannot register, and asks their walker why.
+- **Confirmations OFF** — the account is usable immediately by whoever created
+  it, so the same guess is a takeover of the client portal.
+
+`0048` bounds the *rate* either way. This decides what a single successful
+guess is worth, which is the difference between an annoyance and an incident.
+
+**What is true until this is answered:** the frontend already handles both —
+`ClaimInvite` catches `email_not_confirmed` on the sign-in that follows and
+offers a resend — so nothing is broken in either configuration. What is
+missing is knowing which one is deployed. Dashboard → Authentication →
+Providers → Email → *Confirm email*.
+
+Deliberately NOT added to `scripts/check-auth-posture.sh`, and the reason is
+that script's own header: the Management API's name for this setting is not
+established from here (no GoTrue in this environment, supabase.com blocked by
+the egress proxy), `app/scripts/auth-posture.test.ts` builds its fixtures only
+from key names captured from a real response, and a gate naming a key that
+does not exist is the exact defect that left staging-smoke permanently red
+through every attempt to fix it. When a live `/config/auth` response is next
+read, the key name is in it, and the check is a two-line addition then.
 
 ## Keeping this honest
 

@@ -97,6 +97,12 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
 - **Assert on a named sentence, not a bare call.** A sabotage that aborts the
   suite with Postgres's own message reads as a broken suite rather than a
   broken rule. Wrap the call and raise your own `FAIL: …`.
+- **The same trap in TypeScript is a bare `assertRejects`.** It passes for any
+  rejection, including one from a dependency that blew up because your
+  sabotage moved it earlier — so a test written to pin *which* refusal happens
+  goes green against the exact defect it exists to catch. Assert on the error:
+  `err instanceof HttpError && err.status === …`. Found in 0048's own new
+  tests, by the sabotage, not by review.
 
 ## Verifying things the gates cannot see
 

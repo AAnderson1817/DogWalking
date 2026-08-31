@@ -474,11 +474,16 @@ verify_jwt = false
 # This function remains the manual path: the Calendar screen's "Run
 # materializer" button, and the staging smoke suite. It calls the same
 # fn_run_nightly_jobs() the cron does, so the two cannot drift.
-# Review M29. The ONLY public endpoint in this project, and deliberately so:
-# the recipient of a mistyped address is not a client, cannot sign in, and an
-# opt-out behind a session is no opt-out at all for exactly the person who most
-# needs one. RFC 8058 one-click also POSTs straight from the mail client, with
-# no Authorization header to offer.
+# Review M29. Public deliberately: the recipient of a mistyped address is not
+# a client, cannot sign in, and an opt-out behind a session is no opt-out at
+# all for exactly the person who most needs one. RFC 8058 one-click also POSTs
+# straight from the mail client, with no Authorization header to offer.
+#
+# It used to say "the ONLY public endpoint in this project"; H31 added
+# claim-signup below and did not come back to this line. Both are public now,
+# and they are public for opposite reasons — this one has nothing worth
+# spending, and that one creates accounts, which is why 0048 gives it a budget
+# and this one still needs none (see below).
 #
 # The token in the URL is the credential. It only ever suppresses its own
 # address, the operation is idempotent, and the function answers identically
@@ -498,6 +503,12 @@ verify_jwt = true
 # and a token bound to an email admits only that email. This is what lets
 # the GoTrue "allow new users to sign up" toggle finally be turned off
 # without breaking client invites.
+#
+# Rate-limited by fn_invite_signup_allow_attempt (0048), keyed on the client
+# the invite belongs to. Before H31 this flow ran on public signUp, which the
+# [auth.rate_limit] sign_in_sign_ups setting above covers; moving it to a
+# service-role admin call took that control away, and 0048 is what puts one
+# back. Unlike `unsubscribe`, this endpoint creates accounts.
 [functions.claim-signup]
 verify_jwt = false
 
