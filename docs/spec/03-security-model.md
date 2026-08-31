@@ -243,7 +243,10 @@ the limit, so at most 10 rows per client can exist at any instant. A reissued
 invite starts a fresh budget — `trg_clients_reset_invite_signup_budget` fires
 on any change to `invite_token`, so rotation, unbind and purge all clear the
 client's attempts, and the reissue the operator is told to reach for is not
-refused by the budget the attacker burned (Codex review on PR #84).
+refused by the budget the attacker burned (Codex review on PR #84). The
+limiter re-reads the client under its advisory lock and holds the row until it
+inserts, so a request that resolved the old token cannot land after a rotation
+or a purge and undo either — `concurrency.sh` cases 6 and 6b.
 
 A claim that lands on the wrong person is undone with `fn_unbind_invite`,
 which severs the account and reissues in ONE statement — two statements leave a

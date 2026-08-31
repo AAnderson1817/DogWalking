@@ -89,6 +89,9 @@ db_cleanup() {
     delete from recurring_schedules where operator_id::text like '${NS}%';
     delete from walks where operator_id::text like '${NS}%';
     drop function if exists fn_debit_walk_barrier(uuid);
+    drop function if exists fn_invite_signup_allow_attempt_barrier(uuid, inet, int, int);
+    delete from invite_signup_attempts where client_id in
+      (select id from clients where operator_id::text like '${NS}%');
     delete from pets where operator_id::text like '${NS}%';
     delete from properties where operator_id::text like '${NS}%';
     delete from clients where operator_id::text like '${NS}%';
@@ -120,6 +123,9 @@ insert into service_types (id, operator_id, name, duration_minutes, credit_cost)
 insert into clients (id, operator_id, full_name, email, plan_id, credit_balance, status)
   values ('${NS}-000000000100', '${NS}-000000000001', 'CC Client', 'cc-client@sanpo.dev',
           '${NS}-000000000010', 1, 'active');
+insert into clients (id, operator_id, full_name, status, invite_token)
+  values ('${NS}-000000000101', '${NS}-000000000001', 'CC Invitee', 'invited',
+          '${NS}-000000000901');
 insert into properties (id, operator_id, client_id, label, address_line1, city, postcode)
   values ('${NS}-000000000200', '${NS}-000000000001', '${NS}-000000000100',
           'Home', '1 CC St', 'Chicago', '60601');
@@ -416,6 +422,186 @@ expect_eq "and the walk stops claiming it was paid for" \
   "$(q "select credits_debited from walks where id = '${NS}-000000000305'")" "0"
 
 psql "$DB" -q -c "drop function if exists fn_debit_walk_barrier(uuid);" >/dev/null
+
+
+# ── Case 6: a stale attempt landing after the invite was reissued ─────────
+#
+# Codex review on PR #84, second round. `fn_invite_signup_allow_attempt`
+# resolves the token to a client BEFORE it serialises on the advisory lock,
+# and the reset trigger takes no advisory lock — so a request that resolved
+# the OLD token can sit in the queue while an operator rotates or purges the
+# invite, and then insert against the client that still exists. Two harms:
+# the reissued invite does not get the fresh budget the previous round's fix
+# promised, and after a PURGE the row re-creates an `ip` for a client whose
+# personal data was erased on request.
+#
+# Same apparatus as case 5, and for the same reason: the interleave is INSIDE
+# one RPC, so the function is copied from `pg_get_functiondef` — never
+# hand-written, so the copy provably carries the shipped logic — with a
+# barrier injected at the point the finding names. The anchor is the first
+# token lookup, which is a stable landmark in both the pre-fix body and the
+# fixed one, so this same case exercises both.
+echo
+echo "== case 6: a stale attempt landing after the invite was reissued =="
+
+# Spend some of the budget on the old token, so there is something for the
+# reset to clear and the assertion cannot pass by there being nothing.
+psql "$DB" -v ON_ERROR_STOP=1 -q -c "
+  select fn_invite_signup_allow_attempt('${NS}-000000000901', '203.0.113.5')
+    from generate_series(1, 4);" >/dev/null
+expect_eq "the old token spent part of its budget (precondition)" \
+  "$(q "select count(*) from invite_signup_attempts where client_id = '${NS}-000000000101'")" "4"
+
+psql "$DB" -v ON_ERROR_STOP=1 -q -c "
+do \$outer\$
+declare
+  v_def text;
+  v_at int;
+begin
+  select pg_get_functiondef(
+    'fn_invite_signup_allow_attempt(uuid, inet, int, int)'::regprocedure) into v_def;
+  v_def := replace(v_def, 'FUNCTION public.fn_invite_signup_allow_attempt(',
+                          'FUNCTION public.fn_invite_signup_allow_attempt_barrier(');
+  v_at := position('where invite_token = p_token;' in v_def)
+        + length('where invite_token = p_token;');
+  if v_at <= length('where invite_token = p_token;') then
+    raise exception 'case 6: no token lookup found in fn_invite_signup_allow_attempt';
+  end if;
+  v_def := left(v_def, v_at)
+        || E'\n  perform pg_advisory_xact_lock(920);'
+        || substr(v_def, v_at + 1);
+  execute v_def;
+end \$outer\$;"
+
+# Session A holds the barrier shut.
+echo "select pg_advisory_lock(920);" >&3
+for _ in $(seq 1 50); do
+  [ "$(q "select count(*) from pg_locks where locktype = 'advisory' and objid = 920 and granted")" != "0" ] && break
+  sleep 0.1
+done
+
+# B is a claim-signup attempt bearing the OLD token. It resolves the client
+# and stops before serialising.
+psql "$DB" -q -v ON_ERROR_STOP=1 -c \
+  "begin; select fn_invite_signup_allow_attempt_barrier('${NS}-000000000901', '203.0.113.6'); commit;" \
+  >"$WORK/b6.out" 2>&1 &
+B6_PID=$!
+expect_eq "the attempt resolved the old token and reached the barrier" \
+  "$(wait_until_blocked fn_invite_signup_allow_attempt_barrier)" "blocked"
+
+# C is the operator reissuing the invite — the documented remedy for a burned
+# budget. Its UPDATE fires the reset trigger.
+psql "$DB" -q -v ON_ERROR_STOP=1 -c "
+  set local request.jwt.claims = '{\"sub\":\"${NS}-000000000001\",\"role\":\"authenticated\"}';
+  select fn_rotate_invite('${NS}-000000000101');" >"$WORK/c6.out" 2>&1
+expect_eq "the reissue cleared the burned budget" \
+  "$(q "select count(*) from invite_signup_attempts where client_id = '${NS}-000000000101'")" "0"
+
+# Release the barrier: B now serialises and decides whether to record.
+echo "select pg_advisory_unlock(920);" >&3
+wait $B6_PID || true
+
+# THE FINDING. A stale request must not spend the budget the reissue just
+# handed to the real claimant — and on the purge path, which rotates the token
+# the same way, must not re-create an `ip` row for an erased client.
+expect_eq "the stale attempt did not refill the reissued invite's budget" \
+  "$(q "select count(*) from invite_signup_attempts where client_id = '${NS}-000000000101'")" "0"
+
+# It is ALLOWED, not refused: the token no longer matches anything, so the
+# caller goes on to the check and is told `not_found`, which is true.
+expect_eq "and it was allowed through rather than rate-limited" \
+  "$(grep -c ' t$\| t' "$WORK/b6.out" || true)" "1"
+
+psql "$DB" -q -c "drop function if exists fn_invite_signup_allow_attempt_barrier(uuid, inet, int, int);" >/dev/null
+
+# ── Case 6b: the row lock is real, and it does not deadlock ───────────────
+#
+# The fix for case 6 introduces a `clients` row lock into a function that
+# previously took none, which is the change M32/0037 exists to guard. Both
+# halves are demonstrated rather than asserted: that the lock actually blocks
+# a rotation (the mechanism the fix rests on — a rotation is an ordinary
+# UPDATE of a non-key column, so it takes the conflicting `for no key
+# update`), and that the two orders cannot cycle. Lock order is advisory ->
+# clients -> invite_signup_attempts here and clients -> invite_signup_attempts
+# in the rotation, so both take clients first and no cycle exists; this is the
+# demonstration of that.
+echo
+echo "== case 6b: the client row lock blocks a rotation, without deadlocking =="
+
+CUR_TOKEN="$(q "select invite_token from clients where id = '${NS}-000000000101'")"
+
+psql "$DB" -v ON_ERROR_STOP=1 -q -c "
+do \$outer\$
+declare
+  v_def text;
+  v_at int;
+begin
+  select pg_get_functiondef(
+    'fn_invite_signup_allow_attempt(uuid, inet, int, int)'::regprocedure) into v_def;
+  v_def := replace(v_def, 'FUNCTION public.fn_invite_signup_allow_attempt(',
+                          'FUNCTION public.fn_invite_signup_allow_attempt_barrier(');
+  -- Anchored on the re-check itself and then advanced to the END of that
+  -- statement, so the injection point does not depend on WHICH lock mode is
+  -- written there. That is deliberate: anchoring on the lock clause would
+  -- make removing or weakening it abort this case instead of failing its
+  -- assertion, and a missing lock is precisely what the assertion below is
+  -- here to report.
+  v_at := position('where id = v_client and invite_token = p_token' in v_def);
+  if v_at = 0 then
+    raise exception 'case 6b: no post-lock re-check found in fn_invite_signup_allow_attempt';
+  end if;
+  v_at := v_at + position(';' in substr(v_def, v_at)) - 1;
+  v_def := left(v_def, v_at)
+        || E'\n  perform pg_advisory_xact_lock(921);'
+        || substr(v_def, v_at + 1);
+  execute v_def;
+end \$outer\$;"
+
+echo "select pg_advisory_lock(921);" >&3
+for _ in $(seq 1 50); do
+  [ "$(q "select count(*) from pg_locks where locktype = 'advisory' and objid = 921 and granted")" != "0" ] && break
+  sleep 0.1
+done
+
+# B holds the client row and stops.
+psql "$DB" -q -v ON_ERROR_STOP=1 -c \
+  "begin; select fn_invite_signup_allow_attempt_barrier('$CUR_TOKEN', '203.0.113.8'); commit;" \
+  >"$WORK/b6b.out" 2>&1 &
+B6B_PID=$!
+expect_eq "the attempt reached the barrier holding the client row" \
+  "$(wait_until_blocked fn_invite_signup_allow_attempt_barrier)" "blocked"
+
+# C reissues. Its UPDATE must wait for that row.
+psql "$DB" -q -v ON_ERROR_STOP=1 -c "
+  set local request.jwt.claims = '{\"sub\":\"${NS}-000000000001\",\"role\":\"authenticated\"}';
+  select fn_rotate_invite('${NS}-000000000101');" >"$WORK/c6b.out" 2>&1 &
+C6B_PID=$!
+expect_eq "the reissue genuinely blocked on it — the window case 6 exploited is shut" \
+  "$(wait_until_blocked fn_rotate_invite)" "blocked"
+
+echo "select pg_advisory_unlock(921);" >&3
+B6B_RC=0; C6B_RC=0
+wait $B6B_PID || B6B_RC=$?
+wait $C6B_PID || C6B_RC=$?
+
+if [ "$B6B_RC" != "0" ] || [ "$C6B_RC" != "0" ]; then
+  fail "neither the attempt nor the reissue is aborted" \
+       "$(grep -ih "deadlock\|ERROR" "$WORK/b6b.out" "$WORK/c6b.out" | head -3)"
+else
+  pass "neither the attempt nor the reissue is aborted"
+fi
+if grep -qi "deadlock detected" "$WORK/b6b.out" "$WORK/c6b.out"; then
+  fail "no deadlock was detected" "$(grep -ih "deadlock detected" "$WORK/b6b.out" "$WORK/c6b.out" | head -1)"
+else
+  pass "no deadlock was detected"
+fi
+
+# The reissue ran second, so its trigger swept the row the attempt had just
+# written: the new token starts clean even when an attempt was mid-flight.
+expect_eq "the reissued invite still starts with a clean budget" \
+  "$(q "select count(*) from invite_signup_attempts where client_id = '${NS}-000000000101'")" "0"
+
+psql "$DB" -q -c "drop function if exists fn_invite_signup_allow_attempt_barrier(uuid, inet, int, int);" >/dev/null
 
 
 exec 3>&-

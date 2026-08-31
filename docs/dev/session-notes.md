@@ -79,6 +79,19 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   file is back (`grep -c` for something the sabotage removed) before believing
   any green run, and remember that a `validate.sh` started before a sabotage
   and finishing after it has told you nothing.
+- **Restoring a sabotaged MIGRATION does not restore the database.** Smoke-level
+  sabotages injected after `begin;` roll back with the suite, which is why this
+  only bites when you edit the migration itself and re-reset. Put the file back
+  AND re-run `db-reset.sh`, then assert against the LIVE definition
+  (`pg_get_functiondef`) rather than the file — the file being right tells you
+  nothing about what the database is running.
+- **Grep the definition with comments STRIPPED.** A well-commented function
+  argues about the thing it does, so its own prose matches your needle: in
+  0048, `for no key update` appeared three times in the live definition and
+  only once in the code. Checking the raw text reported the fix present while
+  the database was running the sabotaged body — the same mention-versus-use
+  defect 0046's second Codex round found in a migration's own assertion.
+  `regexp_replace(def, '--[^\n]*', '', 'g')` first.
 - **A vitest file claimed by neither project runs nowhere, silently.** `node`
   takes `src/lib/**/*.test.ts` and `scripts/**/*.test.ts`; `dom` takes
   components / screens / hooks / prototypes plus `src/lib/**/*.test.tsx`. The
