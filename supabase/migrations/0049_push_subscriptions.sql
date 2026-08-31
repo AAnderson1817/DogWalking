@@ -446,6 +446,47 @@ grant execute on function fn_register_push_subscription(text, text, text, text)
   to authenticated;
 
 /**
+ * Count one delivery failure against a device, in ONE statement.
+ *
+ * Codex review on PR #85. The sender did this as a client-side
+ * read-modify-write, so two notifications delivered concurrently to the same
+ * failing device both read the old count and both wrote the same value —
+ * losing a failure precisely during a burst, which is when the number is worth
+ * having. PostgREST cannot express `col = col + 1`, so it takes a function.
+ *
+ * Advisory data, deliberately: nothing branches on `failure_count`, it is
+ * there for an operator looking at a flapping device. That is why this is a
+ * plain increment with no policy attached, and why a failure to record it is
+ * logged and swallowed by the caller rather than costing a notification.
+ *
+ * Service role only. The sender is the only writer, and letting a client
+ * increment another device's counter would make the signal worthless.
+ */
+create function fn_note_push_failure(p_id uuid, p_error text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not fn_is_service_session() then
+    raise exception 'fn_note_push_failure: service role only';
+  end if;
+  update push_subscriptions
+     set failure_count = failure_count + 1,
+         last_failure_at = now(),
+         last_error = left(p_error, 500)
+   where id = p_id;
+end $$;
+
+revoke all on function fn_note_push_failure(uuid, text) from public, anon, authenticated;
+
+comment on function fn_note_push_failure(uuid, text) is
+  'Increment one device''s failure counter atomically (0049). A client-side '
+  'read-modify-write lost concurrent failures during exactly the bursts the '
+  'counter exists to show.';
+
+/**
  * Forget this device. Scoped to the caller, so one person cannot silence
  * another's notifications by guessing an endpoint — endpoints are not secret
  * in any strong sense, and a bare `delete where endpoint = $1` would make

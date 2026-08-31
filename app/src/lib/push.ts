@@ -254,7 +254,15 @@ export async function enablePush(): Promise<PushState> {
  * not have been removed. It just no longer decides whether the local half
  * happens.
  */
-export async function disablePush(): Promise<PushState> {
+export async function disablePush(
+  // Set once sign-out has stopped waiting for this (Codex review on PR #85).
+  // A timeout stops AWAITING; it does not cancel. A stalled `unsubscribe()`
+  // that settles after somebody else has signed in would otherwise fall
+  // through to the RPC under the NEW session — and `fn_remove_push_subscription`
+  // is caller-scoped, so it deletes the row that account has just reclaimed,
+  // leaving their UI saying `on` over nothing.
+  abandoned: () => boolean = () => false,
+): Promise<PushState> {
   const reg = await registration();
   const sub = reg ? await reg.pushManager.getSubscription() : null;
   if (sub) {
@@ -262,7 +270,12 @@ export async function disablePush(): Promise<PushState> {
     try {
       await sub.unsubscribe();
     } finally {
-      await removePushSubscription(endpoint);
+      // The late `unsubscribe()` itself cannot be recalled, and that residual
+      // is the ordinary cost of signing out: the next account sees `off` and
+      // turns it back on. What must not happen is the SERVER row going too,
+      // because that is the state the UI cannot show — `on` with nothing
+      // behind it.
+      if (!abandoned()) await removePushSubscription(endpoint);
     }
   }
   return pushSupported() ? (env.vapidPublicKey ? "off" : "unconfigured") : "unsupported";
@@ -367,9 +380,11 @@ export async function reclaimPushDevice(
  * Never throws, for the same reason the others do not: leaving somebody signed
  * in because a cleanup failed is strictly worse than the leak.
  */
-export async function forgetPushDeviceBeforeSignOut(): Promise<void> {
+export async function forgetPushDeviceBeforeSignOut(
+  abandoned: () => boolean = () => false,
+): Promise<void> {
   try {
-    await disablePush();
+    await disablePush(abandoned);
   } catch {
     /* best effort — see above */
   }

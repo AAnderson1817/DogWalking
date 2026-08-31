@@ -28,7 +28,6 @@ import {
   forgetPushDeviceOnSignedOut,
   reclaimPushDevice,
 } from "./push";
-import { withTimeout } from "./with-timeout";
 import { Sheet } from "@/components/Sheet";
 import { FormError, Input } from "@/components/fields";
 import { LoadingState } from "@/components/StateField";
@@ -300,7 +299,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Losing the cleanup is survivable and this is not: the SIGNED_OUT
     // transition below queues `forgetPushDeviceOnSignedOut`, which retries the
     // local half on this load and every one after it.
-    await withTimeout(forgetPushDeviceBeforeSignOut(), SIGN_OUT_CLEANUP_MS);
+    // One timer does both jobs: it releases this await AND tells the cleanup it
+    // has been abandoned (Codex review on PR #85, eighteenth round). A bare
+    // timeout only stops waiting — the work carries on, and a stalled
+    // unsubscribe settling after the next person signs in would fall through
+    // to an RPC under THEIR session and delete the row they had just
+    // reclaimed.
+    let abandoned = false;
+    const cleanup = forgetPushDeviceBeforeSignOut(() => abandoned);
+    await Promise.race([
+      cleanup,
+      new Promise<void>((resolve) =>
+        setTimeout(() => {
+          abandoned = true;
+          resolve();
+        }, SIGN_OUT_CLEANUP_MS)
+      ),
+    ]);
     await supabase.auth.signOut();
     // Review M8. Sign-out used to clear the session and three pieces of React
     // state and nothing else, so this device kept raw GPS coordinates for

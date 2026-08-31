@@ -354,6 +354,32 @@ describe("enable/disable failure paths", () => {
     expect(sub.unsubscribed, "left the browser subscribed with no server row").toBe(true);
   });
 
+  it("an ABANDONED cleanup does not delete a row the next account reclaimed", async () => {
+    // A timeout stops AWAITING; it does not cancel (Codex review on PR #85,
+    // eighteenth round). A stalled `unsubscribe()` settling after somebody
+    // else has signed in would otherwise fall through to the RPC under the NEW
+    // session — and `fn_remove_push_subscription` is caller-scoped, so it
+    // deletes the row that account has just reclaimed, leaving their UI saying
+    // `on` over nothing.
+    const sub = fakeSub();
+    stubBrowser(null, sub);
+    await forgetPushDeviceBeforeSignOut(() => true);
+    expect(sub.unsubscribed, "the local half should still have happened").toBe(true);
+    expect(
+      API.removePushSubscription,
+      "an abandoned cleanup reached the server under a later session",
+    ).not.toHaveBeenCalled();
+  });
+
+  it("but a cleanup that finishes in time still removes the row", async () => {
+    // Or "always abandoned" would satisfy the case above and leave every
+    // signed-out device's row behind — the M27 hazard the cleanup exists for.
+    const sub = fakeSub();
+    stubBrowser(null, sub);
+    await forgetPushDeviceBeforeSignOut(() => false);
+    expect(API.removePushSubscription).toHaveBeenCalled();
+  });
+
   it("unsubscribes locally even when the removal RPC fails", async () => {
     // The sign-out path swallows this error by design, so a failed RPC used to
     // skip the local unsubscribe entirely and leave a shared device receiving

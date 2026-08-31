@@ -901,6 +901,40 @@ expect_eq "the erasure still took the device the registration had just made" \
 
 psql "$DB" -q -c "drop function if exists fn_register_push_subscription_barrier(text, text, text, text);" >/dev/null
 
+echo
+echo "== case 9: two failures against one device are both counted =="
+
+# Codex review on PR #85, eighteenth round. `noteFailure` was a client-side
+# read-modify-write, so two notifications delivered concurrently to the same
+# failing device both read the old count and both wrote the same value —
+# losing a failure during exactly the burst the counter exists to show.
+#
+# This lives here and not in smoke.sql because smoke CANNOT see it: two
+# SEQUENTIAL calls reach +2 under a read-modify-write too, since each takes its
+# own snapshot. Verified by sabotage — a read-modify-write body passes the
+# smoke block unchanged. The lost update needs two backends.
+psql "$DB" -v ON_ERROR_STOP=1 -q -c "
+  delete from push_subscriptions where operator_id = '${NS}-000000000001';
+  insert into push_subscriptions (id, operator_id, client_id, endpoint, p256dh, auth, failure_count)
+  values ('${NS}-000000000900', '${NS}-000000000001', null,
+          'https://fcm.googleapis.com/fcm/send/FLAPPING', repeat('A', 87), repeat('B', 22), 0);"
+
+# Ten concurrent recordings. A read-modify-write loses some of them; one
+# statement per call cannot.
+NOTE_PIDS=""
+for i in $(seq 1 10); do
+  psql "$DB" -q -v ON_ERROR_STOP=1 -c \
+    "select fn_note_push_failure('${NS}-000000000900', 'the push service answered 50$i');" \
+    >"$WORK/note$i.out" 2>&1 &
+  NOTE_PIDS="$NOTE_PIDS $!"
+done
+for pid in $NOTE_PIDS; do wait "$pid" || true; done
+
+expect_eq "every concurrent failure was counted" \
+  "$(q "select failure_count from push_subscriptions where id = '${NS}-000000000900'")" "10"
+
+psql "$DB" -q -c "delete from push_subscriptions where operator_id = '${NS}-000000000001';" >/dev/null
+
 exec 3>&-
 wait $A_PID 2>/dev/null || true
 
