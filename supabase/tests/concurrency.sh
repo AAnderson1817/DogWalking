@@ -618,10 +618,16 @@ psql "$DB" -q -c "drop function if exists fn_invite_signup_allow_attempt_barrier
 echo
 echo "== case 7: the per-recipient device quota holds under concurrency =="
 
+# Real push-service hosts, because 0049 refuses anything else (Codex review
+# on PR #85). These fixtures said `https://push.example/…` and the allowlist
+# turned every registration below into an ERROR — which this case did not
+# notice, because `total <= 10` is satisfied by the nine seeds alone. It
+# reported "ok (got 9)" while proving nothing, in CI and locally alike. That
+# is why the precondition below exists and is checked FIRST.
 psql "$DB" -v ON_ERROR_STOP=1 -q -c "
   delete from push_subscriptions where operator_id = '${NS}-000000000001';
   insert into push_subscriptions (operator_id, client_id, endpoint, p256dh, auth)
-  select '${NS}-000000000001', null, 'https://push.example/seed-' || g,
+  select '${NS}-000000000001', null, 'https://fcm.googleapis.com/fcm/send/seed-' || g,
          repeat('A', 87), repeat('B', 22)
     from generate_series(1, 9) g;"
 
@@ -636,11 +642,30 @@ for i in $(seq 1 10); do
   psql "$DB" -q -v ON_ERROR_STOP=1 -c "
     set local request.jwt.claims = '{\"sub\":\"${NS}-000000000001\",\"role\":\"authenticated\"}';
     select fn_register_push_subscription(
-      'https://push.example/race-$i', repeat('C', 87), repeat('D', 22));" \
+      'https://fcm.googleapis.com/fcm/send/race-$i', repeat('C', 87), repeat('D', 22));" \
     >"$WORK/race$i.out" 2>&1 &
   RACE_PIDS="$RACE_PIDS $!"
 done
 for pid in $RACE_PIDS; do wait "$pid" || true; done
+
+# PRECONDITION, not the detector: the ten registrations have to have actually
+# HAPPENED. Without this, anything that makes them all fail — a refused
+# endpoint, a shape check, a renamed function — leaves the nine seeds behind
+# and `total <= 10` passes having exercised no quota, no lock and no race.
+#
+# Ten exactly, and that is deterministic rather than hopeful: each race
+# registers a DISTINCT endpoint, the advisory lock serialises the
+# read-modify-write, and every race row is newer than every seed, so a correct
+# quota evicts all nine seeds and keeps all ten races.
+RACE_NEW="$(q "select count(*) from push_subscriptions
+                where operator_id = '${NS}-000000000001'
+                  and endpoint like '%/race-%'")"
+if [ "$RACE_NEW" = "10" ]; then
+  pass "all ten concurrent registrations landed (precondition, not the detector)"
+else
+  fail "the race registered nothing to bound" \
+       "expected 10 race rows, got $RACE_NEW — this case would otherwise pass on the seeds alone"
+fi
 
 RACE_TOTAL="$(q "select count(*) from push_subscriptions where operator_id = '${NS}-000000000001'")"
 if [ "$RACE_TOTAL" -le 10 ]; then
