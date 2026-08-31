@@ -19,11 +19,16 @@ import { supabase } from "./supabase";
 import { deleteOutboxDatabase } from "./gps-outbox";
 import { clearAllWalkSnapshots } from "./walk-snapshot";
 import { createSerialRunner, type SerialRunner } from "./serial-repair";
+
+/** Long enough for a local unsubscribe and one RPC; short enough that a
+ * stalled network cannot keep somebody signed in on a shared device. */
+const SIGN_OUT_CLEANUP_MS = 3000;
 import {
   forgetPushDeviceBeforeSignOut,
   forgetPushDeviceOnSignedOut,
   reclaimPushDevice,
 } from "./push";
+import { withTimeout } from "./with-timeout";
 import { Sheet } from "@/components/Sheet";
 import { FormError, Input } from "@/components/fields";
 import { LoadingState } from "@/components/StateField";
@@ -269,7 +274,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // run once there is none. Leaving the row behind means that on a shared
     // device the next person's notifications reach a browser registration the
     // previous person owns (review M27).
-    await forgetPushDeviceBeforeSignOut();
+    // BOUNDED (Codex review on PR #85). `forgetPushDeviceBeforeSignOut`
+    // catches rejections, but a promise that never SETTLES is not a rejection
+    // — a stalled `unsubscribe()` or a hung RPC left this await pending
+    // forever, so the button did nothing, gave no feedback, and the person
+    // walked away from a shared device still signed in. That is the exact
+    // hazard the cleanup exists to prevent, caused by the cleanup.
+    //
+    // Losing the cleanup is survivable and this is not: the SIGNED_OUT
+    // transition below queues `forgetPushDeviceOnSignedOut`, which retries the
+    // local half on this load and every one after it.
+    await withTimeout(forgetPushDeviceBeforeSignOut(), SIGN_OUT_CLEANUP_MS);
     await supabase.auth.signOut();
     // Review M8. Sign-out used to clear the session and three pieces of React
     // state and nothing else, so this device kept raw GPS coordinates for

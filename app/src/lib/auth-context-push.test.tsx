@@ -112,7 +112,7 @@ vi.mock("./supabase", () => ({
   },
 }));
 
-import { AuthProvider } from "./auth-context";
+import { AuthProvider, useAuth } from "./auth-context";
 
 beforeEach(() => {
   PUSH.forgetPushDeviceOnSignedOut.mockClear();
@@ -270,4 +270,41 @@ describe("the repairs go through the serial runner", () => {
       "the cleanup was told to stand down by a repair it should have outranked",
     ).toBe(false);
   });
+});
+
+describe("sign-out is never held up by its own cleanup", () => {
+  it("proceeds once the bounded cleanup times out", async () => {
+    // `forgetPushDeviceBeforeSignOut` catches rejections, but a promise that
+    // never SETTLES is not a rejection (Codex review on PR #85). A stalled
+    // unsubscribe or hung RPC left the await pending forever: the button did
+    // nothing, said nothing, and the person walked away from a shared device
+    // still signed in — the exact hazard the cleanup exists to prevent,
+    // caused by the cleanup.
+    PUSH.forgetPushDeviceBeforeSignOut.mockImplementation(() => new Promise<void>(() => {}));
+    AUTH.session = { user: { id: "op-1" } };
+    let signOut: (() => Promise<void>) | null = null;
+    function Probe() {
+      signOut = useAuth().signOut;
+      return null;
+    }
+    render(
+      <AuthProvider>
+        <Probe />
+      </AuthProvider>,
+    );
+    await waitFor(() => expect(signOut).not.toBeNull());
+
+    let done = false;
+    const pending = signOut!().then(() => {
+      done = true;
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(done, "sign-out completed before the cleanup deadline — the bound is not real").toBe(
+      false,
+    );
+    await new Promise((r) => setTimeout(r, 3200));
+    await pending;
+    expect(done, "a hung cleanup kept the session alive").toBe(true);
+    PUSH.forgetPushDeviceBeforeSignOut.mockImplementation(async () => {});
+  }, 10_000);
 });
