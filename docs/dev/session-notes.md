@@ -123,6 +123,20 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   goes green against the exact defect it exists to catch. Assert on the error:
   `err instanceof HttpError && err.status === …`. Found in 0048's own new
   tests, by the sabotage, not by review.
+- **`pg_get_functiondef` does not return a terminating semicolon.** Building a
+  sabotage from the LIVE definition is the right technique (it cannot silently
+  drop what a later migration added), but pasted straight into a script the
+  next statement collides with it and psql dies on a syntax error hundreds of
+  lines before your assertion. Same class as the entry above: exit non-zero,
+  nothing proved. Append the `;`.
+- **A sabotage can be red for the WRONG reason.** When several rules share one
+  assertion, change exactly one of them. A userinfo-blind host parse written
+  for PR #85 also dropped the suffix list, so it failed on "a real push service
+  endpoint was refused" rather than on the near-miss it was aimed at — a
+  perfectly red run that demonstrated a different rule. If the aggregate cannot
+  tell them apart, probe each rule directly (`select fn_x('…')`) alongside the
+  suite run; that is cheap and it is what makes "individually load-bearing" a
+  reading rather than a claim.
 
 ## Verifying things the gates cannot see
 
