@@ -5445,6 +5445,33 @@ begin
     raise exception 'FAIL: the refused claim still moved the device (0049)';
   end if;
 
+  -- 3b. And the SECRET half is what has to match, not just the public one
+  -- (Codex review on PR #85, tenth round). `p256dh` is the ECDH public key —
+  -- it is not a secret in any sense — while `auth` is the 16-byte shared
+  -- secret. The first version of this check tested p256dh alone, so a caller
+  -- holding the endpoint and the public half took the row AND overwrote the
+  -- secret one, which silences the victim. Checking the public half of a
+  -- keypair and calling it proof is checking the wrong half, so this case
+  -- presents the RIGHT p256dh with the wrong auth.
+  set local role authenticated;
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_user_a), true);
+  begin
+    perform fn_register_push_subscription(v_shared, v_p256, 'AAAAAAAAAAAAAAAAAAAAAA');
+    raise exception 'FAIL: the public key alone was accepted as proof of a device (0049)';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  select client_id into v_owner from push_subscriptions where endpoint = v_shared;
+  if v_owner <> v_cl_z then
+    raise exception 'FAIL: a wrong-auth claim still moved the device (0049)';
+  end if;
+  if (select auth from push_subscriptions where endpoint = v_shared) <> v_auth then
+    raise exception 'FAIL: a refused claim still overwrote the device secret (0049)';
+  end if;
+
   -- 4. Removal is scoped to the caller. A must not be able to silence Z's
   -- device by naming its endpoint — endpoints are not secret in any strong
   -- sense, so an unscoped delete is a denial-of-service primitive.

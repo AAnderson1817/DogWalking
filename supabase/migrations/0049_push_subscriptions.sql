@@ -364,6 +364,15 @@ begin
   -- the keys arrive together. A caller who knows only the endpoint cannot
   -- produce the keys — they never leave the browser that made them, and 0049
   -- withholds them from `authenticated` for this reason among others.
+  --
+  -- BOTH halves, not just `p256dh` (Codex review on PR #85, tenth round). The
+  -- first version of this check tested the p256dh alone — which is the ECDH
+  -- PUBLIC key, semantically not a secret — while the update replaced `auth`
+  -- as well, so anyone holding the endpoint and the public half could take the
+  -- row and overwrite the secret one. Checking the public half of a keypair
+  -- and calling it proof is checking the wrong half. The legitimate case is
+  -- unaffected: `pushManager.subscribe()` hands back the existing subscription
+  -- object, so a real browser presents endpoint, p256dh and auth together.
   insert into push_subscriptions (operator_id, client_id, endpoint, p256dh, auth, user_agent)
   values (v_operator, v_client, p_endpoint, p_p256dh, p_auth, p_user_agent)
   on conflict (endpoint) do update
@@ -376,6 +385,7 @@ begin
          last_failure_at = null,
          last_error = null
    where push_subscriptions.p256dh = excluded.p256dh
+     and push_subscriptions.auth = excluded.auth
   returning id into v_id;
 
   if v_id is null then
