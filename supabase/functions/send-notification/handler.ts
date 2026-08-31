@@ -27,8 +27,16 @@ export interface NotificationRow {
   body: string | null;
   walk_id: string | null;
   email_attempts: number;
-  /** 0029. `sent` is terminal — see the send-once guard in deliverNotification. */
-  email_delivery_status?: string | null;
+  /** 0029. `sent` is terminal — see the send-once guard in deliverNotification.
+   *
+   * The column is `email_status`. This field was `email_delivery_status` from
+   * 0032 until M27 — which is the ENUM TYPE's name, not the column's — so the
+   * select naming it raised 42703 and every lookup 500'd. `select-columns.test.ts`
+   * is the gate. */
+  email_status?: string | null;
+  /** 0049, the push mirror. Same terminal rule. */
+  push_attempts?: number;
+  push_status?: string | null;
 }
 
 /** The outcome recorded against the row. */
@@ -101,7 +109,7 @@ export async function deliverNotification(
   // Deliberately not `email_attempts > 0`: an attempt that FAILED must stay
   // retryable, which is the whole point of the backlog 0029 added. Only a
   // recorded `sent` is terminal.
-  if (row.email_delivery_status === "sent") {
+  if (row.email_status === "sent") {
     return { kind: "skipped", reason: "already sent" };
   }
 

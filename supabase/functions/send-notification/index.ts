@@ -11,6 +11,13 @@
 // wiring. Every path leaves the row in a terminal ('sent'/'skipped') or
 // retryable ('failed') state, and the nightly job counts what is still owed.
 import { isServiceAuth, jsonOk, readJson, requireOperator, serveFunction, HttpError } from "../_lib/http.ts";
+import { encryptPushPayload, vapidAuthorization, type VapidConfig } from "../_lib/webpush.ts";
+import {
+  deliverPush,
+  type PushableRow,
+  type PushDeps,
+  pushRecordPatch,
+} from "./push.ts";
 import { adminClient } from "../_lib/admin.ts";
 import {
   deliverNotification,
@@ -34,7 +41,8 @@ interface Body {
 }
 
 const COLS =
-  "id, operator_id, client_id, type, title, body, walk_id, email_attempts, email_delivery_status";
+  "id, operator_id, client_id, type, title, body, walk_id, email_attempts, email_status, " +
+  "push_attempts, push_status";
 
 /**
  * `operatorId` scopes every lookup to one tenant. Null means the service role,
@@ -165,6 +173,109 @@ function makeDeps(apiKey: string, operatorId: string | null): SendDeps {
   };
 }
 
+/**
+ * Read the VAPID configuration, or null when push was never set up.
+ *
+ * Null is not an error on its own: with no keys the frontend never offers to
+ * subscribe, so there are no devices and every notification records `skipped`
+ * for want of a recipient — the honest state. It becomes an error only when
+ * devices EXIST and the keys do not, which is a real misconfiguration (keys
+ * rotated or removed out from under live subscriptions) and gets H17's loud
+ * failure rather than a silent success.
+ */
+function vapidConfig(): VapidConfig | null {
+  const publicKey = Deno.env.get("VAPID_PUBLIC_KEY");
+  const privateKey = Deno.env.get("VAPID_PRIVATE_KEY");
+  const subject = Deno.env.get("VAPID_SUBJECT");
+  if (!publicKey || !privateKey || !subject) return null;
+  return { publicKey, privateKey, subject };
+}
+
+function makePushDeps(db: ReturnType<typeof adminClient>, vapid: VapidConfig | null): PushDeps {
+  return {
+    async getSubscriptions(operatorId, clientId) {
+      // Explicit columns, never `*`: 0049 makes this a column-restricted table
+      // (the encryption secrets are withheld from `authenticated`), and
+      // PostgREST does not narrow a wildcard — it would raise 42501 for every
+      // row. That is the fix(client-columns) defect.
+      let q = db
+        .from("push_subscriptions")
+        .select("id, endpoint, p256dh, auth")
+        .eq("operator_id", operatorId);
+      q = clientId === null ? q.is("client_id", null) : q.eq("client_id", clientId);
+      const { data, error } = await q;
+      if (error) {
+        throw new HttpError(500, "db_error", "could not read push subscriptions", error, {
+          operator_id: operatorId,
+        });
+      }
+      return data ?? [];
+    },
+
+    async sendPush(sub, payload) {
+      if (!vapid) {
+        // Reachable only when devices exist without keys — see vapidConfig().
+        throw new HttpError(
+          500,
+          "push_not_configured",
+          "push delivery is not configured, so this notification was not pushed",
+          "VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY / VAPID_SUBJECT are unset in this deployment",
+          { subscription_id: sub.id },
+        );
+      }
+      const body = await encryptPushPayload(payload, { p256dh: sub.p256dh, auth: sub.auth });
+      const res = await fetch(sub.endpoint, {
+        method: "POST",
+        headers: {
+          Authorization: await vapidAuthorization(sub.endpoint, vapid),
+          "Content-Encoding": "aes128gcm",
+          "Content-Type": "application/octet-stream",
+          // Four hours. A walk report is worth holding while a phone is off;
+          // it is not worth delivering next week.
+          TTL: "14400",
+        },
+        body: body as BodyInit,
+      });
+      // The push service's own words, truncated: they are the only diagnostic
+      // available when a body is rejected, and they are not ours to invent.
+      const detail = res.ok ? undefined : (await res.text().catch(() => "")).slice(0, 300);
+      return { status: res.status, detail };
+    },
+
+    async dropSubscription(id) {
+      await db.from("push_subscriptions").delete().eq("id", id);
+    },
+
+    async noteFailure(id, error) {
+      const { data } = await db
+        .from("push_subscriptions")
+        .select("failure_count")
+        .eq("id", id)
+        .maybeSingle();
+      await db
+        .from("push_subscriptions")
+        .update({
+          failure_count: ((data?.failure_count as number | undefined) ?? 0) + 1,
+          last_failure_at: new Date().toISOString(),
+          last_error: error.slice(0, 500),
+        })
+        .eq("id", id);
+    },
+
+    async recordPush(id, outcome, previousAttempts) {
+      const { error } = await db
+        .from("notifications")
+        .update(pushRecordPatch(outcome, previousAttempts))
+        .eq("id", id);
+      if (error) {
+        throw new HttpError(500, "db_error", "could not record push delivery", error, {
+          notification_id: id,
+        });
+      }
+    },
+  };
+}
+
 serveFunction(async (req) => {
   const isService = isServiceAuth(
     req.headers.get("Authorization"),
@@ -194,6 +305,7 @@ serveFunction(async (req) => {
   }
 
   const deps = makeDeps(apiKey, operator?.id ?? null);
+  const pushDeps = makePushDeps(adminClient(), vapidConfig());
 
   if (body?.action === "drain") {
     if (!isService) {
@@ -214,9 +326,30 @@ serveFunction(async (req) => {
   // caller can do nothing differently with the distinction anyway.
   if (!row) throw new HttpError(404, "not_found", "notification not found");
 
+  // Push FIRST, and independently of email (review M27).
+  //
+  // The order matters because the email arm throws when RESEND_API_KEY is
+  // missing — H17's deliberate loud failure. If push ran after it, a
+  // deployment with push configured and email not would silently push nothing.
+  // Running it first costs nothing on the reverse path: push is send-once on
+  // `push_status = 'sent'`, so the webhook's retry after an email 500 records
+  // "already sent" rather than pushing twice.
+  //
+  // A push failure does not fail the request. They are separate promises to
+  // the same person, the row records which one broke, and turning a dead
+  // Android endpoint into a 502 would put the EMAIL back in the backlog too.
+  const pushOutcome = await deliverPush(row as unknown as PushableRow, pushDeps);
+
   const outcome = await deliverNotification(row, deps);
   if (outcome.kind === "failed") throw failureResponse(row, outcome);
-  return jsonOk(outcome.kind === "sent" ? { sent: true } : { skipped: true, reason: outcome.reason });
+  return jsonOk({
+    ...(outcome.kind === "sent" ? { sent: true } : { skipped: true, reason: outcome.reason }),
+    push: pushOutcome.kind === "sent"
+      ? { sent: true }
+      : pushOutcome.kind === "skipped"
+      ? { skipped: true, reason: pushOutcome.reason }
+      : { failed: true, error: pushOutcome.error },
+  });
 });
 
 /** Minimal Indigo Emaki email field, inline CSS only. */
