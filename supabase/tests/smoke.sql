@@ -5265,6 +5265,168 @@ begin
   raise notice 'the public signup endpoint has a per-client budget with a ceiling (0048): OK';
 end $$;
 
+-- ── 0049: Web Push device registrations ──────────────────────────────────
+--
+-- The properties that are not restatements of the DDL. The one that matters
+-- most is the shared-device reassignment: a push endpoint identifies a
+-- BROWSER, not a person, so two people using one phone can present the same
+-- endpoint and whichever row survives decides whose walk reports land on that
+-- lock screen.
+do $$
+declare
+  v_op      uuid := '99999999-0000-4000-a000-000000000001';
+  v_cl_a    uuid := '99999999-0000-4000-c000-00000000000a';
+  v_user_a  uuid;
+  v_cl_z    uuid := '99999999-0000-4000-c000-0000000000fb';
+  v_user_z  uuid := '99999999-0000-4000-a000-0000000000fb';
+  -- Real key material, so the shape validators are exercised rather than
+  -- satisfied by a string of the right length (the vector from webpush_test).
+  v_p256    text := 'BDgBTGA8idqXEkJjIO5TqUx5Xdo7kLtbB5Guj120hrfbJeOqNo7eN7llZvZlkPieoqyDS81hVBuQc4y8gpRwbJY';
+  v_auth    text := 'ZmVkY2JhOTg3NjU0MzIxMA';
+  v_shared  text := 'https://fcm.googleapis.com/fcm/send/SHARED-DEVICE';
+  v_op_ep   text := 'https://fcm.googleapis.com/fcm/send/OPERATOR-PHONE';
+  v_id      uuid;
+  v_rows    int;
+  v_owner   uuid;
+  v_removed boolean;
+begin
+  reset session authorization;
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  select auth_user_id into v_user_a from clients where id = v_cl_a;
+  insert into auth.users (id, email) values (v_user_z, 'push-z@sanpo.test');
+  insert into clients (id, operator_id, auth_user_id, full_name, status)
+  values (v_cl_z, v_op, v_user_z, 'Push Client Z', 'active');
+
+  -- 1. The OPERATOR's own device: client_id null, operator_id resolved from
+  -- the session rather than supplied.
+  set local role authenticated;
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  v_id := fn_register_push_subscription(v_op_ep, v_p256, v_auth, 'Pixel/Chrome');
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  if (select client_id from push_subscriptions where id = v_id) is not null then
+    raise exception 'FAIL: an operator device was recorded against a client (0049)';
+  end if;
+  if (select operator_id from push_subscriptions where id = v_id) <> v_op then
+    raise exception 'FAIL: the operator device was not scoped to its operator (0049)';
+  end if;
+
+  -- 2. A CLIENT's device carries both ids, and the operator is derived from
+  -- the client rather than trusted from the caller.
+  set local role authenticated;
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_user_a), true);
+  v_id := fn_register_push_subscription(v_shared, v_p256, v_auth, 'iPhone/Safari');
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  if (select client_id from push_subscriptions where id = v_id) <> v_cl_a
+     or (select operator_id from push_subscriptions where id = v_id) <> v_op then
+    raise exception 'FAIL: a client device was not scoped to its client and operator (0049)';
+  end if;
+
+  -- 3. THE SHARED DEVICE. Z signs in on the same browser and registers the
+  -- SAME endpoint. There must be exactly one row and it must belong to Z —
+  -- a row left attached to A sends A's client reports to a phone Z is holding.
+  set local role authenticated;
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_user_z), true);
+  perform fn_register_push_subscription(v_shared, v_p256, v_auth, 'iPhone/Safari');
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  select count(*) into v_rows from push_subscriptions where endpoint = v_shared;
+  select client_id into v_owner from push_subscriptions where endpoint = v_shared limit 1;
+  if v_rows <> 1 then
+    raise exception 'FAIL: re-registering a shared device left % rows for one endpoint (0049)', v_rows;
+  end if;
+  if v_owner <> v_cl_z then
+    raise exception 'FAIL: a re-registered device still belongs to the PREVIOUS person (0049) — their notifications now reach a phone somebody else is holding';
+  end if;
+
+  -- 4. Removal is scoped to the caller. A must not be able to silence Z's
+  -- device by naming its endpoint — endpoints are not secret in any strong
+  -- sense, so an unscoped delete is a denial-of-service primitive.
+  set local role authenticated;
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_user_a), true);
+  v_removed := fn_remove_push_subscription(v_shared);
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  if v_removed then
+    raise exception 'FAIL: one person removed another person''s push subscription (0049)';
+  end if;
+  if not exists (select 1 from push_subscriptions where endpoint = v_shared) then
+    raise exception 'FAIL: the foreign removal deleted the row anyway (0049)';
+  end if;
+
+  -- 5. No write grants for the API roles: every write goes through the
+  -- definer functions, which decide the persona themselves.
+  if has_table_privilege('authenticated', 'push_subscriptions', 'INSERT')
+     or has_table_privilege('authenticated', 'push_subscriptions', 'UPDATE')
+     or has_table_privilege('authenticated', 'push_subscriptions', 'DELETE')
+     or has_table_privilege('anon', 'push_subscriptions', 'SELECT, INSERT, UPDATE, DELETE') then
+    raise exception 'FAIL: an API role can write push_subscriptions directly (0049)';
+  end if;
+
+  -- 6. The encryption secrets are not selectable.
+  if has_column_privilege('authenticated', 'push_subscriptions', 'p256dh', 'SELECT')
+     or has_column_privilege('authenticated', 'push_subscriptions', 'auth', 'SELECT') then
+    raise exception 'FAIL: a client can read push encryption secrets (0049)';
+  end if;
+
+  -- 7. RLS scopes reads to the caller's own devices. Z must not see the
+  -- operator's device, and the operator must not see Z's.
+  set local role authenticated;
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_user_z), true);
+  select count(*) into v_rows from push_subscriptions;
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  if v_rows <> 1 then
+    raise exception 'FAIL: a client can see % push subscriptions, not just their own (0049)', v_rows;
+  end if;
+
+  -- 8. Erasure. The purge REDACTS the client row rather than deleting it, so
+  -- the FK cascade never fires — without the trigger an endpoint identifying
+  -- a person's browser survives an erasure request indefinitely.
+  update clients set purged_at = now() where id = v_cl_z;
+  if exists (select 1 from push_subscriptions where client_id = v_cl_z) then
+    raise exception 'FAIL: a purged client kept their device registrations (0049)';
+  end if;
+
+  -- 9. Shape validation. A truncated key produces a payload the push service
+  -- ACCEPTS and the browser silently never opens, so it is refused at write
+  -- time rather than discovered as a notification nobody received.
+  set local role authenticated;
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  begin
+    perform fn_register_push_subscription(v_op_ep || '-x', left(v_p256, 40), v_auth);
+    raise exception 'FAIL: a truncated p256dh was accepted (0049)';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+  begin
+    perform fn_register_push_subscription('http://insecure.example/x', v_p256, v_auth);
+    raise exception 'FAIL: a non-https endpoint was accepted (0049)';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+
+  -- 10. The new notifications columns are not client-writable. 0004 grants
+  -- only `update (read_at)`; a later table-level grant would silently let a
+  -- client mark their own payment_failed push as sent.
+  if has_column_privilege('authenticated', 'notifications', 'push_status', 'UPDATE')
+     or has_column_privilege('authenticated', 'notifications', 'push_sent_at', 'UPDATE') then
+    raise exception 'FAIL: a client can rewrite push delivery state (0049)';
+  end if;
+
+  raise notice 'push subscriptions: persona-scoped, device-reassigning, purged with the client (0049): OK';
+end $$;
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;

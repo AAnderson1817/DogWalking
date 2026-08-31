@@ -110,6 +110,13 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
 - **Assert on a named sentence, not a bare call.** A sabotage that aborts the
   suite with Postgres's own message reads as a broken suite rather than a
   broken rule. Wrap the call and raise your own `FAIL: …`.
+- **A non-zero exit is not proof that a sabotage worked.** Check that YOUR
+  `FAIL:` sentence appeared. In 0049 a sabotage of the upsert duplicated a
+  column assignment, so the `create or replace` errored and the function was
+  never replaced — the run exited 3 and looked red while testing nothing. A
+  non-empty diff was not enough here, because the diff applied and the SQL
+  did not. Make the batch runner print "(no FAIL line)" and treat that as a
+  failure of the proof, not of the code.
 - **The same trap in TypeScript is a bare `assertRejects`.** It passes for any
   rejection, including one from a dependency that blew up because your
   sabotage moved it earlier — so a test written to pin *which* refusal happens

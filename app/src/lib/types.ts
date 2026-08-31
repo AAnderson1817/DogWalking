@@ -333,6 +333,10 @@ export type Database = {
           email_attempts: number;
           email_sent_at: string | null;
           email_last_error: string | null;
+          push_status: Database["public"]["Enums"]["push_delivery_status"];
+          push_attempts: number;
+          push_sent_at: string | null;
+          push_last_error: string | null;
         };
         Insert: {
           id?: string;
@@ -349,6 +353,10 @@ export type Database = {
           email_attempts?: number;
           email_sent_at?: string | null;
           email_last_error?: string | null;
+          push_status?: Database["public"]["Enums"]["push_delivery_status"];
+          push_attempts?: number;
+          push_sent_at?: string | null;
+          push_last_error?: string | null;
         };
         Update: {
           id?: string;
@@ -365,6 +373,10 @@ export type Database = {
           email_attempts?: number;
           email_sent_at?: string | null;
           email_last_error?: string | null;
+          push_status?: Database["public"]["Enums"]["push_delivery_status"];
+          push_attempts?: number;
+          push_sent_at?: string | null;
+          push_last_error?: string | null;
         };
         Relationships: [];
       };
@@ -731,6 +743,51 @@ export type Database = {
           lng?: number | null;
           created_at?: string;
           updated_at?: string;
+        };
+        Relationships: [];
+      };
+      push_subscriptions: {
+        Row: {
+          id: string;
+          operator_id: string;
+          client_id: string | null;
+          endpoint: string;
+          p256dh: string;
+          auth: string;
+          user_agent: string | null;
+          created_at: string;
+          last_seen_at: string;
+          failure_count: number;
+          last_failure_at: string | null;
+          last_error: string | null;
+        };
+        Insert: {
+          id?: string;
+          operator_id: string;
+          client_id?: string | null;
+          endpoint: string;
+          p256dh: string;
+          auth: string;
+          user_agent?: string | null;
+          created_at?: string;
+          last_seen_at?: string;
+          failure_count?: number;
+          last_failure_at?: string | null;
+          last_error?: string | null;
+        };
+        Update: {
+          id?: string;
+          operator_id?: string;
+          client_id?: string | null;
+          endpoint?: string;
+          p256dh?: string;
+          auth?: string;
+          user_agent?: string | null;
+          created_at?: string;
+          last_seen_at?: string;
+          failure_count?: number;
+          last_failure_at?: string | null;
+          last_error?: string | null;
         };
         Relationships: [];
       };
@@ -1257,6 +1314,10 @@ export type Database = {
         };
         Returns: Json;
       };
+      fn_forget_purged_push_subscriptions: {
+        Args: Record<string, never>;
+        Returns: unknown;
+      };
       fn_grant_credits: {
         Args: {
           p_client: string;
@@ -1413,6 +1474,21 @@ export type Database = {
       fn_refund_cancelled_debit: {
         Args: Record<string, never>;
         Returns: unknown;
+      };
+      fn_register_push_subscription: {
+        Args: {
+          p_endpoint: string;
+          p_p256dh: string;
+          p_auth: string;
+          p_user_agent: string;
+        };
+        Returns: string;
+      };
+      fn_remove_push_subscription: {
+        Args: {
+          p_endpoint: string;
+        };
+        Returns: boolean;
       };
       fn_reset_invite_signup_budget: {
         Args: Record<string, never>;
@@ -1599,6 +1675,7 @@ export type Database = {
       payment_status: "pending" | "succeeded" | "failed" | "refunded" | "disputed";
       payment_type: "subscription" | "overage" | "topup";
       pet_size: "small" | "medium" | "large" | "giant";
+      push_delivery_status: "pending" | "sent" | "skipped" | "failed";
       rollover_policy: "none" | "capped" | "unlimited";
       subscription_status: "none" | "active" | "paused" | "past_due" | "cancelled";
       walk_status: "scheduled" | "in_progress" | "completed" | "cancelled" | "no_show";
@@ -1623,6 +1700,7 @@ export type Pets = Database["public"]["Tables"]["pets"]["Row"];
 export type PlanChangeIntents = Database["public"]["Tables"]["plan_change_intents"]["Row"];
 export type Plans = Database["public"]["Tables"]["plans"]["Row"];
 export type Properties = Database["public"]["Tables"]["properties"]["Row"];
+export type PushSubscriptions = Database["public"]["Tables"]["push_subscriptions"]["Row"];
 export type RecurringSchedules = Database["public"]["Tables"]["recurring_schedules"]["Row"];
 export type SchedulePets = Database["public"]["Tables"]["schedule_pets"]["Row"];
 export type ServiceTypes = Database["public"]["Tables"]["service_types"]["Row"];
@@ -1644,6 +1722,7 @@ export type NotificationType = Database["public"]["Enums"]["notification_type"];
 export type PaymentStatus = Database["public"]["Enums"]["payment_status"];
 export type PaymentType = Database["public"]["Enums"]["payment_type"];
 export type PetSize = Database["public"]["Enums"]["pet_size"];
+export type PushDeliveryStatus = Database["public"]["Enums"]["push_delivery_status"];
 export type RolloverPolicy = Database["public"]["Enums"]["rollover_policy"];
 export type SubscriptionStatus = Database["public"]["Enums"]["subscription_status"];
 export type WalkStatus = Database["public"]["Enums"]["walk_status"];
