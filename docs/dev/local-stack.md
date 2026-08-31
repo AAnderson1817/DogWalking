@@ -1,5 +1,9 @@
 # Local stack without Docker
 
+This file is the DATABASE half. For the rest of getting a container working —
+deno, the Playwright browser, the build env vars, and the gates that pass
+without checking anything — see `docs/dev/session-notes.md`.
+
 The usual path is `supabase start` (Docker). This repo also supports a
 bare-metal fallback for environments where the Docker daemon is unavailable,
 using a system PostgreSQL server plus a compatibility shim.
