@@ -222,6 +222,8 @@ async function push(h: SwHarness, payload: unknown | "malformed"): Promise<void>
       : {
         json: () => {
           if (payload === "malformed") throw new SyntaxError("not json");
+          // The literal `null` in the body: valid JSON, parses fine.
+          if (payload === "json-null") return null;
           return payload;
         },
       },
@@ -513,7 +515,11 @@ describe("push (review M27)", () => {
     // repeat offenders. So every path out of the handler must show something:
     // a generic notification is a worse product, no notification is a broken
     // one — and the permission is not recoverable without asking again.
-    for (const payload of ["malformed", null, {}, { title: "" }] as const) {
+    // `null` and `42` are the sharp ones: `data.json()` SUCCEEDS for both, so
+    // the parse guard does not fire and every field read runs against a
+    // non-object. `null` then throws, which rejected waitUntil and showed
+    // nothing at all (Codex review on PR #85).
+    for (const payload of ["malformed", null, {}, { title: "" }, "json-null", 42] as const) {
       const h = loadServiceWorker();
       await push(h, payload);
       expect(h.shown.length, `payload ${JSON.stringify(payload)} showed nothing`).toBe(1);

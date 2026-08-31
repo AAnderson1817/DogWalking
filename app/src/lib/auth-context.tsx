@@ -18,7 +18,7 @@ import type { Session } from "@supabase/supabase-js";
 import { supabase } from "./supabase";
 import { deleteOutboxDatabase } from "./gps-outbox";
 import { clearAllWalkSnapshots } from "./walk-snapshot";
-import { forgetPushDeviceBeforeSignOut } from "./push";
+import { forgetPushDeviceBeforeSignOut, reclaimPushDevice } from "./push";
 import { Sheet } from "@/components/Sheet";
 import { FormError, Input } from "@/components/fields";
 import { LoadingState } from "@/components/StateField";
@@ -126,6 +126,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setOperatorId(resolved.operatorId);
     setClientId(resolved.clientId);
     setOperatorBilling(resolved.billing);
+    // Claim any browser subscription that survived a session ending WITHOUT
+    // the sign-out path — a failed refresh token, cleared auth storage, a tab
+    // killed mid-session (Codex review on PR #85). Without this the device
+    // keeps delivering the previous account's notifications and never gets
+    // this one's, and the UI cannot repair it because `on` offers only OFF.
+    //
+    // Fire-and-forget and never throwing: it is a repair, not a precondition
+    // for being signed in, and the RPC refuses a caller who is not yet an
+    // operator or a client (mid-onboarding), which must not block anything.
+    void reclaimPushDevice();
     return resolved.role;
   }, []);
 

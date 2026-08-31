@@ -5386,6 +5386,31 @@ begin
     raise exception 'FAIL: a re-registered device still belongs to the PREVIOUS person (0049) — their notifications now reach a phone somebody else is holding';
   end if;
 
+  -- 3b. A foreign caller who learns the endpoint cannot claim it (Codex
+  -- review on PR #85). Unconditional reassignment contradicted this file's
+  -- own reason for scoping removal — an endpoint is not secret enough to
+  -- authorize acting on it — and let anyone stop a victim's notifications
+  -- AND start delivering their own onto the victim's device.
+  --
+  -- The genuine shared-device case presents the SAME key material, because
+  -- the browser hands back the same subscription object; a caller who only
+  -- knows the endpoint cannot.
+  set local role authenticated;
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_user_a), true);
+  begin
+    perform fn_register_push_subscription(v_shared, replace(v_p256, 'BDgB', 'BDgC'), v_auth);
+    raise exception 'FAIL: a caller knowing only the endpoint claimed another device (0049)';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+  end;
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  select client_id into v_owner from push_subscriptions where endpoint = v_shared;
+  if v_owner <> v_cl_z then
+    raise exception 'FAIL: the refused claim still moved the device (0049)';
+  end if;
+
   -- 4. Removal is scoped to the caller. A must not be able to silence Z's
   -- device by naming its endpoint — endpoints are not secret in any strong
   -- sense, so an unscoped delete is a denial-of-service primitive.
