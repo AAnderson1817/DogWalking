@@ -2425,7 +2425,28 @@ begin
     raise exception 'FAIL: expiring the backlog twice abandoned the same row again';
   end if;
 
-  raise notice 'email retry bound and give-up note (0029): OK';
+  -- 0049, Codex review on PR #85: the push channel has to give up VISIBLY
+  -- too. The widened backlog excludes a push past the ceiling, so without
+  -- this the row just vanishes from the drain — no note, no abandoned count,
+  -- `push_status` left 'failed' forever with nothing that will ever look at
+  -- it again. The whole argument for four states is that a row says what
+  -- happened to it.
+  update notifications
+     set push_status = 'failed', push_attempts = 99, push_last_error = 'fcm 500'
+   where id = v_n;
+  if fn_expire_notification_backlog() < 1 then
+    raise exception 'FAIL: a push past the attempt ceiling was not abandoned (0049)';
+  end if;
+  select push_last_error into v_err from notifications where id = v_n;
+  if v_err not like '%gave up after%' then
+    raise exception 'FAIL: the push does not say it was given up on (0049): %', v_err;
+  end if;
+  -- Idempotent, for the same reason the email half is.
+  if fn_expire_notification_backlog() <> 0 then
+    raise exception 'FAIL: expiring twice abandoned the same push again (0049)';
+  end if;
+
+  raise notice 'email retry bound and give-up note (0029) + push (0049): OK';
 end $$;
 
 -- A row older than the retry window is abandoned too: an email about a walk
@@ -5331,6 +5352,7 @@ declare
   v_rows    int;
   v_owner   uuid;
   v_removed boolean;
+  i         int;
 begin
   reset session authorization;
   reset role;
@@ -5489,6 +5511,34 @@ begin
   if has_column_privilege('authenticated', 'notifications', 'push_status', 'UPDATE')
      or has_column_privilege('authenticated', 'notifications', 'push_sent_at', 'UPDATE') then
     raise exception 'FAIL: a client can rewrite push delivery state (0049)';
+  end if;
+
+  -- 11. The device count per recipient is BOUNDED (Codex review on PR #85).
+  -- Nothing checks an endpoint belongs to a real push service, so without a
+  -- quota one account can register unbounded fabricated endpoints and every
+  -- later notification POSTs to each of them, sequentially, before the email
+  -- arm runs.
+  set local role authenticated;
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  for i in 1..25 loop
+    perform fn_register_push_subscription(
+      'https://fcm.googleapis.com/fcm/send/FLOOD-' || i, v_p256, v_auth);
+  end loop;
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  select count(*) into v_rows
+    from push_subscriptions where operator_id = v_op and client_id is null;
+  if v_rows > 10 then
+    raise exception 'FAIL: one recipient holds % device registrations (0049) — the send path POSTs to every one of them before the email', v_rows;
+  end if;
+  -- And the MOST RECENT survive: evicting the device in front of somebody
+  -- right now would be worse than refusing the registration outright.
+  if not exists (
+    select 1 from push_subscriptions
+     where endpoint = 'https://fcm.googleapis.com/fcm/send/FLOOD-25'
+  ) then
+    raise exception 'FAIL: the newest device was evicted rather than the oldest (0049)';
   end if;
 
   raise notice 'push subscriptions: persona-scoped, device-reassigning, purged with the client (0049): OK';

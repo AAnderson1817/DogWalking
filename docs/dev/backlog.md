@@ -25,7 +25,21 @@ before you hit them.
 
 ## Open
 
-### 1. Small batch (one PR)
+### 1. Make send-once atomic on BOTH channels
+`deliverNotification` and `deliverPush` both read `*_status === 'sent'` and
+write unconditionally later, so two concurrent invocations — the INSERT
+webhook racing the nightly drain, or an operator POSTing `notification_id`
+directly — can both pass the guard and both deliver. Raised by Codex on PR #85
+against the push arm; it is pre-existing in the email arm since M1, which is
+why it belongs here as one change rather than half of it in a push PR.
+
+Harm is asymmetric: the worker sets `tag` to the notification type, so a
+duplicate push COLLAPSES on the lock screen, while a duplicate email is a
+second email. Fix is the `0013` shape — an atomic claim with a LEASE, so a
+process that dies mid-send does not strand the row — and the lease is why this
+is not a two-line change.
+
+### 2. Small batch (one PR)
 - `fn_walk_cost` is LOAD-BEARING (`fn_debit_walk` calls it, smoke pins it) —
   do NOT touch it. The dead code is `api.ts`'s `walkCost()` wrapper, itself
   with zero importers: delete it, or wire it where a persisted walk's display
@@ -40,7 +54,7 @@ before you hit them.
   the deliberate thin-wrapper exception (its logic is SQL-side);
   `charge-overage` is already covered through `_lib/overage*.ts`.
 
-### 2. Tell the operator when an edited address is already suppressed
+### 3. Tell the operator when an edited address is already suppressed
 Also recorded in spec 04. Editing a client's address to one already in
 `email_suppressions` makes every future client-facing email skip
 permanently and terminally, with no signal in the UI. Whether to surface it
