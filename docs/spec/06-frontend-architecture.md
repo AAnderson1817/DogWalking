@@ -754,3 +754,39 @@ Two mechanisms now, and the order matters:
 The panel replaces the app rather than sitting inside `ErrorBoundary`: a client
 pointed at the unroutable placeholder would otherwise spend the whole session
 failing one request at a time instead of saying what is wrong once.
+
+## Push notifications (review M27)
+
+The service worker gains `push` and `notificationclick`. Three rules, each of
+which has a test that fails against the plausible wrong version:
+
+1. **Every push ends in a visible notification**, including one whose payload
+   cannot be parsed. Chrome permits a handful of silent pushes, then displays
+   "This site has been updated in the background" itself, and revokes the
+   permission from repeat offenders — which is not recoverable without asking
+   again. A generic notification is a worse product; no notification is a
+   broken one.
+2. **A payload-supplied path is not a trusted destination.** `safePath`
+   mirrors `lib/internal-path.ts` (M41) at a sink that is a real navigation:
+   `//host` and the `\` bypass are another origin once handed to
+   `clients.openWindow`. It is duplicated rather than imported because a
+   worker has no module graph into `src/`.
+3. **A tap focuses an already-open tab** on our own origin rather than
+   stacking another, and `client.navigate` failing is not allowed to lose the
+   focus already gained.
+
+The opt-in reports five states, not a boolean: `unsupported`, `unconfigured`,
+`denied`, `off`, `on`. Only the last two render a switch — offering one that
+cannot work is worse than an honest sentence, and `denied` names the browser's
+site settings as the only place that can undo it. `unsupported` is checked
+before `unconfigured` so a browser without the Push API is not told the site
+is misconfigured.
+
+`VITE_VAPID_PUBLIC_KEY` is optional, like `VITE_MAPBOX_TOKEN`. Minting the
+pair is an owner action; absent it, the UI says so and no device subscribes.
+
+Sign-out removes this device's registration BEFORE clearing the session, which
+is the opposite of the M8 outbox and snapshot cleanups beside it: those are
+local storage and need no caller, while `fn_remove_push_subscription` is
+scoped to the caller. Leaving the row behind means that on a shared device the
+next person's notifications reach a registration the previous person owns.

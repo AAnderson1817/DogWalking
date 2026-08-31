@@ -25,17 +25,7 @@ before you hit them.
 
 ## Open
 
-### 1. Push notifications (M27) — the largest item
-No push handler in `app/public/sw.js`, no VAPID keys, no subscriptions table.
-Scope: subscriptions table (tenant table ⇒ `operator_id` + RLS, invariant 7),
-SW `push`/`notificationclick` handlers (mind the network-only rules from
-`qc(1–4)`; `app/scripts/service-worker.test.ts` drives the real fetch
-handler), opt-in UI, and a send path piggybacking the existing `notifications`
-insert. Honest delivery states: copy H17's email machinery. VAPID key
-generation is an **owner action** — add it to `owner-actions.md` in the same
-commit and degrade gracefully without it.
-
-### 2. Small batch (one PR)
+### 1. Small batch (one PR)
 - `fn_walk_cost` is LOAD-BEARING (`fn_debit_walk` calls it, smoke pins it) —
   do NOT touch it. The dead code is `api.ts`'s `walkCost()` wrapper, itself
   with zero importers: delete it, or wire it where a persisted walk's display
@@ -50,7 +40,7 @@ commit and degrade gracefully without it.
   the deliberate thin-wrapper exception (its logic is SQL-side);
   `charge-overage` is already covered through `_lib/overage*.ts`.
 
-### 3. Tell the operator when an edited address is already suppressed
+### 2. Tell the operator when an edited address is already suppressed
 Also recorded in spec 04. Editing a client's address to one already in
 `email_suppressions` makes every future client-facing email skip
 permanently and terminally, with no signal in the UI. Whether to surface it
@@ -58,6 +48,17 @@ permanently and terminally, with no signal in the UI. Whether to surface it
 a product question.
 
 ## Done
+
+- **Push notifications (M27)** — RFC 8291 payload encryption and RFC 8292
+  VAPID written against `crypto.subtle` and pinned byte-for-byte to
+  `http_ece`, the reference implementation; migration `0049` for the
+  subscriptions table and the `push_*` delivery quartet; a push arm alongside
+  H17's email arm in `send-notification`; service-worker `push` /
+  `notificationclick`; and a five-state opt-in for both personas. VAPID keys
+  are owner action §17 and everything degrades to `skipped` without them.
+  Found on the way: `send-notification` had been selecting a column that does
+  not exist since `security(0032)`, so no email had ever been sent. See the
+  `feat(push)` status-log entry.
 
 - **`claim-signup` rate limit** — migration `0048`. Keyed on the CLIENT the
   invite belongs to, not on the caller: the backlog said "keyed for an

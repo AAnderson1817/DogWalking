@@ -48,6 +48,7 @@ not quietly rot:
 | §1b signup toggle | Nothing automated, by design — it is a business decision, and neither setting is a defect |
 | §15 GoTrue admin rate limit | Nothing automated — no GoTrue in this environment. Sizes a harm; blocks nothing |
 | §16 email confirmations | Nothing automated yet; the check needs a key name only a live `/config/auth` response carries |
+| §17 VAPID keys | The opt-in section reads "not set up for this installation"; every notification records `push_status = 'skipped'` |
 
 Several of these have no automated signal at all — §1, §1a, §1b, §4, §6, §15
 and §16 —
@@ -397,6 +398,46 @@ the thing that was not true before.
 
 This is a spending and design decision, and the composition is LOCKED
 (`CLAUDE.md`, Ownership): a re-render is a resize, never a recomposition.
+
+### 17. Mint the VAPID key pair — review M27
+
+Push notifications ship in code and are inert until this exists. Nothing here
+can create the pair: the public half has to be baked into the client bundle at
+build time and the private half is a deploy secret, so this is three settings
+in two places.
+
+```
+npx web-push generate-vapid-keys
+```
+
+Then:
+
+| Where | Name | Value |
+| --- | --- | --- |
+| Vercel (all environments) | `VITE_VAPID_PUBLIC_KEY` | the public key |
+| Supabase Edge Function secrets | `VAPID_PUBLIC_KEY` | the same public key |
+| Supabase Edge Function secrets | `VAPID_PRIVATE_KEY` | the private key |
+| Supabase Edge Function secrets | `VAPID_SUBJECT` | `mailto:` an address you read |
+
+The public key must be **identical** in both places. A browser subscribes with
+the one from the bundle and the push service checks the signature against it;
+a mismatch fails at the push service, per device, with nothing on our side to
+look at.
+
+`VAPID_SUBJECT` is not decoration. RFC 8292 §2.1 makes it how a push service
+reaches a human about a misbehaving sender, and a service that cannot may
+simply stop accepting the key. `_lib/webpush.ts` refuses a subject that is not
+`mailto:` or `https:` rather than sending one that will be ignored.
+
+**What is true until this is done:** the opt-in section says "Push
+notifications are not set up for this installation yet" and offers no switch,
+so nobody subscribes, so every notification records `push_status = 'skipped'`
+for want of a device. That is the honest state, not a silent failure — and it
+is why this blocks nothing. The email channel is unaffected.
+
+Rotating later invalidates every existing subscription: browsers subscribed
+under the old key keep endpoints the new key cannot sign for, and the send
+path learns it one 403 at a time. Treat it as a re-opt-in, not a swap.
 
 ## Questions, not tasks
 
