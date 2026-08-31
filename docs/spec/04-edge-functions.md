@@ -452,11 +452,38 @@ accepted; `skipped` (TERMINAL) when there are no registrations, or when every
 one turned out to be gone; `failed` (retryable) when they had devices and all
 of them failed. Per-device health lives on the subscription row.
 
+An endpoint that is not a push service is never CONTACTED at all — the check
+is a `continue` before the request exists, not a classification of one that
+failed (Codex review on PR #85; the host list and its residuals are in spec
+01). It is dropped, on the same reasoning as 404: an endpoint nothing will
+ever POST to cannot deliver, so keeping the row leaves a target padding the
+recipient's device quota. Registration refuses these, so on a fresh deploy
+that branch is unreachable — which is why it exists. It is the check that
+survives a future write path forgetting the rule. Requests also refuse to
+FOLLOW a redirect: the allowlist decides which host this function contacts,
+and a followed redirect hands that decision to the response instead, one hop
+later, at a host nothing checked.
+
 404 and 410 delete the registration: the browser has permanently forgotten it,
 and the row holds an endpoint identifying a browser. 413 is OURS — the payload
 exceeded the service's limit — so it is permanent but must NOT delete a good
 device over a bug in our own message. A thrown transport error is not a
 verdict from the push service and is never read as "this device is gone".
+
+What a failure RECORDS is ours, never the push service's words.
+`notifications.push_last_error` is selectable by `authenticated`, and this used
+to carry 300 characters of the response body — H14's rule inverted, and with an
+attacker-choosable endpoint an exfiltration channel rather than merely untidy.
+The status is kept because it is the diagnostic and it is a number we chose;
+the body goes to ONE log line at the point it is read, with the subscription id
+and the endpoint's HOST for context. Never the endpoint itself: its path
+segment is the device's bearer credential.
+
+The wiring lives in `push_deps.ts` rather than `index.ts` so that it can be
+driven by a test at all — importing `index.ts` executes `serveFunction` and
+binds a port. That is the `overage_deps.ts` split and the same reason: every
+push test injects a pure `sendPush`, so nothing had ever exercised the request
+options, which is precisely where both defects above lived.
 
 VAPID is read at send time and is absent-tolerant by ordering: subscriptions
 are looked up first, so a deployment with no keys has no devices and records

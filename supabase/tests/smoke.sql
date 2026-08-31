@@ -5553,6 +5553,73 @@ begin
     raise exception 'FAIL: the newest device was evicted rather than the oldest (0049)';
   end if;
 
+  -- 12. The endpoint HOST is checked, not just the scheme (Codex review on
+  -- PR #85). Registration used to accept any https url and `send-notification`
+  -- then POSTed to it from the edge runtime, with the outcome readable back
+  -- off `notifications.push_last_error` — a server-side request forgery with
+  -- an oracle, available to any authenticated caller.
+  --
+  -- The predicate is driven directly rather than through the RPC, because a
+  -- matrix is what this needs and each RPC call would also have to satisfy
+  -- the key shape, the quota and the reassignment rules. The RPC's use of it
+  -- is asserted separately below.
+  if not (
+    fn_is_push_service_endpoint('https://fcm.googleapis.com/fcm/send/x')
+    and fn_is_push_service_endpoint('https://updates.push.services.mozilla.com/wpush/v2/x')
+    and fn_is_push_service_endpoint('https://web.push.apple.com/x')
+    and fn_is_push_service_endpoint('https://wns2-by3p.notify.windows.com/w/?token=x')
+    -- Host names are case-insensitive, and refusing a real device over a
+    -- detail the URL grammar calls meaningless is the false-positive
+    -- direction that gets a check deleted.
+    and fn_is_push_service_endpoint('https://FCM.GoogleAPIs.COM/fcm/send/x')
+  ) then
+    raise exception 'FAIL: a real push service endpoint was refused (0049)';
+  end if;
+  if (
+    -- The finding itself, then loopback and link-local — where an SSRF is
+    -- usually pointed.
+    fn_is_push_service_endpoint('https://internal.svc.local/admin')
+    or fn_is_push_service_endpoint('https://169.254.169.254/latest/meta-data/')
+    or fn_is_push_service_endpoint('https://127.0.0.1/')
+    -- Userinfo: the HOST here is evil.example, and the string reads to a
+    -- skimming human as a Google endpoint.
+    or fn_is_push_service_endpoint('https://fcm.googleapis.com@evil.example/x')
+    -- The leading dot on each suffix is what refuses this: `notify.windows.com`
+    -- is also a suffix of `evilnotify.windows.com`, which anyone can register.
+    or fn_is_push_service_endpoint('https://evilnotify.windows.com/w/')
+    -- A subdomain of an EXACT host is not that host, and a suffix used as a
+    -- prefix is not a suffix.
+    or fn_is_push_service_endpoint('https://evil.fcm.googleapis.com/fcm/send/x')
+    or fn_is_push_service_endpoint('https://fcm.googleapis.com.evil.example/x')
+    -- An explicit non-443 port would open every internal service reachable
+    -- on an allowlisted name.
+    or fn_is_push_service_endpoint('https://fcm.googleapis.com:8080/fcm/send/x')
+    or fn_is_push_service_endpoint('http://fcm.googleapis.com/fcm/send/x')
+    or fn_is_push_service_endpoint('fcm.googleapis.com/fcm/send/x')
+    or fn_is_push_service_endpoint(null)
+  ) then
+    raise exception 'FAIL: an endpoint that is not a push service was accepted (0049)';
+  end if;
+
+  -- And registration CONSULTS it. A predicate nothing calls is a comment.
+  set local role authenticated;
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  begin
+    perform fn_register_push_subscription('https://internal.svc.local/admin', v_p256, v_auth);
+    raise exception 'FAIL: an arbitrary https endpoint was registered (0049)';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    -- The refusal must be the HOST check and not some later rule tripping by
+    -- luck — a quota or a key-shape failure here would pass this block while
+    -- leaving the endpoint registrable under other conditions.
+    if sqlerrm not like '%is not a push service%' then
+      raise exception 'FAIL: refused for the wrong reason (0049): %', sqlerrm;
+    end if;
+  end;
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+
   raise notice 'push subscriptions: persona-scoped, device-reassigning, purged with the client (0049): OK';
 end $$;
 

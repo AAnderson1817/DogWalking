@@ -23,8 +23,12 @@ const EXPLANATION: Record<PushState, string> = {
   unsupported:
     "This browser cannot show push notifications. On an iPhone, add Sanpo to your Home Screen first.",
   unconfigured: "Push notifications are not set up for this installation yet.",
+  // Covers three situations with one sentence, because the remedy is one
+  // thing: a worker that predates push, an update still installing, and a
+  // first load where nothing has activated yet. Saying "an app update is
+  // ready" was only true of the first (Codex review on PR #85).
   "stale-worker":
-    "An app update is ready. Reload to finish it, then you can turn notifications on — until then this device could not show them.",
+    "This device is still running an older version of the app, which cannot show notifications. Reload to finish updating, then you can turn them on.",
 };
 
 export function PushSection({ heading = "Notifications" }: { heading?: string }) {

@@ -13,6 +13,7 @@ import {
   forgetPushDeviceBeforeSignOut,
   type PushEnvironment,
   pushState,
+  readPushEnvironment,
   reclaimPushDevice,
   subscriptionKeys,
 } from "./push";
@@ -37,7 +38,7 @@ const BASE: PushEnvironment = {
   vapidKey: "BHYKBshY3BflxTbegR9xB7-iTU_uOdZK_ZFY7rqrPPJbxO3PNMLAjRaw3NuIHYRwFLhAKusNb8UweMqU884c5M4",
   permission: "default",
   subscribed: false,
-  updatePending: false,
+  workerHandlesPush: true,
 };
 
 describe("push state", () => {
@@ -71,18 +72,18 @@ describe("push state", () => {
     expect(pushState({ ...BASE, permission: "denied", subscribed: true })).toBe("denied");
   });
 
-  it("a waiting worker is reported ahead of `on`, because a stale one cannot display", () => {
+  it("a worker that cannot handle push is reported ahead of `on`", () => {
     // On an upgrade from before M27 the ACTIVE worker has no push handler at
     // all, and getRegistration() returns it regardless. Subscribing then
     // produces deliveries nothing displays. Reporting `on` for a device
-    // already subscribed under a stale worker would be the worse lie: it
+    // already subscribed under such a worker would be the worse lie: it
     // claims notifications work while none can appear.
-    expect(pushState({ ...BASE, updatePending: true })).toBe("stale-worker");
-    expect(pushState({ ...BASE, updatePending: true, subscribed: true })).toBe("stale-worker");
+    expect(pushState({ ...BASE, workerHandlesPush: false })).toBe("stale-worker");
+    expect(pushState({ ...BASE, workerHandlesPush: false, subscribed: true })).toBe("stale-worker");
     // But a real blocker still outranks it — the person cannot act on either,
     // and `denied` names the only place that CAN be undone.
-    expect(pushState({ ...BASE, updatePending: true, permission: "denied" })).toBe("denied");
-    expect(pushState({ ...BASE, updatePending: true, vapidKey: "" })).toBe("unconfigured");
+    expect(pushState({ ...BASE, workerHandlesPush: false, permission: "denied" })).toBe("denied");
+    expect(pushState({ ...BASE, workerHandlesPush: false, vapidKey: "" })).toBe("unconfigured");
   });
 
   it("only the two actionable states offer a switch", () => {
@@ -142,41 +143,132 @@ describe("enable/disable failure paths", () => {
     return s;
   }
 
-  function stubBrowser(sub: FakeSub | null, existing: FakeSub | null = sub, waiting = false) {
+  /**
+   * How the active service worker behaves.
+   *
+   *   push-capable  a worker running the current sw.js: answers PUSH_CAPABLE?
+   *   silent        a worker from before M27: receives the message, matches
+   *                 none of its own cases, returns without replying. This is
+   *                 the real pre-upgrade behaviour, and silence — not a "no"
+   *                 — is what the page has to read correctly.
+   *   never-ready   nothing has activated, so `serviceWorker.ready` does not
+   *                 settle. It never rejects either, so only a timeout ends
+   *                 the wait.
+   */
+  type WorkerMode = "push-capable" | "silent" | "never-ready";
+
+  function stubBrowser(
+    sub: FakeSub | null,
+    existing: FakeSub | null = sub,
+    mode: WorkerMode = "push-capable",
+  ) {
     vi.stubGlobal("PushManager", class {});
     vi.stubGlobal("Notification", {
       permission: "granted",
       requestPermission: () => Promise.resolve("granted" as NotificationPermission),
     });
+    const reg = {
+      active: {
+        postMessage: (msg: { type?: string }, transfer?: MessagePort[]) => {
+          if (mode !== "push-capable") return;
+          if (msg?.type !== "PUSH_CAPABLE?") return;
+          transfer?.[0]?.postMessage({ type: "PUSH_CAPABLE", push: true });
+        },
+      },
+      pushManager: {
+        subscribe: () => {
+          subscribeCalls.push(1);
+          return Promise.resolve(sub);
+        },
+        getSubscription: () => Promise.resolve(existing),
+      },
+    };
     vi.stubGlobal("navigator", {
       userAgent: "test",
       serviceWorker: {
-        getRegistration: () =>
-          Promise.resolve({
-            waiting: waiting ? {} : null,
-            pushManager: {
-              subscribe: () => {
-                subscribeCalls.push(1);
-                return Promise.resolve(sub);
-              },
-              getSubscription: () => Promise.resolve(existing),
-            },
-          }),
+        getRegistration: () => Promise.resolve(reg),
+        ready: mode === "never-ready" ? new Promise(() => {}) : Promise.resolve(reg),
       },
     });
   }
 
   afterEach(() => vi.unstubAllGlobals());
 
-  it("never subscribes under a worker that cannot serve the push", async () => {
-    // The active worker on an upgrade from before M27 has no `push` handler.
-    // Creating a subscription there produces deliveries nothing displays, and
-    // the person is told notifications are on.
-    const sub = fakeSub();
-    stubBrowser(sub, sub, true);
-    expect(await enablePush()).toBe("stale-worker");
+  it("never subscribes under a worker that does not answer PUSH_CAPABLE?", async () => {
+    // The active worker on an upgrade from before M27 has no `push` handler
+    // and no case for this message, so it simply does not reply. Creating a
+    // subscription there produces deliveries nothing displays, and the person
+    // is told notifications are on.
+    //
+    // The predecessor of this check asked `registration.waiting != null`,
+    // which is null for the whole of that upgrade — the new worker is
+    // `installing`, not `waiting` — so it passed and the subscription was
+    // made. That is the finding, and this case is red against it.
+    vi.useFakeTimers();
+    try {
+      const sub = fakeSub();
+      stubBrowser(sub, sub, "silent");
+      const pending = enablePush();
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(await pending).toBe("stale-worker");
+    } finally {
+      vi.useRealTimers();
+    }
     expect(subscribeCalls, "subscribed anyway").toEqual([]);
     expect(API.registerPushSubscription).not.toHaveBeenCalled();
+  });
+
+  it("never subscribes before any worker has activated", async () => {
+    // A first load, or a worker whose install failed: `ready` never settles.
+    // Waiting forever would leave the switch as a spinner; answering "fine"
+    // would subscribe against nothing at all.
+    vi.useFakeTimers();
+    try {
+      const sub = fakeSub();
+      stubBrowser(sub, sub, "never-ready");
+      const pending = enablePush();
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(await pending).toBe("stale-worker");
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(subscribeCalls, "subscribed anyway").toEqual([]);
+  });
+
+  it("readPushEnvironment asks the worker too, not just enablePush", async () => {
+    // Both call sites matter and they answer different questions. `enablePush`
+    // decides whether to subscribe; `readPushEnvironment` decides what the
+    // screen SAYS about a device already subscribed. A guard on only one of
+    // them leaves the switch reading `on` under a worker that can display
+    // nothing — which is the half of the finding a person actually sees.
+    const sub = fakeSub();
+    stubBrowser(sub, sub);
+    expect((await readPushEnvironment()).workerHandlesPush).toBe(true);
+    expect(pushState(await readPushEnvironment())).toBe("on");
+
+    vi.useFakeTimers();
+    try {
+      stubBrowser(sub, sub, "silent");
+      const pending = readPushEnvironment();
+      await vi.advanceTimersByTimeAsync(2000);
+      const env = await pending;
+      expect(env.workerHandlesPush).toBe(false);
+      expect(env.subscribed, "the browser IS subscribed — that is the case that matters").toBe(true);
+      expect(pushState(env)).toBe("stale-worker");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("subscribes when the active worker says it handles push", async () => {
+    // The other direction: a worker running the current sw.js answers, and
+    // the guard must not stand in the way of the ordinary case. A check that
+    // refuses everything satisfies the case above and ships a dead switch.
+    const sub = fakeSub();
+    stubBrowser(sub, null);
+    expect(await enablePush()).toBe("on");
+    expect(subscribeCalls).toEqual([1]);
+    expect(API.registerPushSubscription).toHaveBeenCalled();
   });
 
   it("rolls the browser subscription back when the server will not record it", async () => {

@@ -16,6 +16,9 @@ import {
   b64urlToBytes,
   bytesToB64url,
   encryptPushPayload,
+  isPushServiceEndpoint,
+  PUSH_SERVICE_HOST_SUFFIXES,
+  PUSH_SERVICE_HOSTS,
   pushAudience,
   RECORD_SIZE,
   vapidAuthorization,
@@ -206,4 +209,95 @@ Deno.test("a payload too large for one record is refused, not mis-framed", async
     auth: VECTOR.auth,
   });
   assert(ok.length > RECORD_SIZE - 200);
+});
+
+// ── The host allowlist (Codex review on PR #85) ──────────────────────────
+//
+// Registration accepted any https url and `send-notification` POSTed to it,
+// so any authenticated caller held a server-side request forgery primitive
+// with an oracle attached. This predicate is the send-side half of the fix;
+// `fn_is_push_service_endpoint` in 0049 is the registration half, and
+// app/scripts/push-service-hosts.test.ts pins the two lists to each other.
+
+Deno.test("every real push service a mainstream browser hands back is accepted", () => {
+  // The other direction matters as much as the refusals: a predicate that
+  // says no to everything satisfies every security case below and ships a
+  // product where nobody can turn notifications on.
+  for (
+    const endpoint of [
+      "https://fcm.googleapis.com/fcm/send/cJ8x9vQ:APA91bF",
+      "https://updates.push.services.mozilla.com/wpush/v2/gAAAAAB",
+      "https://web.push.apple.com/QF3aTf1n2c",
+      "https://wns2-by3p.notify.windows.com/w/?token=BQYAAAB",
+      "https://autopush.stage.push.services.mozilla.com/wpush/v2/x",
+    ]
+  ) {
+    assert(isPushServiceEndpoint(endpoint), `refused a real push endpoint: ${endpoint}`);
+  }
+});
+
+Deno.test("anything that is not one of those hosts is refused", () => {
+  for (
+    const endpoint of [
+      // The finding itself: an arbitrary host reachable from the runtime.
+      "https://internal.svc.local/admin",
+      "https://example.com/collect",
+      // Link-local and loopback, which is where an SSRF is usually pointed.
+      "https://169.254.169.254/latest/meta-data/",
+      "https://127.0.0.1/",
+      "https://[::1]/",
+      // Not https at all.
+      "http://fcm.googleapis.com/fcm/send/x",
+      "ftp://fcm.googleapis.com/x",
+      // Not a url.
+      "fcm.googleapis.com/fcm/send/x",
+      "",
+    ]
+  ) {
+    assert(!isPushServiceEndpoint(endpoint), `accepted a non-push endpoint: ${endpoint}`);
+  }
+});
+
+Deno.test("the near-misses that look like an allowlisted host", () => {
+  for (
+    const endpoint of [
+      // Userinfo. The HOST is evil.example; a reader skimming sees Google.
+      "https://fcm.googleapis.com@evil.example/x",
+      "https://fcm.googleapis.com:pw@evil.example/x",
+      // The leading dot on each suffix is what refuses this one: without it,
+      // `notify.windows.com` is a suffix of `evilnotify.windows.com` too, and
+      // that domain is registrable by anyone.
+      "https://evilnotify.windows.com/w/",
+      "https://notfcm.googleapis.com/fcm/send/x",
+      // A subdomain of an EXACT host is not the exact host.
+      "https://evil.fcm.googleapis.com/fcm/send/x",
+      // Suffix as a prefix, and as a bare label.
+      "https://fcm.googleapis.com.evil.example/x",
+      // An explicit non-443 port: a push service is not on one, and allowing
+      // it would open every internal service on an allowlisted name.
+      "https://fcm.googleapis.com:8080/fcm/send/x",
+    ]
+  ) {
+    assert(!isPushServiceEndpoint(endpoint), `accepted a near-miss: ${endpoint}`);
+  }
+});
+
+Deno.test("host comparison is case-insensitive, because host names are", () => {
+  // A browser hands back a lower-cased host, so this is not about what
+  // arrives — it is about not refusing a legitimate device over a detail the
+  // URL grammar says is meaningless.
+  assert(isPushServiceEndpoint("https://FCM.googleapis.COM/fcm/send/x"));
+  assert(isPushServiceEndpoint("https://WNS2-BY3P.Notify.Windows.Com/w/"));
+});
+
+Deno.test("every suffix carries its leading dot", () => {
+  // The one property of an entry that is invisible when read next to its
+  // siblings, and the difference between matching a subdomain and matching
+  // any domain that merely ends in those letters.
+  for (const suffix of PUSH_SERVICE_HOST_SUFFIXES) {
+    assert(suffix.startsWith("."), `suffix without a leading dot: ${suffix}`);
+  }
+  for (const host of PUSH_SERVICE_HOSTS) {
+    assert(!host.startsWith("."), `exact host written as a suffix: ${host}`);
+  }
 });

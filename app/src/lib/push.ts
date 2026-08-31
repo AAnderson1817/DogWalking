@@ -34,8 +34,18 @@ export interface PushEnvironment {
   vapidKey: string;
   permission: NotificationPermission | null;
   subscribed: boolean;
-  /** A newer worker is installed and WAITING, so the active one is older. */
-  updatePending: boolean;
+  /**
+   * The ACTIVE service worker answered "yes, I handle push".
+   *
+   * Asked rather than inferred (Codex review on PR #85). This was
+   * `registration.waiting != null`, which is neither necessary nor
+   * sufficient: an upgrade from the pre-M27 worker spends its whole install
+   * in `installing`, where `waiting` is still null and the active worker has
+   * no `push` handler; and a deploy that changes nothing about push leaves a
+   * worker WAITING while the active one handles push perfectly well, which
+   * that check reported as broken.
+   */
+  workerHandlesPush: boolean;
 }
 
 export function pushState(e: PushEnvironment): PushState {
@@ -45,17 +55,14 @@ export function pushState(e: PushEnvironment): PushState {
   if (!e.supported) return "unsupported";
   if (!e.vapidKey) return "unconfigured";
   if (e.permission === "denied") return "denied";
-  // A newer worker is waiting, which means the ACTIVE one is from a previous
-  // build — and on an upgrade from before M27 that worker has no `push`
-  // handler at all (Codex review on PR #85). `getRegistration()` returns it
-  // regardless, so subscribing here produces a registration whose deliveries
-  // land on a worker that ignores them: every push silent until the person
-  // happens to accept the update.
+  // The active worker could not confirm it handles push, so a subscription
+  // made here would deliver to something that ignores it: every push silent
+  // until the person happens to reload (Codex review on PR #85).
   //
   // Reported ahead of `on` deliberately. A device that IS subscribed under a
-  // stale worker is the case that matters — saying `on` there would claim
-  // notifications work while none can be displayed.
-  if (e.updatePending) return "stale-worker";
+  // worker that cannot display anything is the case that matters — saying
+  // `on` there would claim notifications work while none can be shown.
+  if (!e.workerHandlesPush) return "stale-worker";
   return e.subscribed ? "on" : "off";
 }
 
@@ -109,6 +116,86 @@ async function registration(): Promise<ServiceWorkerRegistration | null> {
   return (await navigator.serviceWorker.getRegistration()) ?? null;
 }
 
+/**
+ * How long to wait for a worker to activate, and then to answer.
+ *
+ * Both are bounded because both can hang forever rather than fail.
+ * `serviceWorker.ready` never rejects — if nothing ever activates it simply
+ * does not settle — and a worker with no matching message handler never
+ * replies. An unbounded await here would leave the Settings screen showing a
+ * spinner where a switch belongs, with nothing on screen saying why.
+ */
+const WORKER_READY_MS = 3000;
+const WORKER_REPLY_MS = 1000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(null);
+      },
+    );
+  });
+}
+
+/**
+ * Ask the ACTIVE worker whether it handles push, over a MessagePort.
+ *
+ * Silence is a NO, and that is the load-bearing half. A worker from before
+ * M27 receives this message, matches none of its own cases and returns
+ * without replying — so the timeout is how the page learns the worker
+ * predates push. The only way to get `true` is for a worker running the
+ * current `sw.js` to say so.
+ */
+function askWorker(worker: ServiceWorker): Promise<boolean> {
+  return new Promise((resolve) => {
+    let channel: MessageChannel;
+    try {
+      channel = new MessageChannel();
+    } catch {
+      return resolve(false);
+    }
+    const settle = (answer: boolean) => {
+      clearTimeout(timer);
+      channel.port1.onmessage = null;
+      channel.port1.close();
+      resolve(answer);
+    };
+    const timer = setTimeout(() => settle(false), WORKER_REPLY_MS);
+    channel.port1.onmessage = (event: MessageEvent) => {
+      const data = event.data as { type?: unknown; push?: unknown } | null;
+      settle(data?.type === "PUSH_CAPABLE" && data.push === true);
+    };
+    try {
+      worker.postMessage({ type: "PUSH_CAPABLE?" }, [channel.port2]);
+    } catch {
+      settle(false);
+    }
+  });
+}
+
+/**
+ * Whether a push delivered right now would be displayed.
+ *
+ * `serviceWorker.ready` rather than `getRegistration()`: it settles only once
+ * there IS an active worker, which is the one this question is about, and it
+ * covers the first-load case where a registration exists but nothing has
+ * activated yet by waiting instead of answering wrongly.
+ */
+export async function activeWorkerHandlesPush(): Promise<boolean> {
+  if (!pushSupported()) return false;
+  const reg = await withTimeout(navigator.serviceWorker.ready, WORKER_READY_MS);
+  const active = reg?.active ?? null;
+  if (!active) return false;
+  return await askWorker(active);
+}
+
 export async function readPushEnvironment(): Promise<PushEnvironment> {
   const supported = pushSupported();
   const reg = supported ? await registration() : null;
@@ -118,7 +205,7 @@ export async function readPushEnvironment(): Promise<PushEnvironment> {
     vapidKey: env.vapidPublicKey,
     permission: supported ? Notification.permission : null,
     subscribed: existing !== null,
-    updatePending: reg?.waiting != null,
+    workerHandlesPush: supported ? await activeWorkerHandlesPush() : false,
   };
 }
 
@@ -127,7 +214,10 @@ export async function enablePush(): Promise<PushState> {
   const reg = await registration();
   if (!reg || !env.vapidPublicKey) return "unconfigured";
   // Refuse rather than create a subscription the active worker cannot serve.
-  if (reg.waiting != null) return "stale-worker";
+  // Re-asked here rather than trusted from the last render: the worker can
+  // change under a screen that has been open for a while, and this is the
+  // moment the permission prompt and the subscription are about to happen.
+  if (!(await activeWorkerHandlesPush())) return "stale-worker";
 
   const permission = await Notification.requestPermission();
   if (permission !== "granted") return permission === "denied" ? "denied" : "off";

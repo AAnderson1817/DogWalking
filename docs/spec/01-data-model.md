@@ -86,6 +86,34 @@ discriminator because the genuine shared-device case presents endpoint and
 keys TOGETHER: `pushManager.subscribe()` against an existing registration
 returns the existing subscription object.
 
+`endpoint` must also name a push service this system will POST to, checked by
+`fn_is_push_service_endpoint` at registration and again by
+`isPushServiceEndpoint` before the send (Codex review on PR #85). Accepting any
+https url made this a server-side request forgery primitive available to every
+authenticated caller: register an endpoint aimed wherever you like, trigger a
+notification addressed to yourself, and read the outcome back off
+`notifications.push_last_error`, which `authenticated` may select. The quota
+below is not a substitute — it bounds how much outbound work a caller can
+cause and says nothing about where it goes.
+
+The list is four services, each read rather than recalled: `fcm.googleapis.com`
+(Chrome, Chromium, Brave, Opera, Edge on Android),
+`updates.push.services.mozilla.com` (Firefox), `web.push.apple.com` (Safari),
+and `*.notify.windows.com` (Edge / WNS), plus the regional siblings
+`*.push.apple.com` and `*.push.services.mozilla.com`. Each suffix carries a
+LEADING DOT, which is load-bearing rather than cosmetic: without it,
+`notify.windows.com` is also a suffix of `evilnotify.windows.com`, a domain
+anyone can register.
+
+**Stated residual:** a browser whose push service is not on that list cannot
+enable notifications. It is refused at registration, by name, so the failure is
+a sentence somebody can act on rather than a switch that reads "on" and never
+delivers — and the fix is one entry in two places that
+`app/scripts/push-service-hosts.test.ts` keeps in step. Samsung Internet is the
+known unknown: its Android push service hosts are documented, but whether its
+WEB push endpoints use them or FCM could not be established from here, so
+nothing was added on a guess.
+
 **Stated residual:** a browser that recycled an endpoint under a fresh keypair
 would also be refused, and the stale row is invisible to the new owner
 (SELECT is scoped per persona). No implementation is known to do this — the

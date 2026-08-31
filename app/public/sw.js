@@ -68,7 +68,29 @@ self.addEventListener("install", (event) => {
 // longer serves, and got a 404 in the middle of a walk. Now the new worker
 // waits, the app offers a reload, and this only fires when someone accepts.
 self.addEventListener("message", (event) => {
-  if (event.data && event.data.type === "SKIP_WAITING") self.skipWaiting();
+  if (!event.data) return;
+  if (event.data.type === "SKIP_WAITING") self.skipWaiting();
+
+  // "Can you show a push?" — asked by lib/push.ts before it lets anyone
+  // subscribe (Codex review on PR #85).
+  //
+  // The page cannot answer this from the registration object. It used to try,
+  // by treating `registration.waiting != null` as "the active worker is old",
+  // and that misses the case it was written for: during an upgrade FROM the
+  // pre-M27 worker the new one spends its install in `installing`, where
+  // `waiting` is still null, and the active worker — the one that would
+  // receive a push — has no `push` handler at all. Subscribing there produces
+  // a registration whose deliveries are silently dropped.
+  //
+  // A worker that predates M27 falls through its own handler without
+  // replying, so the page's timeout is what answers for it. That is the whole
+  // design: the ONLY way to hear "yes" is from a worker running this file.
+  if (event.data.type === "PUSH_CAPABLE?") {
+    const reply = { type: "PUSH_CAPABLE", push: true };
+    const port = event.ports && event.ports[0];
+    if (port) port.postMessage(reply);
+    else if (event.source) event.source.postMessage(reply);
+  }
 });
 
 self.addEventListener("activate", (event) => {

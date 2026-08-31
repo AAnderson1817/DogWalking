@@ -11,15 +11,10 @@
 // wiring. Every path leaves the row in a terminal ('sent'/'skipped') or
 // retryable ('failed') state, and the nightly job counts what is still owed.
 import { isServiceAuth, jsonOk, readJson, requireOperator, serveFunction, HttpError } from "../_lib/http.ts";
-import { encryptPushPayload, vapidAuthorization, type VapidConfig } from "../_lib/webpush.ts";
 import type { Outcome } from "./handler.ts";
-import {
-  deliverPush,
-  type PushableRow,
-  type PushDeps,
-  pushRecordPatch,
-} from "./push.ts";
+import { deliverPush, type PushableRow } from "./push.ts";
 import { adminClient } from "../_lib/admin.ts";
+import { makePushDeps, vapidConfig } from "./push_deps.ts";
 import {
   deliverNotification,
   drainBacklog,
@@ -183,135 +178,6 @@ function makeDeps(apiKey: string | null, operatorId: string | null): SendDeps {
   };
 }
 
-/**
- * Read the VAPID configuration, or null when push was never set up.
- *
- * Null is not an error on its own: with no keys the frontend never offers to
- * subscribe, so there are no devices and every notification records `skipped`
- * for want of a recipient — the honest state. It becomes an error only when
- * devices EXIST and the keys do not, which is a real misconfiguration (keys
- * rotated or removed out from under live subscriptions) and gets H17's loud
- * failure rather than a silent success.
- */
-function vapidConfig(): VapidConfig | null {
-  const publicKey = Deno.env.get("VAPID_PUBLIC_KEY");
-  const privateKey = Deno.env.get("VAPID_PRIVATE_KEY");
-  const subject = Deno.env.get("VAPID_SUBJECT");
-  if (!publicKey || !privateKey || !subject) return null;
-  return { publicKey, privateKey, subject };
-}
-
-/** Per-endpoint deadline. Ten seconds is far longer than a push service
- * needs and short enough that ten stalled devices cannot outlast the
- * invocation. */
-const PUSH_TIMEOUT_MS = 10_000;
-
-function makePushDeps(db: ReturnType<typeof adminClient>, vapid: VapidConfig | null): PushDeps {
-  return {
-    async getSubscriptions(operatorId, clientId) {
-      // Explicit columns, never `*`: 0049 makes this a column-restricted table
-      // (the encryption secrets are withheld from `authenticated`), and
-      // PostgREST does not narrow a wildcard — it would raise 42501 for every
-      // row. That is the fix(client-columns) defect.
-      let q = db
-        .from("push_subscriptions")
-        .select("id, endpoint, p256dh, auth")
-        .eq("operator_id", operatorId);
-      q = clientId === null ? q.is("client_id", null) : q.eq("client_id", clientId);
-      const { data, error } = await q;
-      if (error) {
-        throw new HttpError(500, "db_error", "could not read push subscriptions", error, {
-          operator_id: operatorId,
-        });
-      }
-      return data ?? [];
-    },
-
-    async sendPush(sub, payload) {
-      if (!vapid) {
-        // Reachable only when devices exist without keys — see vapidConfig().
-        throw new HttpError(
-          500,
-          "push_not_configured",
-          "push delivery is not configured, so this notification was not pushed",
-          "VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY / VAPID_SUBJECT are unset in this deployment",
-          { subscription_id: sub.id },
-        );
-      }
-      const body = await encryptPushPayload(payload, { p256dh: sub.p256dh, auth: sub.auth });
-      // Every request gets a deadline (Codex review on PR #85). An endpoint
-      // that accepts the connection and then STALLS would otherwise hold this
-      // invocation open — and devices are awaited sequentially, ahead of the
-      // email arm, so one slow endpoint costs the recipient their email and
-      // every later device. That is precisely the channel isolation this
-      // function claims, defeated by a socket rather than by an exception.
-      //
-      // Registered endpoints are attacker-influenced (any https url passes the
-      // shape check), so this is not only about a push service having a bad
-      // day.
-      const res = await fetch(sub.endpoint, {
-        signal: AbortSignal.timeout(PUSH_TIMEOUT_MS),
-        method: "POST",
-        headers: {
-          Authorization: await vapidAuthorization(sub.endpoint, vapid),
-          "Content-Encoding": "aes128gcm",
-          "Content-Type": "application/octet-stream",
-          // Four hours. A walk report is worth holding while a phone is off;
-          // it is not worth delivering next week.
-          TTL: "14400",
-        },
-        body: body as BodyInit,
-      });
-      // The push service's own words, truncated: they are the only diagnostic
-      // available when a body is rejected, and they are not ours to invent.
-      const detail = res.ok ? undefined : (await res.text().catch(() => "")).slice(0, 300);
-      return { status: res.status, detail };
-    },
-
-    async dropSubscription(id) {
-      // supabase-js reports failures in the RESOLVED result, not by
-      // rejecting, so the bare await said nothing (Codex review on PR #85).
-      // A failed delete counted as "gone" anyway: `deliverPush` could then
-      // record `skipped` — terminal — while the dead endpoint stayed in the
-      // table for every future notification to POST to again.
-      const { error } = await db.from("push_subscriptions").delete().eq("id", id);
-      if (error) {
-        throw new HttpError(500, "db_error", "could not drop a dead subscription", error, {
-          subscription_id: id,
-        });
-      }
-    },
-
-    async noteFailure(id, error) {
-      const { data } = await db
-        .from("push_subscriptions")
-        .select("failure_count")
-        .eq("id", id)
-        .maybeSingle();
-      await db
-        .from("push_subscriptions")
-        .update({
-          failure_count: ((data?.failure_count as number | undefined) ?? 0) + 1,
-          last_failure_at: new Date().toISOString(),
-          last_error: error.slice(0, 500),
-        })
-        .eq("id", id);
-    },
-
-    async recordPush(id, outcome, previousAttempts) {
-      const { error } = await db
-        .from("notifications")
-        .update(pushRecordPatch(outcome, previousAttempts))
-        .eq("id", id);
-      if (error) {
-        throw new HttpError(500, "db_error", "could not record push delivery", error, {
-          notification_id: id,
-        });
-      }
-    },
-  };
-}
-
 serveFunction(async (req) => {
   const isService = isServiceAuth(
     req.headers.get("Authorization"),
@@ -331,7 +197,7 @@ serveFunction(async (req) => {
   // one paragraph down, and it meant even OPERATOR-ONLY notifications, which
   // skip email by definition, could not be pushed until an unrelated provider
   // was configured.
-  const pushDeps = makePushDeps(adminClient(), vapidConfig());
+  const pushDeps = makePushDeps(adminClient(), vapidConfig(), req);
 
   // A missing key is still a 500, not a 200 — H17's rule, unchanged: this used
   // to return `{ skipped: true }`, so a deploy that forgot the secret reported

@@ -1,4 +1,4 @@
-// The opt-in surface (review M27). What matters is that each of the five
+// The opt-in surface (review M27). What matters is that each of the six
 // states produces the RIGHT AFFORDANCE — a switch that cannot work is worse
 // than an honest sentence, and "blocked in your browser" points at the only
 // place that can undo it.
@@ -25,6 +25,7 @@ const ENV = {
   vapidKey: "k",
   permission: "default" as NotificationPermission,
   subscribed: false,
+  workerHandlesPush: true,
 };
 
 beforeEach(() => {
@@ -53,6 +54,16 @@ describe("PushSection", () => {
     render(<PushSection />);
     expect(await screen.findByText(/browser's site settings/)).toBeInTheDocument();
     expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("offers NO switch when the active worker cannot display a push", async () => {
+    // The finding this state exists for (Codex review on PR #85): during an
+    // upgrade from the pre-M27 worker, a subscription made here delivers to
+    // something that ignores it. A switch would create exactly that.
+    PUSH.readPushEnvironment.mockResolvedValue({ ...ENV, workerHandlesPush: false, subscribed: true });
+    render(<PushSection />);
+    expect(await screen.findByText(/still running an older version/)).toBeInTheDocument();
+    expect(screen.queryByRole("button"), "offered a switch under a worker that cannot serve it").toBeNull();
   });
 
   it("says push is not set up rather than blaming the browser", async () => {
