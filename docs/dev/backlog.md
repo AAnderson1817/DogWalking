@@ -25,15 +25,7 @@ before you hit them.
 
 ## Open
 
-### 1. `walk_photos` integrity checksum
-No checksum or byte size, so a restore cannot verify photo evidence (flagged
-in `disaster-recovery.md`). New migration: nullable `sha256` + `byte_size`;
-compute in the browser at upload (`crypto.subtle.digest`) alongside the
-existing upload-time row insert (`fix(walk-durability)` has that path). No
-backfill — a guessed checksum is indistinguishable from a real one. Verifying
-on the read path is a follow-up, not that PR.
-
-### 2. `claim-signup` rate limit
+### 1. `claim-signup` rate limit
 Public (`verify_jwt=false`) and its success path calls
 `auth.admin.createUser`; no rate limit (a stated residual in spec 04). Follow
 the `0016` `vault_rate_limit_attempts` shape, keyed for an unauthenticated
@@ -41,7 +33,7 @@ caller. Two properties must survive: the endpoint stays a non-oracle
 (identical answers wherever it gives them today), and a legitimate claimant
 retrying after a failed `createUser` is not locked out. Red-first on both.
 
-### 3. Push notifications (M27) — the largest item
+### 2. Push notifications (M27) — the largest item
 No push handler in `app/public/sw.js`, no VAPID keys, no subscriptions table.
 Scope: subscriptions table (tenant table ⇒ `operator_id` + RLS, invariant 7),
 SW `push`/`notificationclick` handlers (mind the network-only rules from
@@ -51,7 +43,7 @@ insert. Honest delivery states: copy H17's email machinery. VAPID key
 generation is an **owner action** — add it to `owner-actions.md` in the same
 commit and degrade gracefully without it.
 
-### 4. Small batch (one PR)
+### 3. Small batch (one PR)
 - `fn_walk_cost` is LOAD-BEARING (`fn_debit_walk` calls it, smoke pins it) —
   do NOT touch it. The dead code is `api.ts`'s `walkCost()` wrapper, itself
   with zero importers: delete it, or wire it where a persisted walk's display
@@ -66,7 +58,7 @@ commit and degrade gracefully without it.
   the deliberate thin-wrapper exception (its logic is SQL-side);
   `charge-overage` is already covered through `_lib/overage*.ts`.
 
-### 5. Tell the operator when an edited address is already suppressed
+### 4. Tell the operator when an edited address is already suppressed
 Also recorded in spec 04. Editing a client's address to one already in
 `email_suppressions` makes every future client-facing email skip
 permanently and terminally, with no signal in the UI. Whether to surface it
@@ -75,6 +67,14 @@ a product question.
 
 ## Done
 
+- **`walk_photos` integrity checksum** — migration `0047`, nullable `sha256` +
+  `byte_size` written by the browser at upload, with
+  `scripts/verify-photo-integrity.sh` as the consumer so the columns are not
+  written-and-never-read. Two of the item's own premises turned out to be
+  wrong and are corrected in `disaster-recovery.md`: verification was never
+  "impossible" (Storage already records a size and an `eTag`, one join away),
+  and the digest is **not** chargeback evidence — the operator can delete and
+  re-insert the row. See the `db(0047)` status-log entry.
 - **Today illustration responsive variants (M17)** — the plate now ships as
   four candidates (438/640/750/875w) behind one `srcset`, with only the master
   precached and the service worker substituting it for the rest. The review's

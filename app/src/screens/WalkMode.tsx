@@ -381,7 +381,11 @@ function WalkModeInner({ walkId }: { walkId: string }) {
     try {
       for (const file of Array.from(files)) {
         const compressed = await compressImage(file);
-        const path = await uploadWalkPhoto(walk.operator_id, walk.id, compressed);
+        // `uploaded` carries the path AND the digest of the bytes that were
+        // actually stored (0047). Deliberately not hashed here: `file` and
+        // `compressed` are both in scope, and hashing the wrong one is a
+        // digest that matches nothing on every photo, forever.
+        const uploaded = await uploadWalkPhoto(walk.operator_id, walk.id, compressed);
         // Record the row now rather than at completion (review H8): until this
         // existed, the only pointer to an uploaded photo was React state, so a
         // remount stranded every photo in the bucket with nothing referencing
@@ -389,11 +393,11 @@ function WalkModeInner({ walkId }: { walkId: string }) {
         // the path is still held in state and the snapshot, and complete-walk
         // writes the row with the same conflict target.
         try {
-          await insertWalkPhoto(walk.operator_id, walk.id, path);
+          await insertWalkPhoto(walk.operator_id, walk.id, uploaded);
         } catch {
           // no-op: the photo is in Storage and the path is carried forward.
         }
-        setPhotoPaths((prev) => [...prev, path]);
+        setPhotoPaths((prev) => [...prev, uploaded.path]);
         setPhotoPreviews((prev) => [...prev, URL.createObjectURL(compressed)]);
       }
     } catch (e) {

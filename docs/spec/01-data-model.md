@@ -45,7 +45,13 @@ There is **no** `key_location_hint`. It existed until 0030 as an ordinary, clien
 
 **walk_gps_points** — `walk_id references walks on delete cascade`, `operator_id`, `recorded_at timestamptz`, `lat`, `lng`, `accuracy_m real`. Index `(walk_id, recorded_at)`. Batch-inserted (spec 06).
 
-**walk_photos** — `walk_id on delete cascade`, `operator_id`, `storage_path text`, `caption text`, `taken_at timestamptz`.
+**walk_photos** — `walk_id on delete cascade`, `operator_id`, `storage_path text`, `caption text`, `taken_at timestamptz`, plus the `0047` integrity record: `sha256 text` (lower-case hex, `check (sha256 ~ '^[0-9a-f]{64}$')`) and `byte_size integer` (`check (byte_size > 0)`), both **nullable and never backfilled**.
+
+The digest is computed in the browser over the bytes actually uploaded and written once with the row. There is no `UPDATE` grant on this table for any API role, so neither column can be rewritten by the writer that produced it — that is what makes it a record of the past rather than a description of the present, which is precisely what Storage's own regenerated `metadata` (`size`, `eTag`) cannot be.
+
+`NULL` is a third state meaning **not recorded**, never "failed": rows predating `0047`, rows written by `complete-walk` (which replays paths from the completion request and has no bytes to hash), and any runtime without `crypto.subtle`. `complete-walk`'s upsert must stay `ON CONFLICT DO NOTHING` — a `DO UPDATE` replay would blank a digest the browser recorded, with no grant to restore it.
+
+**This is not tamper evidence.** The operator holds `DELETE` on the table alongside `INSERT`, so a row can be removed and re-inserted with a digest matching whatever bytes were uploaded second. It detects storage divergence — a replaced object, a faithless restore, bit-rot — and a mismatch must never be reported as tampering. `scripts/verify-photo-integrity.sh` is the consumer and reports match / mismatch / not-recorded plus coverage.
 
 **credit_ledger** — `operator_id`, `client_id`, `entry_type ledger_entry_type`, `amount int not null check (amount <> 0)` (signed: grants/rollover +, debit/expiry −, adjust ±), `balance_after int not null`, `walk_id uuid null`, `expires_at timestamptz null` (rollover lots), `note text`. Append-only; insert path is definer-only (spec 02/03). Index `(client_id, created_at desc)`.
 

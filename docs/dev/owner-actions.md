@@ -395,6 +395,30 @@ the thing that was not true before.
 This is a spending and design decision, and the composition is LOCKED
 (`CLAUDE.md`, Ownership): a re-render is a resize, never a recomposition.
 
+### 14. Confirm whether Supabase's backup includes the `storage` schema — migration 0047
+
+One fact decides how much `walk_photos.sha256` actually adds, and it cannot be
+established from this repository (supabase.com is blocked by the egress proxy
+here, and no project has ever been restored).
+
+Supabase Storage records a server-side `size` and a content-derived `eTag` per
+object in `storage.objects.metadata`. If that schema is included in the
+project's backup, a restore brings back an independent expected-value record
+and `0047`'s columns are a second opinion. If it is **not** included, `0047` is
+the only surviving record of what each object was.
+
+**What is true until this is answered:** `docs/dev/disaster-recovery.md` §5
+states both branches rather than picking one, and the rehearsal in §6 is where
+you would find out. Answering it costs one restore into a scratch project and a
+single query:
+
+```sql
+select count(*), count(metadata) from storage.objects;
+```
+
+Nothing is blocked on this. It only changes how the DR document describes the
+value of a column that is already being written.
+
 ## Keeping this honest
 
 When a pull request creates one of these, add it here in the same commit rather

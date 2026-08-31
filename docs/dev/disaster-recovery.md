@@ -158,10 +158,41 @@ restore desynchronises them from `walk_photos` / pet photos:
   bytes remain and nothing references them.
 
 Today you can enumerate both by diffing the bucket listing against
-`walk_photos.storage_path`. What you **cannot** do is verify that a surviving
-object is still the one that was uploaded: the table records no checksum and no
-byte size. For the photo report — the artefact you would submit in a chargeback
-dispute — "the file is present" is a weaker claim than it looks. See section 7.
+`walk_photos.storage_path`. Since migration `0047` you can also ask whether a
+surviving object is still the one that was uploaded:
+`walk_photos.sha256` / `.byte_size` are written by the browser at upload and
+never updated, and `scripts/verify-photo-integrity.sh` compares them against
+the bytes in the bucket.
+
+**Two corrections to what this section used to say**, both found while building
+that migration:
+
+- It claimed verification was impossible. It was not. Supabase Storage records
+  a server-side `size` and a content-derived `eTag` for every object in
+  `storage.objects.metadata`, one join from `storage_path` — visible in the
+  installed `storage-js` type contract. Nothing in this repository has ever
+  read it. What that copy cannot do is answer this question, because it is
+  **regenerated**: replace an object and its metadata is rewritten to describe
+  the new bytes. A row written once and never updated is the only operand that
+  still describes the past. That is the whole value `0047` adds, and it is
+  narrower than "impossible" implied. *Open:* whether the `storage` schema is
+  included in Supabase's own backup is unverified — `owner-actions.md` §14.
+- It called the photo report "the artefact you would submit in a chargeback
+  dispute" and implied the digest strengthens it. **It does not, and that
+  framing is the dangerous part.** The digest is computed by the operator's own
+  browser over bytes the operator chose, and stored in a row the operator may
+  delete and re-insert at will (`authenticated` holds SELECT/INSERT/DELETE on
+  `walk_photos`). Anyone wanting a different photo on a report deletes the row,
+  uploads new bytes, and inserts a fresh row whose digest matches perfectly. A
+  match therefore proves nothing about authenticity and a mismatch is not
+  evidence of misconduct.
+
+So `0047` detects **storage divergence** — an object replaced, a faithless copy
+restored from a mirror, bit-rot — and nothing else. Read a mismatch as "these
+bytes are not the bytes we recorded", never as tampering: mismatches are near
+zero by construction (a fresh `randomUUID` path per upload, `upsert: false`, no
+read-path re-encoding), so the first one anyone sees will look like a signal
+when the likeliest cause is a bug of ours. See section 7.
 
 ## 6. The rehearsal (this is what makes the numbers real)
 
@@ -201,10 +232,15 @@ Each costs money, a credential, or both.
    point, independent of the nightly.
 4. **Storage backup.** Objects have no protection at any tier. Mirroring both
    buckets to independent object storage needs a destination and credentials.
-5. **A `walk_photos` integrity record.** Adding a client-computed SHA-256 and
-   byte size at upload makes post-restore reconciliation possible in principle
-   rather than impossible. Needs no money and no decision — it is a migration
-   plus the upload path, and is the one item here that can simply be built.
+5. ~~**A `walk_photos` integrity record.**~~ **Done** — migration `0047`, with
+   `scripts/verify-photo-integrity.sh` as its consumer. Note what it did and
+   did not buy, since this entry previously overstated both: it does **not**
+   make reconciliation "possible rather than impossible" (the platform already
+   recorded a size and an `eTag`, see §5), and it is **not** evidence for a
+   dispute. Its one real job is item 4 below: verifying a copy restored from a
+   mirror. Rows predating `0047` are permanently NULL — a digest cannot be
+   reconstructed, and a guessed one is indistinguishable from a real one — so
+   the script reports **coverage** as well as mismatches.
 6. **Vault key escrow.** One copy of `VAULT_MASTER_KEY` is a single point of
    unrecoverable loss. A second copy in a password manager costs nothing.
    `vault-key-rotation.md` § "Escrow it before anything else".
