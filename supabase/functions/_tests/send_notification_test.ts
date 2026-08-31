@@ -9,6 +9,7 @@
 // This suite exists because the branching added to fix that had no coverage
 // at all, which is the same shape as the original defect.
 import { assert, assertEquals, assertFalse } from "./asserts.ts";
+import { HttpError } from "../_lib/http.ts";
 import {
   deliverNotification,
   drainBacklog,
@@ -38,6 +39,8 @@ interface Opts {
   /** The suppression list itself is unreadable. */
   suppressionError?: boolean;
   send?: () => Promise<{ ok: true } | { ok: false; status: number; detail: string }>;
+  /** Model a deployment with no RESEND_API_KEY (H17). */
+  emailUnconfigured?: boolean;
   backlog?: string[];
   rows?: Record<string, NotificationRow | null>;
 }
@@ -63,6 +66,11 @@ function makeDeps(opts: Opts = {}) {
     },
     unsubscribeUrl: (token) => `https://fn.test/functions/v1/unsubscribe?t=${token}`,
     getOperator: () => Promise.resolve({ business_name: "Old Town Walks" }),
+    assertEmailConfigured: () => {
+      if (opts.emailUnconfigured) {
+        throw new HttpError(500, "email_not_configured", "not configured");
+      }
+    },
     sendEmail: (msg) => {
       sentTo.push(msg.to);
       sentHeaders.push(msg.headers);
@@ -358,4 +366,50 @@ Deno.test("every email carries the one-click unsubscribe pair", async () => {
     "<https://fn.test/functions/v1/unsubscribe?t=11111111-2222-4333-8444-555555555555>",
   );
   assertEquals(sentHeaders[0]["List-Unsubscribe-Post"], "List-Unsubscribe=One-Click");
+});
+
+// ── H17's loud failure, and where it can still BE loud ─────────────────────
+
+Deno.test("a deployment with no email key FAILS the request, it does not record", async () => {
+  // The whole of H17: `if (!apiKey) return jsonOk({skipped:true})` meant a
+  // deploy that forgot the secret reported uniform success forever while
+  // sending zero email. Round five moved the throw inside `sendEmail`, where
+  // `deliverNotification`'s catch records any throw as a retryable delivery
+  // failure — so the 500 quietly became `resend unreachable` on the row and a
+  // 502 to the caller (Codex review on PR #85). Same defect, new clothes.
+  const { deps, recorded, sentTo } = makeDeps({ emailUnconfigured: true });
+  const err = await deliverNotification(ROW, deps).then(() => null, (e) => e);
+  assert(err instanceof HttpError, `expected a thrown HttpError, got ${JSON.stringify(err)}`);
+  assertEquals(err.status, 500);
+  assertEquals(err.code, "email_not_configured");
+  assertEquals(sentTo, [], "attempted a send with no provider configured");
+  assertEquals(recorded, [], "recorded a delivery outcome for a configuration fault");
+});
+
+Deno.test("but a TERMINAL row is still recorded, key or no key", async () => {
+  // Every skip above the check is terminal regardless of configuration —
+  // an operator-only notification has nobody to email whatever the env says —
+  // so 500ing on those would replace an honest record with a false alarm.
+  const { deps, recorded } = makeDeps({ emailUnconfigured: true });
+  const outcome = await deliverNotification({ ...ROW, client_id: null }, deps);
+  assertEquals(outcome.kind, "skipped");
+  assertEquals(recorded.length, 1);
+
+  const noAddress = makeDeps({ emailUnconfigured: true, email: null });
+  assertEquals((await deliverNotification(ROW, noAddress.deps)).kind, "skipped");
+  assertEquals(noAddress.recorded.length, 1);
+});
+
+Deno.test("the drain does not abort on one row, and stays loud by its backlog", async () => {
+  // The drain must not take the remaining rows' PUSH down with it, so it
+  // counts the failure and continues. Its loudness is the surviving backlog
+  // and the nightly ops check, not an aborted run.
+  const { deps, recorded } = makeDeps({
+    emailUnconfigured: true,
+    backlog: ["n1", "n2"],
+    rows: { n1: ROW, n2: { ...ROW, id: "n2" } },
+  });
+  const result = await drainBacklog(deps);
+  assertEquals(result, { drained: 2, sent: 0, failed: 2, pushSent: 0, pushFailed: 0 });
+  assertEquals(recorded, [], "a configuration fault must not stamp an outcome");
 });

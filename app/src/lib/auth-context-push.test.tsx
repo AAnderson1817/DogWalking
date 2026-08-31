@@ -23,21 +23,47 @@
 import { render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const PUSH = vi.hoisted(() => ({
-  forgetPushDeviceOnSignedOut: vi.fn(async () => {}),
-  reclaimPushDevice: vi.fn(async () => {}),
-  forgetPushDeviceBeforeSignOut: vi.fn(async () => {}),
-}));
+const PUSH = vi.hoisted(() => {
+  // Both repairs record when they START and when they FINISH, because the
+  // question these tests ask is about OVERLAP, which a call counter cannot
+  // see (Codex review on PR #85).
+  const log: string[] = [];
+  const slow = (name: string, ms = 20) =>
+    vi.fn(async () => {
+      log.push(`${name}:start`);
+      await new Promise((r) => setTimeout(r, ms));
+      log.push(`${name}:end`);
+    });
+  return {
+    log,
+    forgetPushDeviceOnSignedOut: slow("forget"),
+    reclaimPushDevice: slow("reclaim"),
+    forgetPushDeviceBeforeSignOut: vi.fn(async () => {}),
+  };
+});
 const AUTH = vi.hoisted(() => ({
   session: null as { user: { id: string } } | null,
+  listener: null as null | ((event: string, session: unknown) => void),
 }));
 
-vi.mock("./push", () => PUSH);
+vi.mock("./push", () => ({
+  forgetPushDeviceOnSignedOut: PUSH.forgetPushDeviceOnSignedOut,
+  reclaimPushDevice: PUSH.reclaimPushDevice,
+  forgetPushDeviceBeforeSignOut: PUSH.forgetPushDeviceBeforeSignOut,
+}));
 vi.mock("./supabase", () => ({
   supabase: {
     auth: {
       getSession: () => Promise.resolve({ data: { session: AUTH.session } }),
-      onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } }),
+      // Captured, so a test can drive two transitions itself. Rendering twice
+      // does NOT produce them: the provider's effect depends on stable
+      // callbacks, so it subscribes once and a rerender re-runs nothing —
+      // which is why the first version of the overlap test below passed
+      // against the unserialized code it exists to catch.
+      onAuthStateChange: (cb: (event: string, session: unknown) => void) => {
+        AUTH.listener = cb;
+        return { data: { subscription: { unsubscribe: () => {} } } };
+      },
       signOut: () => Promise.resolve({ error: null }),
     },
     // resolveRole's queries. An operator with no billing row resolves fine and
@@ -66,9 +92,11 @@ import { AuthProvider } from "./auth-context";
 beforeEach(() => {
   PUSH.forgetPushDeviceOnSignedOut.mockClear();
   PUSH.reclaimPushDevice.mockClear();
+  PUSH.log.length = 0;
 });
 afterEach(() => {
   AUTH.session = null;
+  AUTH.listener = null;
 });
 
 describe("the auth transition drives both push repairs", () => {
@@ -87,5 +115,40 @@ describe("the auth transition drives both push repairs", () => {
       PUSH.forgetPushDeviceOnSignedOut,
       "unsubscribed a device belonging to the person who just signed in",
     ).not.toHaveBeenCalled();
+  });
+});
+
+describe("the repairs go through the serial runner", () => {
+  it("a sign-out followed straight by a sign-in never runs the two at once", async () => {
+    // The WIRING, not the rules — those live in `serial-repair.test.ts`,
+    // because `applyRole` is async so the provider can only ever exercise the
+    // sequential case. Unwired, the sign-out's cleanup (which reads
+    // `pushManager.getSubscription()` and then unsubscribes) is still in
+    // flight when the sign-in's reclaim reads the same subscription, and
+    // either completion order loses: the new account ends up with a dead
+    // server row or with push silently off.
+    AUTH.session = null;
+    render(<AuthProvider>ready</AuthProvider>);
+    await waitFor(() => expect(AUTH.listener).not.toBeNull());
+    // The mount's own null session correctly queues a cleanup. Let it finish
+    // before measuring, or the log opens with a dangling `:end`.
+    await waitFor(() => expect(PUSH.log).toContain("forget:end"));
+    PUSH.log.length = 0;
+    PUSH.reclaimPushDevice.mockClear();
+
+    AUTH.listener!("SIGNED_OUT", null);
+    AUTH.listener!("SIGNED_IN", { user: { id: "op-1" } });
+    await waitFor(() => expect(PUSH.reclaimPushDevice).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 120));
+
+    expect(PUSH.log.length, "neither repair ran").toBeGreaterThan(0);
+    let running = 0;
+    for (const entry of PUSH.log) {
+      if (entry.endsWith(":start")) {
+        expect(running, `overlapping repairs: ${PUSH.log.join(" ")}`).toBe(0);
+        running += 1;
+      } else running -= 1;
+    }
+    expect(running, `unbalanced log: ${PUSH.log.join(" ")}`).toBe(0);
   });
 });

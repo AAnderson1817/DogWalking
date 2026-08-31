@@ -825,6 +825,20 @@ survived, so the row is re-registered to them. Neither replaces the other, and
 `auth-context-push.test.tsx` keeps both wired, because both are `void`-ed
 fire-and-forget calls that nothing downstream observes.
 
+Both go through `createSerialRunner` rather than being fired and forgotten
+(Codex review on PR #85). They are opposites and both begin by reading
+`pushManager.getSubscription()`, so run concurrently — which a null-session
+callback followed straight by a signed-in one produced — either completion
+order loses: the cleanup can unsubscribe the endpoint the new account just
+registered, or the reclaim can register one the cleanup is about to
+invalidate. Two rules: never concurrent, and any repair not yet STARTED is
+superseded by a newer one (same tick included, which is the case that matters
+— a sign-out immediately superseded by a sign-in should reassign this device,
+not unsubscribe it and leave that account with push silently off). The rules
+are tested in `serial-repair.test.ts` rather than through the provider,
+because `applyRole` is async so the provider can only ever exercise the
+sequential case; the provider test pins the wiring.
+
 The stated cost: a session ending for any reason now costs this device its
 registration, so the person turns notifications back on. That is already true
 of every deliberate sign-out, and the alternative is a live subscription owned
