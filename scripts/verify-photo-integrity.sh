@@ -130,24 +130,40 @@ while IFS=$'\t' read -r id path want_sha want_size; do
     -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
     "$SUPABASE_URL/storage/v1/object/walk-photos/$path" 2>/dev/null) || code="000"
 
+  # Only 404 — the API's actual not-found — means the object is missing.
+  # EVERYTHING else is a failure to verify, and the difference matters because
+  # "GONE" is a storage-divergence finding somebody would act on.
+  #
+  # This is an inversion rather than a longer list, and the list is why: a
+  # previous version enumerated the failures it had thought of (401, 403,
+  # unreachable) and let the catch-all swallow the rest, so a 429 or a 502
+  # during a rehearsal would have reported every object missing and could still
+  # exit 0. Enumerating the ways a check can be wrong is how a check ends up
+  # reporting success having verified nothing — which is the whole thing this
+  # script exists to prevent.
   case "$code" in
     200) ;;
+    404)
+      # Genuinely absent. Not a byte mismatch, and counted separately.
+      missing=$((missing + 1))
+      echo "GONE      $path — row $id has a digest but no object"
+      continue ;;
     401|403)
-      # Not a finding about the data. Every object would fail identically, so
-      # stop rather than emit a page of false GONEs.
+      # Every object would fail identically, so stop rather than emit a page of
+      # false GONEs.
       echo "FAIL: storage refused the credentials (HTTP $code) — nothing was verified." >&2
       echo "      SUPABASE_SERVICE_ROLE_KEY must be the service role key for \$SUPABASE_URL." >&2
       exit 2 ;;
     000)
-      echo "FAIL: could not reach $SUPABASE_URL — nothing was verified." >&2
+      echo "FAIL: could not reach $SUPABASE_URL — verification is incomplete." >&2
       exit 2 ;;
     *)
-      # The object is gone, not wrong. A missing object is a storage-divergence
-      # finding of its own, but it is not a byte mismatch and must not be
-      # counted as one.
-      missing=$((missing + 1))
-      echo "GONE      $path (HTTP $code) — row $id has a digest but no object"
-      continue ;;
+      # 429, 5xx, a redirect, anything else: transient or unexpected, but NOT
+      # evidence about the data. Fail loudly and let the rehearsal re-run.
+      echo "FAIL: storage answered HTTP $code for $path — verification is incomplete." >&2
+      echo "      Only 404 means an object is missing; every other status is a" >&2
+      echo "      failure to check, and an incomplete run must not look clean." >&2
+      exit 2 ;;
   esac
 
   got_sha=$(sha256sum "$tmp" | cut -d' ' -f1)
