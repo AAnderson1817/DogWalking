@@ -294,14 +294,58 @@ begin
     raise exception 'fn_register_push_subscription: auth must be at least 22 base64url characters';
   end if;
 
+  -- Serialize the whole read-modify-write per RECIPIENT, and take the lock
+  -- FIRST (Codex review on PR #85, fourth and eighth rounds).
+  --
+  -- The quota below is a count-then-delete, and under READ COMMITTED each
+  -- concurrent transaction sees only the committed rows plus its own insert —
+  -- so with nine devices already present, any number of simultaneous calls
+  -- each see ten, each delete nothing, and all commit. The quota bounded
+  -- nothing against exactly the caller it exists to bound, who can trivially
+  -- issue concurrent requests. Same instrument as 0016's vault limiter and
+  -- 0048's: an advisory lock on the subject being protected, taken before the
+  -- read.
+  --
+  -- Keyed on the CLIENT where there is one, and only on the operator for an
+  -- operator's own devices — not on the pair. A client belongs to exactly one
+  -- operator, so the pair says nothing extra about which recipient this is,
+  -- and the single-value key is what lets the advisory lock come BEFORE the
+  -- `clients` read: the pair cannot be computed until `operator_id` has been
+  -- read, which would force clients-row-then-advisory here against 0048's
+  -- advisory-then-clients-row. Two functions taking the same two locks in
+  -- opposite orders is the 0037 cycle, and this key is derived exactly as
+  -- 0048's is, so the two provably cannot interleave into one.
   v_client := my_client_id();
   if v_client is not null then
-    select operator_id into v_operator from clients where id = v_client;
+    perform pg_advisory_xact_lock(hashtextextended(v_client::text, 0));
+    -- LOCKED, and `purged_at is null` (Codex review on PR #85, eighth round).
+    -- Unlocked and unfiltered, a registration that began before an erasure
+    -- inserted its row AFTER `fn_purge_client` had tombstoned the client and
+    -- the trigger at the foot of this file had deleted every device it knew
+    -- about: an endpoint identifying a browser, surviving the erasure request
+    -- H5 exists to honour. Reproduced as concurrency.sh case 8 before this
+    -- line existed.
+    --
+    -- The lock is what closes it, not the predicate: `fn_purge_client` takes
+    -- `for update` on this row, so this read waits for it and then re-reads
+    -- the committed tombstone. The predicate alone would still race.
+    --
+    -- Not reachable sequentially — the purge NULLs `auth_user_id`, so
+    -- afterwards `my_client_id()` returns null and this branch is never
+    -- entered — which is why nothing but an interleave finds it.
+    select operator_id into v_operator
+      from clients
+     where id = v_client and purged_at is null
+       for no key update;
+    if v_operator is null then
+      raise exception 'fn_register_push_subscription: this client record has been erased';
+    end if;
   else
     select id into v_operator from operators where id = auth.uid();
-  end if;
-  if v_operator is null then
-    raise exception 'fn_register_push_subscription: caller is neither an operator nor a client';
+    if v_operator is null then
+      raise exception 'fn_register_push_subscription: caller is neither an operator nor a client';
+    end if;
+    perform pg_advisory_xact_lock(hashtextextended(v_operator::text, 0));
   end if;
 
   -- The reassignment is CONDITIONAL on presenting the endpoint's existing key
@@ -320,19 +364,6 @@ begin
   -- the keys arrive together. A caller who knows only the endpoint cannot
   -- produce the keys — they never leave the browser that made them, and 0049
   -- withholds them from `authenticated` for this reason among others.
-  -- Serialize the whole read-modify-write per RECIPIENT (Codex review on PR
-  -- #85, fourth round). The quota below is a count-then-delete, and under
-  -- READ COMMITTED each concurrent transaction sees only the committed rows
-  -- plus its own insert — so with nine devices already present, any number of
-  -- simultaneous calls each see ten, each delete nothing, and all commit. The
-  -- quota bounded nothing against exactly the caller it exists to bound, who
-  -- can trivially issue concurrent requests.
-  --
-  -- Same instrument as 0016's vault limiter and 0048's: an advisory lock on
-  -- the subject being protected, taken before the read.
-  perform pg_advisory_xact_lock(
-    hashtextextended(v_operator::text || ':' || coalesce(v_client::text, ''), 0));
-
   insert into push_subscriptions (operator_id, client_id, endpoint, p256dh, auth, user_agent)
   values (v_operator, v_client, p_endpoint, p_p256dh, p_auth, p_user_agent)
   on conflict (endpoint) do update
