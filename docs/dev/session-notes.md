@@ -20,8 +20,11 @@ bash scripts/db-start.sh
 export LOCAL_DB_URL="postgresql://postgres@127.0.0.1:54322/postgres"
 bash scripts/db-reset.sh
 
-# frontend deps
-npm --prefix app install
+# frontend deps — `ci`, not `install`: it installs exactly what the lockfile
+# says, refuses if package.json and the lock disagree, and cannot rewrite the
+# lock underneath you. It is what ci.yml runs (lines 40 and 419), so a green
+# local run means the same dependency tree CI validated. Takes ~10s here.
+npm ci --prefix app
 
 # deno — often absent. deno.land is blocked by the egress proxy in this
 # environment; the npm package carries the same binary and works:
