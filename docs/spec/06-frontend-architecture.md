@@ -851,8 +851,17 @@ role lookup begun BEFORE a sign-out could finish after it and queue its reclaim
 as the newest repair, making the sign-out's cleanup stand down while the
 previous account's subscription stayed live: the shared-device leak the cleanup
 exists to close, reintroduced by the stand-down added to protect the account
-switch. The version is now bumped where the transition arrives, and unmounting
-bumps it too — nothing a torn-down provider scheduled is current. The third is not a refinement of the second — it is the
+switch. The version is now bumped where the transition arrives, and unmounting bumps
+it too — nothing a torn-down provider scheduled is current.
+
+It bumps only when the IDENTITY changes. supabase-js re-emits `SIGNED_IN` for
+an already-signed-in user (a refocused tab) and `TOKEN_REFRESHED` on a timer,
+both carrying the same session; treating those as transitions superseded a
+reclaim between its service-worker lookups and its RPC, and the `resolvedFor`
+early return scheduled no replacement — so on a shared device the surviving
+subscription stayed owned by the previous account while the UI reported push as
+on. The version answers "whose session is this", and a token refresh does not
+change the answer. The third is not a refinement of the second — it is the
 case that actually happens, because `applyRole` awaits a database query before
 queueing the reclaim, so a sign-out's cleanup has always started by then and
 the pre-start check can never reach it. Without the signal the cleanup
