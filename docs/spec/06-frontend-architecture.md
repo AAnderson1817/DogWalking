@@ -810,3 +810,22 @@ is the opposite of the M8 outbox and snapshot cleanups beside it: those are
 local storage and need no caller, while `fn_remove_push_subscription` is
 scoped to the caller. Leaving the row behind means that on a shared device the
 next person's notifications reach a registration the previous person owns.
+
+A session can end WITHOUT that path — a failed refresh token, cleared auth
+storage, a tab killed mid-session — and there are two repairs, at opposite ends
+of the same hazard (Codex review on PR #85). `forgetPushDeviceOnSignedOut`
+unsubscribes locally the moment a resolution yields NO session; push delivery
+is independent of the page's auth state, so a surviving subscription keeps
+putting the previous account's client names on the lock screen of a signed-out,
+possibly handed-over device. It is local only because
+`fn_remove_push_subscription` is scoped to its caller and there is none — the
+row self-heals on the 404/410 the unsubscribe guarantees. `reclaimPushDevice`
+covers the other end: somebody signs in on a device whose subscription
+survived, so the row is re-registered to them. Neither replaces the other, and
+`auth-context-push.test.tsx` keeps both wired, because both are `void`-ed
+fire-and-forget calls that nothing downstream observes.
+
+The stated cost: a session ending for any reason now costs this device its
+registration, so the person turns notifications back on. That is already true
+of every deliberate sign-out, and the alternative is a live subscription owned
+by an account with no session.

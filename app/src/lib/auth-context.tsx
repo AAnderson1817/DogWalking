@@ -18,7 +18,11 @@ import type { Session } from "@supabase/supabase-js";
 import { supabase } from "./supabase";
 import { deleteOutboxDatabase } from "./gps-outbox";
 import { clearAllWalkSnapshots } from "./walk-snapshot";
-import { forgetPushDeviceBeforeSignOut, reclaimPushDevice } from "./push";
+import {
+  forgetPushDeviceBeforeSignOut,
+  forgetPushDeviceOnSignedOut,
+  reclaimPushDevice,
+} from "./push";
 import { Sheet } from "@/components/Sheet";
 import { FormError, Input } from "@/components/fields";
 import { LoadingState } from "@/components/StateField";
@@ -154,6 +158,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setClientId(null);
         setOperatorBilling(null);
         setLoading(false);
+        // No session means no browser subscription (Codex review on PR #85).
+        // The reclaim below repairs a surviving one at the NEXT sign-in, which
+        // is too late: push delivery does not care about the page's auth
+        // state, so until then the device keeps displaying the previous
+        // account's notifications while signed out. Deliberate sign-out
+        // already unsubscribed, so this is a no-op there; it is the ungraceful
+        // ends — a failed refresh, cleared storage, a killed tab — that reach
+        // here with a live subscription. Fire-and-forget for the same reason
+        // the reclaim is: a repair must not stand between anyone and being
+        // signed out.
+        void forgetPushDeviceOnSignedOut();
         return;
       }
       if (resolvedFor.current === uid) return; // role already resolved
