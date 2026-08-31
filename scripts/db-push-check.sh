@@ -210,6 +210,72 @@ end
 $outer$;
 SQL
 
+# ── every object the sender reaches must be granted, not inherited ───────
+#
+# This database is the one place that can ask the question. Objects here are
+# created by sb_deploy, which holds no ALTER DEFAULT PRIVILEGES, so a table or
+# function is reachable by service_role only if a migration said so out loud.
+# A real project carries Supabase's default ACL — `grant all on tables to
+# ... service_role` for anything postgres creates in public — so an omitted
+# grant works there and is invisible everywhere else, including in smoke,
+# which cannot tell an explicit grant from an inherited one (both read as
+# `service_role=arwdDxt/postgres`).
+#
+# That is not hypothetical: `push_subscriptions`, `fn_note_push_failure`,
+# `vault_canary` and `fn_unsubscribe_by_token` were each measured unreachable
+# here while this script still exited 0.
+#
+# The object list is DERIVED from the edge functions rather than enumerated,
+# so a table or RPC added to a handler is covered without anyone remembering
+# to add it. Deriving it is also what makes the check honest about its own
+# blind spot: a `.from()` built from a variable is invisible to this grep and
+# to any other, which is why the sender-side rule stays a code review concern
+# too. Names are matched against pg_class/pg_proc, so a grep that captures
+# something that is not an object simply matches nothing rather than failing.
+SENDER_TABLES=$(grep -rhoE '\.from\("[a-z_]+"\)' supabase/functions/ \
+  | sed -E 's/\.from\("(.*)"\)/\1/' | sort -u | paste -sd, || true)
+SENDER_FNS=$(grep -rhoE '\.rpc\("[a-z_]+"' supabase/functions/ \
+  | sed -E 's/\.rpc\("(.*)"/\1/' | sort -u | paste -sd, || true)
+
+if [ -z "$SENDER_TABLES" ] || [ -z "$SENDER_FNS" ]; then
+  echo "FAIL: derived no sender objects from supabase/functions — the grep stopped matching," >&2
+  echo "      so this check would pass by looking at nothing." >&2
+  exit 1
+fi
+
+psql "$CHECK_URL" -v ON_ERROR_STOP=1 -q <<SQL
+do \$$
+declare
+  v_missing text;
+  v_tables  int;
+  v_fns     int;
+begin
+  select string_agg(x.what, E'\n  ' order by x.what), count(*) filter (where x.kind = 't'),
+         count(*) filter (where x.kind = 'f')
+    into v_missing, v_tables, v_fns
+  from (
+    select 't' as kind, 'table    ' || c.relname as what
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'public' and c.relkind = 'r'
+       and c.relname = any(string_to_array('${SENDER_TABLES}', ','))
+       and not has_table_privilege('service_role', c.oid, 'select')
+    union all
+    select 'f', 'function ' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public'
+       and p.proname = any(string_to_array('${SENDER_FNS}', ','))
+       and not has_function_privilege('service_role', p.oid, 'execute')
+  ) x;
+
+  if v_missing is not null then
+    raise exception E'FAIL: % table(s) and % function(s) the edge functions reach are not granted to service_role.\nThey work only on a project carrying the platform default ACL, which 0004 says not to rely on:\n  %', v_tables, v_fns, v_missing;
+  end if;
+
+  raise notice 'every object the edge functions reach is explicitly granted to service_role';
+end
+\$$;
+SQL
+
 cat <<'EOF'
 
 == what the role running `supabase db push` must hold ==
