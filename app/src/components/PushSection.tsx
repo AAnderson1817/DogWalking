@@ -23,6 +23,8 @@ const EXPLANATION: Record<PushState, string> = {
   unsupported:
     "This browser cannot show push notifications. On an iPhone, add Sanpo to your Home Screen first.",
   unconfigured: "Push notifications are not set up for this installation yet.",
+  "stale-worker":
+    "An app update is ready. Reload to finish it, then you can turn notifications on — until then this device could not show them.",
 };
 
 export function PushSection({ heading = "Notifications" }: { heading?: string }) {

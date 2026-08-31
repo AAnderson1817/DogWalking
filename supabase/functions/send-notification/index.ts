@@ -201,6 +201,11 @@ function vapidConfig(): VapidConfig | null {
   return { publicKey, privateKey, subject };
 }
 
+/** Per-endpoint deadline. Ten seconds is far longer than a push service
+ * needs and short enough that ten stalled devices cannot outlast the
+ * invocation. */
+const PUSH_TIMEOUT_MS = 10_000;
+
 function makePushDeps(db: ReturnType<typeof adminClient>, vapid: VapidConfig | null): PushDeps {
   return {
     async getSubscriptions(operatorId, clientId) {
@@ -234,7 +239,18 @@ function makePushDeps(db: ReturnType<typeof adminClient>, vapid: VapidConfig | n
         );
       }
       const body = await encryptPushPayload(payload, { p256dh: sub.p256dh, auth: sub.auth });
+      // Every request gets a deadline (Codex review on PR #85). An endpoint
+      // that accepts the connection and then STALLS would otherwise hold this
+      // invocation open — and devices are awaited sequentially, ahead of the
+      // email arm, so one slow endpoint costs the recipient their email and
+      // every later device. That is precisely the channel isolation this
+      // function claims, defeated by a socket rather than by an exception.
+      //
+      // Registered endpoints are attacker-influenced (any https url passes the
+      // shape check), so this is not only about a push service having a bad
+      // day.
       const res = await fetch(sub.endpoint, {
+        signal: AbortSignal.timeout(PUSH_TIMEOUT_MS),
         method: "POST",
         headers: {
           Authorization: await vapidAuthorization(sub.endpoint, vapid),
@@ -253,7 +269,17 @@ function makePushDeps(db: ReturnType<typeof adminClient>, vapid: VapidConfig | n
     },
 
     async dropSubscription(id) {
-      await db.from("push_subscriptions").delete().eq("id", id);
+      // supabase-js reports failures in the RESOLVED result, not by
+      // rejecting, so the bare await said nothing (Codex review on PR #85).
+      // A failed delete counted as "gone" anyway: `deliverPush` could then
+      // record `skipped` — terminal — while the dead endpoint stayed in the
+      // table for every future notification to POST to again.
+      const { error } = await db.from("push_subscriptions").delete().eq("id", id);
+      if (error) {
+        throw new HttpError(500, "db_error", "could not drop a dead subscription", error, {
+          subscription_id: id,
+        });
+      }
     },
 
     async noteFailure(id, error) {

@@ -192,3 +192,18 @@ Deno.test("a subject the push service cannot act on is refused", async () => {
     })
   );
 });
+
+Deno.test("a payload too large for one record is refused, not mis-framed", async () => {
+  // The header declares `rs`. Emitting a longer single record contradicts it,
+  // and the failure lands at the push service or in a browser that cannot
+  // decrypt — neither of which says what went wrong.
+  await assertRejects(() =>
+    encryptPushPayload("x".repeat(RECORD_SIZE), { p256dh: VECTOR.p256dh, auth: VECTOR.auth })
+  );
+  // Just under the limit still works, so the bound is not merely "large is bad".
+  const ok = await encryptPushPayload("x".repeat(RECORD_SIZE - 200), {
+    p256dh: VECTOR.p256dh,
+    auth: VECTOR.auth,
+  });
+  assert(ok.length > RECORD_SIZE - 200);
+});

@@ -79,11 +79,24 @@ export function isPermanentPushFailure(status: number): boolean {
  * `notifications.body` is already written for the in-app bell under the same
  * constraint (0038 removed a balance from one of them).
  */
+/** A lock screen shows a line and a bit. These bound the encrypted record as
+ * well as the display: `title` and `body` are unconstrained text and operator
+ * notifications embed a client's name, so nothing upstream stops one growing
+ * past the 4096-byte record `encryptPushPayload` frames (Codex review on PR
+ * #85). Clamping is also the better product answer — a truncated sentence on
+ * a lock screen beats a notification that does not arrive. */
+const MAX_TITLE = 120;
+const MAX_BODY = 400;
+
+function clamp(value: string, max: number): string {
+  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
+}
+
 export function pushPayload(row: PushableRow): string {
   return JSON.stringify({
     id: row.id,
-    title: row.title,
-    body: row.body ?? "",
+    title: clamp(row.title, MAX_TITLE),
+    body: clamp(row.body ?? "", MAX_BODY),
     url: deepLink(row),
     // The NOTIFICATION id, not the type (Codex review on PR #85). Tagging by
     // type collapsed two distinct `walk_complete` events into one tray entry:

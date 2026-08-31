@@ -37,6 +37,7 @@ const BASE: PushEnvironment = {
   vapidKey: "BHYKBshY3BflxTbegR9xB7-iTU_uOdZK_ZFY7rqrPPJbxO3PNMLAjRaw3NuIHYRwFLhAKusNb8UweMqU884c5M4",
   permission: "default",
   subscribed: false,
+  updatePending: false,
 };
 
 describe("push state", () => {
@@ -70,10 +71,24 @@ describe("push state", () => {
     expect(pushState({ ...BASE, permission: "denied", subscribed: true })).toBe("denied");
   });
 
+  it("a waiting worker is reported ahead of `on`, because a stale one cannot display", () => {
+    // On an upgrade from before M27 the ACTIVE worker has no push handler at
+    // all, and getRegistration() returns it regardless. Subscribing then
+    // produces deliveries nothing displays. Reporting `on` for a device
+    // already subscribed under a stale worker would be the worse lie: it
+    // claims notifications work while none can appear.
+    expect(pushState({ ...BASE, updatePending: true })).toBe("stale-worker");
+    expect(pushState({ ...BASE, updatePending: true, subscribed: true })).toBe("stale-worker");
+    // But a real blocker still outranks it — the person cannot act on either,
+    // and `denied` names the only place that CAN be undone.
+    expect(pushState({ ...BASE, updatePending: true, permission: "denied" })).toBe("denied");
+    expect(pushState({ ...BASE, updatePending: true, vapidKey: "" })).toBe("unconfigured");
+  });
+
   it("only the two actionable states offer a switch", () => {
     expect(["off", "on"].map((s) => canToggle(s as never))).toEqual([true, true]);
-    expect(["unsupported", "unconfigured", "denied"].map((s) => canToggle(s as never)))
-      .toEqual([false, false, false]);
+    expect(["unsupported", "unconfigured", "denied", "stale-worker"].map((s) => canToggle(s as never)))
+      .toEqual([false, false, false, false]);
   });
 });
 
@@ -105,6 +120,9 @@ describe("key encoding", () => {
 // about whether this device is subscribed — which on a SHARED device means
 // somebody receives another account's notifications.
 describe("enable/disable failure paths", () => {
+  const subscribeCalls: number[] = [];
+  beforeEach(() => { subscribeCalls.length = 0; });
+
   interface FakeSub {
     endpoint: string;
     unsubscribed: boolean;
@@ -124,7 +142,7 @@ describe("enable/disable failure paths", () => {
     return s;
   }
 
-  function stubBrowser(sub: FakeSub | null, existing: FakeSub | null = sub) {
+  function stubBrowser(sub: FakeSub | null, existing: FakeSub | null = sub, waiting = false) {
     vi.stubGlobal("PushManager", class {});
     vi.stubGlobal("Notification", {
       permission: "granted",
@@ -135,8 +153,12 @@ describe("enable/disable failure paths", () => {
       serviceWorker: {
         getRegistration: () =>
           Promise.resolve({
+            waiting: waiting ? {} : null,
             pushManager: {
-              subscribe: () => Promise.resolve(sub),
+              subscribe: () => {
+                subscribeCalls.push(1);
+                return Promise.resolve(sub);
+              },
               getSubscription: () => Promise.resolve(existing),
             },
           }),
@@ -145,6 +167,17 @@ describe("enable/disable failure paths", () => {
   }
 
   afterEach(() => vi.unstubAllGlobals());
+
+  it("never subscribes under a worker that cannot serve the push", async () => {
+    // The active worker on an upgrade from before M27 has no `push` handler.
+    // Creating a subscription there produces deliveries nothing displays, and
+    // the person is told notifications are on.
+    const sub = fakeSub();
+    stubBrowser(sub, sub, true);
+    expect(await enablePush()).toBe("stale-worker");
+    expect(subscribeCalls, "subscribed anyway").toEqual([]);
+    expect(API.registerPushSubscription).not.toHaveBeenCalled();
+  });
 
   it("rolls the browser subscription back when the server will not record it", async () => {
     // Otherwise readPushEnvironment reports `subscribed`, the UI says `on`,
