@@ -125,6 +125,28 @@ known unknown: its Android push service hosts are documented, but whether its
 WEB push endpoints use them or FCM could not be established from here, so
 nothing was added on a guess.
 
+Registration resolves the caller's client under a ROW LOCK and refuses a
+tombstone (Codex review on PR #85). Unlocked and unfiltered, a registration
+that began before an erasure inserted its row after `fn_purge_client` had
+tombstoned the client and the trigger had deleted every device it knew about —
+an endpoint identifying a browser, surviving the erasure request H5 exists to
+honour. The lock is what closes it and the predicate alone would not: the
+purge takes `for update` on that row, so the read waits for it and then
+re-reads the committed tombstone. Both are load-bearing and neither is
+redundant, which is not an assumption — `concurrency.sh` case 8 goes red
+without the predicate and case 8b without the lock, each closing an interleave
+the other does not. Nothing sequential can reach it, because the purge NULLs
+`auth_user_id` and `my_client_id()` then returns null.
+
+The per-recipient advisory lock is keyed on the CLIENT where there is one and
+on the operator otherwise, never on the pair. A client belongs to exactly one
+operator, so the pair says nothing extra — and the single-value key is what
+lets the advisory lock be taken BEFORE the `clients` read, since the pair
+cannot be computed until `operator_id` has been read. That ordering matters:
+`fn_invite_signup_allow_attempt` (0048) takes advisory-then-clients on a key
+derived the same way, and two functions taking the same two locks in opposite
+orders is the 0037 cycle.
+
 **Stated residual:** a browser that recycled an endpoint under a fresh keypair
 would also be refused, and the stale row is invisible to the new owner
 (SELECT is scoped per persona). No implementation is known to do this — the

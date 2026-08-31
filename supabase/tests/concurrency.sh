@@ -676,6 +676,193 @@ fi
 
 psql "$DB" -q -c "delete from push_subscriptions where operator_id = '${NS}-000000000001';" >/dev/null
 
+echo
+echo "== case 8: a device registration racing the erasure of its own client =="
+
+# Codex review on PR #85, eighth round. `fn_register_push_subscription`
+# resolved the caller's client with `my_client_id()` and then read
+# `clients.operator_id` UNLOCKED and without a `purged_at` predicate, so a
+# registration that started before an erasure could insert its row after
+# `fn_purge_client` had tombstoned the client and the 0049 trigger had deleted
+# every device it knew about. The endpoint identifies a browser; a row bearing
+# one surviving an erasure request is exactly what H5 exists to prevent.
+#
+# Not reachable sequentially: the purge NULLs `auth_user_id`, so afterwards
+# `my_client_id()` returns null and the caller never reaches the client branch
+# at all. Only an interleave gets there, which is why this needs the barrier.
+psql "$DB" -v ON_ERROR_STOP=1 -q -c "
+  insert into auth.users (id, email) values ('${NS}-000000000801', 'cc-erase@sanpo.test');
+  insert into clients (id, operator_id, auth_user_id, full_name, status)
+    values ('${NS}-000000000102', '${NS}-000000000001', '${NS}-000000000801', 'CC Erasee', 'active');
+  insert into push_subscriptions (operator_id, client_id, endpoint, p256dh, auth)
+    values ('${NS}-000000000001', '${NS}-000000000102',
+            'https://fcm.googleapis.com/fcm/send/erase-seed', repeat('E', 87), repeat('F', 22));"
+
+psql "$DB" -v ON_ERROR_STOP=1 -q -c "
+do \$outer\$
+declare
+  v_def text;
+  v_at  int;
+  v_needle constant text := 'v_client := my_client_id();';
+begin
+  select pg_get_functiondef(
+    'fn_register_push_subscription(text, text, text, text)'::regprocedure) into v_def;
+  v_def := replace(v_def, 'FUNCTION public.fn_register_push_subscription(',
+                          'FUNCTION public.fn_register_push_subscription_barrier(');
+  v_at := position(v_needle in v_def) + length(v_needle);
+  if v_at <= length(v_needle) then
+    raise exception 'case 8: no client resolution found in fn_register_push_subscription';
+  end if;
+  v_def := left(v_def, v_at)
+        || E'\n  perform pg_advisory_xact_lock(930);'
+        || substr(v_def, v_at + 1);
+  execute v_def;
+end \$outer\$;"
+
+# Session A holds the barrier shut.
+echo "select pg_advisory_lock(930);" >&3
+for _ in $(seq 1 50); do
+  [ "$(q "select count(*) from pg_locks where locktype = 'advisory' and objid = 930 and granted")" != "0" ] && break
+  sleep 0.1
+done
+
+# B is the client's own browser registering a device. It resolves its client
+# id and stops before looking the client up.
+psql "$DB" -q -v ON_ERROR_STOP=1 -c "
+  begin;
+  set local request.jwt.claims = '{\"sub\":\"${NS}-000000000801\",\"role\":\"authenticated\"}';
+  select fn_register_push_subscription_barrier(
+    'https://fcm.googleapis.com/fcm/send/erase-race', repeat('C', 87), repeat('D', 22));
+  commit;" >"$WORK/b8.out" 2>&1 &
+B8_PID=$!
+expect_eq "the registration resolved its client and reached the barrier" \
+  "$(wait_until_blocked fn_register_push_subscription_barrier)" "blocked"
+
+# C is the operator honouring an erasure request.
+psql "$DB" -q -v ON_ERROR_STOP=1 -c "
+  set local request.jwt.claims = '{\"sub\":\"${NS}-000000000001\",\"role\":\"authenticated\"}';
+  select * from fn_purge_client('${NS}-000000000102');" >"$WORK/c8.out" 2>&1
+expect_eq "the purge deleted the device it knew about (precondition)" \
+  "$(q "select count(*) from push_subscriptions where client_id = '${NS}-000000000102'")" "0"
+
+# Release the barrier: B now looks its client up and decides.
+echo "select pg_advisory_unlock(930);" >&3
+wait $B8_PID || true
+
+# THE FINDING. A device registered by a request that began before the erasure
+# must not outlive it.
+expect_eq "no device survived the erasure" \
+  "$(q "select count(*) from push_subscriptions where client_id = '${NS}-000000000102'")" "0"
+
+# And it is REFUSED rather than silently dropped, so the browser learns its
+# subscription was not recorded instead of reporting notifications as on.
+if grep -q "erased" "$WORK/b8.out"; then
+  pass "the registration was refused, naming the erasure"
+else
+  fail "the registration did not name the erasure" "$(tail -2 "$WORK/b8.out")"
+fi
+
+psql "$DB" -q -c "drop function if exists fn_register_push_subscription_barrier(text, text, text, text);" >/dev/null
+
+# ── Case 8b: the row lock is real, and it does not deadlock ───────────────
+#
+# Case 8 proves the OUTCOME, and it would still pass with only the
+# `purged_at` predicate and no lock at all — the purge commits before the
+# barrier releases there, so the predicate alone answers. The predicate alone
+# is NOT the fix: a registration that reads the client while the purge is
+# still in flight sees a live row and inserts. So the lock gets its own case.
+#
+# It is also the change M32/0037 exists to guard: a `clients` row lock added
+# to a function that took none. Order is advisory -> clients ->
+# push_subscriptions here, and walks -> clients -> everything in
+# `fn_purge_client`, so both take clients before push_subscriptions and the
+# purge never takes this advisory lock. This is the demonstration of that,
+# rather than the assertion of it.
+echo
+echo "== case 8b: the client row lock blocks an erasure, without deadlocking =="
+
+psql "$DB" -v ON_ERROR_STOP=1 -q -c "
+  insert into auth.users (id, email) values ('${NS}-000000000802', 'cc-erase2@sanpo.test');
+  insert into clients (id, operator_id, auth_user_id, full_name, status)
+    values ('${NS}-000000000103', '${NS}-000000000001', '${NS}-000000000802', 'CC Erasee 2', 'active');"
+
+psql "$DB" -v ON_ERROR_STOP=1 -q -c "
+do \$outer\$
+declare
+  v_def text;
+  v_at  int;
+begin
+  select pg_get_functiondef(
+    'fn_register_push_subscription(text, text, text, text)'::regprocedure) into v_def;
+  v_def := replace(v_def, 'FUNCTION public.fn_register_push_subscription(',
+                          'FUNCTION public.fn_register_push_subscription_barrier(');
+  -- Anchored on the ASSIGNMENT and advanced to the END of that statement, so
+  -- the injection point depends on neither the lock mode nor the `purged_at`
+  -- predicate. Anchoring on either would make removing it ABORT this case
+  -- instead of failing its assertion — and removing them is exactly what the
+  -- assertions below are here to report. Case 6b's comment says the same of
+  -- its own anchor; this one was first written against the predicate and the
+  -- sabotage caught it.
+  v_at := position('select operator_id into v_operator' in v_def);
+  if v_at = 0 then
+    raise exception 'case 8b: no client lookup found in fn_register_push_subscription';
+  end if;
+  v_at := v_at + position(';' in substr(v_def, v_at)) - 1;
+  v_def := left(v_def, v_at)
+        || E'\n  perform pg_advisory_xact_lock(931);'
+        || substr(v_def, v_at + 1);
+  execute v_def;
+end \$outer\$;"
+
+echo "select pg_advisory_lock(931);" >&3
+for _ in $(seq 1 50); do
+  [ "$(q "select count(*) from pg_locks where locktype = 'advisory' and objid = 931 and granted")" != "0" ] && break
+  sleep 0.1
+done
+
+# B holds the client row and stops.
+psql "$DB" -q -v ON_ERROR_STOP=1 -c "
+  begin;
+  set local request.jwt.claims = '{\"sub\":\"${NS}-000000000802\",\"role\":\"authenticated\"}';
+  select fn_register_push_subscription_barrier(
+    'https://fcm.googleapis.com/fcm/send/erase-race-2', repeat('C', 87), repeat('D', 22));
+  commit;" >"$WORK/b8b.out" 2>&1 &
+B8B_PID=$!
+expect_eq "the registration reached the barrier holding the client row" \
+  "$(wait_until_blocked fn_register_push_subscription_barrier)" "blocked"
+
+# C erases. Its `for update` on that row must wait.
+psql "$DB" -q -v ON_ERROR_STOP=1 -c "
+  set local request.jwt.claims = '{\"sub\":\"${NS}-000000000001\",\"role\":\"authenticated\"}';
+  select * from fn_purge_client('${NS}-000000000103');" >"$WORK/c8b.out" 2>&1 &
+C8B_PID=$!
+expect_eq "the erasure genuinely blocked on it — the window case 8 exploited is shut" \
+  "$(wait_until_blocked fn_purge_client)" "blocked"
+
+echo "select pg_advisory_unlock(931);" >&3
+B8B_RC=0; C8B_RC=0
+wait $B8B_PID || B8B_RC=$?
+wait $C8B_PID || C8B_RC=$?
+
+if [ "$B8B_RC" != "0" ] || [ "$C8B_RC" != "0" ]; then
+  fail "neither the registration nor the erasure is aborted" \
+       "$(grep -ih "deadlock\|ERROR" "$WORK/b8b.out" "$WORK/c8b.out" | head -3)"
+else
+  pass "neither the registration nor the erasure is aborted"
+fi
+if grep -qi "deadlock detected" "$WORK/b8b.out" "$WORK/c8b.out"; then
+  fail "no deadlock was detected" "$(grep -ih "deadlock detected" "$WORK/b8b.out" "$WORK/c8b.out" | head -1)"
+else
+  pass "no deadlock was detected"
+fi
+
+# The erasure still wins: it runs after the registration commits, so the
+# trigger deletes the device that registration just created.
+expect_eq "the erasure still took the device the registration had just made" \
+  "$(q "select count(*) from push_subscriptions where client_id = '${NS}-000000000103'")" "0"
+
+psql "$DB" -q -c "drop function if exists fn_register_push_subscription_barrier(text, text, text, text);" >/dev/null
+
 exec 3>&-
 wait $A_PID 2>/dev/null || true
 
