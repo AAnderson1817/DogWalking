@@ -195,19 +195,43 @@ begin
     raise exception 'fn_register_push_subscription: caller is neither an operator nor a client';
   end if;
 
+  -- The reassignment is CONDITIONAL on presenting the endpoint's existing key
+  -- material (Codex review on PR #85). Unconditional, it contradicted this
+  -- file's own reasoning two functions down: `fn_remove_push_subscription` is
+  -- scoped to the caller precisely because an endpoint is not secret enough to
+  -- authorize acting on it — and then this let any authenticated caller who
+  -- learned an endpoint claim that row, which silently stops the victim's
+  -- notifications AND starts delivering the claimant's onto the victim's
+  -- device.
+  --
+  -- The key check is exactly the right discriminator, because the genuine
+  -- shared-device case is "the browser handed back the SAME subscription":
+  -- `pushManager.subscribe()` with an existing registration and the same
+  -- application server key returns the existing object, so the endpoint and
+  -- the keys arrive together. A caller who knows only the endpoint cannot
+  -- produce the keys — they never leave the browser that made them, and 0049
+  -- withholds them from `authenticated` for this reason among others.
   insert into push_subscriptions (operator_id, client_id, endpoint, p256dh, auth, user_agent)
   values (v_operator, v_client, p_endpoint, p_p256dh, p_auth, p_user_agent)
   on conflict (endpoint) do update
      set operator_id = excluded.operator_id,
          client_id = excluded.client_id,
-         p256dh = excluded.p256dh,
          auth = excluded.auth,
          user_agent = excluded.user_agent,
          last_seen_at = now(),
          failure_count = 0,
          last_failure_at = null,
          last_error = null
+   where push_subscriptions.p256dh = excluded.p256dh
   returning id into v_id;
+
+  if v_id is null then
+    -- The endpoint exists under different key material. Either a caller
+    -- claiming somebody else's device, or the far rarer case of a browser
+    -- recycling an endpoint with a fresh keypair — which this refuses too,
+    -- and that residual is recorded in spec 01 rather than guessed at.
+    raise exception 'fn_register_push_subscription: endpoint is registered to a different device';
+  end if;
 
   return v_id;
 end $$;

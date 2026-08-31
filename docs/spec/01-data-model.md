@@ -76,6 +76,31 @@ same endpoint, so `fn_register_push_subscription` upserts on it and REASSIGNS
 ownership. A row left attached to the previous person sends their walk reports
 to a lock screen somebody else is holding.
 
+The reassignment is CONDITIONAL on presenting the endpoint's existing key
+material (Codex review on PR #85). Unconditional, it contradicted the reason
+`fn_remove_push_subscription` is scoped to its caller — an endpoint is not
+secret enough to authorize acting on it — and let any authenticated caller who
+learned an endpoint claim that row, stopping the victim's notifications and
+delivering the claimant's onto the victim's device. The key check is the right
+discriminator because the genuine shared-device case presents endpoint and
+keys TOGETHER: `pushManager.subscribe()` against an existing registration
+returns the existing subscription object.
+
+**Stated residual:** a browser that recycled an endpoint under a fresh keypair
+would also be refused, and the stale row is invisible to the new owner
+(SELECT is scoped per persona). No implementation is known to do this — the
+subscription object is stable per registration and application server key —
+and the alternative, accepting any claim that presents new keys, is the hole
+itself. A row in that state is already undeliverable, since payloads would be
+encrypted to keys the browser no longer holds.
+
+A session can also end WITHOUT the sign-out path — a failed refresh token,
+cleared auth storage, a tab killed mid-session — leaving the browser
+subscribed while the row still belongs to the previous account.
+`reclaimPushDevice()` re-registers on every resolved session, which repairs it
+using the same upsert; it is idempotent and best-effort, because the function
+refuses a caller who is not yet an operator or a client.
+
 `authenticated` holds no INSERT, UPDATE or DELETE — every write goes through
 `fn_register_push_subscription` / `fn_remove_push_subscription`, which resolve
 the persona themselves so a caller cannot name someone else's `operator_id`.

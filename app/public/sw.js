@@ -125,7 +125,14 @@ function safePath(candidate) {
 async function showPush(data) {
   let payload = {};
   try {
-    payload = data ? data.json() : {};
+    const parsed = data ? data.json() : null;
+    // `json()` SUCCEEDS for the literal `null`, and every field read below
+    // then throws — rejecting the waitUntil promise and showing nothing,
+    // which is the silent push this handler exists to prevent (Codex review
+    // on PR #85). A string or a number is harmless (property reads give
+    // undefined) but is normalised here too, so the guarantee does not rest
+    // on which primitive arrived.
+    if (parsed && typeof parsed === "object") payload = parsed;
   } catch {
     // A body we cannot parse is still a push we must answer for.
     payload = {};

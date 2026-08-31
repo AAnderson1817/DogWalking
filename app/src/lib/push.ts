@@ -171,6 +171,41 @@ export async function disablePush(): Promise<PushState> {
 }
 
 /**
+ * Claim any existing browser subscription for whoever is signed in NOW.
+ *
+ * The sign-out cleanup below only covers the graceful path. A session can end
+ * without it — a refresh token that fails, cleared auth storage, a tab killed
+ * mid-session — and the browser's subscription survives all of them (Codex
+ * review on PR #85). The next person to sign in then finds
+ * `readPushEnvironment` reporting `subscribed: true`, so the UI says `on` and
+ * offers only the OFF action, and nothing ever re-registers it: the device
+ * keeps receiving the PREVIOUS account's notifications and never receives the
+ * current one's.
+ *
+ * Re-registering is the whole fix, and it needs no new machinery because
+ * `fn_register_push_subscription` already upserts and reassigns — the
+ * primitive the shared-device case required is exactly the one that repairs
+ * this. It is idempotent, so running it on every resolved session is a no-op
+ * once the row already belongs to the caller.
+ *
+ * Best effort by design: a caller who is neither an operator nor a client
+ * (mid-onboarding, before the row exists) is refused by the function, and
+ * that must not break signing in.
+ */
+export async function reclaimPushDevice(): Promise<void> {
+  try {
+    const reg = await registration();
+    const sub = reg ? await reg.pushManager.getSubscription() : null;
+    if (!sub) return;
+    const keys = subscriptionKeys(sub);
+    if (!keys) return;
+    await registerPushSubscription(sub.endpoint, keys.p256dh, keys.auth, navigator.userAgent);
+  } catch {
+    /* see above */
+  }
+}
+
+/**
  * Sign-out cleanup (the M8 rule, one layer out).
  *
  * MUST run BEFORE `supabase.auth.signOut()`, which is the opposite of the

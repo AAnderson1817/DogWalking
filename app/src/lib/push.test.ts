@@ -13,6 +13,7 @@ import {
   forgetPushDeviceBeforeSignOut,
   type PushEnvironment,
   pushState,
+  reclaimPushDevice,
   subscriptionKeys,
 } from "./push";
 
@@ -173,5 +174,58 @@ describe("enable/disable failure paths", () => {
     API.removePushSubscription.mockRejectedValue(new Error("offline"));
     await forgetPushDeviceBeforeSignOut();
     expect(sub.unsubscribed).toBe(true);
+  });
+});
+
+describe("reclaiming a device the sign-out path never saw", () => {
+  // A session can end without signOut — a failed refresh token, cleared auth
+  // storage, a tab killed mid-session. The browser subscription survives all
+  // of them, and the next account would otherwise keep receiving the previous
+  // one's notifications while never receiving its own.
+  interface FakeSub {
+    endpoint: string;
+    unsubscribe: () => Promise<boolean>;
+    getKey: (n: string) => ArrayBuffer | null;
+  }
+  function stub(sub: FakeSub | null) {
+    vi.stubGlobal("PushManager", class {});
+    vi.stubGlobal("Notification", { permission: "granted", requestPermission: () => Promise.resolve("granted") });
+    vi.stubGlobal("navigator", {
+      userAgent: "test",
+      serviceWorker: {
+        getRegistration: () => Promise.resolve({ pushManager: { getSubscription: () => Promise.resolve(sub) } }),
+      },
+    });
+  }
+  const sub: FakeSub = {
+    endpoint: "https://push.example/survivor",
+    unsubscribe: () => Promise.resolve(true),
+    getKey: (n) => (n === "p256dh" ? new Uint8Array(65).buffer : new Uint8Array(16).buffer),
+  };
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("re-registers a surviving subscription for whoever is signed in now", async () => {
+    stub(sub);
+    await reclaimPushDevice();
+    expect(API.registerPushSubscription).toHaveBeenCalledWith(
+      "https://push.example/survivor",
+      expect.any(String),
+      expect.any(String),
+      "test",
+    );
+  });
+
+  it("does nothing when this browser has no subscription", async () => {
+    stub(null);
+    await reclaimPushDevice();
+    expect(API.registerPushSubscription).not.toHaveBeenCalled();
+  });
+
+  it("never throws — it is a repair, not a precondition for signing in", async () => {
+    // The RPC refuses a caller who is not yet an operator or a client, which
+    // is the ordinary state mid-onboarding.
+    stub(sub);
+    API.registerPushSubscription.mockRejectedValue(new Error("caller is neither"));
+    await reclaimPushDevice();
   });
 });
