@@ -34,6 +34,24 @@ export interface PlateFamily {
   variants: string[];
 }
 
+/**
+ * A named type rather than a bare Error, so the build can tell a plate failure
+ * from a missing `dist/assets`.
+ *
+ * The caller has to re-throw this out of a `catch` that exists to tolerate a
+ * `public`-only build, and the first version of that check matched on the
+ * error's MESSAGE TEXT. Rewording a sentence would then have silently turned
+ * the re-throw off and let the build swallow exactly the failures this class
+ * exists to surface — a gate that stops running because someone improved the
+ * prose is the shape this repository keeps finding.
+ */
+export class PlateFamilyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PlateFamilyError";
+  }
+}
+
 export function todayPlateFamily(files: string[], sourceVariantCount: number): PlateFamily {
   const family = files.filter((f) => f.startsWith(PLATE_BASENAME) && f.endsWith(".webp"));
   const variants = family.filter((f) => PLATE_VARIANT_RE.test(f));
@@ -45,13 +63,13 @@ export function todayPlateFamily(files: string[], sourceVariantCount: number): P
   // has shipped "a gate that passes by not running" often enough to write the
   // rule down.
   if (masters.length !== 1) {
-    throw new Error(
+    throw new PlateFamilyError(
       `expected exactly one Today plate master in the bundle, found ${masters.length} `
         + `(${masters.join(", ") || "none"}). The service worker would have nothing to fall back to.`,
     );
   }
   if (variants.length !== sourceVariantCount) {
-    throw new Error(
+    throw new PlateFamilyError(
       `${sourceVariantCount} Today plate variants exist in src/assets/illustrations but `
         + `${variants.length} reached the bundle (${variants.join(", ") || "none"}). `
         + "A variant that is never imported is never served, so `srcset` would name a URL that 404s.",

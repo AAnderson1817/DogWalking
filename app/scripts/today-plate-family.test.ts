@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PLATE_SOURCE_VARIANT_RE, todayPlateFamily } from "./today-plate-family.ts";
+import { PLATE_SOURCE_VARIANT_RE, PlateFamilyError, todayPlateFamily } from "./today-plate-family.ts";
 
 /**
  * Review M17. The build decides which Today plate goes in the precache and
@@ -48,6 +48,22 @@ describe("the build's Today plate family", () => {
     const foreign = "some-other-illustration-438w-Aa111111.webp";
     const family = todayPlateFamily([...OTHERS, ...VARIANTS, MASTER, foreign], 3);
     expect(family.variants).not.toContain(foreign);
+  });
+
+  it("throws a NAMED error, because the build re-throws it by type", () => {
+    // `vite.config.ts` catches around this call to tolerate a `public`-only
+    // build with no `dist/assets`, and has to let plate failures back out. It
+    // used to decide that by matching the message text, so rewording a
+    // sentence would have silently turned the re-throw off and let the build
+    // swallow the failure. If a future branch here throws a bare Error, the
+    // build goes quiet and this is what says so.
+    for (const bad of [
+      () => todayPlateFamily([...OTHERS, MASTER], 3),
+      () => todayPlateFamily([...OTHERS, ...VARIANTS], 3),
+      () => todayPlateFamily([...OTHERS, ...VARIANTS, MASTER, `${STEM}-Zz999999.webp`], 3),
+    ]) {
+      expect(bad).toThrow(PlateFamilyError);
+    }
   });
 
   it("counts source variants by the un-hashed name Vite starts from", () => {
