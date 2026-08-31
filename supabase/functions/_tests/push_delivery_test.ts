@@ -10,6 +10,7 @@ import {
   isGoneStatus,
   isPermanentPushFailure,
   type PushableRow,
+  type PushAttempt,
   type PushDeps,
   type PushSubscription,
   pushPayload,
@@ -56,7 +57,7 @@ interface Harness {
   sent: string[];
 }
 
-function harness(subs: PushSubscription[], reply: (s: PushSubscription) => { status: number } | Error): Harness {
+function harness(subs: PushSubscription[], reply: (s: PushSubscription) => PushAttempt | Error): Harness {
   const h: Harness = { dropped: [], failures: [], recorded: [], sent: [], deps: null as unknown as PushDeps };
   h.deps = {
     getSubscriptions: () => Promise.resolve(subs),
@@ -269,6 +270,31 @@ Deno.test("a dead row that survives its delete keeps the push retryable", async 
   const ok = harness([sub("dead")], () => ({ status: 410 }));
   const settled = await deliverPush(ROW, ok.deps);
   assertEquals(settled.kind, "skipped");
+});
+
+Deno.test("a blocked attempt says what blocked it, and stays retryable", async () => {
+  // "the request to the push service did not complete" is false when no
+  // request was made, and it is the sentence that hid a missing VAPID key
+  // behind an ordinary network blip.
+  const h = harness([sub("a")], () => ({ status: 0, blocked: "not_configured" as const }));
+  const outcome = await deliverPush(ROW, h.deps);
+  assertEquals(h.failures, [
+    { id: "a", error: "push delivery is not configured for this deployment" },
+  ]);
+  assert(outcome.kind === "failed" && !outcome.permanent, "a restored key must be able to fix it");
+
+  const enc = harness([sub("a")], () => ({ status: 0, blocked: "payload" as const }));
+  await deliverPush(ROW, enc.deps);
+  assertEquals(enc.failures, [
+    { id: "a", error: "this notification could not be encrypted for that device" },
+  ]);
+
+  // And a genuine transport failure keeps the sentence that IS true of it.
+  const net = harness([sub("a")], () => ({ status: 0, blocked: "transport" as const }));
+  await deliverPush(ROW, net.deps);
+  assertEquals(net.failures, [
+    { id: "a", error: "the request to the push service did not complete" },
+  ]);
 });
 
 Deno.test("a row already sent is not pushed again", async () => {

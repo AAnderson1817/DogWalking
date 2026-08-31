@@ -29,11 +29,25 @@ export interface PushSubscription {
   auth: string;
 }
 
+/**
+ * What one attempt at one device produced.
+ *
+ * `status` is the push service's own answer. `blocked` says why there was no
+ * answer at all, and it is the difference between "the network blinked" and
+ * "this deployment cannot push", which the operator can act on and the other
+ * they cannot.
+ */
+export interface PushAttempt {
+  status: number;
+  blocked?: "not_configured" | "payload" | "transport";
+}
+
 export interface PushDeps {
   /** This notification's recipient's devices. `client` null ⇒ the operator's. */
   getSubscriptions(operatorId: string, clientId: string | null): Promise<PushSubscription[]>;
   /**
-   * POST the encrypted body. Resolves with the push service's own status.
+   * POST the encrypted body. Resolves with the push service's own status, or
+   * with `status: 0` and a `blocked` reason when we never reached it.
    *
    * The STATUS and nothing else (Codex review on PR #85). This used to hand
    * back 300 characters of the service's response body, which then travelled
@@ -43,8 +57,19 @@ export interface PushDeps {
    * attacker-registrable endpoint it was an exfiltration channel rather than
    * merely untidy. The body is logged server-side by the implementation, at
    * the point it is read, so it cannot reach a column by being forgotten.
+   *
+   * It does not THROW for its own pre-flight failures either (Codex review on
+   * PR #85, twelfth round). Missing VAPID keys and a payload that cannot be
+   * encrypted both failed before the `fetch`, so the catch below turned them
+   * into `status: 0` — recorded as "the request to the push service did not
+   * complete", which is false, since no request was made — and the
+   * implementation's logging ran only AFTER the fetch, so nothing recorded
+   * them anywhere. A deployment whose VAPID keys were removed while devices
+   * existed therefore reported an ordinary transient failure forever. Same
+   * shape as the email arm's `assertEmailConfigured` one round earlier: an
+   * actionable configuration fault, indistinguishable from a bad minute.
    */
-  sendPush(sub: PushSubscription, payload: string): Promise<{ status: number }>;
+  sendPush(sub: PushSubscription, payload: string): Promise<PushAttempt>;
   /**
    * 404/410 — the browser has permanently forgotten this registration.
    *
@@ -116,10 +141,16 @@ export function isPermanentPushFailure(status: number): boolean {
  * the log line the sender emits when it reads it, with the subscription id
  * for context.
  */
-export function pushFailureLabel(status: number): string {
-  return status === 0
-    ? "the request to the push service did not complete"
-    : `the push service answered ${status}`;
+export function pushFailureLabel(attempt: PushAttempt): string {
+  if (attempt.status !== 0) return `the push service answered ${attempt.status}`;
+  switch (attempt.blocked) {
+    case "not_configured":
+      return "push delivery is not configured for this deployment";
+    case "payload":
+      return "this notification could not be encrypted for that device";
+    default:
+      return "the request to the push service did not complete";
+  }
 }
 
 /**
@@ -233,22 +264,23 @@ export async function deliverPush(row: PushableRow, deps: PushDeps): Promise<Out
       continue;
     }
 
-    let status: number;
+    let attempt: PushAttempt;
     try {
-      ({ status } = await deps.sendPush(sub, payload));
+      attempt = await deps.sendPush(sub, payload);
     } catch {
-      // A thrown transport error is not a verdict from the push service, so
-      // it must never be read as "this device is gone". The error itself is
-      // logged by the implementation; it is not recorded, because this string
-      // lands in a client-readable column.
-      status = 0;
+      // A backstop, not the path: `sendPush` classifies and logs its own
+      // failures now. A throw reaching here is a dep implementation that does
+      // not, and it is still never a verdict from the push service — so it
+      // must not be read as "this device is gone".
+      attempt = { status: 0, blocked: "transport" };
     }
+    const status = attempt.status;
 
     if (status >= 200 && status < 300) {
       delivered += 1;
       continue;
     }
-    lastError = pushFailureLabel(status);
+    lastError = pushFailureLabel(attempt);
     if (isGoneStatus(status)) {
       if (await deps.dropSubscription(sub.id)) {
         gone += 1;
