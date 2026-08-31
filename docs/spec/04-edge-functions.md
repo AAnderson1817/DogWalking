@@ -425,6 +425,49 @@ Two further residuals, accepted and recorded rather than silently carried
   refusal log lands in a `foreign_key_violation` handler that returns
   `not_found`, which by then is true (0045).
 
+### Push, alongside email (review M27)
+
+The same invocation delivers BOTH channels, because the Database Webhook on
+INSERT already calls this function and a second one would need a second
+webhook — a dashboard step only the owner can perform, and one more thing that
+is invisible when it is missing.
+
+They do not gate each other. Push runs FIRST, deliberately: the email arm
+throws when `RESEND_API_KEY` is missing (H17's loud failure), so push running
+after it would be silently skipped on a deployment with push configured and
+email not. The reverse costs nothing, because push is send-once on
+`push_status = 'sent'` — the webhook's retry after an email 500 records
+"already sent" rather than pushing twice. A push failure never fails the
+request: turning a dead Android endpoint into a 502 would put the EMAIL back
+in the backlog too.
+
+Recipients differ from email's. Email is client-facing only; push goes to
+whoever the notification is addressed to, because an operator wants "walk
+cancelled" on their phone as much as a client wants "walk complete".
+`client_id is null` means the operator's own devices.
+
+One aggregate outcome per notification, not per device — the question is "was
+I told", not "did device 3 of 4 accept it". `sent` when at least one device
+accepted; `skipped` (TERMINAL) when there are no registrations, or when every
+one turned out to be gone; `failed` (retryable) when they had devices and all
+of them failed. Per-device health lives on the subscription row.
+
+404 and 410 delete the registration: the browser has permanently forgotten it,
+and the row holds an endpoint identifying a browser. 413 is OURS — the payload
+exceeded the service's limit — so it is permanent but must NOT delete a good
+device over a bug in our own message. A thrown transport error is not a
+verdict from the push service and is never read as "this device is gone".
+
+VAPID is read at send time and is absent-tolerant by ordering: subscriptions
+are looked up first, so a deployment with no keys has no devices and records
+`skipped` without ever needing them. Keys missing WITH devices present is a
+real misconfiguration — keys rotated out from under live subscriptions — and
+gets H17's loud 500.
+
+The payload lands on a LOCK SCREEN, so it carries a title, a body, a type tag
+and a deep link, and nothing else. 0038 already removed a credit balance from
+a notification body for the same reason.
+
 ## stripe-webhook — POST from Stripe
 **Register it as a Connect endpoint**, not an account endpoint — connected
 accounts are where every payment now happens, and an account-level endpoint

@@ -63,3 +63,33 @@ The digest is computed in the browser over the bytes actually uploaded and writt
 
 ## Storage buckets
 - `pet-photos` (public read via signed URLs), `walk-photos` (private; signed URLs in report cards). Path convention `{operator_id}/{entity_id}/{uuid}.jpg`; RLS on `storage.objects` scopes by first path segment.
+
+## push_subscriptions (0049, review M27)
+
+Web Push device registrations. A tenant table — `operator_id` plus RLS, per
+invariant 7 — with `client_id null` meaning the operator's own device, the
+convention `notifications` already uses.
+
+`endpoint` is UNIQUE and is the device's identity, not the person's. That
+distinction is the whole design: on a shared phone two people can present the
+same endpoint, so `fn_register_push_subscription` upserts on it and REASSIGNS
+ownership. A row left attached to the previous person sends their walk reports
+to a lock screen somebody else is holding.
+
+`authenticated` holds no INSERT, UPDATE or DELETE — every write goes through
+`fn_register_push_subscription` / `fn_remove_push_subscription`, which resolve
+the persona themselves so a caller cannot name someone else's `operator_id`.
+SELECT is a column grant that WITHHOLDS `p256dh` and `auth`, the per-device
+encryption secrets; so this is a column-restricted table and `select("*")` on
+it raises 42501 for every row (`scripts/select-columns.test.ts` and
+`column-grants.test.ts` are the gates).
+
+Erasure is by trigger, not by a line in `fn_purge_client`. The purge REDACTS
+the client row, so the FK cascade never fires and an endpoint identifying a
+person's browser would otherwise survive an erasure request indefinitely —
+the gap Codex found in 0048 for `invite_signup_attempts`.
+
+`notifications` gains `push_status` / `push_attempts` / `push_sent_at` /
+`push_last_error`, mirroring H17's email quartet exactly. Existing rows are
+backfilled to `skipped`: no push was ever sent because there was no push, and
+the point is that they must not be sent now.
