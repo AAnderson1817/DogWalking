@@ -31,7 +31,11 @@ const SW_SOURCE = readFileSync(
 interface Handlers {
   fetch?: (event: FetchEventStub) => void;
   install?: (event: { waitUntil: (p: Promise<unknown>) => void }) => void;
-  message?: (event: { data: unknown }) => void;
+  message?: (event: {
+    data: unknown;
+    ports?: Array<{ postMessage: (m: unknown) => void }>;
+    source?: { postMessage: (m: unknown) => void };
+  }) => void;
   push?: (event: PushEventStub) => void;
   notificationclick?: (event: NotificationClickStub) => void;
 }
@@ -400,6 +404,48 @@ describe("the service worker's install", () => {
     sw.message?.({ data: null });
     sw.message?.({ data: "SKIP_WAITING" });
     expect(sw.skipWaitingCalls).toBe(0);
+  });
+
+  // The page cannot tell from the registration object whether the ACTIVE
+  // worker can display a push: during an upgrade from the pre-M27 worker the
+  // new one is `installing`, so `registration.waiting` is null while the
+  // worker that would receive a delivery has no `push` handler at all (Codex
+  // review on PR #85). So it asks, and only a worker running THIS file can
+  // answer.
+  it("answers PUSH_CAPABLE? on the port it was given", async () => {
+    const sw = loadServiceWorker();
+    await install(sw);
+    const replies: unknown[] = [];
+    sw.message?.({
+      data: { type: "PUSH_CAPABLE?" },
+      ports: [{ postMessage: (m) => replies.push(m) }],
+    });
+    expect(replies).toEqual([{ type: "PUSH_CAPABLE", push: true }]);
+  });
+
+  it("falls back to the asking client when no port came with it", async () => {
+    const sw = loadServiceWorker();
+    await install(sw);
+    const replies: unknown[] = [];
+    sw.message?.({
+      data: { type: "PUSH_CAPABLE?" },
+      source: { postMessage: (m) => replies.push(m) },
+    });
+    expect(replies).toEqual([{ type: "PUSH_CAPABLE", push: true }]);
+  });
+
+  it("answers nothing at all to any other message", async () => {
+    // Silence is what the page reads as "this worker predates push", so a
+    // handler that replied to anything would report every old worker as
+    // capable — the finding, rebuilt on this side.
+    const sw = loadServiceWorker();
+    await install(sw);
+    const replies: unknown[] = [];
+    const port = { postMessage: (m: unknown) => replies.push(m) };
+    sw.message?.({ data: { type: "SKIP_WAITING" }, ports: [port] });
+    sw.message?.({ data: { type: "PUSH_CAPABLE" }, ports: [port] });
+    sw.message?.({ data: "PUSH_CAPABLE?", ports: [port] });
+    expect(replies).toEqual([]);
   });
 });
 

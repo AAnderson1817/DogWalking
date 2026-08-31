@@ -29,8 +29,21 @@ const ROW: PushableRow = {
   push_status: "pending",
 };
 
+/**
+ * A subscription on a REAL push service host.
+ *
+ * These fixtures used to say `https://push.example/<id>`, and every one of
+ * them went red the moment `deliverPush` started refusing endpoints that are
+ * not push services (Codex review on PR #85) — correctly: they were the
+ * arbitrary hosts the finding is about.
+ */
 function sub(id: string): PushSubscription {
-  return { id, endpoint: `https://push.example/${id}`, p256dh: "p", auth: "a" };
+  return { id, endpoint: `https://fcm.googleapis.com/fcm/send/${id}`, p256dh: "p", auth: "a" };
+}
+
+/** A subscription pointing anywhere else. Nothing may POST to one of these. */
+function foreignSub(id: string, endpoint = "https://internal.svc.local/admin"): PushSubscription {
+  return { id, endpoint, p256dh: "p", auth: "a" };
 }
 
 interface Harness {
@@ -41,7 +54,7 @@ interface Harness {
   sent: string[];
 }
 
-function harness(subs: PushSubscription[], reply: (s: PushSubscription) => { status: number; detail?: string } | Error): Harness {
+function harness(subs: PushSubscription[], reply: (s: PushSubscription) => { status: number } | Error): Harness {
   const h: Harness = { dropped: [], failures: [], recorded: [], sent: [], deps: null as unknown as PushDeps };
   h.deps = {
     getSubscriptions: () => Promise.resolve(subs),
@@ -70,7 +83,7 @@ Deno.test("one device accepting means the person was told, even if others fail",
   // The aggregate rule. Recording `failed` because device 2 of 3 was
   // unreachable would put a notification the person already received back into the
   // backlog, and they would get it again tomorrow.
-  const h = harness([sub("a"), sub("b")], (s) => (s.id === "a" ? { status: 201 } : { status: 500, detail: "boom" }));
+  const h = harness([sub("a"), sub("b")], (s) => (s.id === "a" ? { status: 201 } : { status: 500 }));
   const outcome = await deliverPush(ROW, h.deps);
   assertEquals(outcome.kind, "sent");
   assertEquals(h.failures.map((f) => f.id), ["b"], "the unhealthy device is still noted");
@@ -108,6 +121,90 @@ Deno.test("a thrown transport error is never read as 'this device is gone'", asy
   assertEquals(h.dropped, []);
   assertEquals(outcome.kind, "failed");
   assert(outcome.kind === "failed" && !outcome.permanent);
+});
+
+Deno.test("an endpoint that is not a push service is never contacted", async () => {
+  // The SSRF (Codex review on PR #85). Registration accepted any https url
+  // and this loop POSTed to it from the edge runtime, so any authenticated
+  // caller could aim a server-side request wherever they liked and read the
+  // outcome back off `notifications.push_last_error`.
+  //
+  // The assertion is on `h.sent` — that no REQUEST was made — rather than on
+  // the outcome. A version that fetches and then classifies the answer is the
+  // bug, however tidy its recorded result looks.
+  const h = harness([foreignSub("evil")], () => ({ status: 200 }));
+  const outcome = await deliverPush(ROW, h.deps);
+  assertEquals(h.sent, [], "POSTed to an endpoint that is not a push service");
+  assertEquals(h.dropped, ["evil"], "an endpoint nothing will ever send to must not be kept");
+  assertEquals(outcome.kind, "skipped");
+  assert(
+    outcome.kind === "skipped" && outcome.reason.includes("not a push service"),
+    `the skip must say why: ${JSON.stringify(outcome)}`,
+  );
+});
+
+Deno.test("a refused endpoint does not stop the recipient's other devices", async () => {
+  // Registering one fabricated endpoint must not cost somebody the push to
+  // the phone in their hand — which is what treating the refusal as a hard
+  // failure of the whole notification would do.
+  const h = harness([foreignSub("evil"), sub("phone")], () => ({ status: 201 }));
+  const outcome = await deliverPush(ROW, h.deps);
+  assertEquals(h.sent, ["phone"]);
+  assertEquals(h.dropped, ["evil"]);
+  assertEquals(outcome.kind, "sent");
+});
+
+Deno.test("userinfo does not smuggle an allowlisted host past the check", async () => {
+  // `https://fcm.googleapis.com@internal.svc.local/` reads to a skimming
+  // human as a Google endpoint and resolves to a host of `internal.svc.local`.
+  const h = harness(
+    [foreignSub("smuggled", "https://fcm.googleapis.com@internal.svc.local/x")],
+    () => ({ status: 200 }),
+  );
+  await deliverPush(ROW, h.deps);
+  assertEquals(h.sent, [], "userinfo defeated the host check");
+});
+
+Deno.test("what a failure RECORDS is ours, never the push service's words", async () => {
+  // `notifications.push_last_error` is selectable by `authenticated`, and
+  // `push_subscriptions.last_error` carries the same string. H14's rule is
+  // that the client sees our message and the underlying system's words stay
+  // on the server; the body used to travel all the way into both columns,
+  // which with an attacker-chosen endpoint made it an exfiltration channel.
+  const h = harness([sub("a")], () => ({ status: 500 }));
+  const outcome = await deliverPush(ROW, h.deps);
+  assertEquals(h.failures, [{ id: "a", error: "the push service answered 500" }]);
+  assert(outcome.kind === "failed" && outcome.error === "the push service answered 500", "the recorded outcome must say the same");
+});
+
+Deno.test("a transport error records a classification, not the exception text", async () => {
+  // A rejected fetch carries the URL and the underlying network condition in
+  // its message. The endpoint's path segment is the device's bearer
+  // credential, so that string is exactly the one not to persist.
+  const h = harness([sub("a")], () => new Error("error sending request for url (https://fcm.googleapis.com/fcm/send/SECRET-TOKEN)"));
+  const outcome = await deliverPush(ROW, h.deps);
+  assertEquals(h.failures, [{ id: "a", error: "the request to the push service did not complete" }]);
+  assert(
+    outcome.kind === "failed" && !outcome.error.includes("SECRET-TOKEN"),
+    "the endpoint's token reached a recorded column",
+  );
+});
+
+Deno.test("a redirect is a failure, never a delivery", async () => {
+  // Measured rather than assumed: with `redirect: "manual"` Deno hands back
+  // the real 3xx (status 302, type "basic", ok false) and does NOT make the
+  // second request — it neither throws nor returns an opaque status 0. So the
+  // 3xx arrives here as an ordinary non-2xx and must not be read as success.
+  //
+  // Left RETRYABLE deliberately: a push service that redirects is either
+  // misconfigured or is not the push service, and neither is something this
+  // code can tell apart from a failover. The backlog's attempt ceiling is
+  // what ends it, rather than a rule invented for a case nobody has seen.
+  const h = harness([sub("a")], () => ({ status: 302 }));
+  const outcome = await deliverPush(ROW, h.deps);
+  assertEquals(outcome.kind, "failed");
+  assert(outcome.kind === "failed" && !outcome.permanent, "a 3xx is not classed permanent");
+  assertEquals(h.dropped, [], "a redirect must not delete a registration");
 });
 
 Deno.test("a row already sent is not pushed again", async () => {

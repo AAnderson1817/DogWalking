@@ -1367,6 +1367,12 @@ export type Database = {
         };
         Returns: Database["public"]["Enums"]["invite_claim_outcome"];
       };
+      fn_is_push_service_endpoint: {
+        Args: {
+          p_endpoint: string;
+        };
+        Returns: boolean;
+      };
       fn_is_service_session: {
         Args: Record<string, never>;
         Returns: boolean;

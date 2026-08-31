@@ -19,6 +19,7 @@
 // "walk cancelled" on their phone as much as a client wants "walk complete".
 // `client_id is null` means the operator's own devices, which is the same
 // convention `notifications` and `push_subscriptions` already use.
+import { isPushServiceEndpoint } from "../_lib/webpush.ts";
 import type { Outcome } from "./handler.ts";
 
 export interface PushSubscription {
@@ -31,8 +32,19 @@ export interface PushSubscription {
 export interface PushDeps {
   /** This notification's recipient's devices. `client` null ⇒ the operator's. */
   getSubscriptions(operatorId: string, clientId: string | null): Promise<PushSubscription[]>;
-  /** POST the encrypted body. Resolves with the push service's own status. */
-  sendPush(sub: PushSubscription, payload: string): Promise<{ status: number; detail?: string }>;
+  /**
+   * POST the encrypted body. Resolves with the push service's own status.
+   *
+   * The STATUS and nothing else (Codex review on PR #85). This used to hand
+   * back 300 characters of the service's response body, which then travelled
+   * into `notifications.push_last_error` — a column `authenticated` may
+   * select. H14's rule is that the client sees OUR message and the underlying
+   * system's words never leave the server; this path broke it, and with an
+   * attacker-registrable endpoint it was an exfiltration channel rather than
+   * merely untidy. The body is logged server-side by the implementation, at
+   * the point it is read, so it cannot reach a column by being forgotten.
+   */
+  sendPush(sub: PushSubscription, payload: string): Promise<{ status: number }>;
   /** 404/410 — the browser has permanently forgotten this registration. */
   dropSubscription(id: string): Promise<void>;
   /** Per-device health, so a flapping endpoint is visible before it is dropped. */
@@ -70,6 +82,27 @@ export function isGoneStatus(status: number): boolean {
 
 export function isPermanentPushFailure(status: number): boolean {
   return status >= 400 && status < 500 && status !== 429;
+}
+
+/**
+ * What a failure is allowed to SAY, as opposed to what it means.
+ *
+ * `notifications.push_last_error` is selectable by `authenticated` (0004
+ * grants the whole row and the RLS policies scope it to the recipient), so
+ * whatever goes in here is client-readable. It used to be the push service's
+ * own response body, truncated to 300 characters — which is H14's rule
+ * inverted: ours is the only part a client sees, the underlying system's
+ * words stay on the server.
+ *
+ * A status is a number we chose to keep, not text somebody else wrote, and it
+ * is the part that is actually diagnostic. The body still exists — it is on
+ * the log line the sender emits when it reads it, with the subscription id
+ * for context.
+ */
+export function pushFailureLabel(status: number): string {
+  return status === 0
+    ? "the request to the push service did not complete"
+    : `the push service answered ${status}`;
 }
 
 /**
@@ -153,26 +186,44 @@ export async function deliverPush(row: PushableRow, deps: PushDeps): Promise<Out
   const payload = pushPayload(row);
   let delivered = 0;
   let gone = 0;
+  let refused = 0;
   let lastError = "";
   let anyTransient = false;
 
   for (const sub of subs) {
+    // Refused BEFORE the request exists, not classified after it fails
+    // (Codex review on PR #85). `fetch` is the whole of the SSRF: an endpoint
+    // that is not a push service must never be contacted, so this is a
+    // `continue` rather than an error status fed through the loop below.
+    //
+    // Dropped, and that is the same call 404/410 gets: an endpoint no sender
+    // will ever POST to cannot deliver, so keeping the row leaves a target
+    // sitting in the table padding the recipient's device quota. 0049 refuses
+    // these at registration, so on a fresh deploy this branch is unreachable
+    // — which is exactly why it is here. It is the check that survives a
+    // future write path forgetting the rule.
+    if (!isPushServiceEndpoint(sub.endpoint)) {
+      refused += 1;
+      await deps.dropSubscription(sub.id);
+      continue;
+    }
+
     let status: number;
-    let detail: string | undefined;
     try {
-      ({ status, detail } = await deps.sendPush(sub, payload));
-    } catch (e) {
+      ({ status } = await deps.sendPush(sub, payload));
+    } catch {
       // A thrown transport error is not a verdict from the push service, so
-      // it must never be read as "this device is gone".
+      // it must never be read as "this device is gone". The error itself is
+      // logged by the implementation; it is not recorded, because this string
+      // lands in a client-readable column.
       status = 0;
-      detail = e instanceof Error ? e.message : String(e);
     }
 
     if (status >= 200 && status < 300) {
       delivered += 1;
       continue;
     }
-    lastError = `${status} ${detail ?? ""}`.trim();
+    lastError = pushFailureLabel(status);
     if (isGoneStatus(status)) {
       gone += 1;
       await deps.dropSubscription(sub.id);
@@ -185,8 +236,18 @@ export async function deliverPush(row: PushableRow, deps: PushDeps): Promise<Out
   let outcome: Outcome;
   if (delivered > 0) {
     outcome = { kind: "sent" };
-  } else if (gone === subs.length) {
-    outcome = { kind: "skipped", reason: "every registered device was gone" };
+  } else if (gone + refused === subs.length) {
+    // Nothing is left to retry: every device was either forgotten by its push
+    // service or is one we will not contact. A retry tomorrow finds no rows
+    // at all and records `skipped` anyway, so recording it now says the same
+    // true thing one night earlier — and it says WHICH, because a dropped row
+    // that nothing mentions is the kind of deletion nobody can account for.
+    outcome = {
+      kind: "skipped",
+      reason: refused > 0
+        ? `every registered device was gone (${gone}) or not a push service (${refused})`
+        : "every registered device was gone",
+    };
   } else {
     outcome = { kind: "failed", error: lastError, permanent: !anyTransient };
   }

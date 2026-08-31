@@ -205,6 +205,81 @@ export interface VapidConfig {
   subject: string;
 }
 
+// ── Which hosts this sender will POST to (Codex review on PR #85) ────────
+//
+// `fn_register_push_subscription` accepted any https url, and
+// `send-notification` then POSTed to it from the edge runtime. That is a
+// server-side request forgery primitive available to ANY authenticated
+// caller: register an endpoint you control — or one you want probed — trigger
+// a notification addressed to yourself, and read the outcome back off
+// `notifications.push_last_error`, which `authenticated` may select.
+//
+// 0049 shipped with a quota instead, on the stated ground that "a stricter
+// host allowlist would be brittle across providers". That reasoning priced
+// the cost of the allowlist and not the cost of its absence. A quota bounds
+// how MUCH outbound work one caller can cause; it does nothing about WHERE
+// the requests go, which is the whole of the finding. The quota stays — the
+// two answer different questions — and this decides the destination.
+//
+// The four services below are every push service a mainstream browser hands
+// back, and each was read rather than recalled (see the sources in
+// `docs/spec/01-edge-functions.md`). The residual is stated there too and it
+// is real: a browser whose push service is not listed is REFUSED at
+// registration, loudly and by name, rather than silently never delivering.
+// That is the direction to fail in — a named refusal is a one-line fix by
+// whoever reads it, and it is the same call `db-push-check.sh` makes about
+// an unknown migration.
+export const PUSH_SERVICE_HOSTS: readonly string[] = [
+  "fcm.googleapis.com", // Chrome, Chromium, Brave, Opera, Edge on Android
+  "updates.push.services.mozilla.com", // Firefox
+  "web.push.apple.com", // Safari — macOS, and iOS 16.4+ installed to Home Screen
+];
+
+// Dot-prefixed, and the leading dot is load-bearing rather than decorative:
+// `notify.windows.com` as a suffix also admits `evilnotify.windows.com`,
+// which is registrable. With the dot, only a real subdomain matches.
+export const PUSH_SERVICE_HOST_SUFFIXES: readonly string[] = [
+  ".notify.windows.com", // Edge / WNS, e.g. wns2-by3p.notify.windows.com
+  ".push.apple.com", // Apple regional siblings of web.push.apple.com
+  ".push.services.mozilla.com", // Mozilla autopush regional
+];
+
+/**
+ * Is this an endpoint we are willing to POST to at all?
+ *
+ * Checked in TWO places on purpose, and they are not redundant:
+ *
+ *   - `fn_is_push_service_endpoint` (0049) refuses at REGISTRATION, so the
+ *     person toggling push on gets an error naming their browser's push
+ *     service instead of a switch that reads "on" and never delivers.
+ *   - this one refuses at SEND, which is the check that actually protects:
+ *     it covers a row that predates the rule, and any future write path that
+ *     forgets it. `deliverPush` never calls `fetch` for a refused endpoint.
+ *
+ * The two lists are pinned to each other by `app/scripts/push-service-hosts.test.ts`.
+ *
+ * Userinfo is the bypass worth naming: `https://fcm.googleapis.com@evil.example/`
+ * has a HOST of `evil.example`, and a reader skimming the string sees a
+ * Google domain. `URL` resolves it correctly, and the explicit username and
+ * port rejections below mean the answer does not rest on that alone.
+ */
+export function isPushServiceEndpoint(endpoint: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "https:") return false;
+  if (url.username !== "" || url.password !== "") return false;
+  // `URL` normalises the default port away, so this rejects only an explicit
+  // non-443 port. A push service is not on one.
+  if (url.port !== "") return false;
+  const host = url.hostname.toLowerCase();
+  if (PUSH_SERVICE_HOSTS.includes(host)) return true;
+  return PUSH_SERVICE_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix));
+}
+
 /** The `aud` claim is the push service ORIGIN, never the full endpoint. */
 export function pushAudience(endpoint: string): string {
   return new URL(endpoint).origin;

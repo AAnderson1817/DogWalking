@@ -775,12 +775,32 @@ which has a test that fails against the plausible wrong version:
    stacking another, and `client.navigate` failing is not allowed to lose the
    focus already gained.
 
-The opt-in reports five states, not a boolean: `unsupported`, `unconfigured`,
-`denied`, `off`, `on`. Only the last two render a switch — offering one that
-cannot work is worse than an honest sentence, and `denied` names the browser's
-site settings as the only place that can undo it. `unsupported` is checked
-before `unconfigured` so a browser without the Push API is not told the site
-is misconfigured.
+The opt-in reports six states, not a boolean: `unsupported`, `unconfigured`,
+`denied`, `stale-worker`, `off`, `on`. Only the last two render a switch —
+offering one that cannot work is worse than an honest sentence, and `denied`
+names the browser's site settings as the only place that can undo it.
+`unsupported` is checked before `unconfigured` so a browser without the Push
+API is not told the site is misconfigured.
+
+`stale-worker` means **the active service worker did not confirm it handles
+push**, and it is ASKED rather than inferred (Codex review on PR #85). The page
+posts `PUSH_CAPABLE?` on a `MessagePort` and reads silence as no: a worker from
+before M27 receives the message, matches none of its own cases and returns
+without replying, so the only way to hear yes is from a worker running the
+current `sw.js`. Both `readPushEnvironment` and `enablePush` ask — the first
+decides what the screen SAYS about a device already subscribed, the second
+whether to create a subscription at all, and a guard on only one of them leaves
+the switch reading `on` under a worker that can display nothing.
+
+This replaced `registration.waiting != null`, which was neither necessary nor
+sufficient. During an upgrade from the pre-M27 worker the new one spends its
+whole install in `installing`, where `waiting` is still null and the ACTIVE
+worker — the one a delivery reaches — has no `push` handler; and a deploy that
+changes nothing about push leaves a worker waiting while the active one works
+perfectly well, which that check reported as broken. Both waits are bounded
+(`serviceWorker.ready` never rejects, and an unanswered port never settles), so
+a worker that never activates yields `stale-worker` rather than a spinner where
+a switch belongs.
 
 `VITE_VAPID_PUBLIC_KEY` is optional, like `VITE_MAPBOX_TOKEN`. Minting the
 pair is an owner action; absent it, the UI says so and no device subscribes.

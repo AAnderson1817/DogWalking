@@ -156,6 +156,92 @@ update notifications set push_status = 'skipped' where push_status = 'pending';
  * because a browser handing back an endpoint is the best evidence available
  * that it is alive again.
  */
+/**
+ * Is this endpoint one of the push services this system will POST to?
+ *
+ * Codex review on PR #85, and the finding is a server-side request forgery:
+ * registration accepted ANY https url and `send-notification` then POSTed to
+ * it from the edge runtime, with the outcome readable back off
+ * `notifications.push_last_error`. Any authenticated caller could therefore
+ * probe HTTPS services reachable from a shared runtime and read the answer.
+ *
+ * This file shipped a device QUOTA instead, on the stated ground that a host
+ * allowlist would be brittle across providers. That priced the cost of having
+ * one and not the cost of not having one: a quota bounds how much outbound
+ * work a caller can cause and says nothing whatever about where it goes,
+ * which is the whole of the finding. Both are kept — the comment on the quota
+ * below is corrected to say so.
+ *
+ * Refusing here rather than only at send time is what makes the failure
+ * legible: the person toggling notifications on gets an error naming their
+ * push service, instead of a switch that reads "on" and never delivers. The
+ * residual — a browser whose push service is not listed cannot enable push —
+ * is stated in docs/spec/01 rather than discovered.
+ *
+ * `immutable` because it is a pure function of its argument, which also lets
+ * it be used in a CHECK or an index later without a rewrite.
+ */
+create function fn_is_push_service_endpoint(p_endpoint text)
+returns boolean
+language plpgsql
+immutable
+set search_path = public
+as $$
+declare
+  -- Kept in step with PUSH_SERVICE_HOSTS / PUSH_SERVICE_HOST_SUFFIXES in
+  -- supabase/functions/_lib/webpush.ts by app/scripts/push-service-hosts.test.ts.
+  -- Two enforcement points is deliberate; two DIFFERENT lists would be the
+  -- payment_status drift this repository has already paid for once.
+  v_hosts text[] := array[
+    'fcm.googleapis.com',                 -- Chrome, Chromium, Brave, Opera, Edge on Android
+    'updates.push.services.mozilla.com',  -- Firefox
+    'web.push.apple.com'                  -- Safari
+  ];
+  -- The leading dot is load-bearing: without it '.notify.windows.com' also
+  -- admits 'evilnotify.windows.com', which anyone can register.
+  v_suffixes text[] := array[
+    '.notify.windows.com',                -- Edge / WNS, e.g. wns2-by3p.notify.windows.com
+    '.push.apple.com',                    -- Apple regional
+    '.push.services.mozilla.com'          -- Mozilla autopush regional
+  ];
+  v_authority text;
+  v_suffix    text;
+begin
+  if p_endpoint is null then
+    return false;
+  end if;
+  -- Everything between the scheme and the first '/', '?' or '#' — the whole
+  -- AUTHORITY, userinfo and port included, deliberately not parsed apart.
+  -- 'https://fcm.googleapis.com@evil.example/' has a host of 'evil.example'
+  -- and reads to a skimming human as a Google domain; comparing the entire
+  -- authority means that string matches nothing, which is the answer that
+  -- cannot be got subtly wrong. A port fails for the same reason.
+  v_authority := lower(substring(p_endpoint from '^https://([^/?#]+)'));
+  if v_authority is null then
+    return false;
+  end if;
+  if v_authority = any (v_hosts) then
+    return true;
+  end if;
+  foreach v_suffix in array v_suffixes loop
+    -- right(), not LIKE: a suffix is compared as text, so no character in it
+    -- can ever be read as a wildcard.
+    if right(v_authority, length(v_suffix)) = v_suffix then
+      return true;
+    end if;
+  end loop;
+  return false;
+end;
+$$;
+
+revoke all on function fn_is_push_service_endpoint(text) from public, anon;
+
+comment on function fn_is_push_service_endpoint(text) is
+  'Whether an endpoint names a browser push service this system will POST to '
+  '(0049). The send side enforces the same list from '
+  'supabase/functions/_lib/webpush.ts; the two are pinned together by '
+  'app/scripts/push-service-hosts.test.ts.';
+
 create function fn_register_push_subscription(
   p_endpoint text,
   p_p256dh text,
@@ -173,6 +259,14 @@ declare
 begin
   if p_endpoint is null or length(p_endpoint) < 8 or p_endpoint !~ '^https://' then
     raise exception 'fn_register_push_subscription: endpoint must be an https url';
+  end if;
+  -- The host, not just the scheme (Codex review on PR #85). See
+  -- fn_is_push_service_endpoint: an arbitrary https endpoint here is an SSRF
+  -- primitive at send time. Named in the message because the caller supplied
+  -- it and is the one who can act on it.
+  if not fn_is_push_service_endpoint(p_endpoint) then
+    raise exception 'fn_register_push_subscription: % is not a push service this system sends to',
+      coalesce(substring(p_endpoint from '^https://([^/?#]+)'), 'that endpoint');
   end if;
   -- Shape-checked here rather than trusted, because a truncated key produces a
   -- payload the push service ACCEPTS and the browser silently never opens —
@@ -248,10 +342,13 @@ begin
 
   -- Bound the device count per recipient (Codex review on PR #85).
   --
-  -- Nothing checks that an endpoint belongs to a real push service — the
-  -- shape check above accepts any https url, and a stricter host allowlist
-  -- would be brittle across providers — so an authenticated caller could
-  -- register unbounded fabricated endpoints. Every later notification loads
+  -- The host check above decides WHERE a request may go; this bounds HOW MUCH.
+  -- They are not alternatives, and an earlier version of this comment said
+  -- they were — it justified having no host check on the ground that a quota
+  -- bounded the damage, which was wrong about what the damage is.
+  --
+  -- Even with every endpoint a genuine push service, an authenticated caller
+  -- can register unbounded real subscriptions. Every later notification loads
   -- ALL of a recipient's rows and POSTs to each one sequentially BEFORE the
   -- email arm runs, so that is unbounded outbound work per notification on a
   -- shared runtime, and it delays or loses the sender's own email.
