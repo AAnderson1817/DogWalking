@@ -93,22 +93,62 @@ fi
 
 # ── Compare recorded bytes against stored bytes ───────────────────────────
 match=0; mismatch=0; missing=0
-tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+tmp="$(mktemp)"; rows="$(mktemp)"; trap 'rm -f "$tmp" "$rows"' EXIT
+
+# Read the work list into a FILE and check the query's exit status, rather than
+# piping psql straight into the loop. A failure inside `< <(...)` is not
+# propagated — measured: the loop sees zero lines, prints 0/0/0 and the script
+# exits 0. That is "verified nothing, reported success", which is the exact
+# failure this script exists to catch, in the script itself.
+if ! psql "$DB_URL" -tA -F$'\t' -v ON_ERROR_STOP=1 -c \
+  "select id, storage_path, sha256, byte_size from walk_photos
+    where sha256 is not null order by created_at $LIMIT" > "$rows" 2>/dev/null
+then
+  echo "FAIL: the verification query failed — nothing was checked" >&2
+  exit 2
+fi
+
+# And cross-check the work list against the coverage count taken above, so a
+# silently short read cannot be mistaken for a clean run either.
+got=$(grep -c . "$rows" || true)
+if [ -z "$LIMIT" ] && [ "$got" -ne "$recorded" ]; then
+  echo "FAIL: coverage reports $recorded rows with a digest but the query returned $got —" >&2
+  echo "      refusing to report a result computed from a partial read" >&2
+  exit 2
+fi
 
 while IFS=$'\t' read -r id path want_sha want_size; do
   [ -z "$id" ] && continue
+  # BOTH headers. A hosted project's gateway wants `apikey` alongside the
+  # bearer credential — the idiom every other caller here uses
+  # (.github/workflows/staging-smoke.yml:99, job-health.yml:75). With only
+  # Authorization the gateway answers 401, and an earlier version of this loop
+  # counted that as GONE for every row and still exited 0: an integrity
+  # consumer that checked no bytes and said so in the language of success.
   code=$(curl -sS -o "$tmp" -w '%{http_code}' \
+    -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
     -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
     "$SUPABASE_URL/storage/v1/object/walk-photos/$path" 2>/dev/null) || code="000"
 
-  if [ "$code" != "200" ]; then
-    # The object is gone, not wrong. A missing object is a storage-divergence
-    # finding of its own, but it is not a byte mismatch and must not be counted
-    # as one.
-    missing=$((missing + 1))
-    echo "GONE      $path (HTTP $code) — row $id has a digest but no object"
-    continue
-  fi
+  case "$code" in
+    200) ;;
+    401|403)
+      # Not a finding about the data. Every object would fail identically, so
+      # stop rather than emit a page of false GONEs.
+      echo "FAIL: storage refused the credentials (HTTP $code) — nothing was verified." >&2
+      echo "      SUPABASE_SERVICE_ROLE_KEY must be the service role key for \$SUPABASE_URL." >&2
+      exit 2 ;;
+    000)
+      echo "FAIL: could not reach $SUPABASE_URL — nothing was verified." >&2
+      exit 2 ;;
+    *)
+      # The object is gone, not wrong. A missing object is a storage-divergence
+      # finding of its own, but it is not a byte mismatch and must not be
+      # counted as one.
+      missing=$((missing + 1))
+      echo "GONE      $path (HTTP $code) — row $id has a digest but no object"
+      continue ;;
+  esac
 
   got_sha=$(sha256sum "$tmp" | cut -d' ' -f1)
   got_size=$(wc -c < "$tmp" | tr -d ' ')
@@ -123,9 +163,7 @@ while IFS=$'\t' read -r id path want_sha want_size; do
     echo "          was uploaded. Most likely storage divergence — an object"
     echo "          replaced, or a copy restored from a mirror."
   fi
-done < <(psql "$DB_URL" -tA -F$'\t' -c \
-  "select id, storage_path, sha256, byte_size from walk_photos
-    where sha256 is not null order by created_at $LIMIT")
+done < "$rows"
 
 echo
 echo "verified:              $match"
