@@ -13,11 +13,13 @@
 // against a third hand-written copy here. A third copy would need updating
 // too, which is the same defect one level up.
 //
-// What this does NOT check is that the two IMPLEMENTATIONS agree — `URL` in
-// Deno against `substring()` in Postgres. That is covered on each side by its
-// own matrix (webpush_test.ts and the 0049 block in smoke.sql), because a
-// vitest process cannot run PL/pgSQL. The lists are what drifts when somebody
-// adds a provider; the parsing does not.
+// This compares the two LISTS, which is what drifts when somebody adds a
+// provider. It cannot compare the two ANSWERS — `URL` in Deno against
+// `substring()` in Postgres — because a vitest process cannot run PL/pgSQL,
+// and that turned out to be the half that mattered: the two disagreed on an
+// uppercase scheme and an explicit `:443` the day they were written.
+// `scripts/check-push-endpoint-parity.sh` is the gate for that, run from
+// validate.sh and the CI database job because it needs a database AND deno.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";

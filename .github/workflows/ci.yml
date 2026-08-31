@@ -643,8 +643,25 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
 
+      # This job is the only one with a database, and the push-endpoint parity
+      # check below is the only gate that needs a database AND deno: the
+      # push-service allowlist lives in a migration and in an edge library,
+      # written against a POSIX regex and `URL` respectively, and no single
+      # test runner here can ask both of them the same question.
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5 (node24; SHA verified this session, so no longer floating)
+        with:
+          deno-version: v2.9.1  # verified release (matches the local toolchain)
+
       - name: Reset — shim + migrations 0001..NNNN + seed
         run: ./scripts/db-reset.sh
+
+      # Both halves of the allowlist, asked the same questions from one case
+      # list. They disagreed on an uppercase scheme and an explicit `:443` the
+      # day they were written — `URL` normalises both away and the regex did
+      # not. Neither was a hole, because registration was the stricter side,
+      # but "one list, one rule" is the whole claim the two halves make.
+      - name: Push endpoint allowlist — both implementations agree
+        run: ./scripts/check-push-endpoint-parity.sh
 
       # The reset above connects as the cluster's bootstrap SUPERUSER and
       # applies each file statement-at-a-time, so it answers a weaker question

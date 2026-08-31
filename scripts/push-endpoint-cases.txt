@@ -1,0 +1,60 @@
+# Endpoints the push-service allowlist is asked about, one per line.
+#
+# ONE list, read by both implementations through
+# scripts/check-push-endpoint-parity.sh. The rule exists twice on purpose —
+# fn_is_push_service_endpoint (0049) refuses at registration,
+# isPushServiceEndpoint (_lib/webpush.ts) refuses before the fetch — and the
+# two are written against different primitives, a POSIX regex and `URL`. They
+# disagreed on two of these inputs within an hour of being written; a security
+# control whose two halves differ is one nobody can reason about.
+#
+# Format: <expected>\t<endpoint>, where expected is `t` or `f`. A blank
+# endpoint is written as the literal (empty) — the file cannot carry it.
+
+# ── real push services, which must be ACCEPTED ────────────────────────────
+# The direction that matters as much as the refusals: a predicate that says no
+# to everything satisfies every case below and ships a product in which nobody
+# can turn notifications on.
+t	https://fcm.googleapis.com/fcm/send/cJ8x9vQ:APA91bF
+t	https://updates.push.services.mozilla.com/wpush/v2/gAAAAAB
+t	https://web.push.apple.com/QF3aTf1n2c
+t	https://wns2-by3p.notify.windows.com/w/?token=BQYAAAB
+t	https://autopush.stage.push.services.mozilla.com/wpush/v2/x
+# Host names and schemes are case-insensitive; refusing a real device over a
+# detail the URL grammar calls meaningless is the false-positive direction
+# that gets a check deleted.
+t	https://FCM.GoogleAPIs.COM/fcm/send/x
+t	https://WNS2-BY3P.Notify.Windows.Com/w/
+t	HTTPS://fcm.googleapis.com/fcm/send/x
+# The default port, which `URL` normalises away.
+t	https://fcm.googleapis.com:443/fcm/send/x
+
+# ── the finding itself, and where an SSRF is usually pointed ──────────────
+f	https://internal.svc.local/admin
+f	https://example.com/collect
+f	https://169.254.169.254/latest/meta-data/
+f	https://127.0.0.1/
+f	https://[::1]/
+
+# ── not https, or not a url ───────────────────────────────────────────────
+f	http://fcm.googleapis.com/fcm/send/x
+f	ftp://fcm.googleapis.com/x
+f	fcm.googleapis.com/fcm/send/x
+
+# ── near-misses that read like an allowlisted host ────────────────────────
+# Userinfo: the HOST is evil.example, and a reader skimming sees Google.
+f	https://fcm.googleapis.com@evil.example/x
+f	https://fcm.googleapis.com:pw@evil.example/x
+# The leading dot on each suffix is what refuses this one: without it,
+# `notify.windows.com` is a suffix of `evilnotify.windows.com` too, and that
+# domain is registrable by anyone.
+f	https://evilnotify.windows.com/w/
+f	https://notfcm.googleapis.com/fcm/send/x
+# A subdomain of an EXACT host is not that host; a suffix used as a prefix is
+# not a suffix.
+f	https://evil.fcm.googleapis.com/fcm/send/x
+f	https://fcm.googleapis.com.evil.example/x
+# An explicit non-default port would open every internal service reachable on
+# an allowlisted name.
+f	https://fcm.googleapis.com:8080/fcm/send/x
+f	https://evil.example:443/x

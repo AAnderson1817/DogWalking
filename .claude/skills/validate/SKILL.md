@@ -97,6 +97,18 @@ in and out.
 `smoke.sql` must end with `SMOKE PASS`. Run every `supabase/tests/*.sql`, not
 just these two — later work adds files here.
 
+## 8c. Push endpoint allowlist parity (requires `LOCAL_DB_URL` and deno)
+```
+./scripts/check-push-endpoint-parity.sh
+```
+The push-service allowlist exists twice — `fn_is_push_service_endpoint` (0049)
+refuses at registration, `isPushServiceEndpoint` (`_lib/webpush.ts`) refuses
+before the `fetch` — and they are written against different primitives. This
+asks both the same questions from one case list
+(`scripts/push-endpoint-cases.txt`). It has its own gate because no other
+runner here has a database AND deno; they disagreed on an uppercase scheme and
+an explicit `:443` the day they were written.
+
 ## 9. Migrations are append-only (invariant 6)
 ```
 git fetch -q origin main
