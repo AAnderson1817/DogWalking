@@ -271,7 +271,7 @@ def strip_sql(sql: str, *, inside_dollar: bool = False) -> tuple[str, str]:
 # round nine) — one word the first regex did not know, and the whole gate
 # passed a migration that moved every unqualified statement into `x`.
 SET_SEARCH_PATH = re.compile(
-    r"^\s*set\s+(?:local\s+|session\s+)?(?:search_path|schema)\s*(?:=|to)?\s*(.*?)\s*$",
+    r"^\s*set\s+(?:local\s+|session\s+)?(?:\"?search_path\"?|schema)\s*(?:=|to)?\s*(.*?)\s*$",
     re.I | re.S,
 )
 # `set_config` takes expressions, so `set_config('search_path', concat(…),
@@ -280,7 +280,17 @@ SET_SEARCH_PATH = re.compile(
 # NOTHING otherwise — the enumerate-what-I-know shape). The rule is inverted:
 # a call whose name or value is not a plain literal is refused outright, and
 # only a literal `'search_path'` with a literal public-first value passes.
-SET_CONFIG_OPEN = re.compile(r"\bset_config\s*\(\s*", re.I)
+# Calls are located on the SKELETON and their arguments decoded from the
+# intact text at the same spans (Codex round eleven, both directions): scanning
+# the intact statement read `select 'set_config(foo)'` — inert data — as a
+# computed call and refused a valid migration, and a quoted
+# `pg_catalog."set_config"(…)` was invisible because the skeleton masks
+# identifiers. So a call is either the bare word or a quoted identifier whose
+# intact text is `set_config`; quoted names are case-sensitive in PostgreSQL,
+# so `"SET_CONFIG"` is a different (nonexistent) function, but refusing it
+# costs nothing and is one less thing to argue about.
+SET_CONFIG_OPEN = re.compile(r'(?:\bset_config|"x+")\s*\(\s*', re.I)
+QUOTED_IDENT = re.compile(r'"x+"')
 LITERAL_AT = re.compile(LIT)
 ALTER_SESSION_DEFAULTS = re.compile(r"^\s*alter\s+(?:database|role|user)\b", re.I)
 
@@ -289,11 +299,27 @@ def first_schema(value: str) -> str:
     return value.split(",", 1)[0].strip().strip("'\"").strip().lower()
 
 
-def set_config_moves_search_path(stmt: str) -> bool:
+def quoted_name(stmt: str, skel_match: "re.Match[str]") -> str:
+    """The identifier a `"x…x"` skeleton span names, read from the intact text."""
+    raw = stmt[skel_match.start() : skel_match.end()]
+    return raw[1:-1].replace('""', '"').lower()
+
+
+def mentions_search_path(stmt: str, stmt_skel: str) -> bool:
+    if re.search(r"\bsearch_path\b", stmt_skel, re.I):
+        return True
+    return any(quoted_name(stmt, q) == "search_path" for q in QUOTED_IDENT.finditer(stmt_skel))
+
+
+def set_config_moves_search_path(stmt: str, stmt_skel: str) -> bool:
     """True if any `set_config(...)` in this statement might move search_path
     off `public`: a computed name, a computed value, or a literal value that
     is not public-first. A literal name other than search_path is not ours."""
-    for call in SET_CONFIG_OPEN.finditer(stmt):
+    for call in SET_CONFIG_OPEN.finditer(stmt_skel):
+        if call.group(0).startswith('"'):
+            q = QUOTED_IDENT.match(stmt_skel, call.start())
+            if quoted_name(stmt, q) != "set_config":
+                continue  # some other quoted function
         name = LITERAL_AT.match(stmt, call.end())
         if not name:
             return True  # a computed GUC name could be search_path
@@ -317,9 +343,9 @@ def refuse_search_path_changes(path: pathlib.Path, sql: str, skel: str) -> None:
         m = SET_SEARCH_PATH.match(stmt)
         if m and first_schema(m.group(1)) != "public":
             bad = stmt
-        if set_config_moves_search_path(stmt):
+        if set_config_moves_search_path(stmt, stmt_skel):
             bad = stmt
-        if ALTER_SESSION_DEFAULTS.match(stmt_skel) and re.search(r"\bsearch_path\b", stmt, re.I):
+        if ALTER_SESSION_DEFAULTS.match(stmt_skel) and mentions_search_path(stmt, stmt_skel):
             bad = stmt
         if bad is not None:
             print(
