@@ -47,6 +47,15 @@ export type Outcome =
 
 export interface SendDeps {
   getNotification(id: string): Promise<NotificationRow | null>;
+  /**
+   * Claim one channel of this notification for sending, atomically.
+   *
+   * Returns false when somebody else holds a live claim, or the channel has
+   * already settled. `isSettled` below is a read-then-act and cannot be the
+   * mutual exclusion on its own — two invocations both pass it and both
+   * deliver. See 0051; the exclusion is the conditional UPDATE inside the RPC.
+   */
+  claimSend(id: string, channel: "email" | "push"): Promise<boolean>;
   /** Rows the nightly job counted as still owed an email. */
   backlogIds(): Promise<string[]>;
   getClient(id: string): Promise<{
@@ -150,6 +159,20 @@ export async function deliverNotification(
   // retryable, which is the whole point of the backlog 0029 added.
   if (isSettled(row.email_status)) {
     return { kind: "skipped", reason: `already ${row.email_status}` };
+  }
+
+  // ...and the guard above is a READ. It is kept because it answers the common
+  // "already sent" case without a round trip and with a better sentence, but
+  // it is not the exclusion: between reading it and recording an outcome, a
+  // second invocation reads the same row and delivers too. The claim is one
+  // conditional UPDATE, so exactly one caller proceeds (0051).
+  //
+  // Claimed BEFORE the terminal checks below rather than just before the send:
+  // those checks write `skipped`, and two callers racing to write it is
+  // harmless, but placing the claim first means every path out of here is
+  // covered by one rule instead of most of them.
+  if (!(await deps.claimSend(row.id, "email"))) {
+    return { kind: "skipped", reason: "another sender holds the email claim" };
   }
 
   // Terminal, not a failure: an operator-only notification has no client to

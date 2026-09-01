@@ -5723,6 +5723,97 @@ begin
   raise notice 'push subscriptions: persona-scoped, device-reassigning, purged with the client (0049): OK';
 end $$;
 
+-- ── the notification send claim (0051) ───────────────────────────────────
+do $$
+declare
+  v_op  uuid;
+  v_id  uuid;
+  v_n   int;
+begin
+  select id into v_op from operators limit 1;
+  insert into notifications (operator_id, type, title)
+    values (v_op, 'walk_complete', 'claim smoke') returning id into v_id;
+
+  if not fn_claim_notification_send(v_id, 'email') then
+    raise exception 'FAIL: the first claim on an unclaimed channel was refused (0051)';
+  end if;
+  if fn_claim_notification_send(v_id, 'email') then
+    raise exception 'FAIL: a second sender took a channel that is already claimed (0051)';
+  end if;
+
+  -- The lease is what keeps a crash from stranding the row forever. Without
+  -- it the claim above is permanent and the notification is never sent.
+  update notifications set email_claimed_at = now() - interval '10 minutes' where id = v_id;
+  if not fn_claim_notification_send(v_id, 'email') then
+    raise exception 'FAIL: an expired claim was not taken over (0051)';
+  end if;
+
+  -- A settled channel is never revived, whatever the claim state.
+  update notifications set email_status = 'sent', email_claimed_at = null where id = v_id;
+  if fn_claim_notification_send(v_id, 'email') then
+    raise exception 'FAIL: a settled channel was claimed for sending again (0051)';
+  end if;
+
+  -- The two channels are independent: email being finished says nothing about
+  -- whether push is still owed.
+  if not fn_claim_notification_send(v_id, 'push') then
+    raise exception 'FAIL: push could not be claimed while email was settled (0051)';
+  end if;
+
+  -- The backlog must not hand out a row somebody is sending right now, or the
+  -- drain reports work it never did.
+  update notifications
+     set email_status = 'pending', email_claimed_at = now(),
+         push_status = 'sent', push_claimed_at = null
+   where id = v_id;
+  select count(*) into v_n from fn_notification_backlog() b where b.id = v_id;
+  if v_n <> 0 then
+    raise exception 'FAIL: the backlog handed out a row under a live claim (0051)';
+  end if;
+  update notifications set email_claimed_at = now() - interval '10 minutes' where id = v_id;
+  select count(*) into v_n from fn_notification_backlog() b where b.id = v_id;
+  if v_n <> 1 then
+    raise exception 'FAIL: the backlog dropped a row whose claim had expired (0051)';
+  end if;
+
+  begin
+    perform fn_claim_notification_send(v_id, 'sms');
+    raise exception 'FAIL: an unknown channel was accepted (0051)';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%unknown channel%' then
+      raise exception 'FAIL: unknown channel refused for the wrong reason (0051): %', sqlerrm;
+    end if;
+  end;
+
+  -- Service role only. Granted inside this rolled-back suite so the BODY guard
+  -- is what refuses, not a missing EXECUTE (the 0048 lesson).
+  grant execute on function fn_claim_notification_send(uuid, text, interval) to authenticated;
+  -- BOTH inputs. fn_is_service_session() is
+  --   auth.role() = 'service_role'  OR  session_user = 'postgres'
+  -- so switching only the session authorization leaves the suite's earlier
+  -- `{"role":"service_role"}` claim satisfying it, and this block reports a
+  -- forgery that never happened. Caught by the assertion failing honestly.
+  set local session authorization authenticated;
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  begin
+    perform fn_claim_notification_send(v_id, 'email');
+    raise exception 'FAIL: a non-service caller claimed a notification (0051)';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%service role only%' then
+      raise exception 'FAIL: refused for the wrong reason (0051): %', sqlerrm;
+    end if;
+  end;
+  -- `reset role` does NOT undo session authorization (the 0038 lesson).
+  reset session authorization;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  revoke execute on function fn_claim_notification_send(uuid, text, interval) from authenticated;
+
+  raise notice 'notification send claim: atomic, leased, per-channel, service-only (0051): OK';
+end $$;
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;

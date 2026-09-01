@@ -60,6 +60,11 @@ interface Harness {
 function harness(subs: PushSubscription[], reply: (s: PushSubscription) => PushAttempt | Error): Harness {
   const h: Harness = { dropped: [], failures: [], recorded: [], sent: [], deps: null as unknown as PushDeps };
   h.deps = {
+    // Defaults to WINNING the claim, so every existing case still
+    // exercises the delivery path it was written for. The refusal is its
+    // own test below — a default of `false` would make the whole file
+    // pass by never sending anything.
+    claimSend: () => Promise.resolve(true),
     getSubscriptions: () => Promise.resolve(subs),
     sendPush: (s) => {
       h.sent.push(s.id);
@@ -373,6 +378,7 @@ Deno.test("the drain delivers BOTH channels, and each stays send-once", async ()
   const pushed: string[] = [];
   const emailed: string[] = [];
   const deps = {
+    claimSend: () => Promise.resolve(true),
     getNotification: () => Promise.resolve(row),
     backlogIds: () => Promise.resolve(["n1"]),
     getClient: () => Promise.resolve({ full_name: "x", email: "a@b.test", unsubscribe_token: "t" }),
@@ -404,6 +410,7 @@ Deno.test("a push failure in the drain never strands the rest of the backlog", a
   };
   const seen: string[] = [];
   const deps = {
+    claimSend: () => Promise.resolve(true),
     getNotification: (id: string) => Promise.resolve(rows[id]),
     backlogIds: () => Promise.resolve(["a", "b"]),
     record: () => Promise.resolve(),
@@ -437,4 +444,35 @@ Deno.test("the payload is clamped so one record can always frame it", async () =
     auth: "ZmVkY2JhOTg3NjU0MzIxMA",
   });
   assert(body.length > 86);
+});
+
+Deno.test("push: losing the claim race POSTs nothing and records nothing", async () => {
+  // The SIBLING call site. The email arm's test proves the email arm; a rule
+  // applied to one and not the other is the shape this repository keeps
+  // recording, so the push arm gets its own.
+  //
+  // A duplicate push is less damaging than a duplicate email — the worker tags
+  // by notification id, so two deliveries collapse into one lock-screen entry
+  // — but the fanout still POSTs every device again, and the loser must not
+  // write an outcome over the winner's.
+  const h = harness([sub("a"), sub("b")], () => ({ status: 201 }));
+  h.deps.claimSend = () => Promise.resolve(false);
+
+  const outcome = await deliverPush(ROW, h.deps);
+
+  assertEquals(outcome.kind, "skipped");
+  assertEquals(h.sent.length, 0, "the loser POSTed to devices anyway");
+  assertEquals(h.recorded.length, 0, "the loser wrote an outcome over the winner's");
+});
+
+Deno.test("push: winning the claim still delivers", async () => {
+  // Without this, a claim wired to refuse everything would pass the test above
+  // while push never worked again.
+  const h = harness([sub("a")], () => ({ status: 201 }));
+  h.deps.claimSend = () => Promise.resolve(true);
+
+  const outcome = await deliverPush(ROW, h.deps);
+
+  assertEquals(outcome.kind, "sent");
+  assertEquals(h.sent.length, 1);
 });

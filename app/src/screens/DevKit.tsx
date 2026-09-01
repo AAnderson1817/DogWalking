@@ -170,6 +170,8 @@ const NOTIFICATIONS: Notifications[] = [
   push_attempts: 0,
   push_sent_at: null,
   push_last_error: null,
+  email_claimed_at: null,
+  push_claimed_at: null,
   },
   {
     id: "notification-read",
@@ -190,6 +192,8 @@ const NOTIFICATIONS: Notifications[] = [
   push_attempts: 0,
   push_sent_at: null,
   push_last_error: null,
+  email_claimed_at: null,
+  push_claimed_at: null,
   },
 ];
 

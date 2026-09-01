@@ -435,11 +435,53 @@ is invisible when it is missing.
 They do not gate each other. Push runs FIRST, deliberately: the email arm
 throws when `RESEND_API_KEY` is missing (H17's loud failure), so push running
 after it would be silently skipped on a deployment with push configured and
-email not. The reverse costs nothing, because push is send-once on
-`push_status = 'sent'` — the webhook's retry after an email 500 records
-"already sent" rather than pushing twice. A push failure never fails the
+email not. The reverse costs nothing, because push is send-once — the webhook's retry
+after an email 500 records "already sent" rather than pushing twice. A push failure never fails the
 request: turning a dead Android endpoint into a 502 would put the EMAIL back
 in the backlog too.
+
+### Send-once is a CLAIM, not a status read (0051)
+
+Both arms consult `isSettled(*_status)`, and that is a **read-then-act**: two
+invocations both pass it and both deliver. Three ways to get two invocations —
+the INSERT webhook racing the nightly drain, a drain run overlapping its
+predecessor, and the endpoint accepting a `notification_id` directly (M1),
+which an operator can POST in a loop.
+
+So before either arm sends, it calls `fn_claim_notification_send(id, channel)`.
+The mutual exclusion is the single conditional UPDATE inside that function, not
+the read before it: under READ COMMITTED a second contender blocks on the row
+lock, re-evaluates its `WHERE` against the row the winner just wrote, and
+updates zero rows. Same instrument as 0016's rate limit and 0048's budget.
+
+The status read is kept in front of it — it answers the common "already sent"
+case without a round trip and with a better sentence — but it is not the rule.
+
+**The harm is asymmetric**, and it is why this covers both arms rather than
+only push: the service worker sets `tag` to the notification id, so two
+deliveries of one row COLLAPSE into a single lock-screen entry. A duplicate
+email is a second email in somebody's inbox, and the email arm has had this
+shape since M1.
+
+**A lease, not a permanent claim.** A claim that never expires turns a crashed
+sender into permanent loss — the row neither sent nor reclaimable, which is
+worse than the duplicate it prevents. A claim older than five minutes is
+assumed crashed and may be taken over; edge functions cap out well below that.
+This is the `stripe_events` shape from 0013.
+
+`fn_notification_backlog` also stops handing out a row under a live claim, so
+the nightly drain cannot report work another sender is doing.
+
+A timestamp column rather than a `sending` value on the two delivery enums:
+`alter type … add value` cannot be used in the transaction that adds it and
+`db-push-check.sh` applies one transaction per file, so the enum modelling
+would take two migrations to express one idea. `*_status` keeps meaning only
+the outcome.
+
+**What proves it**: `concurrency.sh` case 10, because nothing else can. Two
+SEQUENTIAL claims return `t` then `f` under a read-then-act as well —
+demonstrated, the smoke block passes unchanged against that body — so only
+contending backends distinguish the fix from the defect.
 
 Recipients differ from email's. Email is client-facing only; push goes to
 whoever the notification is addressed to, because an operator wants "walk

@@ -60,6 +60,24 @@ const COLS =
 function makeDeps(apiKey: string | null, operatorId: string | null): SendDeps {
   const db = adminClient();
   return {
+    /**
+     * One RPC, one conditional UPDATE (0051). A failure here must NOT be read
+     * as "somebody else has it": that would silently skip a delivery on a
+     * transient database error, which is the failure mode this whole change is
+     * about, inverted. It throws, and the caller's 502 says so.
+     */
+    async claimSend(id, channel) {
+      const { data, error } = await db.rpc("fn_claim_notification_send", {
+        p_id: id,
+        p_channel: channel,
+      });
+      if (error) {
+        throw new HttpError(500, "db_error", "could not claim the notification", error, {
+          notification_id: id,
+        });
+      }
+      return data === true;
+    },
     async getNotification(id) {
       let q = db.from("notifications").select(COLS).eq("id", id);
       if (operatorId) q = q.eq("operator_id", operatorId);

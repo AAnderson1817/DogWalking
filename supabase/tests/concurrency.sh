@@ -935,6 +935,47 @@ expect_eq "every concurrent failure was counted" \
 
 psql "$DB" -q -c "delete from push_subscriptions where operator_id = '${NS}-000000000001';" >/dev/null
 
+echo
+echo "== case 10: exactly one sender may claim a notification channel =="
+
+# Backlog item 1. `deliverNotification` and `deliverPush` each READ the
+# channel's status and write the outcome later, so send-once was a
+# read-then-act: two invocations both pass it and both deliver. Reachable via
+# the INSERT webhook racing the nightly drain, the drain overlapping itself,
+# and the endpoint accepting a notification_id directly (M1).
+#
+# This lives here rather than in smoke.sql for the same reason case 9 does, and
+# it is worth stating because it is the whole point of the design: two
+# SEQUENTIAL claims already return t then f under ANY implementation that
+# writes the timestamp — including a SELECT-then-UPDATE, which is the bug. Only
+# contending backends can tell a conditional UPDATE from a read-then-act.
+psql "$DB" -v ON_ERROR_STOP=1 -q -c "
+  delete from notifications where operator_id = '${NS}-000000000001';
+  insert into notifications (id, operator_id, type, title)
+  values ('${NS}-000000001000', '${NS}-000000000001', 'walk_complete', 'claim race');"
+
+CLAIM_PIDS=""
+for i in $(seq 1 10); do
+  psql "$DB" -q -t -A -v ON_ERROR_STOP=1 -c \
+    "select fn_claim_notification_send('${NS}-000000001000', 'email');" \
+    >"$WORK/claim$i.out" 2>&1 &
+  CLAIM_PIDS="$CLAIM_PIDS $!"
+done
+for pid in $CLAIM_PIDS; do wait "$pid" || true; done
+
+# PRECONDITION, not the detector: if every call errored the counts below would
+# both be 0 and "no more than one winner" would pass having proved nothing.
+# The case-7 lesson — an assertion with a floor is vacuous without this.
+expect_eq "all ten claim attempts ran and answered" \
+  "$(cat "$WORK"/claim*.out | grep -c '^[tf]$')" "10"
+
+expect_eq "exactly one sender won the claim" \
+  "$(cat "$WORK"/claim*.out | grep -c '^t$')" "1"
+expect_eq "the other nine were refused, not errored" \
+  "$(cat "$WORK"/claim*.out | grep -c '^f$')" "9"
+
+psql "$DB" -q -c "delete from notifications where operator_id = '${NS}-000000000001';" >/dev/null
+
 exec 3>&-
 wait $A_PID 2>/dev/null || true
 
