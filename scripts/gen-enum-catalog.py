@@ -96,10 +96,20 @@ def unquote(lit: str) -> str:
 
 DOLLAR_TAG = re.compile(r"[$](?:[A-Za-z_][A-Za-z0-9_]*)?[$]")
 DDL_INSIDE = re.compile(r"\b(?:create|alter|drop)\s+type\b", re.I)
+# A DO body runs AT MIGRATION TIME, so nothing in it can be proven inert: an
+# `execute 'create type …'` is enum DDL inside a string, and a
+# `set_config('search_path', …)` changes where every later unqualified
+# statement lands. Both are checked on the body's CLEAN text (Codex round
+# eight) — which also refuses prose such as `raise notice 'create type is
+# not allowed here'`, a decision reversed from round six, because a
+# migration-time body is not a value and the fix is one reworded sentence.
+DO_BODY_UNREADABLE = re.compile(r"\b(?:create|alter|drop)\s+type\b|\bsearch_path\b", re.I)
+FUNCTION_HEAD = re.compile(r"^\s*create\s+(?:or\s+replace\s+)?(?:function|procedure)\b", re.I)
 
 
-class DollarQuotedDDL(Exception):
-    """A dollar-quoted body carries enum DDL this generator does not read."""
+class HiddenDDL(Exception):
+    """Enum DDL, or a search_path change, inside a body or value this
+    generator does not read."""
 
 
 def strip_sql(sql: str, *, inside_dollar: bool = False) -> tuple[str, str]:
@@ -115,20 +125,46 @@ def strip_sql(sql: str, *, inside_dollar: bool = False) -> tuple[str, str]:
 
     A dollar-quoted region (`$$…$$`, `$tag$…$tag$`) is a value, not a
     statement, so it is blanked in both outputs after its own comments are
-    stripped; if its skeleton still carries `create/alter/drop type` the run
-    is refused by name rather than guessed at — top-level statements are all
-    this generator reads, and DDL inside a DO body is the author's to lift
-    out. Inside such a region a `$word$` is text, never a nested quote."""
+    stripped. What is refused inside one depends on the statement it belongs
+    to: a DO body executes now, so its CLEAN text may not mention enum DDL or
+    `search_path` at all (`DO_BODY_UNREADABLE`); any other body — a function,
+    say, which runs later — is refused only if its skeleton carries
+    `create/alter/drop type` outside a literal. A single-quoted literal in the
+    same two statement kinds is the same body in a different quoting and gets
+    the same check (Codex round eight: `DO 'BEGIN EXECUTE ''CREATE TYPE …'';
+    END'` masked the whole body and both scans saw nothing). Inside a
+    dollar-quoted region a `$word$` is text, never a nested quote."""
     out: list[str] = []
     skel: list[str] = []
     i, n = 0, len(sql)
     state = "code"
     depth = 0
     escapes = False  # inside an E'...' literal a backslash escapes the next char
+    lit_start = 0  # index in `out` where the current literal's contents begin
+    last_semi = -1  # index in `skel` of the last top-level `;`
 
     def both(ch: str) -> None:
         out.append(ch)
         skel.append(ch)
+
+    def statement() -> str:
+        """The current statement's skeleton so far (from the last `;`)."""
+        return "".join(skel[last_semi + 1 :])
+
+    def head() -> str:
+        parts = statement().split()
+        return parts[0].lower() if parts else ""
+
+    def check_body(body: str, where: str) -> None:
+        """`body` is the clean text of a DO or function body."""
+        if head() == "do":
+            bad = DO_BODY_UNREADABLE.search(body)
+        elif FUNCTION_HEAD.match(statement()):
+            bad = DDL_INSIDE.search(strip_sql(body, inside_dollar=True)[1])
+        else:
+            return
+        if bad:
+            raise HiddenDDL(" ".join(where.split())[:120])
 
     while i < n:
         c = sql[i]
@@ -138,10 +174,13 @@ def strip_sql(sql: str, *, inside_dollar: bool = False) -> tuple[str, str]:
             if tag:
                 close = sql.find(tag.group(0), tag.end())
                 if close < 0:
-                    raise DollarQuotedDDL(f"unterminated dollar quote {tag.group(0)}")
-                _, inner_skel = strip_sql(sql[tag.end() : close], inside_dollar=True)
-                if DDL_INSIDE.search(inner_skel):
-                    raise DollarQuotedDDL(" ".join(sql[i : close + len(tag.group(0))].split())[:120])
+                    raise HiddenDDL(f"unterminated dollar quote {tag.group(0)}")
+                inner_clean, inner_skel = strip_sql(sql[tag.end() : close], inside_dollar=True)
+                region = sql[i : close + len(tag.group(0))]
+                if head() == "do" or FUNCTION_HEAD.match(statement()):
+                    check_body(inner_clean, region)
+                elif DDL_INSIDE.search(inner_skel):
+                    raise HiddenDDL(" ".join(region.split())[:120])
                 both(" ")
                 i = close + len(tag.group(0))
                 continue
@@ -159,9 +198,15 @@ def strip_sql(sql: str, *, inside_dollar: bool = False) -> tuple[str, str]:
                 prev = sql[i - 1] if i > 0 else ""
                 before = sql[i - 2] if i > 1 else ""
                 escapes = prev in "eE" and not (before.isalnum() or before == "_")
-            elif c == '"':
+                both(c)
+                lit_start = len(out)
+                i += 1
+                continue
+            if c == '"':
                 state = "dq"
             both(c)
+            if c == ";":
+                last_semi = len(skel) - 1
         elif state == "sq":
             if escapes and c == "\\":
                 out.append(c); skel.append("x")
@@ -174,8 +219,10 @@ def strip_sql(sql: str, *, inside_dollar: bool = False) -> tuple[str, str]:
                     out.append(nxt); skel.append("x")
                     i += 2
                     continue
+                content = "".join(out[lit_start:])
                 both(c)
                 state = "code"
+                check_body(unquote(content), sql[max(0, i - len(content) - 1) : i + 1])
             else:
                 out.append(c); skel.append("x")
         elif state == "dq":
@@ -212,6 +259,51 @@ def strip_sql(sql: str, *, inside_dollar: bool = False) -> tuple[str, str]:
     return "".join(out), "".join(skel)
 
 
+# The strict regexes read unqualified names as `public.` — true under the
+# default search_path a `db push` session runs with, and false the moment a
+# migration changes it: `set search_path = private, public; create type
+# mood …` creates `private.mood`, which this file would record over a public
+# enum of the same name (Codex round eight). Tracking the path is more parser
+# than fifteen enums earn, so a top-level change is REFUSED unless `public`
+# is its first schema; `reset search_path` is the default again and passes.
+SET_SEARCH_PATH = re.compile(
+    r"^\s*set\s+(?:local\s+|session\s+)?search_path\s*(?:=|to)\s*(.*?)\s*$", re.I | re.S
+)
+SET_CONFIG_SEARCH_PATH = re.compile(
+    r"set_config\s*\(\s*'search_path'\s*,\s*'((?:[^']|'')*)'", re.I | re.S
+)
+ALTER_SESSION_DEFAULTS = re.compile(r"^\s*alter\s+(?:database|role|user)\b", re.I)
+
+
+def first_schema(value: str) -> str:
+    return value.split(",", 1)[0].strip().strip("'\"").strip().lower()
+
+
+def refuse_search_path_changes(path: pathlib.Path, sql: str, skel: str) -> None:
+    start = 0
+    for end in [m.start() for m in re.finditer(";", skel)] + [len(skel)]:
+        stmt_skel, stmt = skel[start:end], sql[start:end]
+        start = end + 1
+        bad = None
+        m = SET_SEARCH_PATH.match(stmt)
+        if m and first_schema(m.group(1)) != "public":
+            bad = stmt
+        m = SET_CONFIG_SEARCH_PATH.search(stmt)
+        if m and first_schema(unquote(m.group(1))) != "public":
+            bad = stmt
+        if ALTER_SESSION_DEFAULTS.match(stmt_skel) and re.search(r"\bsearch_path\b", stmt, re.I):
+            bad = stmt
+        if bad is not None:
+            print(
+                f"FAIL: {path.name}: `{' '.join(bad.split())[:120]}` moves search_path off "
+                "`public`, so this generator can no longer tell which schema an unqualified "
+                "`create/alter/drop type` lands in; keep `public` first, or teach "
+                "gen-enum-catalog.py to track it",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+
 def strip_sql_comments(sql: str) -> str:
     return strip_sql(sql)[0]
 
@@ -232,14 +324,15 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
         version = path.name.split("_", 1)[0]
         try:
             sql, skel = strip_sql(path.read_text())
-        except DollarQuotedDDL as e:
+        except HiddenDDL as e:
             print(
-                f"FAIL: {path.name}: enum DDL inside a dollar-quoted value or body, which this "
-                f"generator does not read — `{e}`; lift it to a top-level statement or teach "
-                "gen-enum-catalog.py the form",
+                f"FAIL: {path.name}: enum DDL (or a search_path change) inside a DO body, a "
+                f"function body or a dollar-quoted value, which this generator does not read — "
+                f"`{e}`; lift it to a top-level statement or teach gen-enum-catalog.py the form",
                 file=sys.stderr,
             )
             sys.exit(1)
+        refuse_search_path_changes(path, sql, skel)
         # Scan the SKELETON: a literal's contents cannot open, close or name a
         # statement. Spans line up with `sql`, which is where labels are read.
         creates = list(CREATE.finditer(skel))
