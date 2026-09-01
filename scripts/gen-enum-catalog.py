@@ -96,14 +96,20 @@ def unquote(lit: str) -> str:
 
 DOLLAR_TAG = re.compile(r"[$](?:[A-Za-z_][A-Za-z0-9_]*)?[$]")
 DDL_INSIDE = re.compile(r"\b(?:create|alter|drop)\s+type\b", re.I)
-# A DO body runs AT MIGRATION TIME, so nothing in it can be proven inert: an
+# A procedural BODY — a DO block, or a function/procedure definition — may
+# not mention enum DDL or `search_path` anywhere in its CLEAN text: an
 # `execute 'create type …'` is enum DDL inside a string, and a
 # `set_config('search_path', …)` changes where every later unqualified
-# statement lands. Both are checked on the body's CLEAN text (Codex round
-# eight) — which also refuses prose such as `raise notice 'create type is
-# not allowed here'`, a decision reversed from round six, because a
-# migration-time body is not a value and the fix is one reworded sentence.
-DO_BODY_UNREADABLE = re.compile(r"\b(?:create|alter|drop)\s+type\b|\bsearch_path\b", re.I)
+# statement lands. A DO body runs at migration time (Codex round eight); a
+# function body runs whenever it is called, which can be the very next
+# statement of the same migration, a trigger it fires, or a later migration
+# (Codex round twelve) — so the skeleton check round eight kept for function
+# bodies let `execute 'create type public.mood …'` through, and a `select
+# mk()` after it created the enum unseen. One rule for every body now. It
+# also refuses prose such as `raise notice 'create type is not allowed
+# here'` — a decision reversed from round six — because a body is not a
+# value and the fix is one reworded sentence.
+BODY_UNREADABLE = re.compile(r"\b(?:create|alter|drop)\s+type\b|\bsearch_path\b", re.I)
 FUNCTION_HEAD = re.compile(r"^\s*create\s+(?:or\s+replace\s+)?(?:function|procedure)\b", re.I)
 
 
@@ -126,13 +132,15 @@ def strip_sql(sql: str, *, inside_dollar: bool = False) -> tuple[str, str]:
     A dollar-quoted region (`$$…$$`, `$tag$…$tag$`) is a value, not a
     statement, so it is blanked in both outputs after its own comments are
     stripped. What is refused inside one depends on the statement it belongs
-    to: a DO body executes now, so its CLEAN text may not mention enum DDL or
-    `search_path` at all (`DO_BODY_UNREADABLE`); any other body — a function,
-    say, which runs later — is refused only if its skeleton carries
-    `create/alter/drop type` outside a literal. A single-quoted literal in the
-    same two statement kinds is the same body in a different quoting and gets
-    the same check (Codex round eight: `DO 'BEGIN EXECUTE ''CREATE TYPE …'';
-    END'` masked the whole body and both scans saw nothing). Inside a
+    to: the body of a DO block or a function/procedure definition may not
+    mention enum DDL or `search_path` anywhere in its CLEAN text
+    (`BODY_UNREADABLE` — a body can execute at migration time, and an
+    EXECUTE carries its DDL inside a string); any other region — a COMMENT ON
+    value, say — is refused only if its skeleton carries `create/alter/drop
+    type` outside a literal. A single-quoted literal in the same two
+    statement kinds is the same body in a different quoting and gets the same
+    check (Codex round eight: `DO 'BEGIN EXECUTE ''CREATE TYPE …''; END'`
+    masked the whole body and both scans saw nothing). Inside a
     dollar-quoted region a `$word$` is text, never a nested quote."""
     out: list[str] = []
     skel: list[str] = []
@@ -155,15 +163,12 @@ def strip_sql(sql: str, *, inside_dollar: bool = False) -> tuple[str, str]:
         parts = statement().split()
         return parts[0].lower() if parts else ""
 
+    def is_body() -> bool:
+        return head() == "do" or bool(FUNCTION_HEAD.match(statement()))
+
     def check_body(body: str, where: str) -> None:
         """`body` is the clean text of a DO or function body."""
-        if head() == "do":
-            bad = DO_BODY_UNREADABLE.search(body)
-        elif FUNCTION_HEAD.match(statement()):
-            bad = DDL_INSIDE.search(strip_sql(body, inside_dollar=True)[1])
-        else:
-            return
-        if bad:
+        if is_body() and BODY_UNREADABLE.search(body):
             raise HiddenDDL(" ".join(where.split())[:120])
 
     while i < n:
@@ -177,7 +182,7 @@ def strip_sql(sql: str, *, inside_dollar: bool = False) -> tuple[str, str]:
                     raise HiddenDDL(f"unterminated dollar quote {tag.group(0)}")
                 inner_clean, inner_skel = strip_sql(sql[tag.end() : close], inside_dollar=True)
                 region = sql[i : close + len(tag.group(0))]
-                if head() == "do" or FUNCTION_HEAD.match(statement()):
+                if is_body():
                     check_body(inner_clean, region)
                 elif DDL_INSIDE.search(inner_skel):
                     raise HiddenDDL(" ".join(region.split())[:120])
