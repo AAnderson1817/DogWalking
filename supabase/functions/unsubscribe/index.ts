@@ -1,4 +1,6 @@
-// unsubscribe — the only public, unauthenticated endpoint in this project.
+// unsubscribe — one of four `verify_jwt = false` endpoints (stripe-webhook,
+// platform-webhook, claim-signup and this), and the only one addressed to a
+// person who holds no account at all.
 //
 // Review M29. `clients.email` is typed by the operator and reconciled with
 // nothing, so one typo sends a stranger a recurring feed of `walk_complete`

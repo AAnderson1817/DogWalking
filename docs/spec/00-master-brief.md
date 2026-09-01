@@ -22,7 +22,7 @@ CRM/client records · encrypted access vault · scheduling (recurring + one-off)
 - Client portal (same PWA, role-gated): Home (next walk, balance, latest report cards) · Booking against credits + overage extras · Live tracking · Report card history · Billing (plan, invoices, payment method, pause/resume) · Pet + access-instruction self-management (non-secret fields only; secrets are operator-entered — see spec 03).
 
 ## Stack
-React PWA single codebase · Supabase (Postgres 16, Auth, RLS, Realtime, Storage) · Deno edge functions · Stripe Billing + off-session PaymentIntents for overage · Mapbox GL (SVG polyline fallback) · Vercel/Netlify hosting.
+React PWA single codebase · Supabase (Postgres 17, Auth, RLS, Realtime, Storage) · Deno edge functions · Stripe Billing + off-session PaymentIntents for overage · Mapbox GL (SVG polyline fallback) · Vercel hosting (the production and staging deployments are `release/*` refs that only the deploy workflows advance — spec 06).
 
 **Stated platform limit: a PWA cannot record GPS in the background.** This was
 a half-sentence hedge here ("native fork option: React Native/Expo … if

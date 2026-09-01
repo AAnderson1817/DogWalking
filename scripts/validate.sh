@@ -152,6 +152,14 @@ run "10c. workflow gating" python3 scripts/verify-workflows.py
 # stale a third time at 0051. A fresh session reads that paragraph as fact.
 run "10d. status counters" python3 scripts/check-status-counters.py
 
+# 10e. Spec 01's enum block was a hand list under a heading saying "migration
+# 0001", missing `disputed`, `card_saved` and four whole enums by 0049. Same
+# shape as 10a: reads the migrations only, so it always runs.
+enum_catalog() {
+  python3 scripts/gen-enum-catalog.py && git diff --exit-code -- docs/spec/01-data-model.md
+}
+run "10e. enum catalogue" enum_catalog
+
 # ── 11. Secret-leak grep ──────────────────────────────────────────────────
 no_secret_literals() {
   local hits

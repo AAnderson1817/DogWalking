@@ -49,9 +49,11 @@ export interface VaultDeps {
    * How many VERIFIED MFA factors this account has.
    *
    * The gate is graduated on purpose (review H2). Requiring aal2
-   * unconditionally would lock every operator out of the vault, because MFA
-   * needs the Supabase Pro plan and TOTP enrolment is off — so the vault would
-   * be unusable until a billing decision is made. Instead: if the operator has
+   * unconditionally would lock every operator out of the vault, because most
+   * accounts hold no factor yet: TOTP enrolment is available on the current
+   * plan (measured — `ops(auth-posture)`; this comment used to say it needed
+   * the Pro plan, which was never checked) and is opt-in through Settings
+   * (`security(mfa-ui)`). Instead: if the operator has
    * enrolled a factor, a password-only session is refused; if they have not,
    * the password stands and the audit row records the reduced assurance.
    *

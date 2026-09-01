@@ -575,11 +575,15 @@ describe("push (review M27)", () => {
 
   it("uses the server's title, body and tag when they are there", async () => {
     const h = loadServiceWorker();
-    await push(h, { title: "Walk complete", body: "Luna had a great walk.", tag: "walk_complete", url: "/portal/walks/1" });
+    const rowId = "7f1c2e6a-0b3d-4c8e-9a51-2d6f0e4b8c13";
+    await push(h, { title: "Walk complete", body: "Luna had a great walk.", tag: rowId, url: "/portal/walks/1" });
     expect(h.shown[0].title).toBe("Walk complete");
     expect(h.shown[0].opts.body).toBe("Luna had a great walk.");
-    // The tag collapses repeats of one kind rather than stacking a lock screen.
-    expect(h.shown[0].opts.tag).toBe("walk_complete");
+    // The tag is the notification ROW id (pinned server-side by
+    // push_delivery_test.ts), so a redelivery collapses while two distinct
+    // walk-complete events both show. It used to be the type; this fixture
+    // and the worker's comment said so for a round after the server changed.
+    expect(h.shown[0].opts.tag).toBe(rowId);
     expect(h.shown[0].opts.data).toEqual({ url: "/portal/walks/1" });
   });
 
