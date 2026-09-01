@@ -104,6 +104,7 @@ function repoFunctions(): string[] {
 function run(
   base: string,
   functionsDir = join(REPO, "supabase", "functions"),
+  repoFunctionsSh?: string,
 ): Promise<{ code: number; out: string }> {
   return new Promise((done) => {
     execFile(
@@ -118,6 +119,7 @@ function run(
           MANAGEMENT_API: base,
           FUNCTIONS_BASE: `${base}/functions/v1`,
           FUNCTIONS_DIR: functionsDir,
+        ...(repoFunctionsSh ? { REPO_FUNCTIONS: repoFunctionsSh } : {}),
           // A stub on 127.0.0.1 must not be routed through an egress proxy.
           http_proxy: "",
           https_proxy: "",
@@ -265,6 +267,36 @@ describe("verify-deployment", () => {
     const { code, out } = await run(base, dir);
     expect(code).not.toBe(0);
     expect(out).toContain("no function directories found");
+  });
+
+  it("fails when the inventory helper exits non-zero after partial output", async () => {
+    // Codex round 3 on PR #87. `scripts/repo-functions.sh` became a
+    // subprocess, and this script runs `set -uo pipefail` WITHOUT `-e`, so
+    // `expected=$(repo_functions)` keeps whatever the helper managed to print
+    // and the following `[ -z "$expected" ]` resets `$?`. A helper that
+    // printed two names and then died therefore left the verifier probing a
+    // PARTIAL set and reporting DEPLOYMENT VERIFY PASS — every unprinted
+    // function silently unverified, which is the exact class this script
+    // exists to catch.
+    // The partial list deliberately still carries all three bespoke-contract
+    // names, so `contract_for`'s stale-exception check does NOT fire. Without
+    // that the case goes red for the wrong reason and proves nothing: the
+    // first draft of this test did exactly that.
+    const all = ["complete-walk", "platform-webhook", "stripe-webhook", "unsubscribe"];
+    const dir = fakeTree(all);
+    const broken = join(mkdtempSync(join(tmpdir(), "rf-")), "repo-functions.sh");
+    writeFileSync(
+      broken,
+      "#!/usr/bin/env bash\nprintf 'platform-webhook\\nstripe-webhook\\nunsubscribe\\n'\nexit 9\n",
+      { mode: 0o755 },
+    );
+    const base = await stub({
+      inventory: all.map((slug) => ({ slug, status: "ACTIVE" })),
+    });
+    const { code, out } = await run(base, dir, broken);
+    expect(code).not.toBe(0);
+    expect(out).toContain("could not list the functions this repository ships");
+    expect(out).not.toContain("DEPLOYMENT VERIFY PASS");
   });
 
   it("fails, rather than skipping, when the project cannot be listed", async () => {

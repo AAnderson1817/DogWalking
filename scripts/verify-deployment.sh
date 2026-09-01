@@ -48,10 +48,12 @@
 #   FUNCTIONS_BASE          override the functions origin (tests)
 #   MANAGEMENT_API          override the Management API origin (tests)
 #   FUNCTIONS_DIR           override the source directory (tests)
+#   REPO_FUNCTIONS          override the inventory helper (tests)
 set -uo pipefail
 
 MANAGEMENT_API="${MANAGEMENT_API:-https://api.supabase.com}"
 FUNCTIONS_DIR="${FUNCTIONS_DIR:-supabase/functions}"
+REPO_FUNCTIONS="${REPO_FUNCTIONS:-$(dirname "$0")/repo-functions.sh}"
 : "${SUPABASE_PROJECT_REF:?SUPABASE_PROJECT_REF is required}"
 : "${SUPABASE_ACCESS_TOKEN:?SUPABASE_ACCESS_TOKEN is required}"
 FUNCTIONS_BASE="${FUNCTIONS_BASE:-https://${SUPABASE_PROJECT_REF}.supabase.co/functions/v1}"
@@ -69,7 +71,7 @@ mgmt() { curl -sS --max-time 30 -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKE
 # in `check-status-counters.py`; the two disagreed twice (see that script's
 # header), so the mirror is gone rather than annotated.
 repo_functions() {
-  FUNCTIONS_DIR="$FUNCTIONS_DIR" "$(dirname "$0")/repo-functions.sh"
+  FUNCTIONS_DIR="$FUNCTIONS_DIR" "$REPO_FUNCTIONS"
 }
 
 # ── phase 1: inventory ────────────────────────────────────────────────────
@@ -89,7 +91,19 @@ if [ -z "$deployed" ]; then
   bad "the project reports NO deployed functions"
 fi
 
-expected=$(repo_functions)
+# The status is checked BEFORE the output is used, and that ordering is the
+# whole point (Codex round 3 on PR #87). This script runs `set -uo pipefail`
+# WITHOUT `-e`, so a plain `expected=$(repo_functions)` keeps whatever the
+# helper managed to print before dying and the `[ -z ]` test below then resets
+# `$?`. A helper that printed three names and exited 9 therefore left the
+# verifier probing a PARTIAL set, reporting the rest as "deployed but no
+# longer in this repository", and printing DEPLOYMENT VERIFY PASS — every
+# unprinted function silently unverified, which is precisely the class this
+# script exists to catch.
+if ! expected=$(repo_functions); then
+  bad "could not list the functions this repository ships ($REPO_FUNCTIONS failed) — refusing to verify a partial set"
+  exit 1
+fi
 if [ -z "$expected" ]; then
   bad "no function directories found under $FUNCTIONS_DIR — refusing to report success on an empty set"
   exit 1
