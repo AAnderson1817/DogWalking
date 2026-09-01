@@ -43,6 +43,11 @@ export interface PushAttempt {
 }
 
 export interface PushDeps {
+  /**
+   * Claim the push channel for sending, atomically. See `SendDeps.claimSend`
+   * and 0051 — `isSettled` is a read-then-act and cannot exclude on its own.
+   */
+  claimSend(id: string, channel: "email" | "push"): Promise<boolean>;
   /** This notification's recipient's devices. `client` null ⇒ the operator's. */
   getSubscriptions(operatorId: string, clientId: string | null): Promise<PushSubscription[]>;
   /**
@@ -224,6 +229,15 @@ export async function deliverPush(row: PushableRow, deps: PushDeps): Promise<Out
   // (Codex review on PR #85). See `isSettled`.
   if (isSettled(row.push_status)) {
     return { kind: "skipped", reason: `already ${row.push_status}` };
+  }
+
+  // The exclusion, as in the email arm. A duplicate push is less damaging than
+  // a duplicate email — the worker tags by notification id, so two deliveries
+  // of one row collapse into a single lock-screen entry — but "less damaging"
+  // is not "harmless": the fanout POSTs every device again, and a row whose
+  // outcome is being written by another sender is not this one's to write.
+  if (!(await deps.claimSend(row.id, "push"))) {
+    return { kind: "skipped", reason: "another sender holds the push claim" };
   }
 
   const subs = await deps.getSubscriptions(row.operator_id, row.client_id);

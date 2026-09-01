@@ -43,6 +43,8 @@ interface Opts {
   emailUnconfigured?: boolean;
   backlog?: string[];
   rows?: Record<string, NotificationRow | null>;
+  /** Model losing the 0051 claim race — another sender got there first. */
+  claimSend?: (id: string, channel: "email" | "push") => Promise<boolean>;
 }
 
 function makeDeps(opts: Opts = {}) {
@@ -51,6 +53,7 @@ function makeDeps(opts: Opts = {}) {
   const sentHeaders: Array<Record<string, string>> = [];
   const suppressionAsked: Array<[string, string, string]> = [];
   const deps: SendDeps = {
+    claimSend: opts.claimSend ?? (() => Promise.resolve(true)),
     getNotification: (id) => Promise.resolve(opts.rows ? (opts.rows[id] ?? null) : ROW),
     backlogIds: () => Promise.resolve(opts.backlog ?? []),
     getClient: () =>
@@ -412,4 +415,50 @@ Deno.test("the drain does not abort on one row, and stays loud by its backlog", 
   const result = await drainBacklog(deps);
   assertEquals(result, { drained: 2, sent: 0, failed: 2, pushSent: 0, pushFailed: 0 });
   assertEquals(recorded, [], "a configuration fault must not stamp an outcome");
+});
+
+Deno.test("losing the claim race sends nothing and records nothing", async () => {
+  // The email arm. `isSettled` is a READ: two invocations both pass it and
+  // both deliver, which is reachable via the INSERT webhook racing the drain
+  // or an operator POSTing the same notification_id (M1). The claim is the
+  // exclusion, so the loser must not send AND must not write an outcome over
+  // the winner's.
+  const h = makeDeps({ claimSend: () => Promise.resolve(false) });
+  const outcome = await deliverNotification(ROW, h.deps);
+
+  assertEquals(outcome.kind, "skipped");
+  assertEquals(h.sentTo.length, 0, "the loser sent an email anyway");
+  assertEquals(h.recorded.length, 0, "the loser wrote an outcome over the winner's");
+});
+
+Deno.test("winning the claim still delivers — the guard is not a wall", async () => {
+  // The other direction, and it is not ceremony: a claim that always refused
+  // would satisfy the test above while delivering nothing, ever.
+  const h = makeDeps({ claimSend: () => Promise.resolve(true) });
+  const outcome = await deliverNotification(ROW, h.deps);
+
+  assertEquals(outcome.kind, "sent");
+  assertEquals(h.sentTo.length, 1);
+});
+
+Deno.test("the claim is asked for BEFORE any terminal skip is recorded", async () => {
+  // Placement matters. If the claim came after the "not client-facing" and
+  // "no email address" checks, two racing callers would both write `skipped`
+  // — harmless in itself, but it means the row's outcome is written by a
+  // caller that never held the claim, and the rule stops being "one sender
+  // decides this row".
+  const asked: Array<[string, string]> = [];
+  const h = makeDeps({
+    email: null, // terminal: no address
+    claimSend: (id, channel) => {
+      asked.push([id, channel]);
+      return Promise.resolve(false);
+    },
+  });
+  const outcome = await deliverNotification(ROW, h.deps);
+
+  assertEquals(asked.length, 1, "the terminal path skipped the claim entirely");
+  assertEquals(asked[0]?.[1], "email");
+  assertEquals(outcome.kind, "skipped");
+  assertEquals(h.recorded.length, 0, "recorded a terminal outcome without holding the claim");
 });
