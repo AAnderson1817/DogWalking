@@ -98,43 +98,46 @@ class DollarQuotedDDL(Exception):
     """A dollar-quoted body carries enum DDL this generator does not read."""
 
 
-def strip_sql_comments(sql: str, *, inside_dollar: bool = False) -> str:
-    """`--` to end of line, and /* */ blocks — OUTSIDE string literals and
-    quoted identifiers. A commented-out `add value` is not a value (0051
-    discusses one in prose), but `add value 'client--reminder'` is a value
-    whose label happens to contain the comment marker: a regex stripper cut
-    it at the marker, the statement no longer matched, and the catalogue
-    stayed silently short (Codex on PR #88, round three). Comments inside a
-    dollar-quoted function body are still comments and are stripped too, so
-    prose there cannot be read as DDL.
+def strip_sql(sql: str, *, inside_dollar: bool = False) -> tuple[str, str]:
+    """-> (clean, skeleton). Both have `--` and /* */ comments removed —
+    OUTSIDE string literals and quoted identifiers, with nesting, and with a
+    space left where a block comment stood, since PostgreSQL reads it as
+    whitespace. `clean` keeps every literal intact; `skeleton` is the same
+    text, same length, with each literal's CONTENTS replaced by `x`, so the
+    statement scans can run on the skeleton (a `;` or `drop type` inside a
+    value is not a terminator or a statement — Codex round six) and read the
+    real labels out of `clean` at the same spans.
 
-    A dollar-quoted region (`$$…$$`, `$tag$…$tag$`) is then BLANKED, because
-    it is a value, not a statement: `comment on type x is $doc$create type
-    ghost as enum ('x');$doc$` creates nothing, and the top-level scans read
-    it as though it did (Codex round five). If the region still carries
-    `create/alter/drop type` after its own comments are stripped, the run is
-    refused by name rather than guessed at — this generator reads top-level
-    statements only, and DDL inside a DO body is the author's to lift out."""
+    A dollar-quoted region (`$$…$$`, `$tag$…$tag$`) is a value, not a
+    statement, so it is blanked in both outputs after its own comments are
+    stripped; if its skeleton still carries `create/alter/drop type` the run
+    is refused by name rather than guessed at — top-level statements are all
+    this generator reads, and DDL inside a DO body is the author's to lift
+    out. Inside such a region a `$word$` is text, never a nested quote."""
     out: list[str] = []
+    skel: list[str] = []
     i, n = 0, len(sql)
     state = "code"
-    depth = 0  # block comments NEST in PostgreSQL (Codex round four)
+    depth = 0
     escapes = False  # inside an E'...' literal a backslash escapes the next char
+
+    def both(ch: str) -> None:
+        out.append(ch)
+        skel.append(ch)
+
     while i < n:
         c = sql[i]
         nxt = sql[i + 1] if i + 1 < n else ""
         if state == "code":
-            # Inside a dollar-quoted body a `$word$` is just text: the region is
-            # a value, and only its comments are stripped before the DDL check.
             tag = DOLLAR_TAG.match(sql, i) if (c == "$" and not inside_dollar) else None
             if tag:
                 close = sql.find(tag.group(0), tag.end())
                 if close < 0:
                     raise DollarQuotedDDL(f"unterminated dollar quote {tag.group(0)}")
-                inner = strip_sql_comments(sql[tag.end() : close], inside_dollar=True)
-                if DDL_INSIDE.search(inner):
+                _, inner_skel = strip_sql(sql[tag.end() : close], inside_dollar=True)
+                if DDL_INSIDE.search(inner_skel):
                     raise DollarQuotedDDL(" ".join(sql[i : close + len(tag.group(0))].split())[:120])
-                out.append(" ")
+                both(" ")
                 i = close + len(tag.group(0))
                 continue
             if c == "-" and nxt == "-":
@@ -153,25 +156,30 @@ def strip_sql_comments(sql: str, *, inside_dollar: bool = False) -> str:
                 escapes = prev in "eE" and not (before.isalnum() or before == "_")
             elif c == '"':
                 state = "dq"
-            out.append(c)
+            both(c)
         elif state == "sq":
-            out.append(c)
             if escapes and c == "\\":
-                out.append(nxt)
-                i += 1
-            elif c == "'":
-                if nxt == "'":  # escaped quote inside the literal
-                    out.append(nxt)
-                    i += 1
-                else:
-                    state = "code"
+                out.append(c); skel.append("x")
+                out.append(nxt); skel.append("x")
+                i += 2
+                continue
+            if c == "'":
+                if nxt == "'":  # a doubled quote is content, not the end
+                    out.append(c); skel.append("x")
+                    out.append(nxt); skel.append("x")
+                    i += 2
+                    continue
+                both(c)
+                state = "code"
+            else:
+                out.append(c); skel.append("x")
         elif state == "dq":
-            out.append(c)
+            both(c)
             if c == '"':
                 state = "code"
         elif state == "line":
             if c == "\n":
-                out.append(c)
+                both(c)
                 state = "code"
         elif state == "block":
             if c == "/" and nxt == "*":
@@ -182,9 +190,13 @@ def strip_sql_comments(sql: str, *, inside_dollar: bool = False) -> str:
                 i += 1
                 if depth == 0:
                     state = "code"
-                    out.append(" ")  # `CREATE/*gap*/TYPE` is two tokens to PostgreSQL
+                    both(" ")  # `CREATE/*gap*/TYPE` is two tokens to PostgreSQL
         i += 1
-    return "".join(out)
+    return "".join(out), "".join(skel)
+
+
+def strip_sql_comments(sql: str) -> str:
+    return strip_sql(sql)[0]
 
 
 def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
@@ -202,7 +214,7 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
     for path in sorted(MIGRATIONS.glob("*.sql")):
         version = path.name.split("_", 1)[0]
         try:
-            sql = strip_sql_comments(path.read_text())
+            sql, skel = strip_sql(path.read_text())
         except DollarQuotedDDL as e:
             print(
                 f"FAIL: {path.name}: enum DDL inside a dollar-quoted value or body, which this "
@@ -211,19 +223,21 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
                 file=sys.stderr,
             )
             sys.exit(1)
-        creates = list(CREATE.finditer(sql))
-        alters = list(ALTER.finditer(sql))
-        drops = list(DROP.finditer(sql))
+        # Scan the SKELETON: a literal's contents cannot open, close or name a
+        # statement. Spans line up with `sql`, which is where labels are read.
+        creates = list(CREATE.finditer(skel))
+        alters = list(ALTER.finditer(skel))
+        drops = list(DROP.finditer(skel))
         for kind, loose_re, strict in (
             ("create type … as enum", CREATE_ANY, creates),
             ("alter type", ALTER_ANY, alters),
             ("drop type", DROP_ANY, drops),
         ):
             strict_starts = {m.start() for m in strict}
-            for loose in loose_re.finditer(sql):
+            for loose in loose_re.finditer(skel):
                 if loose.start() not in strict_starts:
                     print(
-                        f"FAIL: {path.name}: `{' '.join(loose.group(0).split())}` is a `{kind}` "
+                        f"FAIL: {path.name}: `{' '.join(sql[loose.start():loose.end()].split())}` is a `{kind}` "
                         "this generator cannot read; teach gen-enum-catalog.py the shape rather "
                         "than letting the catalogue silently disagree with the migrations",
                         file=sys.stderr,
@@ -246,23 +260,24 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
                 continue
             name = m.group(1).lower()
             if kind == "create":
-                if not ENUM_BODY.match(m.group(2)):
+                body = sql[m.start(2) : m.end(2)]
+                if not ENUM_BODY.match(body):
                     print(
-                        f"FAIL: {path.name}: `create type {name} as enum ({' '.join(m.group(2).split())})` "
+                        f"FAIL: {path.name}: `create type {name} as enum ({' '.join(body.split())})` "
                         "carries a label this generator cannot read (an E'' escape string, a "
                         "dollar-quoted label, or a stray token); use a plain '...' literal or "
                         "teach gen-enum-catalog.py the form",
                         file=sys.stderr,
                     )
                     sys.exit(1)
-                values[name] = [unquote(v) for v in LABEL.findall(m.group(2))]
+                values[name] = [unquote(v) for v in LABEL.findall(body)]
                 touched[name] = [version]
                 if name not in order:
                     order.append(name)
             elif kind == "alter":
                 if name not in values:
                     continue  # not an enum this file tracks (a composite, say)
-                action = " ".join(m.group(2).split())
+                action = " ".join(sql[m.start(2) : m.end(2)].split())
                 add = ADD_VALUE.match(action)
                 ren = RENAME_VALUE.match(action)
                 if add:
