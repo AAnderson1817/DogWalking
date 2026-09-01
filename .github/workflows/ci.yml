@@ -781,6 +781,21 @@ jobs:
           fi
           echo "PASS: the definer catalogue matches the migrations"
 
+      # Spec 01's enum block was hand-maintained under a heading that said
+      # "migration 0001". By 0049 it was missing `disputed` (one of the three
+      # statuses in every partial-unique-index predicate) and `card_saved`,
+      # plus four whole enums — on the file an engineer reads to learn which
+      # statuses exist. Generated now, the same shape as the catalogue above.
+      - name: Spec 01's enum catalogue matches the migrations
+        run: |
+          python3 scripts/gen-enum-catalog.py
+          if ! git diff --exit-code -- docs/spec/01-data-model.md; then
+            echo "FAIL: docs/spec/01-data-model.md is stale — run"
+            echo "python3 scripts/gen-enum-catalog.py and commit the result."
+            exit 1
+          fi
+          echo "PASS: the enum catalogue matches the migrations"
+
   # CLAUDE.md invariant 6 says migrations are append-only once applied. That
   # rule has been enforced only by a local PreToolUse hook and by whoever is
   # paying attention — nothing a reviewer or CI could see. An edit to an

@@ -44,9 +44,10 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
 
 ## Gates that lie, and gates that are not there
 
-- **`validate.sh` gates 10a/10b regenerate a file and `git diff --exit-code`
-  it** — the definer catalogue in `docs/spec/03-security-model.md`, and
-  `app/src/lib/types.ts`. They go red when *those two files* are uncommitted,
+- **`validate.sh` gates 10a/10b/10e regenerate a file and `git diff --exit-code`
+  it** — the definer catalogue in `docs/spec/03-security-model.md`,
+  `app/src/lib/types.ts`, and the enum catalogue in
+  `docs/spec/01-data-model.md`. They go red when *those three files* are uncommitted,
   which includes the case where your own edit to them is merely unstaged, not
   only the case where the generator produced a change. If they are the only
   red, commit and re-run before diagnosing. A dirty tree elsewhere does not
@@ -224,7 +225,8 @@ only `--` and so still passed for the wrong reason.
 ## Commit identity
 
 `CLAUDE.md` requires the author `AAnderson1817 <andyanderson1818@gmail.com>`
-and the `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>` trailer. Set
+and a `Co-Authored-By: Claude <model> <noreply@anthropic.com>` trailer naming
+the co-authoring model (the harness states the current one). Set
 the author explicitly per commit if your harness suggests otherwise:
 
 ```sh

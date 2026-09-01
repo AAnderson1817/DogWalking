@@ -26,10 +26,14 @@
 # Every request this script makes is a GET with no body, and every probe is
 # chosen to return BEFORE anything can be written:
 #
-#   * 12 of the 13 functions go through `serveFunction`, which answers a
+#   * Every function but two goes through `serveFunction`, which answers a
 #     non-POST with 405 before it ever calls the handler (_lib/http.ts).
-#   * `stripe-webhook` has its own `Deno.serve` and 405s a non-POST before it
-#     reads the body or touches Stripe.
+#   * `stripe-webhook` and `platform-webhook` each have their own `Deno.serve`
+#     and 405 a non-POST before reading the body or touching Stripe. (This
+#     list said "12 of the 13" and named one of them for three functions'
+#     worth of growth — do not state a count here; it is an enumeration
+#     connected to nothing, and `contract_for` is where the bespoke cases are
+#     actually held.)
 #   * `unsubscribe` accepts GET by design, so it is probed with NO token —
 #     which returns the confirmation page without reaching the database.
 #     `unsubscribe_test.ts` pins that ("no token at all: the same page, and

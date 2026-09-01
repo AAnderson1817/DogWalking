@@ -11,14 +11,18 @@ import { withTimeout } from "./with-timeout";
 import { registerPushSubscription, removePushSubscription } from "./api";
 
 /**
- * What the UI should show. Five states, not a boolean, because "off" has four
- * different causes and three of them are not something a switch can fix:
+ * What the UI should show. Six states, not a boolean, because "off" has five
+ * different causes and four of them are not something a switch can fix:
  *
  *   unsupported   this browser has no Push API (iOS Safari outside an
  *                 installed PWA, most notably) — offering a switch is a lie.
  *   unconfigured  no VAPID key in this build. An owner action, not a user's.
  *   denied        the person refused, and the browser will not ask again from
  *                 script. Only site settings can undo it, so say so.
+ *   stale-worker  the ACTIVE worker did not answer `PUSH_CAPABLE?` — it
+ *                 predates push support or never activated — so a
+ *                 subscription would deliver pushes nothing displays. Reported
+ *                 ahead of "on" for exactly that reason (security(push-ssrf)).
  *   off           available, permitted or not yet asked, not subscribed.
  *   on            subscribed on this device.
  */

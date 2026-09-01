@@ -169,6 +169,18 @@ The gate FAILS when it cannot find the sentence carrying a count — a parser
 that matches nothing reports agreement, which is how `column-grants.test.ts`
 and `db-push-check.sh`'s object derivation both had to be fixed.
 
+## 10e. Spec 01's enum catalogue is not stale
+Reads the migrations only, so it always runs:
+```
+python3 scripts/gen-enum-catalog.py && git diff --exit-code -- docs/spec/01-data-model.md
+```
+Spec 01's enum block was hand-maintained under a heading that said "migration
+0001". By 0049 it was missing `disputed` (in every partial-unique-index
+predicate spec 04 says the code must agree with) and `card_saved`, plus four
+whole enums — on the file an engineer reads to learn which statuses exist.
+Same shape as 10a, and red for the same false reason when
+`docs/spec/01-data-model.md` is merely uncommitted.
+
 ## 11. Secret-leak grep
 ```
 grep -RInE "(VAULT_MASTER_KEY|SERVICE_ROLE|sk_live|sk_test)" app/src supabase/functions --include='*.ts' --include='*.tsx' | grep -v 'Deno.env.get' | grep -v env.ts && echo "FAIL: literal secret reference" || echo "PASS: no secret literals"

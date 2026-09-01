@@ -131,7 +131,12 @@ destroyed too, and not by `fn_purge_client` naming it: the purge rotates
 client's rows whenever that column changes. Those rows carry an `ip`, so
 without it they were personal data surviving an erasure request indefinitely —
 a purged client receives no further signup attempts, and the limiter's prune
-only ever runs for the key being attempted. Redaction here is not a weaker
+only ever runs for the key being attempted. `push_subscriptions` (0049) goes
+the same way: the purge redacts the client row rather than deleting it, so the
+FK cascade never fires, and `trg_clients_forget_push_subscriptions` deletes
+the device rows when `purged_at` is set — an endpoint identifies a browser, and
+one surviving an erasure request would keep putting that person's
+notifications on a lock screen (spec 01). Redaction here is not a weaker
 deletion; it is the only form the graph allows without dismantling the tax
 record or the audit trail, and what remains carries no personal data and no
 readable secret.
@@ -300,7 +305,7 @@ function, which is what keeps "who may reissue an invite" a single answer.
 
 ## Storage matrix (`storage.objects`)
 
-Nine policies govern photographs of customers' homes and pets, and this
+Seven policies govern photographs of customers' homes and pets, and this
 document did not mention them until review H20 — which also found the tests
 did not either: `smoke.sql` contained zero occurrences of "storage".
 
@@ -531,8 +536,8 @@ Every definer fn: `SECURITY DEFINER SET search_path = public`, then
 REVOKE ALL ON FUNCTION fn_x(…) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION fn_x(…) TO <role list>;
 ```
-This catalogue used to be hand-written and listed **11** functions. There are
-**48**. It was presented as the complete grant-audit checklist, so an engineer
+This catalogue used to be hand-written and listed **11** functions when there
+were **48** (the generated block below carries the live count). It was presented as the complete grant-audit checklist, so an engineer
 adding a definer function and checking their grants against it had no idea 37
 peers existed (review H21) — the opposite of what a checklist is for. It is
 generated now, and CI fails when it and the migrations disagree.

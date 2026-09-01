@@ -102,6 +102,60 @@ Not urgent: nothing is broken, and the cost of being wrong here is a deploy
 that fails at `link` or `push`, which is exactly the failure 2.109.1 was
 pinned to avoid.
 
+### 5. Spec-drift audit follow-ups (three PRs, in this order)
+Found by the audit recorded as `docs(spec-drift)`; each was verified against
+HEAD and none is fixed by that PR, which corrected documents only.
+
+**PR A — gates that pass for the wrong reason** (tests and CI only):
+- `app/scripts/service-worker.test.ts`: every Supabase fixture is
+  `https://abcdefgh.supabase.co` against a worker origin of `app.sanpo.test`,
+  so `sw.js`'s same-origin gate alone satisfies all five never-cache
+  assertions — replacing `isNeverCache`'s body with `return false` stays
+  green. Add same-origin fixtures for the five families; prove red first.
+- `ci.yml` "Errors go through FormError": greps one literal
+  `className="field__error"`. A bare `<span className="signin__error"
+  role="alert">` slips past. Fail any `role="alert"` outside `fields.tsx` /
+  `StateField`, and any `__error` class outside `fields.tsx`.
+- `ci.yml` invariant-1 catalogue regex: misses `update public.clients set …`
+  and `update clients c set …` (probed; both silent). Allow an optional
+  `public.` and an optional alias; prove with both probe functions.
+- `ci.yml` "the only channel": a second `supabase.channel(` inside
+  `useWalkChannel.ts` passes (`grep -q`), and the server half greps only the
+  literal `private: false`. Count channel calls against `private: true` calls.
+- `docs/dev/session-notes.md` says two gates exist only in CI; there are
+  seven (service worker stamped, build refused without config, vitest
+  orphan, security headers, behavioural tests execute, e2e spec has a step,
+  no-secret-logging grep). Add `scripts/check-gate-lockstep.py` (every
+  `ci.yml` step name appears in `SKILL.md` as a gate or in its §13), wire it
+  as a gate, and point session-notes at §13. Relabel `ci.yml`'s "Secret-leak
+  grep (validate gate 7)" — it is gate 11, and gate 7 is `db reset`.
+- `verify-deployment.test.ts`: assert every function calling `Deno.serve`
+  directly (`stripe-webhook`, `platform-webhook` today) has a `contract_for`
+  case, so the read-only argument is derived rather than enumerated.
+- `staging-smoke.yml` `onboard-repro`: still the single-page `user_id_for`
+  and `|| true` cleanup the claim-replay step was cured of; dead today only
+  because its address is run-scoped.
+
+**PR B — migration `0052`, invariant 5's REVOKE half** (money/trust path:
+written safety argument, adversarial self-review, red-first smoke):
+`fn_assert_plan_change_intent_tenant`, `fn_assert_tenant_consistency`,
+`fn_cancel_paused_walks` and `fn_refund_cancelled_debit` carry `=X` (PUBLIC)
+and `anon=X` in `proacl`; the other 13 definer trigger functions were
+revoked. Not exploitable (Postgres refuses to call a trigger function
+directly; no API role holds CREATE or TRIGGER), and a trigger still fires
+for `authenticated` with EXECUTE revoked (measured). Revoke the four; add a
+smoke block asserting no `prosecdef` function in `public` grants EXECUTE to
+`public` or `anon` (red against HEAD first); make
+`scripts/gen-definer-catalog.py` read `revoke` too and render an unrevoked
+function as `PUBLIC` rather than **none**.
+
+**PR C — `create-plan` accepts an overage rate of 0** (money path):
+`index.ts:61` refuses only `< 0`; `plans_overage_rate_positive` (0026) is
+`> 0`, so the Stripe Price is minted at `:71` and the INSERT then 500s with
+the Price orphaned. Refuse `<= 0` before the Stripe call with a sentence
+naming the rule; disable `Settings.tsx`'s button on a non-positive parsed
+value. Red-first: a zero-rate body must 400 with zero recorded Stripe calls.
+
 ## Done
 
 - **Push notifications (M27)** — RFC 8291 payload encryption and RFC 8292

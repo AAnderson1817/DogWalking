@@ -1,6 +1,6 @@
 # 02 — Credit & billing engine
 
-Single source of truth = `credit_ledger`. `clients.credit_balance` is a denormalized running balance maintained exclusively by the functions below. Ledger inserts are privileged (spec 03); `balance_after` forms an auditable chain: for each client, ordered by `created_at, id`, every row satisfies `balance_after = previous.balance_after + amount`, first row `balance_after = amount`.
+Single source of truth = `credit_ledger`. `clients.credit_balance` is a denormalized running balance maintained exclusively by the functions below. Ledger inserts are privileged (spec 03); `balance_after` forms an auditable chain: for each client, ordered by `seq` (an identity column — rows written in one transaction share `created_at`, and random uuids cannot break the tie deterministically; `0002` records this and `smoke.sql` verifies the chain by `seq`), every row satisfies `balance_after = previous.balance_after + amount`, first row `balance_after = amount`.
 
 ## Locking protocol
 Every function below begins `SELECT credit_balance INTO … FROM clients WHERE id = p_client_id FOR UPDATE;` — serializing all balance mutations per client. Ledger insert and `clients.credit_balance` update happen in the same transaction.

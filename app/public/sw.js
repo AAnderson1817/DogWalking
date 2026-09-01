@@ -162,8 +162,11 @@ async function showPush(data) {
   const title = typeof payload.title === "string" && payload.title ? payload.title : "Sanpo";
   await self.registration.showNotification(title, {
     body: typeof payload.body === "string" ? payload.body : "",
-    // Collapses repeats of the same kind rather than stacking a lock screen
-    // full of them. The server sends the notification TYPE.
+    // Collapses a redelivery of the SAME notification rather than stacking a
+    // lock screen full of copies. The server sends the notification ROW id
+    // (`send-notification/push.ts`), never the type: two distinct walk-complete
+    // events must both show, and tagging by type made the second silently
+    // replace the first.
     tag: typeof payload.tag === "string" && payload.tag ? payload.tag : "sanpo",
     icon: "/icons/icon-192.png",
     badge: "/icons/icon-192.png",

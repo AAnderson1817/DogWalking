@@ -5912,6 +5912,43 @@ begin
   raise notice 'notification send claim: atomic, leased, per-channel, service-only (0051): OK';
 end $$;
 
+-- ── spec 01 · the delete rules the erasure design rests on ─────────────────
+-- Spec 01 stated `credential_access_log.credential_id` as `on delete cascade`
+-- for the life of the project while the schema has been RESTRICT since 0002,
+-- and spec 03's purge design depends on RESTRICT: a credential with an audit
+-- row can never be deleted, so the trail cannot be erased by deleting what it
+-- describes. Nothing asserted the rule, so a migration written to "match the
+-- spec" would have passed every gate. The other three RESTRICTs carry the rest
+-- of spec 03's argument: walks and properties cannot be deleted while the
+-- ledger or a walk references them, which is why the purge redacts.
+do $$
+declare
+  r record;
+begin
+  for r in
+    select want.tbl, want.col,
+           (select c.confdeltype
+              from pg_constraint c
+              join pg_attribute a on a.attrelid = c.conrelid and a.attnum = any(c.conkey)
+             where c.contype = 'f' and c.conrelid = want.tbl::regclass and a.attname = want.col
+             limit 1) as got
+      from (values
+              ('public.credential_access_log', 'credential_id'),
+              ('public.credential_access_log', 'walk_id'),
+              ('public.credit_ledger', 'walk_id'),
+              ('public.payments', 'walk_id'),
+              ('public.walks', 'property_id')
+           ) as want(tbl, col)
+  loop
+    if r.got is null then
+      raise exception 'FAIL: %.% has no foreign key at all (spec 03 relies on a RESTRICT one)', r.tbl, r.col;
+    elsif r.got <> 'r' then
+      raise exception 'FAIL: %.% is ON DELETE % (a=no action, c=cascade, n=set null) — spec 03''s purge design needs RESTRICT; spec 01 once said cascade, and it was wrong', r.tbl, r.col, r.got;
+    end if;
+  end loop;
+  raise notice 'the delete rules the erasure design rests on are RESTRICT (spec 01/03): OK';
+end $$;
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;

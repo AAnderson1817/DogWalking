@@ -619,10 +619,12 @@ the product displays — a door, lockbox or alarm code — for 30 seconds,
 outdoors, one-handed; it is never routed through legacy colour aliases again.
 
 **Live numbers have names and do not interrupt.** The Walk Mode timer and
-distance, and the live-walk banner timer, carry `role="timer"`,
-`aria-live="off"` and an `aria-label` that says which is which. Elapsed time is
-excluded from the banner link's accessible name — a 1 s tick was renaming the
-link under the user's focus every second.
+distance carry `role="timer"`, `aria-live="off"` and an `aria-label` that says
+which is which. The rule learned from the retired live-walk banner (deleted in
+`qc(lows)` L21, superseded by the Today schedule's own row) still stands for
+any live number placed inside a link: elapsed time is excluded from the link's
+accessible name, because a 1 s tick renamed the link under the user's focus
+every second.
 
 **Modal sheets enforce modality.** `Sheet` requires a `title` (a dialog with no
 accessible name cannot be reached by name or rotor) and marks every sibling of

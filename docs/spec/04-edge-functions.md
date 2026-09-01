@@ -56,7 +56,9 @@ is paged. Both runbooks list them. Until they exist, this makes an incident
 
 ## complete-walk — POST, operator JWT
 Body: `{ walk_id, ended_at, distance_m, notes?, potty_pee?, potty_poo?, fed?, watered?, photo_paths?: string[] }`
-Effects (in order): assert walk belongs to caller and `status='in_progress'` → update walk fields, `status='completed'` → insert `walk_photos` rows → `fn_debit_walk` → if `'overage'`, invoke overage charge (same logic as charge-overage, in-process) → insert `walk_complete` notification (client) → low-credit check per spec 02 → Realtime broadcast `walk:{id}` event `ended`.
+Effects (in order): assert walk belongs to caller and `status='in_progress'` (a walk already `completed` returns its stored billing — the idempotent branch) → `fn_debit_walk` → if `'overage'`, invoke overage charge (same logic as charge-overage, in-process) → update walk fields, `status='completed'` → insert `walk_photos` rows → insert `walk_complete` notification (client) → low-credit check per spec 02 (debited outcome only) → Realtime broadcast `walk:{id}` event `ended` (best-effort; never fails the completion).
+
+**Billing comes BEFORE the status write, on purpose** (`qc(1–4)`). `fn_debit_walk` is idempotent under its per-client lock and the overage charge carries a Stripe idempotency key, so if either throws the walk stays `in_progress` and the operator's retry re-runs billing. The other order produces a completed-but-never-billed walk that the idempotent branch then reports as a zero-cost debit forever. `complete_walk_test.ts` ("reverting the bill-before-complete order recreates the permanently-free-walk bug") fails if the order is reverted. This paragraph stated the opposite order from the day the code changed until the spec-drift audit — the same class of defect as the spec-06 service-worker sentence, on the money path.
 Response: `{ walk, billing: { outcome: 'debited'|'overage', cost_credits?, charged_pence?, payment_status? } }`
 Idempotent: re-POST on a completed walk returns the stored result, no re-billing.
 
