@@ -337,6 +337,8 @@ export type Database = {
           push_attempts: number;
           push_sent_at: string | null;
           push_last_error: string | null;
+          email_claimed_at: string | null;
+          push_claimed_at: string | null;
         };
         Insert: {
           id?: string;
@@ -357,6 +359,8 @@ export type Database = {
           push_attempts?: number;
           push_sent_at?: string | null;
           push_last_error?: string | null;
+          email_claimed_at?: string | null;
+          push_claimed_at?: string | null;
         };
         Update: {
           id?: string;
@@ -377,6 +381,8 @@ export type Database = {
           push_attempts?: number;
           push_sent_at?: string | null;
           push_last_error?: string | null;
+          email_claimed_at?: string | null;
+          push_claimed_at?: string | null;
         };
         Relationships: [];
       };
@@ -1267,6 +1273,14 @@ export type Database = {
           p_notice_version: string;
         };
         Returns: Array<{ client_id: string; outcome: Database["public"]["Enums"]["invite_claim_outcome"] }>;
+      };
+      fn_claim_notification_send: {
+        Args: {
+          p_id: string;
+          p_channel: string;
+          p_lease: unknown;
+        };
+        Returns: boolean;
       };
       fn_credential_log_block_mutation: {
         Args: Record<string, never>;
