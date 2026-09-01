@@ -76,6 +76,14 @@ DROP = re.compile(
     re.I | re.S,
 )
 LABEL = re.compile(LIT)
+# The whole parenthesis must be standard literals separated by commas. An
+# escape string (the E prefix, backslash escapes inside), a dollar-quoted
+# label or anything else is refused rather than half-read: on an escape
+# string LABEL.findall stops at the escaped quote, and both create scans
+# still match, so nothing else would notice (Codex round four). Decoding
+# every literal form PostgreSQL has is more parser than a catalogue of
+# fifteen enums earns; refusing keeps the gate honest.
+ENUM_BODY = re.compile(r"^\s*" + LIT + r"(?:\s*,\s*" + LIT + r")*\s*,?\s*$", re.S)
 
 
 def unquote(lit: str) -> str:
@@ -94,6 +102,8 @@ def strip_sql_comments(sql: str) -> str:
     out: list[str] = []
     i, n = 0, len(sql)
     state = "code"
+    depth = 0  # block comments NEST in PostgreSQL (Codex round four)
+    escapes = False  # inside an E'...' literal a backslash escapes the next char
     while i < n:
         c = sql[i]
         nxt = sql[i + 1] if i + 1 < n else ""
@@ -104,16 +114,23 @@ def strip_sql_comments(sql: str) -> str:
                 continue
             if c == "/" and nxt == "*":
                 state = "block"
+                depth = 1
                 i += 2
                 continue
             if c == "'":
                 state = "sq"
+                prev = sql[i - 1] if i > 0 else ""
+                before = sql[i - 2] if i > 1 else ""
+                escapes = prev in "eE" and not (before.isalnum() or before == "_")
             elif c == '"':
                 state = "dq"
             out.append(c)
         elif state == "sq":
             out.append(c)
-            if c == "'":
+            if escapes and c == "\\":
+                out.append(nxt)
+                i += 1
+            elif c == "'":
                 if nxt == "'":  # escaped quote inside the literal
                     out.append(nxt)
                     i += 1
@@ -128,9 +145,14 @@ def strip_sql_comments(sql: str) -> str:
                 out.append(c)
                 state = "code"
         elif state == "block":
-            if c == "*" and nxt == "/":
-                state = "code"
+            if c == "/" and nxt == "*":
+                depth += 1
                 i += 1
+            elif c == "*" and nxt == "/":
+                depth -= 1
+                i += 1
+                if depth == 0:
+                    state = "code"
         i += 1
     return "".join(out)
 
@@ -185,6 +207,15 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
                 continue
             name = m.group(1).lower()
             if kind == "create":
+                if not ENUM_BODY.match(m.group(2)):
+                    print(
+                        f"FAIL: {path.name}: `create type {name} as enum ({' '.join(m.group(2).split())})` "
+                        "carries a label this generator cannot read (an E'' escape string, a "
+                        "dollar-quoted label, or a stray token); use a plain '...' literal or "
+                        "teach gen-enum-catalog.py the form",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
                 values[name] = [unquote(v) for v in LABEL.findall(m.group(2))]
                 touched[name] = [version]
                 if name not in order:
