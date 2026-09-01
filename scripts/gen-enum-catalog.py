@@ -52,11 +52,15 @@ ALTER = re.compile(r"alter\s+type\s+(?:public\.)?([a-z0-9_]+)\s+(.*?);", re.I | 
 # status-log entry claimed the label survived, and my own proof refuted it.
 # `unquote()` turns the literal back into the label Postgres stores.
 LIT = r"'((?:[^']|'')*)'"
+# Matched against the INTACT action span, never a whitespace-collapsed copy:
+# `add value 'needs  review'` stores two spaces, and collapsing the text before
+# parsing it recorded one — and mis-placed a BEFORE/AFTER anchor carrying the
+# same label (Codex round seven). Tokens are separated by `\s+` already.
 ADD_VALUE = re.compile(
-    r"^add\s+value\s+(?:if\s+not\s+exists\s+)?" + LIT + r"(?:\s+(before|after)\s+" + LIT + r")?$",
+    r"^\s*add\s+value\s+(?:if\s+not\s+exists\s+)?" + LIT + r"(?:\s+(before|after)\s+" + LIT + r")?\s*$",
     re.I | re.S,
 )
-RENAME_VALUE = re.compile(r"^rename\s+value\s+" + LIT + r"\s+to\s+" + LIT + r"$", re.I | re.S)
+RENAME_VALUE = re.compile(r"^\s*rename\s+value\s+" + LIT + r"\s+to\s+" + LIT + r"\s*$", re.I | re.S)
 # Every `drop type` statement, loosely, so an unparsed one can be REFUSED —
 # and the strict shape Postgres allows: a comma list of names, optional
 # CASCADE/RESTRICT. Codex on PR #88 round two: the first regex demanded the
@@ -103,9 +107,10 @@ def strip_sql(sql: str, *, inside_dollar: bool = False) -> tuple[str, str]:
     OUTSIDE string literals and quoted identifiers, with nesting, and with a
     space left where a block comment stood, since PostgreSQL reads it as
     whitespace. `clean` keeps every literal intact; `skeleton` is the same
-    text, same length, with each literal's CONTENTS replaced by `x`, so the
-    statement scans can run on the skeleton (a `;` or `drop type` inside a
-    value is not a terminator or a statement — Codex round six) and read the
+    text, same length, with the CONTENTS of each literal and each quoted
+    identifier replaced by `x`, so the statement scans can run on the
+    skeleton (a `;` or `drop type` inside a value or a name is not a
+    terminator or a statement — Codex rounds six and seven) and read the
     real labels out of `clean` at the same spans.
 
     A dollar-quoted region (`$$…$$`, `$tag$…$tag$`) is a value, not a
@@ -174,9 +179,21 @@ def strip_sql(sql: str, *, inside_dollar: bool = False) -> tuple[str, str]:
             else:
                 out.append(c); skel.append("x")
         elif state == "dq":
-            both(c)
+            # A quoted identifier's contents are a NAME, never a statement:
+            # `select 1 as "drop type payment_status;"` is an alias, and with
+            # the contents copied into the skeleton both DROP scans matched it
+            # and removed a live enum (Codex round seven). Masked like a
+            # literal; a doubled quote inside is content, not the end.
             if c == '"':
+                if nxt == '"':
+                    out.append(c); skel.append("x")
+                    out.append(nxt); skel.append("x")
+                    i += 2
+                    continue
+                both(c)
                 state = "code"
+            else:
+                out.append(c); skel.append("x")
         elif state == "line":
             if c == "\n":
                 both(c)
@@ -277,7 +294,7 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
             elif kind == "alter":
                 if name not in values:
                     continue  # not an enum this file tracks (a composite, say)
-                action = " ".join(sql[m.start(2) : m.end(2)].split())
+                action = sql[m.start(2) : m.end(2)]  # intact: labels keep their whitespace
                 add = ADD_VALUE.match(action)
                 ren = RENAME_VALUE.match(action)
                 if add:
@@ -295,7 +312,7 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
                     values[name] = [new if v == old else v for v in values[name]]
                 else:
                     print(
-                        f"FAIL: {path.name}: `alter type {name} {action}` is neither "
+                        f"FAIL: {path.name}: `alter type {name} {' '.join(action.split())}` is neither "
                         "`add value` nor `rename value`; teach gen-enum-catalog.py what it "
                         "means rather than letting the catalogue describe a type that "
                         "no longer matches the migrations",
