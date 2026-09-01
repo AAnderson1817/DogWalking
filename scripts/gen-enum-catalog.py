@@ -46,11 +46,17 @@ CREATE = re.compile(
     re.I | re.S,
 )
 ALTER = re.compile(r"alter\s+type\s+(?:public\.)?([a-z0-9_]+)\s+(.*?);", re.I | re.S)
+# A label is a SQL string literal, so a quote inside it is doubled: `'it''s'`.
+# The first version of these patterns stopped at the first quote and refused
+# such a label as "neither add value nor rename value" — honest, but the
+# status-log entry claimed the label survived, and my own proof refuted it.
+# `unquote()` turns the literal back into the label Postgres stores.
+LIT = r"'((?:[^']|'')*)'"
 ADD_VALUE = re.compile(
-    r"^add\s+value\s+(?:if\s+not\s+exists\s+)?'([^']+)'(?:\s+(before|after)\s+'([^']+)')?$",
+    r"^add\s+value\s+(?:if\s+not\s+exists\s+)?" + LIT + r"(?:\s+(before|after)\s+" + LIT + r")?$",
     re.I | re.S,
 )
-RENAME_VALUE = re.compile(r"^rename\s+value\s+'([^']+)'\s+to\s+'([^']+)'$", re.I | re.S)
+RENAME_VALUE = re.compile(r"^rename\s+value\s+" + LIT + r"\s+to\s+" + LIT + r"$", re.I | re.S)
 # Every `drop type` statement, loosely, so an unparsed one can be REFUSED —
 # and the strict shape Postgres allows: a comma list of names, optional
 # CASCADE/RESTRICT. Codex on PR #88 round two: the first regex demanded the
@@ -69,7 +75,11 @@ DROP = re.compile(
     r"\s*(?:cascade|restrict)?\s*;",
     re.I | re.S,
 )
-LABEL = re.compile(r"'([^']*)'")
+LABEL = re.compile(LIT)
+
+
+def unquote(lit: str) -> str:
+    return lit.replace("''", "'")
 
 
 def strip_sql_comments(sql: str) -> str:
@@ -175,7 +185,7 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
                 continue
             name = m.group(1).lower()
             if kind == "create":
-                values[name] = LABEL.findall(m.group(2))
+                values[name] = [unquote(v) for v in LABEL.findall(m.group(2))]
                 touched[name] = [version]
                 if name not in order:
                     order.append(name)
@@ -186,7 +196,8 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
                 add = ADD_VALUE.match(action)
                 ren = RENAME_VALUE.match(action)
                 if add:
-                    label, where, anchor = add.group(1), add.group(2), add.group(3)
+                    label, where = unquote(add.group(1)), add.group(2)
+                    anchor = unquote(add.group(3)) if add.group(3) else None
                     if label in values[name]:
                         continue  # `if not exists` on a redelivery: no change
                     if where and anchor in values[name]:
@@ -195,7 +206,7 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
                     else:
                         values[name].append(label)
                 elif ren:
-                    old, new = ren.group(1), ren.group(2)
+                    old, new = unquote(ren.group(1)), unquote(ren.group(2))
                     values[name] = [new if v == old else v for v in values[name]]
                 else:
                     print(
