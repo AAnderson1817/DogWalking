@@ -215,6 +215,13 @@ jobs:
       - name: Deploy workflow gating
         run: python3 scripts/verify-workflows.py
 
+      # CLAUDE.md states the migration and edge-function counts in prose, and
+      # its own note used to read "nothing enforces these two counts". They
+      # went stale at H21, again by 0043, and a third time at 0051. The
+      # paragraph is what a fresh session reads as fact about this tree.
+      - name: CLAUDE.md's counts match the tree
+        run: python3 scripts/check-status-counters.py
+
       - name: Secret-leak grep (validate gate 7)
         run: |
           if grep -RInE "(VAULT_MASTER_KEY|SERVICE_ROLE|sk_live|sk_test)" \

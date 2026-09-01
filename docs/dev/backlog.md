@@ -67,6 +67,41 @@ permanently and terminally, with no signal in the UI. Whether to surface it
 — and how, without exposing one operator's suppression list to another — is
 a product question.
 
+### 4. The pinned Supabase CLI is behind, and `db push` warns every deploy
+Read off the `24c74bd` staging deploy (run 33537033230, `Apply migrations`),
+not recalled:
+
+```
+Warning: failed to cache migrations catalog: error exporting pg-delta catalog:
+edge-runtime script produced no output:
+runtime has escaped from the event loop unexpectedly: event loop error:
+Error: Failed to read certificate file
+'/workspace/supabase/.temp/pgdelta/pgdelta-target-ca.crt': ENOENT
+...
+Finished supabase db push.
+A new version of Supabase CLI is available: v2.116.0 (currently installed v2.109.1)
+```
+
+What it is **not**: a failed migration. The line is prefixed `Warning`, the
+failing step is an optional *catalog cache*, `db push` reports `Finished`, and
+the job is green — `0051` applied on this exact run. What it is: recurring
+noise in the log a reader consults when a deploy genuinely breaks, which is
+the `ops(gate-noise)` failure mode — a red (or a scary stack trace) that
+means nothing spends the credibility of one that does.
+
+The pin is six places across the two deploy workflows and is deliberate: it
+was raised to 2.109.1 because 2.99.0 predated the `local_smtp` config key and
+broke `supabase link`. So this is a **deploy-workflow change** — a raise-the-bar
+path — and wants its own argument, not a drive-by bump. Before moving it, read
+2.109.1 → current release notes for `db push` and `functions deploy` changes;
+`supabase.com` is blocked by the egress proxy from this container, so that
+reading has to come from somewhere reachable. The version to move to must be
+read at the time, not taken from this file.
+
+Not urgent: nothing is broken, and the cost of being wrong here is a deploy
+that fails at `link` or `push`, which is exactly the failure 2.109.1 was
+pinned to avoid.
+
 ## Done
 
 - **Push notifications (M27)** — RFC 8291 payload encryption and RFC 8292

@@ -54,14 +54,13 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
 - **A missing tool makes a gate PASS by not running.** `validate.sh` skips its
   deno gate when deno is absent. Install it first; a gate that goes green by
   not running is this repository's most-recorded failure.
-- **Two gates exist only in CI**, so a green local run does not cover them:
-  *Every test file is claimed by a vitest project* and *Every e2e spec is
-  actually run by this workflow*. Both matter — see the traps below.
-- **`scripts/db-push-check.sh` is not part of `validate.sh`.** Run it for any
-  PR touching `supabase/migrations/`: it re-applies every migration from zero
-  as a **non-superuser**, one transaction per file. The ordinary reset runs as
-  the bootstrap superuser and skips every ownership and privilege check a real
-  deploy performs.
+- **`db-push-check.sh` and `concurrency.sh` were CI-only until recently** and
+  are now `validate.sh` gates 7b and 8b. Both were added after a green local
+  run that CI refused, one PR apart. If you add a gate to `ci.yml`, add it to
+  `validate.sh` and `SKILL.md` in the same commit — `CLAUDE.md` calls the
+  three a lockstep and the drift is invisible until CI disagrees with you.
+- **Two gates still exist only in CI**: *Every test file is claimed by a
+  vitest project* and *Every e2e spec is actually run by this workflow*.
 
 ## Traps this repository has already paid for
 
@@ -149,6 +148,10 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   vacuous without a precondition**. Any case whose detector can be satisfied by
   doing nothing needs an explicit "the thing under test actually happened"
   check, run FIRST, labelled as a precondition (cases 1, 5 and 6 already do).
+  Changing a function's RETURN TYPE does the same thing: `money(send-once)`
+  moved `fn_claim_notification_send` from boolean to uuid, and case 10's
+  detectors counted `t`/`f` lines. That one was legible only because all three
+  of its assertions — the precondition included — fell to zero at once.
 - **A green tick is not a green run.** The above was found by reading the CI
   job log, where the postgres *service container* log at the very end printed
   ten `ERROR: … is not a push service` lines the job itself never surfaced.
@@ -162,6 +165,20 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   tell them apart, probe each rule directly (`select fn_x('…')`) alongside the
   suite run; that is cheap and it is what makes "individually load-bearing" a
   reading rather than a claim.
+- **Extract a module with TEXT ANCHORS, never line ranges.** Splitting
+  `deps.ts` out of `send-notification/index.ts` by line numbers cut through a
+  comment block and produced a file that would not parse. Same defect as the
+  L21 CSS split, which a depth-blind `re.split` cut through an `@media` block.
+  Slice on strings you can see, and assert each boundary matched something
+  non-empty before writing either file.
+- **A deps module that reads `Deno.env` at construction cannot be constructed
+  in a test.** CI runs `deno test` with NO permissions, so `makeSendDeps()`
+  reading `SUPABASE_URL` at call time fails with `NotCapable` the moment a
+  test imports it — and the whole reason to split a `deps.ts` out of an
+  `index.ts` is that importing `index.ts` runs `serveFunction` and binds a
+  port. Hoist every `Deno.env.get` into `index.ts` and pass a config object.
+  `push_deps.ts` and `deps.ts` are the two worked examples; backlog item 1
+  asks for the same seam on three more functions.
 
 ## Verifying things the gates cannot see
 

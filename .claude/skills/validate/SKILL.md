@@ -88,14 +88,21 @@ Must end with `DB PUSH CHECK PASS`.
 ```
 psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/smoke.sql
 psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/materializer.sql
-./supabase/tests/concurrency.sh
 ```
-`concurrency.sh` is the only suite that COMMITS — it runs two real backends
-against each other, because the row lock behind invariant 1 cannot be
-exercised inside a single transaction. It clears its own namespace on the way
-in and out.
 `smoke.sql` must end with `SMOKE PASS`. Run every `supabase/tests/*.sql`, not
 just these two — later work adds files here.
+
+## 8b. Concurrency suite (requires `LOCAL_DB_URL`)
+```
+./supabase/tests/concurrency.sh
+```
+The only suite that COMMITS — it runs two real backends against each other,
+because a lock cannot be exercised AS a lock inside a single transaction
+(review H20). It clears its own namespace on the way in and out, and refuses
+to start on leftovers. Numbered here to match `validate.sh`, which it was
+missing from until `money(send-once)`: retyping
+`fn_claim_notification_send`'s return silently invalidated case 10's `t`/`f`
+detectors, which passed 18/18 locally and went red in CI.
 
 ## 8c. Push endpoint allowlist parity (requires `LOCAL_DB_URL` and deno)
 ```
@@ -122,7 +129,7 @@ an edited migration produces a fully green run, while `db push` skips it
 entirely in staging and production. The schemas diverge silently and
 permanently.
 
-## 10. Generated artefacts are not stale
+## 10a / 10b. Generated artefacts are not stale
 Both are committed and both rot silently when a migration lands without a
 regeneration. A stale `types.ts` makes `tsc` agree with code the database will
 reject; a stale definer catalogue makes spec 03's grant-audit checklist lie
@@ -140,7 +147,7 @@ failing gate — report SKIP, not FAIL:
 python3 scripts/gen-types.py && git diff --exit-code -- app/src/lib/types.ts
 ```
 
-## 10b. Deploy workflow gating
+## 10c. Deploy workflow gating
 ```
 python3 scripts/verify-workflows.py
 ```
@@ -149,6 +156,18 @@ forbids shipped: no job may gate on its own result (it can then never run); a
 job whose `if` uses a status function must re-state every `needs` it dropped the
 implicit `success()` for; and a job that runs `git push` needs `fetch-depth: 0`,
 because git cannot prove a fast-forward from a shallow clone.
+
+## 10d. CLAUDE.md's counts match the tree
+```
+python3 scripts/check-status-counters.py
+```
+`CLAUDE.md` states the migration and edge-function counts in prose, and its
+own note used to read "nothing enforces these two counts". They went stale at
+review H21, again by `0043`, and a third time at `0051`. A fresh session reads
+that paragraph as fact about this tree, so it is checked rather than trusted.
+The gate FAILS when it cannot find the sentence carrying a count — a parser
+that matches nothing reports agreement, which is how `column-grants.test.ts`
+and `db-push-check.sh`'s object derivation both had to be fixed.
 
 ## 11. Secret-leak grep
 ```
