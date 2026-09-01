@@ -90,7 +90,15 @@ def unquote(lit: str) -> str:
     return lit.replace("''", "'")
 
 
-def strip_sql_comments(sql: str) -> str:
+DOLLAR_TAG = re.compile(r"[$](?:[A-Za-z_][A-Za-z0-9_]*)?[$]")
+DDL_INSIDE = re.compile(r"\b(?:create|alter|drop)\s+type\b", re.I)
+
+
+class DollarQuotedDDL(Exception):
+    """A dollar-quoted body carries enum DDL this generator does not read."""
+
+
+def strip_sql_comments(sql: str, *, inside_dollar: bool = False) -> str:
     """`--` to end of line, and /* */ blocks — OUTSIDE string literals and
     quoted identifiers. A commented-out `add value` is not a value (0051
     discusses one in prose), but `add value 'client--reminder'` is a value
@@ -98,7 +106,15 @@ def strip_sql_comments(sql: str) -> str:
     it at the marker, the statement no longer matched, and the catalogue
     stayed silently short (Codex on PR #88, round three). Comments inside a
     dollar-quoted function body are still comments and are stripped too, so
-    prose there cannot be read as DDL."""
+    prose there cannot be read as DDL.
+
+    A dollar-quoted region (`$$…$$`, `$tag$…$tag$`) is then BLANKED, because
+    it is a value, not a statement: `comment on type x is $doc$create type
+    ghost as enum ('x');$doc$` creates nothing, and the top-level scans read
+    it as though it did (Codex round five). If the region still carries
+    `create/alter/drop type` after its own comments are stripped, the run is
+    refused by name rather than guessed at — this generator reads top-level
+    statements only, and DDL inside a DO body is the author's to lift out."""
     out: list[str] = []
     i, n = 0, len(sql)
     state = "code"
@@ -108,6 +124,19 @@ def strip_sql_comments(sql: str) -> str:
         c = sql[i]
         nxt = sql[i + 1] if i + 1 < n else ""
         if state == "code":
+            # Inside a dollar-quoted body a `$word$` is just text: the region is
+            # a value, and only its comments are stripped before the DDL check.
+            tag = DOLLAR_TAG.match(sql, i) if (c == "$" and not inside_dollar) else None
+            if tag:
+                close = sql.find(tag.group(0), tag.end())
+                if close < 0:
+                    raise DollarQuotedDDL(f"unterminated dollar quote {tag.group(0)}")
+                inner = strip_sql_comments(sql[tag.end() : close], inside_dollar=True)
+                if DDL_INSIDE.search(inner):
+                    raise DollarQuotedDDL(" ".join(sql[i : close + len(tag.group(0))].split())[:120])
+                out.append(" ")
+                i = close + len(tag.group(0))
+                continue
             if c == "-" and nxt == "-":
                 state = "line"
                 i += 2
@@ -153,6 +182,7 @@ def strip_sql_comments(sql: str) -> str:
                 i += 1
                 if depth == 0:
                     state = "code"
+                    out.append(" ")  # `CREATE/*gap*/TYPE` is two tokens to PostgreSQL
         i += 1
     return "".join(out)
 
@@ -171,7 +201,16 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
     order: list[str] = []
     for path in sorted(MIGRATIONS.glob("*.sql")):
         version = path.name.split("_", 1)[0]
-        sql = strip_sql_comments(path.read_text())
+        try:
+            sql = strip_sql_comments(path.read_text())
+        except DollarQuotedDDL as e:
+            print(
+                f"FAIL: {path.name}: enum DDL inside a dollar-quoted value or body, which this "
+                f"generator does not read — `{e}`; lift it to a top-level statement or teach "
+                "gen-enum-catalog.py the form",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         creates = list(CREATE.finditer(sql))
         alters = list(ALTER.finditer(sql))
         drops = list(DROP.finditer(sql))
