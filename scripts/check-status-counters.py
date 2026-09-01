@@ -20,8 +20,25 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CLAUDE_MD = ROOT / "CLAUDE.md"
 
-# Directories under supabase/functions/ that are not deployable functions.
-NOT_A_FUNCTION = {"_lib", "_tests"}
+def deployable_functions(root):
+    """The functions this repository actually ships.
+
+    The predicate is `repo_functions()` in `scripts/verify-deployment.sh`
+    (skip a leading-underscore directory, require `index.ts`), which is the
+    inventory the deploy probe compares against the Management API — so it is
+    what "N edge functions" means. An enumerated exception list was the first
+    version and Codex was right to refuse it: `{"_lib", "_tests"}` counts the
+    next `_shared/` helper or a scaffold directory with no entrypoint, and a
+    gate that goes red on a healthy tree is the one that gets deleted by
+    whoever is trying to ship something else. Keep the two in step; a guard
+    whose scope disagrees with what it guards is this repository's
+    most-repeated defect.
+    """
+    return sorted(
+        p.name
+        for p in root.iterdir()
+        if p.is_dir() and not p.name.startswith("_") and (p / "index.ts").is_file()
+    )
 
 failures = []
 text = CLAUDE_MD.read_text()
@@ -56,11 +73,7 @@ if m is None:
     )
 else:
     claimed = int(m.group(1))
-    fns = sorted(
-        p.name
-        for p in (ROOT / "supabase" / "functions").iterdir()
-        if p.is_dir() and p.name not in NOT_A_FUNCTION
-    )
+    fns = deployable_functions(ROOT / "supabase" / "functions")
     if not fns:
         failures.append("no edge functions found under supabase/functions/")
     elif claimed != len(fns):
