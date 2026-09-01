@@ -147,6 +147,11 @@ fi
 
 run "10c. workflow gating" python3 scripts/verify-workflows.py
 
+# 10d. CLAUDE.md states the migration and edge-function counts in prose, and
+# its own note used to say "nothing enforces these two counts". They went
+# stale a third time at 0051. A fresh session reads that paragraph as fact.
+run "10d. status counters" python3 scripts/check-status-counters.py
+
 # ── 11. Secret-leak grep ──────────────────────────────────────────────────
 no_secret_literals() {
   local hits
