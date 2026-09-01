@@ -235,28 +235,72 @@ SQL
 SENDER_TABLES=$(python3 - <<'DERIVE' || true
 import re, pathlib
 # supabase-js method -> the SQL privilege it needs. Object visibility is NOT
-# the property under test (Codex review on PR #85): the first version of this
-# check asked only for SELECT, so narrowing push_subscriptions to `select`
-# alone would have passed it while dropSubscription()'s DELETE failed on any
-# deployment without the platform default ACL — a gate verifying less than it
-# claims, which is the defect it exists to catch.
-OPS = [(".select(", ["SELECT"]), (".upsert(", ["INSERT", "UPDATE"]),
-       (".insert(", ["INSERT"]), (".update(", ["UPDATE"]), (".delete(", ["DELETE"])]
+# the property under test (Codex review on PR #85): the first version asked
+# only for SELECT, so narrowing push_subscriptions to `select` alone passed it
+# while dropSubscription()'s DELETE failed on any deployment without the
+# platform default ACL -- a gate verifying less than it claims.
+OPS = {"select": ["SELECT"], "insert": ["INSERT"], "update": ["UPDATE"],
+       "upsert": ["INSERT", "UPDATE"], "delete": ["DELETE"]}
+
+def skip_call(src, i):
+    """i points at '('. Return the index just past the matching ')'."""
+    depth, n, q = 0, len(src), None
+    while i < n:
+        c = src[i]
+        if q:
+            if c == "\\": i += 2; continue
+            if c == q: q = None
+        elif c in "\"'`": q = c
+        elif c == "(": depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0: return i + 1
+        i += 1
+    return None
+
+def skip_gap(src, j):
+    """Whitespace AND comments -- a chain is routinely broken by a `//` note,
+    and treating one as the end of the chain silently loses the ops after it."""
+    n = len(src)
+    while j < n:
+        if src[j] in " \t\r\n": j += 1
+        elif src.startswith("//", j):
+            e = src.find("\n", j); j = n if e == -1 else e + 1
+        elif src.startswith("/*", j):
+            e = src.find("*/", j); j = n if e == -1 else e + 2
+        else: break
+    return j
+
+def chain_ops(src, i):
+    """Every op in THIS chain, not just the first. A mutation followed by
+    .select() makes PostgREST use RETURNING, so the caller needs the write
+    privilege AND select; keeping only the first would let a table used solely
+    through .insert(...).select(...) hold write grants alone and still pass
+    (Codex review on PR #85). Bounded by the chain itself rather than by the
+    next .from(, so an unrelated later call cannot be attributed here either --
+    under-reporting and over-reporting are both wrong."""
+    found, n = set(), len(src)
+    while True:
+        j = skip_gap(src, i)
+        if j >= n or src[j] != ".": return found
+        m = re.match(r"\.([A-Za-z_$][\w$]*)\s*\(", src[j:])
+        if not m: return found
+        end = skip_call(src, j + m.end() - 1)
+        if end is None: return found
+        if m.group(1) in OPS: found.update(OPS[m.group(1)])
+        i = end
+
 need, unparsed = {}, []
 for f in sorted(pathlib.Path("supabase/functions").rglob("*.ts")):
     src = f.read_text()
-    hits = [(m.start(), m.end(), m.group(1)) for m in re.finditer(r'\.from\("([a-z_]+)"\)', src)]
-    for i, (s, e, tbl) in enumerate(hits):
-        # bounded by the NEXT .from(, so an operation is never attributed to
-        # the wrong table
-        window = src[e: hits[i + 1][0] if i + 1 < len(hits) else len(src)]
-        first = min(((window.find(t), pr) for t, pr in OPS if window.find(t) != -1), default=None)
-        if first is None:
-            # loud, never skipped: a .from() whose operation cannot be read is
-            # the one case where quietly checking less looks like checking more
-            unparsed.append('%s:%d .from("%s")' % (f, src[:s].count(chr(10)) + 1, tbl))
+    for m in re.finditer(r'\.from\("([a-z_]+)"\)', src):
+        ops = chain_ops(src, m.end())
+        if not ops:
+            # loud, never skipped: a .from() whose chain cannot be read is the
+            # one case where quietly checking less looks like checking more
+            unparsed.append('%s:%d .from("%s")' % (f, src[:m.start()].count("\n") + 1, m.group(1)))
             continue
-        need.setdefault(tbl, set()).update(first[1])
+        need.setdefault(m.group(1), set()).update(ops)
 if unparsed:
     raise SystemExit("UNPARSED " + "; ".join(unparsed))
 print(";".join("%s=%s" % (t, ",".join(sorted(p))) for t, p in sorted(need.items())))
@@ -283,7 +327,16 @@ begin
          count(*) filter (where x.kind = 'f')
     into v_missing, v_tables, v_fns
   from (
-    select 't' as kind, 'table    ' || r.tbl || ' needs ' || r.priv as what
+    -- A derived name with no matching object is reported, never filtered out.
+    -- `.from("walkz")` is a handler that fails on every invocation, and
+    -- silently dropping it would let this check report that every sender
+    -- object is granted -- the fn_book_walk phantom-column class, in the gate.
+    select 't' as kind, 'table    ' || r.tbl || ' does not exist' as what
+      from (select distinct split_part(p, '=', 1) as tbl
+              from unnest(string_to_array('${SENDER_TABLES}', ';')) p) r
+     where to_regclass('public.' || r.tbl) is null
+    union all
+    select 't', 'table    ' || r.tbl || ' needs ' || r.priv
       from (
         select split_part(p, '=', 1) as tbl,
                unnest(string_to_array(split_part(p, '=', 2), ',')) as priv
@@ -291,6 +344,12 @@ begin
       ) r
      where to_regclass('public.' || r.tbl) is not null
        and not has_table_privilege('service_role', ('public.' || r.tbl)::regclass, r.priv)
+    union all
+    select 'f', 'function ' || f.name || ' does not exist'
+      from unnest(string_to_array('${SENDER_FNS}', ',')) f(name)
+     where not exists (
+       select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'public' and p.proname = f.name)
     union all
     select 'f', 'function ' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
       from pg_proc p join pg_namespace n on n.oid = p.pronamespace
@@ -300,7 +359,7 @@ begin
   ) x;
 
   if v_missing is not null then
-    raise exception E'FAIL: % table(s) and % function(s) the edge functions reach are not granted to service_role.\nThey work only on a project carrying the platform default ACL, which 0004 says not to rely on:\n  %', v_tables, v_fns, v_missing;
+    raise exception E'FAIL: % table(s) and % function(s) the edge functions reach are missing or not granted to service_role.\nA "needs X" row works only on a project carrying the platform default ACL, which 0004 says not to rely on;\na "does not exist" row is a handler that fails on every invocation:\n  %', v_tables, v_fns, v_missing;
   end if;
 
   raise notice 'every object the edge functions reach is explicitly granted to service_role';
