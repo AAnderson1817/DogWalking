@@ -14,7 +14,7 @@
 //
 // `fetchImpl` is injected for that reason and defaults to the global.
 import { HttpError } from "../_lib/http.ts";
-import { claimNotificationSend } from "./handler.ts";
+import { claimNotificationSend, releaseNotificationSend } from "./handler.ts";
 import {
   encryptPushPayload,
   vapidAuthorization,
@@ -72,6 +72,7 @@ export function makePushDeps(
     // two copies of one rule is the drift this repository has already paid
     // for, and one of them was untestable where it sat.
     claimSend: (id, channel) => claimNotificationSend(db, id, channel),
+    releaseSend: (id, channel) => releaseNotificationSend(db, id, channel),
     async getSubscriptions(operatorId, clientId) {
       // Explicit columns, never `*`: 0049 makes this a column-restricted table
       // (the encryption secrets are withheld from `authenticated`), and

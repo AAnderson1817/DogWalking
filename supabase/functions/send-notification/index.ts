@@ -17,6 +17,7 @@ import { adminClient } from "../_lib/admin.ts";
 import { makePushDeps, vapidConfig } from "./push_deps.ts";
 import {
   claimNotificationSend,
+  releaseNotificationSend,
   deliverNotification,
   drainBacklog,
   failureResponse,
@@ -62,6 +63,7 @@ function makeDeps(apiKey: string | null, operatorId: string | null): SendDeps {
   const db = adminClient();
   return {
     claimSend: (id, channel) => claimNotificationSend(db, id, channel),
+    releaseSend: (id, channel) => releaseNotificationSend(db, id, channel),
     async getNotification(id) {
       let q = db.from("notifications").select(COLS).eq("id", id);
       if (operatorId) q = q.eq("operator_id", operatorId);

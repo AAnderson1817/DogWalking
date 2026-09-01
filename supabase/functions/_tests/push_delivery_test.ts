@@ -4,7 +4,7 @@
 // of them are TERMINAL — the H17 lesson. A sweep that cannot tell "no devices"
 // from "the service was briefly down" either retries somebody forever who
 // never turned push on, or abandons a real failure.
-import { assert, assertEquals } from "./asserts.ts";
+import { assert, assertEquals, assertRejects } from "./asserts.ts";
 import {
   deliverPush,
   isGoneStatus,
@@ -55,11 +55,19 @@ interface Harness {
   failures: Array<{ id: string; error: string }>;
   recorded: Array<{ outcome: Outcome; attempts: number }>;
   sent: string[];
+  released: Array<[string, string]>;
 }
 
 function harness(subs: PushSubscription[], reply: (s: PushSubscription) => PushAttempt | Error): Harness {
-  const h: Harness = { dropped: [], failures: [], recorded: [], sent: [], deps: null as unknown as PushDeps };
+  const h: Harness = {
+    dropped: [], failures: [], recorded: [], sent: [], released: [],
+    deps: null as unknown as PushDeps,
+  };
   h.deps = {
+    releaseSend: (id, channel) => {
+      h.released.push([id, channel]);
+      return Promise.resolve();
+    },
     // Defaults to WINNING the claim, so every existing case still
     // exercises the delivery path it was written for. The refusal is its
     // own test below — a default of `false` would make the whole file
@@ -514,4 +522,43 @@ Deno.test("push: the claim names the PUSH channel, and is taken before any skip"
   assertEquals(asked[0]?.[1], "push");
   assertEquals(outcome.kind, "skipped");
   assertEquals(h.recorded.length, 0, "recorded a terminal outcome without holding the claim");
+});
+
+Deno.test("push: a pre-send throw releases the push claim", async () => {
+  // The sibling Codex named on PR #86, and the reason to look at it every time
+  // rather than only at the site the reviewer points to: `getSubscriptions`
+  // throws AFTER the claim, so the row keeps it and the drain's re-read hides
+  // it for the lease — the email arm's defect, one function over.
+  const h = harness([], () => ({ status: 201 }));
+  h.deps.getSubscriptions = () => Promise.reject(new Error("statement timeout"));
+
+  const err = await assertRejects(
+    () => deliverPush(ROW, h.deps),
+    "a failed subscription lookup must still throw",
+  );
+  assert(/statement timeout/.test(err.message), `unexpected error: ${err.message}`);
+
+  assertEquals(h.recorded.length, 0, "a throw must not settle the row");
+  assertEquals(h.released, [[ROW.id, "push"]], "the claim outlived the sender");
+});
+
+Deno.test("push: a recorded outcome does NOT double-release", async () => {
+  const h = harness([sub("a")], () => ({ status: 201 }));
+
+  const outcome = await deliverPush(ROW, h.deps);
+
+  assertEquals(outcome.kind, "sent");
+  assertEquals(h.released.length, 0, "released a claim the outcome had already cleared");
+});
+
+Deno.test("push: a failing release does not mask the original error", async () => {
+  const h = harness([], () => ({ status: 201 }));
+  h.deps.getSubscriptions = () => Promise.reject(new Error("statement timeout"));
+  h.deps.releaseSend = () => Promise.reject(new Error("db unreachable"));
+
+  const err = await assertRejects(() => deliverPush(ROW, h.deps), "must still throw");
+  assert(
+    !err.message.includes("db unreachable"),
+    "the release's own failure replaced the lookup error",
+  );
 });

@@ -8,7 +8,7 @@
 //
 // This suite exists because the branching added to fix that had no coverage
 // at all, which is the same shape as the original defect.
-import { assert, assertEquals, assertFalse } from "./asserts.ts";
+import { assert, assertEquals, assertFalse, assertRejects } from "./asserts.ts";
 import { HttpError } from "../_lib/http.ts";
 import {
   claimNotificationSend,
@@ -46,6 +46,8 @@ interface Opts {
   rows?: Record<string, NotificationRow | null>;
   /** Model losing the 0051 claim race — another sender got there first. */
   claimSend?: (id: string, channel: "email" | "push") => Promise<boolean>;
+  /** Make `getClient` throw, to reach a pre-send throw that is not a config error. */
+  clientLookupThrows?: boolean;
 }
 
 function makeDeps(opts: Opts = {}) {
@@ -53,12 +55,19 @@ function makeDeps(opts: Opts = {}) {
   const sentTo: string[] = [];
   const sentHeaders: Array<Record<string, string>> = [];
   const suppressionAsked: Array<[string, string, string]> = [];
+  const released: Array<[string, string]> = [];
   const deps: SendDeps = {
     claimSend: opts.claimSend ?? (() => Promise.resolve(true)),
+    releaseSend: (id, channel) => {
+      released.push([id, channel]);
+      return Promise.resolve();
+    },
     getNotification: (id) => Promise.resolve(opts.rows ? (opts.rows[id] ?? null) : ROW),
     backlogIds: () => Promise.resolve(opts.backlog ?? []),
     getClient: () =>
-      Promise.resolve({
+      opts.clientLookupThrows
+        ? Promise.reject(new Error("statement timeout"))
+        : Promise.resolve({
         full_name: "Ada",
         email: opts.email === undefined ? "ada@example.test" : opts.email,
         unsubscribe_token: "11111111-2222-4333-8444-555555555555",
@@ -86,7 +95,7 @@ function makeDeps(opts: Opts = {}) {
     },
     renderEmail: (b, t, _body, url) => `<p>${b}: ${t} <a href="${url}">Unsubscribe</a></p>`,
   };
-  return { deps, recorded, sentTo, sentHeaders, suppressionAsked };
+  return { deps, recorded, sentTo, sentHeaders, suppressionAsked, released };
 }
 
 // ── every path records something ───────────────────────────────────────────
@@ -538,4 +547,103 @@ Deno.test("the real claim THROWS on a database error, never answers false", asyn
   assertEquals((threw as HttpError).status, 500);
   // The cause is carried, not dropped — the H14 contract.
   assert((threw as HttpError).cause != null, "the underlying error was discarded");
+});
+
+// ── a claim is released by EVERY exit, not only by a recorded outcome ──────
+
+Deno.test("a pre-send throw releases the email claim", async () => {
+  // Codex review on PR #86. Releasing inside `recordPatch` covers the three
+  // OUTCOMES; it does not cover a throw between the claim and any of them —
+  // and the loudest one is exactly that. `assertEmailConfigured()` throws when
+  // RESEND_API_KEY is unset, `drainBacklog` catches it and still answers 200,
+  // and the row keeps its claim, so `fn_notification_backlog` hides it for the
+  // whole lease. job-health.yml drains and re-reads seconds later: empty, exit
+  // 0. That is H17's alarm dead again, reached through the throw path instead
+  // of the record path — the same defect this PR exists to fix.
+  const h = makeDeps({ emailUnconfigured: true });
+
+  const err = await assertRejects(
+    () => deliverNotification(ROW, h.deps),
+    "a missing RESEND_API_KEY must still throw",
+  );
+  // NOT a bare assertRejects: it passes for any rejection, which is how a
+  // sabotage that broke something unrelated once read as green here (0048).
+  assert(err instanceof HttpError, `expected HttpError, got ${err.name}`);
+
+  assertEquals(h.recorded.length, 0, "a config error must not settle the row");
+  assertEquals(h.released, [[ROW.id, "email"]], "the claim outlived the sender");
+});
+
+Deno.test("a pre-send throw that is NOT a config error releases the claim too", async () => {
+  // The rule is structural, not a list of the throws I could think of. Fixing
+  // only `assertEmailConfigured` would be the enumeration this repository has
+  // already recorded three rounds of (verify-photo-integrity.sh, and the
+  // pre-fetch classification on the push arm).
+  const h = makeDeps({ clientLookupThrows: true });
+
+  const err = await assertRejects(
+    () => deliverNotification(ROW, h.deps),
+    "a failed client lookup must still throw",
+  );
+  assert(/statement timeout/.test(err.message), `unexpected error: ${err.message}`);
+
+  assertEquals(h.recorded.length, 0);
+  assertEquals(h.released, [[ROW.id, "email"]], "the claim outlived the sender");
+});
+
+Deno.test("a recorded outcome does NOT double-release", async () => {
+  // The release belongs to the throw path; `recordPatch` already clears the
+  // column on every kind. A second write would be harmless but would mean two
+  // rules for one property, which is how they drift.
+  const h = makeDeps();
+
+  const outcome = await deliverNotification(ROW, h.deps);
+
+  assertEquals(outcome.kind, "sent");
+  assertEquals(h.released.length, 0, "released a claim the outcome had already cleared");
+});
+
+Deno.test("a failing release does not mask the original error", async () => {
+  // Best-effort, and the lease is the backstop. Swallowing the real failure to
+  // report a bookkeeping one is the `fix(edge-errors)` defect: the operator
+  // would be told the wrong thing about why nothing was sent.
+  const h = makeDeps({ emailUnconfigured: true });
+  h.deps.releaseSend = () => Promise.reject(new Error("db unreachable"));
+
+  const err = await assertRejects(
+    () => deliverNotification(ROW, h.deps),
+    "the configuration error must still surface",
+  );
+  assert(err instanceof HttpError, `expected the config HttpError, got ${err.name}`);
+  assert(
+    !err.message.includes("db unreachable"),
+    "the release's own failure replaced the configuration error",
+  );
+});
+
+Deno.test("a throw AFTER a successful send also releases — and that is the honest choice", async () => {
+  // The rule is "every exit gives the claim back", which includes an exit
+  // after the email has already left: `deps.record` throwing is the case.
+  //
+  // That looks like it risks a duplicate, so it is worth being explicit that
+  // it does NOT change the risk, only its timing. `record` throwing means
+  // nothing was written, so the row is still `pending` with its old attempt
+  // count and the drain returns it either way — retained, in five minutes;
+  // released, on the next drain. The lease was never protection against this.
+  //
+  // What the claim buys is exclusion between CONCURRENT senders. It does not
+  // make delivery exactly-once across a crash between Resend accepting the
+  // message and us recording it, and nothing short of a transaction spanning
+  // Resend could. Spec 04 says so rather than implying otherwise.
+  const h = makeDeps();
+  h.deps.record = () => Promise.reject(new Error("db unreachable"));
+
+  const err = await assertRejects(
+    () => deliverNotification(ROW, h.deps),
+    "a failed outcome write must still throw",
+  );
+  assert(/db unreachable/.test(err.message), `unexpected error: ${err.message}`);
+
+  assertEquals(h.sentTo.length, 1, "the email did leave");
+  assertEquals(h.released, [[ROW.id, "email"]]);
 });
