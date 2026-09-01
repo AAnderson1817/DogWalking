@@ -58,6 +58,12 @@ RENAME_VALUE = re.compile(r"^rename\s+value\s+'([^']+)'\s+to\s+'([^']+)'$", re.I
 # matched nothing and the dropped enum stayed in the catalogue while CI
 # reported agreement — a parser that sees nothing reports agreement.
 DROP_ANY = re.compile(r"drop\s+type\b[^;]*;", re.I | re.S)
+# The same loose-versus-strict pairing for the other two statement kinds
+# (Codex round three): `create type public."delivery_status" as enum (…)` is
+# valid SQL the strict regex does not read, and with fifteen enums already
+# in `order` the parser-saw-nothing guard cannot notice one skipped type.
+CREATE_ANY = re.compile(r"create\s+type\b[^;]*?\bas\s+enum\b[^;]*;", re.I | re.S)
+ALTER_ANY = re.compile(r"alter\s+type\b[^;]*;", re.I | re.S)
 DROP = re.compile(
     r"drop\s+type\s+(?:if\s+exists\s+)?((?:(?:public\.)?[a-z0-9_]+\s*,\s*)*(?:public\.)?[a-z0-9_]+)"
     r"\s*(?:cascade|restrict)?\s*;",
@@ -67,10 +73,56 @@ LABEL = re.compile(r"'([^']*)'")
 
 
 def strip_sql_comments(sql: str) -> str:
-    """`--` to end of line, and /* */ blocks. A commented-out `add value` is
-    not a value (0051 discusses one in prose)."""
-    sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.S)
-    return re.sub(r"--[^\n]*", "", sql)
+    """`--` to end of line, and /* */ blocks — OUTSIDE string literals and
+    quoted identifiers. A commented-out `add value` is not a value (0051
+    discusses one in prose), but `add value 'client--reminder'` is a value
+    whose label happens to contain the comment marker: a regex stripper cut
+    it at the marker, the statement no longer matched, and the catalogue
+    stayed silently short (Codex on PR #88, round three). Comments inside a
+    dollar-quoted function body are still comments and are stripped too, so
+    prose there cannot be read as DDL."""
+    out: list[str] = []
+    i, n = 0, len(sql)
+    state = "code"
+    while i < n:
+        c = sql[i]
+        nxt = sql[i + 1] if i + 1 < n else ""
+        if state == "code":
+            if c == "-" and nxt == "-":
+                state = "line"
+                i += 2
+                continue
+            if c == "/" and nxt == "*":
+                state = "block"
+                i += 2
+                continue
+            if c == "'":
+                state = "sq"
+            elif c == '"':
+                state = "dq"
+            out.append(c)
+        elif state == "sq":
+            out.append(c)
+            if c == "'":
+                if nxt == "'":  # escaped quote inside the literal
+                    out.append(nxt)
+                    i += 1
+                else:
+                    state = "code"
+        elif state == "dq":
+            out.append(c)
+            if c == '"':
+                state = "code"
+        elif state == "line":
+            if c == "\n":
+                out.append(c)
+                state = "code"
+        elif state == "block":
+            if c == "*" and nxt == "/":
+                state = "code"
+                i += 1
+        i += 1
+    return "".join(out)
 
 
 def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
@@ -88,20 +140,27 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
     for path in sorted(MIGRATIONS.glob("*.sql")):
         version = path.name.split("_", 1)[0]
         sql = strip_sql_comments(path.read_text())
+        creates = list(CREATE.finditer(sql))
+        alters = list(ALTER.finditer(sql))
         drops = list(DROP.finditer(sql))
-        strict_starts = {m.start() for m in drops}
-        for loose in DROP_ANY.finditer(sql):
-            if loose.start() not in strict_starts:
-                print(
-                    f"FAIL: {path.name}: `{' '.join(loose.group(0).split())}` is a `drop type` "
-                    "this generator cannot read; teach gen-enum-catalog.py the shape rather "
-                    "than letting the catalogue keep a type the migrations dropped",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+        for kind, loose_re, strict in (
+            ("create type … as enum", CREATE_ANY, creates),
+            ("alter type", ALTER_ANY, alters),
+            ("drop type", DROP_ANY, drops),
+        ):
+            strict_starts = {m.start() for m in strict}
+            for loose in loose_re.finditer(sql):
+                if loose.start() not in strict_starts:
+                    print(
+                        f"FAIL: {path.name}: `{' '.join(loose.group(0).split())}` is a `{kind}` "
+                        "this generator cannot read; teach gen-enum-catalog.py the shape rather "
+                        "than letting the catalogue silently disagree with the migrations",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
         stream = sorted(
-            [(m.start(), "create", m) for m in CREATE.finditer(sql)]
-            + [(m.start(), "alter", m) for m in ALTER.finditer(sql)]
+            [(m.start(), "create", m) for m in creates]
+            + [(m.start(), "alter", m) for m in alters]
             + [(m.start(), "drop", m) for m in drops],
             key=lambda item: item[0],
         )
