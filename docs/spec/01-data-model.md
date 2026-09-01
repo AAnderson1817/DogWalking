@@ -181,12 +181,17 @@ into lost notifications. The **configured** key gets the same treatment: a
 setting truncated in a dashboard is still valid base64url, so it decodes
 without throwing and then differs from every real subscription, which would
 condemn working devices over a typo while the edge function still holds the
-good key. An application-server key is an uncompressed P-256 point — 65 bytes
-beginning `0x04` — and anything else is treated as no evidence rather than as
-evidence of a mismatch. That is a shape check and not a curve check on purpose:
-a 65-byte non-point still reaches `subscribe()`, which refuses it loudly, and
-this rule exists only to stop a malformed setting DESTROYING a working
-subscription. No trustworthy evidence of a mismatch is not evidence of one.
+good key. An application-server key is an uncompressed P-256 point, and the check is on
+the POINT, not merely its shape: `crypto.subtle.importKey("raw", …, P-256)`
+rejects a 65-byte `0x04`-prefixed value whose coordinates are off the curve
+(measured — `DataError`). A shape check alone was not enough, and the reason is
+worth recording because the first argument for it was wrong: "a non-point still
+reaches `subscribe()`, which refuses it loudly" is about DETECTION, and misses
+that `enablePush()` unsubscribes the working device BEFORE `subscribe()` is
+called. The destructive step happens first, so the evidence has to be
+trustworthy before it is acted on. An unimportable key — off-curve, or no
+`crypto.subtle` in this context at all — is no evidence of a mismatch, never
+evidence of one.
 
 A session can also end WITHOUT the sign-out path — a failed refresh token,
 cleared auth storage, a tab killed mid-session — leaving the browser

@@ -113,10 +113,27 @@ export function subscriptionKeys(
  * limitation into a loss of notifications. An unreadable key is "no evidence
  * of a mismatch", never "evidence of one".
  */
-export function subscriptionUsesKey(
+async function isP256PublicKey(bytes: Uint8Array): Promise<boolean> {
+  try {
+    await crypto.subtle.importKey(
+      "raw",
+      bytes as BufferSource,
+      { name: "ECDSA", namedCurve: "P-256" },
+      true,
+      ["verify"],
+    );
+    return true;
+  } catch {
+    // Off the curve, or no `crypto.subtle` here at all. Either way we cannot
+    // trust this value as evidence, which is the fail-open direction.
+    return false;
+  }
+}
+
+export async function subscriptionUsesKey(
   sub: Pick<PushSubscription, "options">,
   vapidKey: string,
-): boolean {
+): Promise<boolean> {
   const bound = sub.options?.applicationServerKey;
   if (!bound || !vapidKey) return true;
   let expected: Uint8Array;
@@ -139,6 +156,15 @@ export function subscriptionUsesKey(
   // working subscription. Same fail-open reasoning as an unreadable bound
   // key: no trustworthy evidence of a mismatch is not evidence of one.
   if (expected.length !== 65 || expected[0] !== 0x04) return true;
+  // ...and the POINT, not only its shape. A 65-byte `0x04`-prefixed value that
+  // is off the curve reaches this comparison, is treated as evidence, and the
+  // mismatch then drives `enablePush` to unsubscribe a WORKING device before
+  // `subscribe()` refuses the bad key (Codex review on PR #85, round 28). My
+  // earlier reasoning — "subscribe() refuses it loudly" — was about detection
+  // and missed that the destructive step happens FIRST. importKey validates
+  // the point, and its failure means no trustworthy evidence, never a
+  // mismatch.
+  if (!(await isP256PublicKey(expected))) return true;
   const actual = new Uint8Array(bound as ArrayBuffer);
   if (actual.length !== expected.length) return false;
   for (let i = 0; i < actual.length; i++) {
@@ -243,7 +269,7 @@ export async function readPushEnvironment(): Promise<PushEnvironment> {
     // A subscription bound to a retired key is not a working subscription:
     // reporting it as `on` offers only the OFF action and never prompts a
     // re-opt-in, while every send is refused by the push service.
-    subscribed: existing !== null && subscriptionUsesKey(existing, env.vapidPublicKey),
+    subscribed: existing !== null && (await subscriptionUsesKey(existing, env.vapidPublicKey)),
     workerHandlesPush: supported ? await activeWorkerHandlesPush() : false,
   };
 }
@@ -267,7 +293,7 @@ export async function enablePush(): Promise<PushState> {
   // throw. Dropping it locally is enough -- the server row self-heals on the
   // 404/410 the send path already handles.
   const stale = await reg.pushManager.getSubscription();
-  if (stale && !subscriptionUsesKey(stale, env.vapidPublicKey)) {
+  if (stale && !(await subscriptionUsesKey(stale, env.vapidPublicKey))) {
     try {
       await stale.unsubscribe();
     } catch {
@@ -426,7 +452,7 @@ export async function reclaimPushDevice(
     // Re-registering a subscription bound to a retired key would keep a row
     // alive that no send can ever reach. Leave it; the screen reports `off`
     // and enabling replaces it.
-    if (!subscriptionUsesKey(sub, env.vapidPublicKey)) return;
+    if (!(await subscriptionUsesKey(sub, env.vapidPublicKey))) return;
     const keys = subscriptionKeys(sub);
     if (!keys) return;
     // Symmetric with the cleanup above: a sign-OUT arriving while this was
