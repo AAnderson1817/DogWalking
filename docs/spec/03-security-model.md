@@ -512,6 +512,19 @@ Its blind spots, stated rather than left to be discovered:
   privilege-and-existence gate; extending it into signature validation would
   make it two gates in one script and a heuristic nobody can reason about.
 
+The key check asks whether each supplied key is an IN parameter of *some*
+overload, which is exact only while our functions are not overloaded: given
+`fn_x(p_a)` and `fn_x(p_b)`, a call passing both keys would satisfy each from a
+different row while PostgREST could resolve neither. Measured rather than
+assumed — **no `fn_` function in this schema is overloaded**, and no RPC is
+called from more than one site, so neither half of that is reachable today.
+Closing it properly needs per-call key sets and overload grouping, which is
+machinery for a state that cannot occur, so the **precondition is pinned
+instead**: `db-push-check.sh` fails the day an `fn_` name gains a second
+signature, and whoever adds it decides what the check should become. pgcrypto's
+`digest`/`hmac`/`pgp_*` are overloaded and deliberately out of scope, since no
+handler `.rpc()`s them.
+
 ## Definer function catalog + grant pattern
 Every definer fn: `SECURITY DEFINER SET search_path = public`, then
 ```
