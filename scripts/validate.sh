@@ -95,6 +95,16 @@ elif [ -n "${LOCAL_DB_URL:-}" ] && have psql; then
   for f in supabase/tests/*.sql; do
     run "8. $(basename "$f")" psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f "$f"
   done
+  # 8b is the only suite that COMMITS, running two real backends, so it is the
+  # only one that can exercise a lock AS a lock (review H20). It was CI-only
+  # until now, which is why a change to `fn_claim_notification_send`'s return
+  # type passed 18/18 here and went red there: `validate.sh` is documented as
+  # "the same gates in the same order", and a gate missing from it is a green
+  # local run that CI refuses. Second instance — `db-push-check.sh` was the
+  # first, added as 7b one PR ago. It namespaces and tears down its own
+  # fixtures, and refuses to start on leftovers.
+  run "8b. concurrency suite" supabase/tests/concurrency.sh
+
   # 8c needs BOTH a database and deno, which is why it is its own script: the
   # push-service allowlist exists in a migration AND in an edge library, and
   # no single test runner here can ask both of them the same question. They

@@ -1013,6 +1013,17 @@ echo "== case 10: exactly one sender may claim a notification channel =="
 #   against the winner's committed row: ONE winner, nine refused.
 #
 # Measured 5/5 in both directions after this change, against 3/12 before.
+#
+# `is not null` rather than the bare call: the RPC returns the claim's FENCING
+# TOKEN (a uuid) rather than a boolean since Codex's second round on PR #86,
+# and this case's detectors count `t`/`f` lines. Asking the question the case
+# actually cares about — did this sender get the channel — keeps them honest.
+# The token's DISTINCTNESS is smoke's assertion, not this one's.
+#
+# Worth recording how that broke: changing the return type silently invalidated
+# this fixture, the counts fell to zero, and `validate.sh` did not catch it
+# because it does not run this file — concurrency.sh is a CI-only gate. Same
+# shape as the push-endpoint allowlist invalidating case 7's fixtures.
 psql "$DB" -v ON_ERROR_STOP=1 -q -c "
   delete from notifications where operator_id = '${NS}-000000000001';
   insert into notifications (id, operator_id, type, title)
@@ -1036,7 +1047,7 @@ expect_eq "PRECONDITION: the holder session has the row locked" \
 CLAIM_PIDS=""
 for i in $(seq 1 10); do
   psql "$DB" -q -t -A -v ON_ERROR_STOP=1 -c \
-    "select fn_claim_notification_send('${NS}-000000001000', 'email');" \
+    "select fn_claim_notification_send('${NS}-000000001000', 'email') is not null;" \
     >"$WORK/claim$i.out" 2>&1 &
   CLAIM_PIDS="$CLAIM_PIDS $!"
 done
