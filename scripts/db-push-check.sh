@@ -232,14 +232,43 @@ SQL
 # to any other, which is why the sender-side rule stays a code review concern
 # too. Names are matched against pg_class/pg_proc, so a grep that captures
 # something that is not an object simply matches nothing rather than failing.
-SENDER_TABLES=$(grep -rhoE '\.from\("[a-z_]+"\)' supabase/functions/ \
-  | sed -E 's/\.from\("(.*)"\)/\1/' | sort -u | paste -sd, || true)
+SENDER_TABLES=$(python3 - <<'DERIVE' || true
+import re, pathlib
+# supabase-js method -> the SQL privilege it needs. Object visibility is NOT
+# the property under test (Codex review on PR #85): the first version of this
+# check asked only for SELECT, so narrowing push_subscriptions to `select`
+# alone would have passed it while dropSubscription()'s DELETE failed on any
+# deployment without the platform default ACL — a gate verifying less than it
+# claims, which is the defect it exists to catch.
+OPS = [(".select(", ["SELECT"]), (".upsert(", ["INSERT", "UPDATE"]),
+       (".insert(", ["INSERT"]), (".update(", ["UPDATE"]), (".delete(", ["DELETE"])]
+need, unparsed = {}, []
+for f in sorted(pathlib.Path("supabase/functions").rglob("*.ts")):
+    src = f.read_text()
+    hits = [(m.start(), m.end(), m.group(1)) for m in re.finditer(r'\.from\("([a-z_]+)"\)', src)]
+    for i, (s, e, tbl) in enumerate(hits):
+        # bounded by the NEXT .from(, so an operation is never attributed to
+        # the wrong table
+        window = src[e: hits[i + 1][0] if i + 1 < len(hits) else len(src)]
+        first = min(((window.find(t), pr) for t, pr in OPS if window.find(t) != -1), default=None)
+        if first is None:
+            # loud, never skipped: a .from() whose operation cannot be read is
+            # the one case where quietly checking less looks like checking more
+            unparsed.append('%s:%d .from("%s")' % (f, src[:s].count(chr(10)) + 1, tbl))
+            continue
+        need.setdefault(tbl, set()).update(first[1])
+if unparsed:
+    raise SystemExit("UNPARSED " + "; ".join(unparsed))
+print(";".join("%s=%s" % (t, ",".join(sorted(p))) for t, p in sorted(need.items())))
+DERIVE
+)
 SENDER_FNS=$(grep -rhoE '\.rpc\("[a-z_]+"' supabase/functions/ \
   | sed -E 's/\.rpc\("(.*)"/\1/' | sort -u | paste -sd, || true)
 
 if [ -z "$SENDER_TABLES" ] || [ -z "$SENDER_FNS" ]; then
-  echo "FAIL: derived no sender objects from supabase/functions — the grep stopped matching," >&2
-  echo "      so this check would pass by looking at nothing." >&2
+  echo "FAIL: derived no sender objects from supabase/functions, so this check would" >&2
+  echo "      pass by looking at nothing. Either the extraction stopped matching, or a" >&2
+  echo "      .from()/.rpc() could not be read — an UNPARSED line above names which." >&2
   exit 1
 fi
 
@@ -254,11 +283,14 @@ begin
          count(*) filter (where x.kind = 'f')
     into v_missing, v_tables, v_fns
   from (
-    select 't' as kind, 'table    ' || c.relname as what
-      from pg_class c join pg_namespace n on n.oid = c.relnamespace
-     where n.nspname = 'public' and c.relkind = 'r'
-       and c.relname = any(string_to_array('${SENDER_TABLES}', ','))
-       and not has_table_privilege('service_role', c.oid, 'select')
+    select 't' as kind, 'table    ' || r.tbl || ' needs ' || r.priv as what
+      from (
+        select split_part(p, '=', 1) as tbl,
+               unnest(string_to_array(split_part(p, '=', 2), ',')) as priv
+          from unnest(string_to_array('${SENDER_TABLES}', ';')) p
+      ) r
+     where to_regclass('public.' || r.tbl) is not null
+       and not has_table_privilege('service_role', ('public.' || r.tbl)::regclass, r.priv)
     union all
     select 'f', 'function ' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
       from pg_proc p join pg_namespace n on n.oid = p.pronamespace

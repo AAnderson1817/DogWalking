@@ -286,16 +286,28 @@ declare
   v_operator uuid;
   v_id uuid;
 begin
-  if p_endpoint is null or length(p_endpoint) < 8 or p_endpoint !~ '^https://' then
-    raise exception 'fn_register_push_subscription: endpoint must be an https url';
+  -- The scheme is NOT checked separately here. It used to be, with a
+  -- case-sensitive `p_endpoint !~ '^https://'` running BEFORE the predicate --
+  -- which meant `HTTPS://fcm.googleapis.com/...` was refused at registration
+  -- while fn_is_push_service_endpoint (which lowercases first) and the edge
+  -- library both accepted it. check-push-endpoint-parity.sh compares those two
+  -- and so reported agreement while the RPC that actually guards registration
+  -- disagreed with both: a gate testing something other than the effective
+  -- gatekeeper. One rule in one place is what keeps the parity check honest,
+  -- so the predicate decides the scheme, the userinfo, the port and the host.
+  -- Null is still guarded here: the predicate returns NULL for a NULL input,
+  -- and `if not null` is not true, so it would fall through.
+  if p_endpoint is null then
+    raise exception 'fn_register_push_subscription: endpoint is required';
   end if;
   -- The host, not just the scheme (Codex review on PR #85). See
   -- fn_is_push_service_endpoint: an arbitrary https endpoint here is an SSRF
   -- primitive at send time. Named in the message because the caller supplied
-  -- it and is the one who can act on it.
+  -- it and is the one who can act on it -- matched case-insensitively, for the
+  -- same reason the check above is gone.
   if not fn_is_push_service_endpoint(p_endpoint) then
     raise exception 'fn_register_push_subscription: % is not a push service this system sends to',
-      coalesce(substring(p_endpoint from '^https://([^/?#]+)'), 'that endpoint');
+      coalesce(substring(lower(p_endpoint) from '^https://([^/?#]+)'), 'that endpoint');
   end if;
   -- Shape-checked here rather than trusted, because a truncated key produces a
   -- payload the push service ACCEPTS and the browser silently never opens —
