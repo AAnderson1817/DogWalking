@@ -293,14 +293,20 @@ def chain_ops(src, i):
 need, unparsed = {}, []
 for f in sorted(pathlib.Path("supabase/functions").rglob("*.ts")):
     src = f.read_text()
-    for m in re.finditer(r'\.from\("([a-z_]+)"\)', src):
+    # BOTH quote styles: nothing in this repo enforces one (no prettier, no
+    # editorconfig, no oxlint quote rule), so `.from('x')` lints and
+    # typechecks clean while a double-quote-only regex derives nothing from it
+    # -- and the emptiness guard cannot see the omission, because the other
+    # call sites keep the aggregate non-empty (Codex review on PR #85, round
+    # 25). The backreference is what stops `.from("x')` matching.
+    for m in re.finditer(r'\.from\((["\'])([a-z_]+)\1\)', src):
         ops = chain_ops(src, m.end())
         if not ops:
             # loud, never skipped: a .from() whose chain cannot be read is the
             # one case where quietly checking less looks like checking more
-            unparsed.append('%s:%d .from("%s")' % (f, src[:m.start()].count("\n") + 1, m.group(1)))
+            unparsed.append('%s:%d .from("%s")' % (f, src[:m.start()].count("\n") + 1, m.group(2)))
             continue
-        need.setdefault(m.group(1), set()).update(ops)
+        need.setdefault(m.group(2), set()).update(ops)
 if unparsed:
     raise SystemExit("UNPARSED " + "; ".join(unparsed))
 print(";".join("%s=%s" % (t, ",".join(sorted(p))) for t, p in sorted(need.items())))
@@ -317,9 +323,9 @@ import re, pathlib
 out = {}
 for f in sorted(pathlib.Path("supabase/functions").rglob("*.ts")):
     src = f.read_text()
-    for m in re.finditer(r'\.rpc\(\s*"([a-z_]+)"\s*(,)?', src):
+    for m in re.finditer(r'\.rpc\(\s*(["\'])([a-z_]+)\1\s*(,)?', src):
         keys = set()
-        if m.group(2):
+        if m.group(3):
             i = src.find("{", m.end())
             # only a literal object directly after the comma is readable; a
             # variable or spread is left to review rather than guessed at
@@ -332,7 +338,7 @@ for f in sorted(pathlib.Path("supabase/functions").rglob("*.ts")):
                         if depth == 0: break
                     j += 1
                 keys = set(re.findall(r'(?:^|[{,\s])([a-z_][a-z0-9_]*)\s*:', src[i:j]))
-        out.setdefault(m.group(1), set()).update(keys)
+        out.setdefault(m.group(2), set()).update(keys)
 print(";".join("%s=%s" % (n, ",".join(sorted(k))) for n, k in sorted(out.items())))
 RPCS
 )
