@@ -72,7 +72,7 @@ export function makePushDeps(
     // two copies of one rule is the drift this repository has already paid
     // for, and one of them was untestable where it sat.
     claimSend: (id, channel) => claimNotificationSend(db, id, channel),
-    releaseSend: (id, channel) => releaseNotificationSend(db, id, channel),
+    releaseSend: (id, channel, stamp) => releaseNotificationSend(db, id, channel, stamp),
     async getSubscriptions(operatorId, clientId) {
       // Explicit columns, never `*`: 0049 makes this a column-restricted table
       // (the encryption secrets are withheld from `authenticated`), and
@@ -267,11 +267,13 @@ export function makePushDeps(
       }
     },
 
-    async recordPush(id, outcome, previousAttempts) {
+    async recordPush(id, outcome, previousAttempts, stamp) {
+      // FENCED on the claim stamp — see the email arm's `record` (0051).
       const { error } = await db
         .from("notifications")
         .update(pushRecordPatch(outcome, previousAttempts))
-        .eq("id", id);
+        .eq("id", id)
+        .eq("push_claim_token", stamp);
       if (error) {
         throw new HttpError(500, "db_error", "could not record push delivery", error, {
           notification_id: id,

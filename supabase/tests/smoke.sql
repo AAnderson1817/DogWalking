@@ -5726,37 +5726,39 @@ end $$;
 -- ── the notification send claim (0051) ───────────────────────────────────
 do $$
 declare
-  v_op  uuid;
-  v_id  uuid;
-  v_n   int;
+  v_op    uuid;
+  v_id    uuid;
+  v_n     int;
+  v_tok_a uuid;
+  v_tok_b uuid;
 begin
   select id into v_op from operators limit 1;
   insert into notifications (operator_id, type, title)
     values (v_op, 'walk_complete', 'claim smoke') returning id into v_id;
 
-  if not fn_claim_notification_send(v_id, 'email') then
+  if fn_claim_notification_send(v_id, 'email') is null then
     raise exception 'FAIL: the first claim on an unclaimed channel was refused (0051)';
   end if;
-  if fn_claim_notification_send(v_id, 'email') then
+  if fn_claim_notification_send(v_id, 'email') is not null then
     raise exception 'FAIL: a second sender took a channel that is already claimed (0051)';
   end if;
 
   -- The lease is what keeps a crash from stranding the row forever. Without
   -- it the claim above is permanent and the notification is never sent.
   update notifications set email_claimed_at = now() - interval '10 minutes' where id = v_id;
-  if not fn_claim_notification_send(v_id, 'email') then
+  if fn_claim_notification_send(v_id, 'email') is null then
     raise exception 'FAIL: an expired claim was not taken over (0051)';
   end if;
 
   -- A settled channel is never revived, whatever the claim state.
   update notifications set email_status = 'sent', email_claimed_at = null where id = v_id;
-  if fn_claim_notification_send(v_id, 'email') then
+  if fn_claim_notification_send(v_id, 'email') is not null then
     raise exception 'FAIL: a settled channel was claimed for sending again (0051)';
   end if;
 
   -- The two channels are independent: email being finished says nothing about
   -- whether push is still owed.
-  if not fn_claim_notification_send(v_id, 'push') then
+  if fn_claim_notification_send(v_id, 'push') is null then
     raise exception 'FAIL: push could not be claimed while email was settled (0051)';
   end if;
 
@@ -5847,6 +5849,44 @@ begin
   revoke execute on function fn_claim_notification_send(uuid, text, interval) from authenticated;
   revoke execute on function fn_notification_claim_lease() from authenticated;
 
+  -- FENCING. A lease recovers a crashed sender by assuming a slow one has
+  -- died, and cannot tell them apart — so a sender still running when its
+  -- lease lapses is replaced and BOTH are live (Codex, PR #86). Every write
+  -- carries the claim's token, so the fenced-out sender updates zero rows
+  -- instead of clearing its replacement's claim and recording over it.
+  update notifications
+     set email_status = 'pending', email_attempts = 0,
+         email_claimed_at = null, email_claim_token = null,
+         push_status = 'sent', push_claimed_at = null
+   where id = v_id;
+
+  v_tok_a := fn_claim_notification_send(v_id, 'email');
+  if v_tok_a is null then
+    raise exception 'FAIL: sender A could not claim an unclaimed channel (0051)';
+  end if;
+  -- A's lease lapses while A is still running; B takes the channel.
+  update notifications set email_claimed_at = now() - interval '10 minutes' where id = v_id;
+  v_tok_b := fn_claim_notification_send(v_id, 'email');
+  if v_tok_b is null or v_tok_b = v_tok_a then
+    raise exception 'FAIL: the replacement did not get a distinct claim token (0051)';
+  end if;
+
+  -- A finishes and writes. Fenced.
+  update notifications set email_status = 'sent'
+   where id = v_id and email_claim_token = v_tok_a;
+  get diagnostics v_n = row_count;
+  if v_n <> 0 then
+    raise exception 'FAIL: a sender whose lease lapsed still wrote the outcome (0051)';
+  end if;
+
+  -- B, the actual holder, writes.
+  update notifications set email_status = 'sent'
+   where id = v_id and email_claim_token = v_tok_b;
+  get diagnostics v_n = row_count;
+  if v_n <> 1 then
+    raise exception 'FAIL: the current claim holder could not write its outcome (0051)';
+  end if;
+
   -- ONE lease, consumed by both. Drift here is silent in both directions, so
   -- the assertion is BEHAVIOURAL: move the single definition and watch both
   -- consumers move with it. A structural check (does the text mention the
@@ -5861,7 +5901,7 @@ begin
    where id = v_id;
   -- 30 minutes is expired under the 5-minute lease and live under the 1-hour
   -- one, so a consumer still carrying its own copy answers the other way.
-  if fn_claim_notification_send(v_id, 'email') then
+  if fn_claim_notification_send(v_id, 'email') is not null then
     raise exception 'FAIL: the claim kept its own lease when the shared one moved (0051)';
   end if;
   select count(*) into v_n from fn_notification_backlog() b where b.id = v_id;

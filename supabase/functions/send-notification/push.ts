@@ -47,10 +47,10 @@ export interface PushDeps {
    * Claim the push channel for sending, atomically. See `SendDeps.claimSend`
    * and 0051 — `isSettled` is a read-then-act and cannot exclude on its own.
    */
-  claimSend(id: string, channel: "email" | "push"): Promise<boolean>;
+  claimSend(id: string, channel: "email" | "push"): Promise<string | null>;
   /** See `SendDeps.releaseSend`. `getSubscriptions` throwing is this arm's
    *  pre-send leak — the same shape, one function over. */
-  releaseSend(id: string, channel: "email" | "push"): Promise<void>;
+  releaseSend(id: string, channel: "email" | "push", stamp: string): Promise<void>;
   /** This notification's recipient's devices. `client` null ⇒ the operator's. */
   getSubscriptions(operatorId: string, clientId: string | null): Promise<PushSubscription[]>;
   /**
@@ -99,7 +99,7 @@ export interface PushDeps {
   dropSubscription(id: string): Promise<boolean>;
   /** Per-device health, so a flapping endpoint is visible before it is dropped. */
   noteFailure(id: string, error: string): Promise<void>;
-  recordPush(id: string, outcome: Outcome, previousAttempts: number): Promise<void>;
+  recordPush(id: string, outcome: Outcome, previousAttempts: number, stamp: string): Promise<void>;
 }
 
 export interface PushableRow {
@@ -239,17 +239,18 @@ export async function deliverPush(row: PushableRow, deps: PushDeps): Promise<Out
   // of one row collapse into a single lock-screen entry — but "less damaging"
   // is not "harmless": the fanout POSTs every device again, and a row whose
   // outcome is being written by another sender is not this one's to write.
-  if (!(await deps.claimSend(row.id, "push"))) {
+  const stamp = await deps.claimSend(row.id, "push");
+  if (stamp === null) {
     return { kind: "skipped", reason: "another sender holds the push claim" };
   }
 
   // Every exit gives the claim back — see the email arm, which carries the
   // argument. `getSubscriptions` throwing is this arm's pre-send leak.
   try {
-    return await pushClaimed(row, deps);
+    return await pushClaimed(row, deps, stamp);
   } catch (e) {
     try {
-      await deps.releaseSend(row.id, "push");
+      await deps.releaseSend(row.id, "push", stamp);
     } catch {
       // best-effort; the lease is the backstop and the release logs its own
     }
@@ -257,11 +258,15 @@ export async function deliverPush(row: PushableRow, deps: PushDeps): Promise<Out
   }
 }
 
-async function pushClaimed(row: PushableRow, deps: PushDeps): Promise<Outcome> {
+async function pushClaimed(
+  row: PushableRow,
+  deps: PushDeps,
+  stamp: string,
+): Promise<Outcome> {
   const subs = await deps.getSubscriptions(row.operator_id, row.client_id);
   if (subs.length === 0) {
     const outcome: Outcome = { kind: "skipped", reason: "no registered devices" };
-    await deps.recordPush(row.id, outcome, row.push_attempts);
+    await deps.recordPush(row.id, outcome, row.push_attempts, stamp);
     return outcome;
   }
 
@@ -347,7 +352,7 @@ async function pushClaimed(row: PushableRow, deps: PushDeps): Promise<Outcome> {
   } else {
     outcome = { kind: "failed", error: lastError, permanent: !anyTransient };
   }
-  await deps.recordPush(row.id, outcome, row.push_attempts);
+  await deps.recordPush(row.id, outcome, row.push_attempts, stamp);
   return outcome;
 }
 
@@ -369,17 +374,19 @@ export function pushRecordPatch(
         push_attempts: previousAttempts + 1,
         push_last_error: null,
         push_claimed_at: null,
+        push_claim_token: null,
       };
     case "skipped":
       // A skip is a decision, not a try. Counting it would march terminal rows
       // toward the give-up ceiling for nothing (0029's rule).
-      return { push_status: "skipped", push_last_error: outcome.reason, push_claimed_at: null };
+      return { push_status: "skipped", push_last_error: outcome.reason, push_claimed_at: null, push_claim_token: null };
     case "failed":
       return {
         push_status: "failed",
         push_attempts: previousAttempts + 1,
         push_last_error: outcome.error.slice(0, 500),
         push_claimed_at: null,
+        push_claim_token: null,
       };
   }
 }
