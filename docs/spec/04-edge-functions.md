@@ -502,6 +502,33 @@ A released claim also keeps the one immediate retry path that exists — an
 operator POSTing `notification_id` after noticing a blip — from being refused,
 with a reason blaming a sender that had already exited.
 
+**Every exit gives the claim back, including the ones that throw.** Releasing
+inside `recordPatch` covers the three outcomes, which is every way the two
+`deliver*` functions RETURN — and none of the ways they THROW. The loudest of
+those is `assertEmailConfigured()`, H17's deliberate 500 for a missing
+`RESEND_API_KEY`: `drainBacklog` catches it and still answers 200, so the row
+kept its claim and the ops re-read came back empty. The same defect, reached
+through the throw path instead of the record path. `deliverPush` has the
+identical shape when `getSubscriptions` throws.
+
+So each arm claims and then wraps its whole remaining body: a throw releases
+the claim and rethrows. Structural rather than a list of the pre-send steps
+anyone could think of — enumerating them is how the next one is missed, which
+`verify-photo-integrity.sh` and the push arm's own pre-fetch classification
+have each already cost a round. The release is best-effort and its own failure
+is contained, because replacing "RESEND_API_KEY is unset" with "db unreachable"
+tells the operator the wrong thing about why nothing was sent; the lease is
+what makes swallowing it affordable.
+
+**What the claim does not buy.** It excludes CONCURRENT senders. It does not
+make delivery exactly-once across a crash between Resend accepting a message
+and us recording that it did — `deps.record` throwing after a successful send
+leaves the row `pending`, so the drain returns it and the client gets a second
+email. Releasing does not introduce that: the row is retryable either way, and
+the lease only changes whether the duplicate arrives in five minutes or on the
+next drain. Nothing short of a transaction spanning Resend would close it, and
+that is stated here rather than implied away.
+
 A timestamp column rather than a `sending` value on the two delivery enums:
 `alter type … add value` cannot be used in the transaction that adds it and
 `db-push-check.sh` applies one transaction per file, so the enum modelling

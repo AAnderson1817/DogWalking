@@ -48,6 +48,9 @@ export interface PushDeps {
    * and 0051 — `isSettled` is a read-then-act and cannot exclude on its own.
    */
   claimSend(id: string, channel: "email" | "push"): Promise<boolean>;
+  /** See `SendDeps.releaseSend`. `getSubscriptions` throwing is this arm's
+   *  pre-send leak — the same shape, one function over. */
+  releaseSend(id: string, channel: "email" | "push"): Promise<void>;
   /** This notification's recipient's devices. `client` null ⇒ the operator's. */
   getSubscriptions(operatorId: string, clientId: string | null): Promise<PushSubscription[]>;
   /**
@@ -240,6 +243,21 @@ export async function deliverPush(row: PushableRow, deps: PushDeps): Promise<Out
     return { kind: "skipped", reason: "another sender holds the push claim" };
   }
 
+  // Every exit gives the claim back — see the email arm, which carries the
+  // argument. `getSubscriptions` throwing is this arm's pre-send leak.
+  try {
+    return await pushClaimed(row, deps);
+  } catch (e) {
+    try {
+      await deps.releaseSend(row.id, "push");
+    } catch {
+      // best-effort; the lease is the backstop and the release logs its own
+    }
+    throw e;
+  }
+}
+
+async function pushClaimed(row: PushableRow, deps: PushDeps): Promise<Outcome> {
   const subs = await deps.getSubscriptions(row.operator_id, row.client_id);
   if (subs.length === 0) {
     const outcome: Outcome = { kind: "skipped", reason: "no registered devices" };

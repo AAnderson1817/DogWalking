@@ -56,6 +56,18 @@ export interface SendDeps {
    * deliver. See 0051; the exclusion is the conditional UPDATE inside the RPC.
    */
   claimSend(id: string, channel: "email" | "push"): Promise<boolean>;
+  /**
+   * Give a claim back without recording an outcome (0051).
+   *
+   * `recordPatch` clears the column on every outcome kind, which covers every
+   * way this function RETURNS. It does not cover the ways it THROWS, and the
+   * loudest of those is `assertEmailConfigured()` — H17's deliberate 500 for a
+   * missing RESEND_API_KEY. `drainBacklog` catches it and still answers 200,
+   * so a retained claim hides the row from `fn_notification_backlog` for the
+   * whole lease and job-health.yml's drain-then-re-read comes back empty:
+   * H17's only alarm, dead again, through the throw path (Codex, PR #86).
+   */
+  releaseSend(id: string, channel: "email" | "push"): Promise<void>;
   /** Rows the nightly job counted as still owed an email. */
   backlogIds(): Promise<string[]>;
   getClient(id: string): Promise<{
@@ -172,6 +184,40 @@ export async function claimNotificationSend(
 }
 
 /**
+ * Release a claim taken by `claimNotificationSend` (0051).
+ *
+ * Deliberately NOT an RPC: the column carries no grant for any API role, and
+ * the sender already holds UPDATE on `notifications` for the outcome write, so
+ * this needs no new migration and no new definer function.
+ *
+ * The caller treats a failure here as best-effort — the lease is what makes
+ * that affordable — so this returns rather than throwing, and says why it
+ * could not release on a server-side line.
+ */
+export async function releaseNotificationSend(
+  db: {
+    from(table: string): {
+      update(patch: Record<string, unknown>): { eq(col: string, val: string): PromiseLike<{ error: unknown }> };
+    };
+  },
+  id: string,
+  channel: "email" | "push",
+): Promise<void> {
+  const column = channel === "email" ? "email_claimed_at" : "push_claimed_at";
+  const { error } = await db.from("notifications").update({ [column]: null }).eq("id", id);
+  if (error) {
+    console.error(
+      JSON.stringify({
+        level: "error",
+        msg: "could not release the send claim",
+        notification_id: id,
+        channel,
+      }),
+    );
+  }
+}
+
+/**
  * Deliver one notification and record what happened.
  *
  * Returns the outcome rather than throwing, so a drain can carry on through a
@@ -208,6 +254,31 @@ export async function deliverNotification(
     return { kind: "skipped", reason: "another sender holds the email claim" };
   }
 
+  // Once claimed, EVERY exit gives the claim back: a recorded outcome clears
+  // it in `recordPatch`, and anything that throws clears it here. Structural
+  // rather than a list of the throws I could think of — enumerating them is
+  // how the next one is missed, which this repository has now recorded three
+  // times (verify-photo-integrity.sh, and the push arm's pre-fetch
+  // classification). Anything added between here and the send is covered
+  // without its author knowing the rule exists.
+  try {
+    return await sendClaimed(row, deps);
+  } catch (e) {
+    // BEST-EFFORT, and it must not become the error the caller sees: replacing
+    // a missing RESEND_API_KEY with "db unreachable" tells the operator the
+    // wrong thing about why nothing was sent (the `fix(edge-errors)` defect).
+    // The lease is what makes swallowing this affordable — a claim nobody
+    // released is retryable in five minutes rather than never.
+    try {
+      await deps.releaseSend(row.id, "email");
+    } catch {
+      // deliberately ignored; `releaseNotificationSend` logs its own failure
+    }
+    throw e;
+  }
+}
+
+async function sendClaimed(row: NotificationRow, deps: SendDeps): Promise<Outcome> {
   // Terminal, not a failure: an operator-only notification has no client to
   // email, and nothing about that will change. A sweep that treated this as
   // "not yet sent" would retry it every night forever.
