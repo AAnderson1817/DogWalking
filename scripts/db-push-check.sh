@@ -363,7 +363,7 @@ begin
     into v_missing, v_tables, v_fns
   from (
     -- A derived name with no matching object is reported, never filtered out.
-    -- `.from("walkz")` is a handler that fails on every invocation, and
+    -- A misspelled .from() is a handler that fails on every invocation, and
     -- silently dropping it would let this check report that every sender
     -- object is granted -- the fn_book_walk phantom-column class, in the gate.
     select 't' as kind, 'table    ' || r.tbl || ' does not exist' as what
@@ -418,7 +418,7 @@ begin
 
   -- The argument-key check above asks whether each supplied key is an IN
   -- parameter of SOME overload, which is exact only while our functions are
-  -- not overloaded. With `fn_x(p_a)` and `fn_x(p_b)`, a call passing both keys
+  -- not overloaded. With fn_x(p_a) and fn_x(p_b), a call passing both keys
   -- would satisfy each from a different row while PostgREST could resolve
   -- neither (Codex review on PR #85, round 23). Closing that needs per-call
   -- key sets and overload grouping -- machinery for a state this schema cannot
@@ -426,7 +426,7 @@ begin
   -- grown: the day a called function gains a second signature, this says so,
   -- and whoever adds it decides.
   --
-  -- Scoped to the names actually DERIVED, not to `fn\_%` (Codex review on PR
+   -- Scoped to the names actually DERIVED, not to an fn_ prefix (Codex review on PR
   -- #85, round 24). The extractor accepts any lowercase RPC name, so a guard
   -- keyed on our naming convention did not cover its own subject -- one rule
   -- with two scopes, which is the disagreement check-push-endpoint-parity.sh
