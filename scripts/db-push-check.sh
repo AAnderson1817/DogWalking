@@ -409,6 +409,24 @@ begin
        and not has_function_privilege('service_role', p.oid, 'execute')
   ) x;
 
+  -- The argument-key check above asks whether each supplied key is an IN
+  -- parameter of SOME overload, which is exact only while our functions are
+  -- not overloaded. With `fn_x(p_a)` and `fn_x(p_b)`, a call passing both keys
+  -- would satisfy each from a different row while PostgREST could resolve
+  -- neither (Codex review on PR #85, round 23). Closing that needs per-call
+  -- key sets and overload grouping -- machinery for a state this schema cannot
+  -- reach, since NO fn_ function is overloaded. So the precondition is pinned
+  -- here instead of the check being grown: the day someone adds an overload,
+  -- this says so, and whoever adds it decides. pgcrypto's digest/hmac/pgp_*
+  -- are overloaded and are deliberately out of scope -- no handler .rpc()s them.
+  perform 1 from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+   where n.nspname = 'public' and p.proname like 'fn\_%'
+   group by p.proname having count(*) > 1;
+  if found then
+    raise exception 'FAIL: an fn_ function is now overloaded, so the RPC argument-key check is no longer exact -- it matches each key against ANY overload. Give it per-call key sets, or keep fn_ names unique.';
+  end if;
+
   if v_missing is not null then
     raise exception E'FAIL: % table(s) and % function(s) the edge functions reach are missing or not granted to service_role.\nA "needs X" row works only on a project carrying the platform default ACL, which 0004 says not to rely on;\na "does not exist" row is a handler that fails on every invocation:\n  %', v_tables, v_fns, v_missing;
   end if;
