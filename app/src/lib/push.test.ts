@@ -15,6 +15,7 @@ import {
   type PushEnvironment,
   pushState,
   readPushEnvironment,
+  subscriptionUsesKey,
   reclaimPushDevice,
   subscriptionKeys,
 } from "./push";
@@ -130,10 +131,12 @@ describe("enable/disable failure paths", () => {
     unsubscribed: boolean;
     unsubscribe: () => Promise<boolean>;
     getKey: (n: string) => ArrayBuffer | null;
+    options?: { applicationServerKey?: ArrayBuffer };
   }
-  function fakeSub(endpoint = "https://push.example/a"): FakeSub {
+  function fakeSub(endpoint = "https://push.example/a", key?: ArrayBuffer): FakeSub {
     const s: FakeSub = {
       endpoint,
+      ...(key === undefined ? {} : { options: { applicationServerKey: key } }),
       unsubscribed: false,
       unsubscribe: () => {
         s.unsubscribed = true;
@@ -234,6 +237,42 @@ describe("enable/disable failure paths", () => {
       vi.useRealTimers();
     }
     expect(subscribeCalls, "subscribed anyway").toEqual([]);
+  });
+
+  it("a device bound to a RETIRED key reads as off, not on", async () => {
+    // The half a person sees. `on` offers only the OFF action, so the device
+    // is never prompted to re-opt in while every send is refused by the push
+    // service. Testing subscriptionUsesKey alone does not cover this — the
+    // helper can be perfect and the call site still ignore it.
+    const retired = fakeSub("https://push.example/old", new Uint8Array([9, 9, 9]).buffer);
+    stubBrowser(retired, retired);
+    const env = await readPushEnvironment();
+    expect(env.subscribed, "bound to a key we no longer sign with").toBe(false);
+    expect(pushState(env)).toBe("off");
+
+    const good = fakeSub("https://push.example/new", base64UrlToBytes("BHYK").buffer as ArrayBuffer);
+    stubBrowser(good, good);
+    expect(pushState(await readPushEnvironment())).toBe("on");
+  });
+
+  it("enabling drops the retired subscription first", async () => {
+    // pushManager.subscribe() rejects with InvalidStateError when a
+    // subscription exists under DIFFERENT options, so without this the UI
+    // would offer the action and the action would throw — the device could
+    // never be re-enabled at all.
+    const retired = fakeSub("https://push.example/old", new Uint8Array([9, 9, 9]).buffer);
+    const fresh = fakeSub("https://push.example/new", base64UrlToBytes("BHYK").buffer as ArrayBuffer);
+    stubBrowser(fresh, retired);
+    await enablePush();
+    expect(retired.unsubscribed, "the stale subscription was left in place").toBe(true);
+    expect(subscribeCalls.length).toBe(1);
+  });
+
+  it("enabling does NOT drop a subscription that still matches", async () => {
+    const good = fakeSub("https://push.example/a", base64UrlToBytes("BHYK").buffer as ArrayBuffer);
+    stubBrowser(good, good);
+    await enablePush();
+    expect(good.unsubscribed, "unsubscribed a perfectly good device").toBe(false);
   });
 
   it("readPushEnvironment asks the worker too, not just enablePush", async () => {
@@ -409,6 +448,7 @@ describe("reclaiming a device the sign-out path never saw", () => {
     endpoint: string;
     unsubscribe: () => Promise<boolean>;
     getKey: (n: string) => ArrayBuffer | null;
+    options?: { applicationServerKey?: ArrayBuffer };
   }
   function stub(sub: FakeSub | null) {
     vi.stubGlobal("PushManager", class {});
@@ -438,6 +478,15 @@ describe("reclaiming a device the sign-out path never saw", () => {
     );
   });
 
+  it("does NOT re-register a subscription bound to a retired VAPID key", async () => {
+    // Re-registering it would keep a row alive that no send can ever reach:
+    // the push service refuses every payload signed with the current key. The
+    // screen reports `off` instead, and enabling replaces the subscription.
+    stub({ ...sub, options: { applicationServerKey: new Uint8Array([9, 9, 9]).buffer } });
+    await reclaimPushDevice();
+    expect(API.registerPushSubscription).not.toHaveBeenCalled();
+  });
+
   it("does nothing when this browser has no subscription", async () => {
     stub(null);
     await reclaimPushDevice();
@@ -450,5 +499,38 @@ describe("reclaiming a device the sign-out path never saw", () => {
     stub(sub);
     API.registerPushSubscription.mockRejectedValue(new Error("caller is neither"));
     await reclaimPushDevice();
+  });
+});
+
+describe("a subscription bound to a retired VAPID key", () => {
+  // `env.vapidPublicKey` is mocked as "BHYK" above; base64UrlToBytes("BHYK")
+  // is the byte sequence a current subscription must carry.
+  const current = () => base64UrlToBytes("BHYK").buffer as ArrayBuffer;
+  const other = () => new Uint8Array([9, 9, 9]).buffer as ArrayBuffer;
+
+  const withKey = (key: ArrayBuffer | undefined) => ({
+    options: key === undefined ? {} : { applicationServerKey: key },
+  }) as unknown as Pick<PushSubscription, "options">;
+
+  it("matches the configured key, and rejects a different one", () => {
+    expect(subscriptionUsesKey(withKey(current()), "BHYK")).toBe(true);
+    expect(subscriptionUsesKey(withKey(other()), "BHYK")).toBe(false);
+  });
+
+  it("a same-length key that differs in one byte is still a mismatch", () => {
+    // A length-only comparison would pass this, and VAPID keys are all the
+    // same length — so length alone would never catch a real rotation.
+    const bytes = new Uint8Array(base64UrlToBytes("BHYK"));
+    bytes[0] = (bytes[0]! + 1) & 0xff;
+    expect(subscriptionUsesKey(withKey(bytes.buffer as ArrayBuffer), "BHYK")).toBe(false);
+  });
+
+  it("FAILS OPEN when the bound key cannot be read", () => {
+    // `options.applicationServerKey` is not exposed everywhere. Answering
+    // "stale" because we could not look would unsubscribe working devices on
+    // that browser — a browser limitation turned into lost notifications.
+    expect(subscriptionUsesKey(withKey(undefined), "BHYK")).toBe(true);
+    expect(subscriptionUsesKey({ options: undefined } as never, "BHYK")).toBe(true);
+    expect(subscriptionUsesKey(withKey(other()), "")).toBe(true);
   });
 });

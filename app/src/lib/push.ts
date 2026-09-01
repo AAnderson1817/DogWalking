@@ -97,6 +97,42 @@ export function subscriptionKeys(
   return { p256dh: bytesToB64Url(p256dh), auth: bytesToB64Url(auth) };
 }
 
+/**
+ * Is this subscription bound to the application-server key we sign with?
+ *
+ * A `PushSubscription` records the VAPID public key it was created under, and
+ * the push service rejects a payload signed by any other one. So after a key
+ * rotation -- or in the window where the frontend and the edge function are
+ * deployed with different keys -- an existing subscription stays non-null and
+ * completely dead: every send is refused, while `getSubscription()` keeps
+ * saying yes (Codex review on PR #85, round 26).
+ *
+ * FAILS OPEN, which is the load-bearing part. `options.applicationServerKey`
+ * is not readable everywhere, and answering "stale" because we could not look
+ * would unsubscribe working devices on that browser -- turning a browser
+ * limitation into a loss of notifications. An unreadable key is "no evidence
+ * of a mismatch", never "evidence of one".
+ */
+export function subscriptionUsesKey(
+  sub: Pick<PushSubscription, "options">,
+  vapidKey: string,
+): boolean {
+  const bound = sub.options?.applicationServerKey;
+  if (!bound || !vapidKey) return true;
+  let expected: Uint8Array;
+  try {
+    expected = base64UrlToBytes(vapidKey);
+  } catch {
+    return true;
+  }
+  const actual = new Uint8Array(bound as ArrayBuffer);
+  if (actual.length !== expected.length) return false;
+  for (let i = 0; i < actual.length; i++) {
+    if (actual[i] !== expected[i]) return false;
+  }
+  return true;
+}
+
 function bytesToB64Url(buf: ArrayBuffer): string {
   let bin = "";
   for (const b of new Uint8Array(buf)) bin += String.fromCharCode(b);
@@ -190,7 +226,10 @@ export async function readPushEnvironment(): Promise<PushEnvironment> {
     supported,
     vapidKey: env.vapidPublicKey,
     permission: supported ? Notification.permission : null,
-    subscribed: existing !== null,
+    // A subscription bound to a retired key is not a working subscription:
+    // reporting it as `on` offers only the OFF action and never prompts a
+    // re-opt-in, while every send is refused by the push service.
+    subscribed: existing !== null && subscriptionUsesKey(existing, env.vapidPublicKey),
     workerHandlesPush: supported ? await activeWorkerHandlesPush() : false,
   };
 }
@@ -207,6 +246,20 @@ export async function enablePush(): Promise<PushState> {
 
   const permission = await Notification.requestPermission();
   if (permission !== "granted") return permission === "denied" ? "denied" : "off";
+
+  // `subscribe()` rejects with InvalidStateError when a subscription already
+  // exists under DIFFERENT options, so a stale-key device could otherwise
+  // never be re-enabled: the UI would offer the action and the action would
+  // throw. Dropping it locally is enough -- the server row self-heals on the
+  // 404/410 the send path already handles.
+  const stale = await reg.pushManager.getSubscription();
+  if (stale && !subscriptionUsesKey(stale, env.vapidPublicKey)) {
+    try {
+      await stale.unsubscribe();
+    } catch {
+      /* best effort: subscribe() below reports the real failure */
+    }
+  }
 
   const sub = await reg.pushManager.subscribe({
     userVisibleOnly: true,
@@ -356,6 +409,10 @@ export async function reclaimPushDevice(
     const reg = await registration();
     const sub = reg ? await reg.pushManager.getSubscription() : null;
     if (!sub) return;
+    // Re-registering a subscription bound to a retired key would keep a row
+    // alive that no send can ever reach. Leave it; the screen reports `off`
+    // and enabling replaces it.
+    if (!subscriptionUsesKey(sub, env.vapidPublicKey)) return;
     const keys = subscriptionKeys(sub);
     if (!keys) return;
     // Symmetric with the cleanup above: a sign-OUT arriving while this was

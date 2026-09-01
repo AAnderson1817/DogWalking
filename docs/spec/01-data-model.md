@@ -159,6 +159,26 @@ and the alternative, accepting any claim that presents new keys, is the hole
 itself. A row in that state is already undeliverable, since payloads would be
 encrypted to keys the browser no longer holds.
 
+**VAPID key rotation.** A `PushSubscription` records the application-server
+key it was created under, and the push service refuses a payload signed by any
+other one. So after a rotation — or in the window where the frontend and the
+edge function carry different keys, which the deploy order makes reachable —
+an existing subscription stays non-null and is completely dead: every send is
+rejected while `getSubscription()` keeps saying yes. `subscriptionUsesKey()`
+compares the bound key against the configured one, and the answer is used in
+three places, because a helper the call sites ignore fixes nothing: a
+mismatched device reads as `off` rather than `on` (so it is offered a re-opt-in
+instead of only an OFF switch), `enablePush()` unsubscribes it before
+subscribing (`pushManager.subscribe()` rejects with `InvalidStateError` when a
+subscription exists under different options, so without this the offered action
+would throw), and `reclaimPushDevice()` leaves it alone rather than keeping a
+row alive that no send can reach.
+
+It **fails open**: `options.applicationServerKey` is not readable everywhere,
+and answering "stale" because we could not look would unsubscribe working
+devices on that browser — a browser limitation turned into lost notifications.
+An unreadable key is no evidence of a mismatch, never evidence of one.
+
 A session can also end WITHOUT the sign-out path — a failed refresh token,
 cleared auth storage, a tab killed mid-session — leaving the browser
 subscribed while the row still belongs to the previous account.
