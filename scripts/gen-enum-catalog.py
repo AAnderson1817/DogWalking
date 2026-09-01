@@ -274,14 +274,38 @@ SET_SEARCH_PATH = re.compile(
     r"^\s*set\s+(?:local\s+|session\s+)?(?:search_path|schema)\s*(?:=|to)?\s*(.*?)\s*$",
     re.I | re.S,
 )
-SET_CONFIG_SEARCH_PATH = re.compile(
-    r"set_config\s*\(\s*'search_path'\s*,\s*'((?:[^']|'')*)'", re.I | re.S
-)
+# `set_config` takes expressions, so `set_config('search_path', concat(…),
+# false)` moves the path with a value no regex can read (Codex round ten,
+# against a pattern that recognised a literal second argument and matched
+# NOTHING otherwise — the enumerate-what-I-know shape). The rule is inverted:
+# a call whose name or value is not a plain literal is refused outright, and
+# only a literal `'search_path'` with a literal public-first value passes.
+SET_CONFIG_OPEN = re.compile(r"\bset_config\s*\(\s*", re.I)
+LITERAL_AT = re.compile(LIT)
 ALTER_SESSION_DEFAULTS = re.compile(r"^\s*alter\s+(?:database|role|user)\b", re.I)
 
 
 def first_schema(value: str) -> str:
     return value.split(",", 1)[0].strip().strip("'\"").strip().lower()
+
+
+def set_config_moves_search_path(stmt: str) -> bool:
+    """True if any `set_config(...)` in this statement might move search_path
+    off `public`: a computed name, a computed value, or a literal value that
+    is not public-first. A literal name other than search_path is not ours."""
+    for call in SET_CONFIG_OPEN.finditer(stmt):
+        name = LITERAL_AT.match(stmt, call.end())
+        if not name:
+            return True  # a computed GUC name could be search_path
+        if unquote(name.group(1)).strip().lower() != "search_path":
+            continue
+        sep = re.compile(r"\s*,\s*").match(stmt, name.end())
+        value = LITERAL_AT.match(stmt, sep.end()) if sep else None
+        if not value or not re.compile(r"\s*[,)]").match(stmt, value.end()):
+            return True  # not a bare literal: concat(), ||, a function, …
+        if first_schema(unquote(value.group(1))) != "public":
+            return True
+    return False
 
 
 def refuse_search_path_changes(path: pathlib.Path, sql: str, skel: str) -> None:
@@ -293,8 +317,7 @@ def refuse_search_path_changes(path: pathlib.Path, sql: str, skel: str) -> None:
         m = SET_SEARCH_PATH.match(stmt)
         if m and first_schema(m.group(1)) != "public":
             bad = stmt
-        m = SET_CONFIG_SEARCH_PATH.search(stmt)
-        if m and first_schema(unquote(m.group(1))) != "public":
+        if set_config_moves_search_path(stmt):
             bad = stmt
         if ALTER_SESSION_DEFAULTS.match(stmt_skel) and re.search(r"\bsearch_path\b", stmt, re.I):
             bad = stmt
