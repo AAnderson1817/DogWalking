@@ -139,7 +139,7 @@ class HiddenDDL(Exception):
     generator does not read."""
 
 
-def strip_sql(sql: str, *, inside_dollar: bool = False) -> tuple[str, str]:
+def strip_sql(sql: str, *, inside_dollar: bool = False, in_body: bool = False) -> tuple[str, str]:
     """-> (clean, skeleton). Both have `--` and /* */ comments removed —
     OUTSIDE string literals and quoted identifiers, with nesting, and with a
     space left where a block comment stood, since PostgreSQL reads it as
@@ -162,7 +162,11 @@ def strip_sql(sql: str, *, inside_dollar: bool = False) -> tuple[str, str]:
     statement kinds is the same body in a different quoting and gets the same
     check (Codex round eight: `DO 'BEGIN EXECUTE ''CREATE TYPE …''; END'`
     masked the whole body and both scans saw nothing). Inside a
-    dollar-quoted region a `$word$` is text, never a nested quote."""
+    dollar-quoted VALUE a `$word$` is text, never a nested quote; inside a
+    BODY (`in_body`) a nested `$tag$…$tag$` is a string literal and is masked
+    like one, so `perform length($msg$please execute this later$msg$)` is
+    not an EXECUTE statement (Codex round fourteen) while `execute
+    $q$create type …$q$` still carries its DDL into the clean text."""
     out: list[str] = []
     skel: list[str] = []
     i, n = 0, len(sql)
@@ -188,16 +192,16 @@ def strip_sql(sql: str, *, inside_dollar: bool = False) -> tuple[str, str]:
         return head() == "do" or bool(FUNCTION_HEAD.match(statement()))
 
     def check_body(body: str, where: str) -> None:
-        """`body` is the clean text of a DO or function body."""
+        """`body` is the raw text of a DO or function body, either quoting."""
         if not is_body():
             return
-        if BODY_UNREADABLE.search(body):
+        clean, body_skel = strip_sql(body, in_body=True)
+        if BODY_UNREADABLE.search(clean):
             raise HiddenDDL(" ".join(where.split())[:120])
-        body_skel = strip_sql(body, inside_dollar=True)[1]
         for ex in EXECUTE_STMT.finditer(body_skel):
             if not READABLE_COMMAND.match(ex.group(1)):
                 raise HiddenDDL("EXECUTE of a command this generator cannot read: "
-                                + " ".join(body[ex.start() : ex.end()].split())[:100])
+                                + " ".join(clean[ex.start() : ex.end()].split())[:100])
 
     while i < n:
         c = sql[i]
@@ -208,12 +212,20 @@ def strip_sql(sql: str, *, inside_dollar: bool = False) -> tuple[str, str]:
                 close = sql.find(tag.group(0), tag.end())
                 if close < 0:
                     raise HiddenDDL(f"unterminated dollar quote {tag.group(0)}")
-                inner_clean, inner_skel = strip_sql(sql[tag.end() : close], inside_dollar=True)
                 region = sql[i : close + len(tag.group(0))]
+                if in_body:
+                    # A nested dollar string inside a body is a literal:
+                    # kept intact in `clean`, masked in the skeleton.
+                    out.extend(region)
+                    skel.extend("'" + "x" * (len(region) - 2) + "'")
+                    i = close + len(tag.group(0))
+                    continue
                 if is_body():
-                    check_body(inner_clean, region)
-                elif DDL_INSIDE.search(inner_skel):
-                    raise HiddenDDL(" ".join(region.split())[:120])
+                    check_body(sql[tag.end() : close], region)
+                else:
+                    _, inner_skel = strip_sql(sql[tag.end() : close], inside_dollar=True)
+                    if DDL_INSIDE.search(inner_skel):
+                        raise HiddenDDL(" ".join(region.split())[:120])
                 both(" ")
                 i = close + len(tag.group(0))
                 continue
@@ -504,7 +516,29 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
                     )
                     sys.exit(1)
                 touched.setdefault(name, []).append(version)
+    for name in order:
+        for label in values[name]:
+            if any(ord(ch) < 32 or ord(ch) == 127 for ch in label):
+                # A label with a newline cannot be shown on one catalogue line
+                # without inventing an escape scheme (Codex round fourteen).
+                print(
+                    f"FAIL: enum `{name}` carries a label with a control character, "
+                    f"{label!r}, which the catalogue cannot render on one line",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
     return values, touched, order
+
+
+def code_span(label: str) -> str:
+    """A Markdown code span that shows `label` exactly: the fence is one
+    backtick longer than any run inside it, and a label that starts or ends
+    with a space or a backtick is padded by one space on each side, which
+    CommonMark strips. A label rendered bare could not be told from two —
+    `'two · labels'` is one legal PostgreSQL label (Codex round fourteen)."""
+    fence = "`" * (max((len(r) for r in re.findall(r"`+", label)), default=0) + 1)
+    pad = " " if (label[:1] in (" ", "`") or label[-1:] in (" ", "`")) else ""
+    return f"{fence}{pad}{label}{pad}{fence}"
 
 
 def render(values: dict[str, list[str]], touched: dict[str, list[str]], order: list[str]) -> str:
@@ -514,8 +548,10 @@ def render(values: dict[str, list[str]], touched: dict[str, list[str]], order: l
         f"{len(order)} enum types, in migration order. Generated by",
         "`scripts/gen-enum-catalog.py`; CI fails if this list and the migrations",
         "disagree, so adding a value without regenerating breaks the build. Values",
-        "are in `enumsortorder`. The parenthesis names the migration that created",
-        "the type, then every migration that added or renamed a value.",
+        "are in `enumsortorder`, each shown as a code span so a label containing",
+        "the separator, a backtick or Markdown syntax reads as one value. The",
+        "parenthesis names the migration that created the type, then every",
+        "migration that added or renamed a value.",
         "",
     ]
     for name in order:
@@ -523,7 +559,7 @@ def render(values: dict[str, list[str]], touched: dict[str, list[str]], order: l
         created = versions[0]
         later = sorted(set(versions[1:]) - {created})  # altered in its own migration is not a later change
         where = created + "".join(f", +{v}" for v in later)
-        lines.append(f"- `{name}` ({where}): " + " · ".join(values[name]))
+        lines.append(f"- `{name}` ({where}): " + " · ".join(code_span(v) for v in values[name]))
     lines += ["", END]
     return "\n".join(lines)
 
