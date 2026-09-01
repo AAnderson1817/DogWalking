@@ -207,7 +207,14 @@ def strip_sql(sql: str, *, inside_dollar: bool = False, in_body: bool = False) -
         c = sql[i]
         nxt = sql[i + 1] if i + 1 < n else ""
         if state == "code":
-            tag = DOLLAR_TAG.match(sql, i) if (c == "$" and not inside_dollar) else None
+            # `$` may sit INSIDE an unquoted identifier (`first$tag$` is an
+            # alias), and PostgreSQL opens a dollar quote only at a token
+            # boundary — pairing two such aliases as one region refused the
+            # enum statement between them (Codex round fifteen). A closing
+            # tag needs no boundary: the lexer ends the string at the first
+            # occurrence of it.
+            after_ident = i > 0 and (sql[i - 1].isalnum() or sql[i - 1] in "_$")
+            tag = DOLLAR_TAG.match(sql, i) if (c == "$" and not inside_dollar and not after_ident) else None
             if tag:
                 close = sql.find(tag.group(0), tag.end())
                 if close < 0:
@@ -341,7 +348,18 @@ ALTER_SESSION_DEFAULTS = re.compile(r"^\s*alter\s+(?:database|role|user)\b", re.
 
 
 def first_schema(value: str) -> str:
-    return value.split(",", 1)[0].strip().strip("'\"").strip().lower()
+    """The first schema a search_path value names, as PostgreSQL resolves it:
+    the value may be a single-quoted string holding the list, an unquoted
+    name case-folds, and a double-quoted name keeps its case — `"PUBLIC"` is
+    a different schema from `public` (Codex round fifteen), so it must not
+    be folded into the one this generator assumes."""
+    value = value.strip()
+    if len(value) >= 2 and value[0] == "'" and value[-1] == "'":
+        value = unquote(value[1:-1])
+    item = value.split(",", 1)[0].strip()
+    if len(item) >= 2 and item[0] == '"' and item[-1] == '"':
+        return item[1:-1].replace('""', '"')
+    return item.lower()
 
 
 def quoted_name(stmt: str, skel_match: "re.Match[str]") -> str:
@@ -518,12 +536,15 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
                 touched.setdefault(name, []).append(version)
     for name in order:
         for label in values[name]:
-            if any(ord(ch) < 32 or ord(ch) == 127 for ch in label):
+            if any(ord(ch) < 32 or ord(ch) == 127 for ch in label) or not label.strip():
                 # A label with a newline cannot be shown on one catalogue line
-                # without inventing an escape scheme (Codex round fourteen).
+                # without inventing an escape scheme (Codex round fourteen),
+                # and one made only of spaces cannot be shown at its true
+                # length — CommonMark keeps every space of an all-space code
+                # span, padding included (round fifteen).
                 print(
-                    f"FAIL: enum `{name}` carries a label with a control character, "
-                    f"{label!r}, which the catalogue cannot render on one line",
+                    f"FAIL: enum `{name}` carries a label the catalogue cannot render "
+                    f"faithfully, {label!r} (a control character, or only whitespace)",
                     file=sys.stderr,
                 )
                 sys.exit(1)
