@@ -5644,6 +5644,23 @@ begin
       raise exception 'FAIL: refused for the wrong reason (0049): %', sqlerrm;
     end if;
   end;
+
+  -- ...and it AGREES with the predicate in the accepting direction too, which
+  -- is the half that was missing. Registration used to apply its own
+  -- case-SENSITIVE `!~ '^https://'` before consulting the predicate, so an
+  -- uppercase scheme was refused here while fn_is_push_service_endpoint and
+  -- the edge library both accepted it — and check-push-endpoint-parity.sh,
+  -- which compares only those two, reported agreement while the RPC that
+  -- actually guards registration disagreed with both. A one-directional
+  -- assertion could not see that: refusing everything satisfies it.
+  begin
+    perform fn_register_push_subscription(
+      'HTTPS://fcm.googleapis.com/fcm/send/scheme-case', v_p256, v_auth);
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    raise exception
+      'FAIL: registration refused an endpoint the predicate accepts (0049): %', sqlerrm;
+  end;
   reset role;
   perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
 
