@@ -265,9 +265,14 @@ def strip_sql(sql: str, *, inside_dollar: bool = False) -> tuple[str, str]:
 # mood …` creates `private.mood`, which this file would record over a public
 # enum of the same name (Codex round eight). Tracking the path is more parser
 # than fifteen enums earn, so a top-level change is REFUSED unless `public`
-# is its first schema; `reset search_path` is the default again and passes.
+# is its first schema (`set schema 'x'` is the same statement); `reset search_path`
+# is the default again and passes.
+# `set schema 'x'` is PostgreSQL's alias for `set search_path to x` (Codex
+# round nine) — one word the first regex did not know, and the whole gate
+# passed a migration that moved every unqualified statement into `x`.
 SET_SEARCH_PATH = re.compile(
-    r"^\s*set\s+(?:local\s+|session\s+)?search_path\s*(?:=|to)\s*(.*?)\s*$", re.I | re.S
+    r"^\s*set\s+(?:local\s+|session\s+)?(?:search_path|schema)\s*(?:=|to)?\s*(.*?)\s*$",
+    re.I | re.S,
 )
 SET_CONFIG_SEARCH_PATH = re.compile(
     r"set_config\s*\(\s*'search_path'\s*,\s*'((?:[^']|'')*)'", re.I | re.S
