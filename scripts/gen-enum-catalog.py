@@ -64,54 +64,65 @@ def strip_sql_comments(sql: str) -> str:
 
 def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
     """-> (name -> values in sort order, name -> migration versions that
-    created or changed it, creation order)."""
+    created or changed it, creation order).
+
+    Every matched statement is applied in STATEMENT ORDER within a migration,
+    not grouped by kind. Codex on PR #88: processing every `create`, then
+    every `alter`, then every `drop` turns `drop type if exists mood; create
+    type mood as enum (...)` into create-then-drop in memory, so the catalogue
+    would omit a live enum while CI reported agreement."""
     values: dict[str, list[str]] = {}
     touched: dict[str, list[str]] = {}
     order: list[str] = []
     for path in sorted(MIGRATIONS.glob("*.sql")):
         version = path.name.split("_", 1)[0]
         sql = strip_sql_comments(path.read_text())
-        for m in CREATE.finditer(sql):
+        stream = sorted(
+            [(m.start(), "create", m) for m in CREATE.finditer(sql)]
+            + [(m.start(), "alter", m) for m in ALTER.finditer(sql)]
+            + [(m.start(), "drop", m) for m in DROP.finditer(sql)],
+            key=lambda item: item[0],
+        )
+        for _, kind, m in stream:
             name = m.group(1).lower()
-            values[name] = LABEL.findall(m.group(2))
-            touched.setdefault(name, []).append(version)
-            if name not in order:
-                order.append(name)
-        for m in ALTER.finditer(sql):
-            name = m.group(1).lower()
-            if name not in values:
-                continue  # not an enum this file tracks (a composite, say)
-            action = " ".join(m.group(2).split())
-            add = ADD_VALUE.match(action)
-            ren = RENAME_VALUE.match(action)
-            if add:
-                label, where, anchor = add.group(1), add.group(2), add.group(3)
-                if label in values[name]:
-                    continue  # `if not exists` on a redelivery: no change
-                if where and anchor in values[name]:
-                    at = values[name].index(anchor) + (1 if where.lower() == "after" else 0)
-                    values[name].insert(at, label)
+            if kind == "create":
+                values[name] = LABEL.findall(m.group(2))
+                touched[name] = [version]
+                if name not in order:
+                    order.append(name)
+            elif kind == "alter":
+                if name not in values:
+                    continue  # not an enum this file tracks (a composite, say)
+                action = " ".join(m.group(2).split())
+                add = ADD_VALUE.match(action)
+                ren = RENAME_VALUE.match(action)
+                if add:
+                    label, where, anchor = add.group(1), add.group(2), add.group(3)
+                    if label in values[name]:
+                        continue  # `if not exists` on a redelivery: no change
+                    if where and anchor in values[name]:
+                        at = values[name].index(anchor) + (1 if where.lower() == "after" else 0)
+                        values[name].insert(at, label)
+                    else:
+                        values[name].append(label)
+                elif ren:
+                    old, new = ren.group(1), ren.group(2)
+                    values[name] = [new if v == old else v for v in values[name]]
                 else:
-                    values[name].append(label)
-            elif ren:
-                old, new = ren.group(1), ren.group(2)
-                values[name] = [new if v == old else v for v in values[name]]
-            else:
-                print(
-                    f"FAIL: {path.name}: `alter type {name} {action}` is neither "
-                    "`add value` nor `rename value`; teach gen-enum-catalog.py what it "
-                    "means rather than letting the catalogue describe a type that "
-                    "no longer matches the migrations",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            touched.setdefault(name, []).append(version)
-        for m in DROP.finditer(sql):
-            name = m.group(1).lower()
-            values.pop(name, None)
-            touched.pop(name, None)
-            if name in order:
-                order.remove(name)
+                    print(
+                        f"FAIL: {path.name}: `alter type {name} {action}` is neither "
+                        "`add value` nor `rename value`; teach gen-enum-catalog.py what it "
+                        "means rather than letting the catalogue describe a type that "
+                        "no longer matches the migrations",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                touched.setdefault(name, []).append(version)
+            else:  # drop
+                values.pop(name, None)
+                touched.pop(name, None)
+                if name in order:
+                    order.remove(name)
     return values, touched, order
 
 
@@ -128,7 +139,8 @@ def render(values: dict[str, list[str]], touched: dict[str, list[str]], order: l
     ]
     for name in order:
         versions = touched[name]
-        created, later = versions[0], sorted(set(versions[1:]))
+        created = versions[0]
+        later = sorted(set(versions[1:]) - {created})  # altered in its own migration is not a later change
         where = created + "".join(f", +{v}" for v in later)
         lines.append(f"- `{name}` ({where}): " + " · ".join(values[name]))
     lines += ["", END]
