@@ -207,6 +207,42 @@ wait_until_blocked() {
   echo "not blocked"
 }
 
+# Case 10 needs two things `wait_until_blocked` cannot express: that a HOLDER
+# session has taken the row (it is idle in transaction, not blocked), and that
+# a specific NUMBER of contenders are queued rather than merely one. Both are
+# preconditions for a deterministic race — see case 10 for why hoping ten
+# backends overlap by themselves is not good enough.
+wait_until_idle_in_txn() {
+  local needle="$1" i n
+  case "$needle" in *"'"*) echo "bad needle (contains a quote)"; return;; esac
+  for i in $(seq 1 100); do
+    n="$(q "select count(*) from pg_stat_activity
+             where state = 'idle in transaction' and query like '%${needle}%'")"
+    case "$n" in
+      ''|*[!0-9]*) echo "probe failed"; return;;
+    esac
+    if [ "$n" -gt 0 ]; then echo holding; return; fi
+    sleep 0.1
+  done
+  echo "not holding"
+}
+
+wait_until_n_blocked() {
+  local needle="$1" want="$2" i n
+  case "$needle" in *"'"*) echo "bad needle (contains a quote)"; return;; esac
+  for i in $(seq 1 100); do
+    n="$(q "select count(*) from pg_stat_activity
+             where state = 'active' and wait_event_type = 'Lock'
+               and query like '%${needle}%'")"
+    case "$n" in
+      ''|*[!0-9]*) echo "probe failed"; return;;
+    esac
+    if [ "$n" -ge "$want" ]; then echo blocked; return; fi
+    sleep 0.1
+  done
+  echo "only $n blocked"
+}
+
 # ── Case 1: the lock protects the credit-vs-overage DECISION ──────────────
 #
 # This is the case that actually falsifies the `for update`, and it took two
@@ -949,10 +985,53 @@ echo "== case 10: exactly one sender may claim a notification channel =="
 # SEQUENTIAL claims already return t then f under ANY implementation that
 # writes the timestamp — including a SELECT-then-UPDATE, which is the bug. Only
 # contending backends can tell a conditional UPDATE from a read-then-act.
+#
+# ── Why the race is FORCED rather than hoped for ──────────────────────────
+#
+# The first version of this case simply launched ten backends at once and
+# asserted one winner. Measured against a read-then-act body, it caught the bug
+# 3 times in 12 runs — a 25% detection rate, so the single red I first observed
+# was luck. `psql` process startup dominates the claim itself, so in most runs
+# the calls barely overlap and each one genuinely does see the previous
+# winner's write: the read-then-act answers t,f,f,… for the same reason the
+# real function does, and the test cannot tell them apart. A test that is
+# unreliable in the direction of passing when the bug is present is the worst
+# available shape, and it is exactly what the header of this file warns about.
+#
+# So the overlap is made deterministic. A holder session takes the row with
+# `SELECT … FOR UPDATE`; all ten contenders then queue on that one lock, which
+# is observable rather than assumed; only then does the holder commit, and all
+# ten proceed from the same starting state. That guarantees the interleave the
+# bug needs:
+#
+#   read-then-act — the unlocked read is NOT blocked by a row lock, so all ten
+#   read `email_claimed_at is null` while the holder still has it, all ten
+#   decide to claim, and all ten then write unconditionally: TEN winners.
+#
+#   the real function — the conditional UPDATE is the only statement, so all
+#   ten block on it, and under READ COMMITTED each re-evaluates its WHERE
+#   against the winner's committed row: ONE winner, nine refused.
+#
+# Measured 5/5 in both directions after this change, against 3/12 before.
 psql "$DB" -v ON_ERROR_STOP=1 -q -c "
   delete from notifications where operator_id = '${NS}-000000000001';
   insert into notifications (id, operator_id, type, title)
   values ('${NS}-000000001000', '${NS}-000000000001', 'walk_complete', 'claim race');"
+
+# The needle is a comment, so it identifies this statement in pg_stat_activity
+# without changing what it does. It sits INSIDE the statement: psql splits on
+# the semicolon, so a trailing `-- needle` after it belongs to the NEXT
+# statement and never appears in this one's query text — the first version did
+# that and the probe timed out for ten seconds every run while the lock it was
+# looking for was in fact held (the contenders below blocked on it).
+cat >&3 <<SQL
+begin;
+select id from notifications
+ where id = '${NS}-000000001000' /* claim_race_holder */ for update;
+SQL
+
+expect_eq "PRECONDITION: the holder session has the row locked" \
+  "$(wait_until_idle_in_txn claim_race_holder)" "holding"
 
 CLAIM_PIDS=""
 for i in $(seq 1 10); do
@@ -961,6 +1040,17 @@ for i in $(seq 1 10); do
     >"$WORK/claim$i.out" 2>&1 &
   CLAIM_PIDS="$CLAIM_PIDS $!"
 done
+
+# PRECONDITION: without this the holder could commit before some contenders had
+# even connected, and those would run sequentially afterwards — which is the
+# 25%-detection case all over again.
+expect_eq "PRECONDITION: all ten contenders are queued on the row lock" \
+  "$(wait_until_n_blocked fn_claim_notification_send 10)" "blocked"
+
+cat >&3 <<SQL
+commit;
+SQL
+
 for pid in $CLAIM_PIDS; do wait "$pid" || true; done
 
 # PRECONDITION, not the detector: if every call errored the counts below would

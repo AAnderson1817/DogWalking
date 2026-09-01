@@ -466,11 +466,41 @@ shape since M1.
 **A lease, not a permanent claim.** A claim that never expires turns a crashed
 sender into permanent loss — the row neither sent nor reclaimable, which is
 worse than the duplicate it prevents. A claim older than five minutes is
-assumed crashed and may be taken over; edge functions cap out well below that.
-This is the `stripe_events` shape from 0013.
+assumed crashed and may be taken over. This is the `stripe_events` shape from
+0013.
+
+The five minutes has ONE definition, `fn_notification_claim_lease()`, because
+two consumers must agree about it and drift between them is silent in both
+directions: a backlog window shorter than the claim's hands out rows the claim
+then refuses (work the drain reports as done and did not do), a longer one
+hides a row whose sender died, for the difference. Two copies of one rule is
+the `payment_status` drift already paid for here. Smoke moves the single
+definition and asserts both consumers move with it — behavioural, because a
+structural check is satisfied by a mention in a comment (the 0046 lesson).
 
 `fn_notification_backlog` also stops handing out a row under a live claim, so
 the nightly drain cannot report work another sender is doing.
+
+**Recording an outcome RELEASES the claim.** The lease exists for a sender that
+crashed; one that recorded an outcome did not, so `recordPatch` and
+`pushRecordPatch` write `*_claimed_at = null` on every kind — sent, skipped and
+failed alike.
+
+This is not tidiness, and getting it wrong disabled an alarm. `job-health.yml`
+drains the backlog and then re-reads it seconds later, exiting 1 if anything is
+still owed; that re-read is H17's **only** signal that client-facing email is
+not being delivered. A retained claim hides every row the drain just touched
+for the whole lease, so a dead `RESEND_API_KEY`, an unverified sending domain
+or a provider outage would all have reported green — a check reporting success
+having verified nothing, which is this repository's most-repeated defect. Two
+independent verifiers reproduced it against the live database before it was
+fixed. Smoke asserts the database half (a drained row that failed to send is
+visible to the backlog immediately); the deno suites assert the release itself,
+on every outcome kind, in both arms.
+
+A released claim also keeps the one immediate retry path that exists — an
+operator POSTing `notification_id` after noticing a blip — from being refused,
+with a reason blaming a sender that had already exited.
 
 A timestamp column rather than a `sending` value on the two delivery enums:
 `alter type … add value` cannot be used in the transaction that adds it and
@@ -482,6 +512,17 @@ the outcome.
 SEQUENTIAL claims return `t` then `f` under a read-then-act as well —
 demonstrated, the smoke block passes unchanged against that body — so only
 contending backends distinguish the fix from the defect.
+
+The case FORCES the race rather than hoping for it. Launching ten backends at
+once and asserting one winner caught a read-then-act body 3 times in 12 runs;
+`psql` startup dominates, so in most runs the calls barely overlap and each
+genuinely does see the previous winner's write. Unreliable in the direction of
+passing when the bug is present is the worst available shape for a test, and it
+is what the header of that file warns about. So a holder session takes the row
+with `SELECT … FOR UPDATE`, all ten contenders are observed queued on that one
+lock, and only then does the holder commit — after which the read-then-act
+gives ten winners (its unlocked read is not blocked, so all ten decide to
+claim) and the real function gives one. 5/5 in both directions.
 
 Recipients differ from email's. Email is client-facing only; push goes to
 whoever the notification is addressed to, because an operator wants "walk

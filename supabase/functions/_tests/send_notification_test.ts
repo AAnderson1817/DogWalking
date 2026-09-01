@@ -11,6 +11,7 @@
 import { assert, assertEquals, assertFalse } from "./asserts.ts";
 import { HttpError } from "../_lib/http.ts";
 import {
+  claimNotificationSend,
   deliverNotification,
   drainBacklog,
   failureResponse,
@@ -461,4 +462,80 @@ Deno.test("the claim is asked for BEFORE any terminal skip is recorded", async (
   assertEquals(asked[0]?.[1], "email");
   assertEquals(outcome.kind, "skipped");
   assertEquals(h.recorded.length, 0, "recorded a terminal outcome without holding the claim");
+});
+
+Deno.test("recording an outcome RELEASES the claim, on every kind", () => {
+  // The lease is for a sender that CRASHED; one that recorded an outcome did
+  // not. Holding the claim afterwards hides the row from
+  // fn_notification_backlog for five minutes — and the nightly ops check
+  // drains and then re-reads that backlog, going red if anything survives.
+  // That re-read happens seconds later, so a permanently failing provider
+  // would report green: H17's only alarm for undelivered email, silenced by
+  // the fix for a different defect.
+  for (const outcome of [
+    { kind: "sent" } as const,
+    { kind: "skipped", reason: "not a client-facing notification" } as const,
+    { kind: "failed", error: "resend 500", permanent: false } as const,
+  ]) {
+    const patch = recordPatch(outcome, 1);
+    assertEquals(
+      patch.email_claimed_at,
+      null,
+      `${outcome.kind} kept the claim, so the drained row stays invisible to the ops check`,
+    );
+  }
+});
+
+// ── The real claim, the one both arms actually call ──────────────────────
+
+Deno.test("the real claim asks the RPC for the named channel and returns its answer", async () => {
+  // Until this existed, the two `claimSend` implementations had NO test: the
+  // email copy sat in index.ts, which binds a port on import, and every test
+  // above injects a constant. So the rule their comments call load-bearing was
+  // enforced by nothing — the `overage_deps.ts` blind spot exactly.
+  const calls: Array<[string, Record<string, unknown>]> = [];
+  const db = {
+    rpc(fn: string, args: Record<string, unknown>) {
+      calls.push([fn, args]);
+      return Promise.resolve({ data: true, error: null });
+    },
+  };
+
+  assertEquals(await claimNotificationSend(db, "n-9", "push"), true);
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0]?.[0], "fn_claim_notification_send");
+  assertEquals(calls[0]?.[1], { p_id: "n-9", p_channel: "push" });
+
+  // The lease is NOT passed: the RPC's default is the single definition of it.
+  assertFalse("p_lease" in (calls[0]?.[1] ?? {}), "the caller pinned its own lease");
+});
+
+Deno.test("the real claim returns false ONLY for a genuine refusal", async () => {
+  const refused = { rpc: () => Promise.resolve({ data: false, error: null }) };
+  assertEquals(await claimNotificationSend(refused, "n-9", "email"), false);
+
+  // Anything that is not a literal `true` is not a claim. A null answer — an
+  // RPC that returned nothing — must not read as "we hold it", or two senders
+  // both proceed.
+  const nothing = { rpc: () => Promise.resolve({ data: null, error: null }) };
+  assertEquals(await claimNotificationSend(nothing, "n-9", "email"), false);
+});
+
+Deno.test("the real claim THROWS on a database error, never answers false", async () => {
+  // This is the rule. Reading a transient failure as "somebody else has it"
+  // silently drops the delivery — the defect this whole change exists to fix,
+  // inverted, and invisible because the drain counts a skip as a success.
+  const broken = {
+    rpc: () => Promise.resolve({ data: null, error: { message: "57P01 terminating connection" } }),
+  };
+  let threw: unknown = null;
+  try {
+    await claimNotificationSend(broken, "n-9", "email");
+  } catch (e) {
+    threw = e;
+  }
+  assert(threw instanceof HttpError, "a database error did not throw");
+  assertEquals((threw as HttpError).status, 500);
+  // The cause is carried, not dropped — the H14 contract.
+  assert((threw as HttpError).cause != null, "the underlying error was discarded");
 });

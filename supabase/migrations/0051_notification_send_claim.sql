@@ -69,10 +69,30 @@ end $$;
  * into a security-definer context, and two short branches cost less than the
  * argument for why the dynamic version is safe.
  */
+-- ONE definition of the lease.
+--
+-- It is needed in two places that must agree: the claim's cutoff, and
+-- `fn_notification_backlog`'s decision about whether a claimed row is still
+-- somebody's to send. Written twice they can drift, and drift is silent in
+-- both directions -- a backlog window SHORTER than the claim's hands out rows
+-- whose claim then refuses them (work the drain reports as done and did not
+-- do), a LONGER one hides a row whose sender died for the difference. Two
+-- copies of one number is the `payment_status` drift this repository has
+-- already paid for.
+--
+-- immutable so it can stand as a parameter default; `parallel safe` because
+-- it reads nothing.
+create function fn_notification_claim_lease() returns interval
+language sql immutable parallel safe
+as $$ select interval '5 minutes' $$;
+
+comment on function fn_notification_claim_lease() is
+  'How long a send claim is honoured before another sender may take it (0051).';
+
 create function fn_claim_notification_send(
   p_id uuid,
   p_channel text,
-  p_lease interval default interval '5 minutes'
+  p_lease interval default fn_notification_claim_lease()
 ) returns boolean
 language plpgsql
 security definer
@@ -117,6 +137,15 @@ revoke all on function fn_claim_notification_send(uuid, text, interval)
 grant execute on function fn_claim_notification_send(uuid, text, interval)
   to service_role;
 
+-- The parameter DEFAULT is evaluated in the caller's context, not the
+-- definer's, so service_role needs execute on this for the two-argument call
+-- to resolve at all. The API roles do not: `fn_notification_backlog` is
+-- SECURITY DEFINER and calls it as its owner.
+revoke all on function fn_notification_claim_lease()
+  from public, anon, authenticated;
+grant execute on function fn_notification_claim_lease()
+  to service_role;
+
 comment on function fn_claim_notification_send(uuid, text, interval) is
   'Atomically claim one channel of one notification for sending (0051). The '
   'single conditional UPDATE is the mutual exclusion; the lease lets a '
@@ -150,10 +179,10 @@ as $$
      and (
        (n.email_status in ('pending', 'failed') and n.email_attempts < p_max_attempts
           and (n.email_claimed_at is null
-               or n.email_claimed_at < now() - interval '5 minutes'))
+               or n.email_claimed_at < now() - fn_notification_claim_lease()))
        or (n.push_status in ('pending', 'failed') and n.push_attempts < p_max_attempts
           and (n.push_claimed_at is null
-               or n.push_claimed_at < now() - interval '5 minutes'))
+               or n.push_claimed_at < now() - fn_notification_claim_lease()))
      )
    order by n.created_at
 $$;

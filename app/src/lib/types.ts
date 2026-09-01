@@ -1437,6 +1437,10 @@ export type Database = {
         };
         Returns: Array<{ id: string; email_status: Database["public"]["Enums"]["email_delivery_status"]; email_attempts: number; created_at: string }>;
       };
+      fn_notification_claim_lease: {
+        Args: Record<string, never>;
+        Returns: unknown;
+      };
       fn_notify_low_credit: {
         Args: {
           p_client: string;

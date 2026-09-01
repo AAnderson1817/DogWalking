@@ -5776,6 +5776,36 @@ begin
     raise exception 'FAIL: the backlog dropped a row whose claim had expired (0051)';
   end if;
 
+  -- H17's ONLY alarm for undelivered email is `job-health.yml`: it drains the
+  -- backlog and then re-reads this function seconds later, exiting 1 if
+  -- anything is still owed. A sender that recorded a failure and kept its
+  -- claim is therefore invisible to that re-read for the whole lease, so a
+  -- permanently failing provider reports green. The release in recordPatch is
+  -- what keeps the alarm alive; this is the database half of that contract.
+  update notifications
+     set email_status = 'failed', email_attempts = 1, email_claimed_at = null
+   where id = v_id;
+  select count(*) into v_n from fn_notification_backlog() b where b.id = v_id;
+  if v_n <> 1 then
+    raise exception 'FAIL: a drained row that failed to send is invisible to the ops re-read (0051)';
+  end if;
+
+  -- The push channel carries the same gate, and it is a SEPARATE predicate in
+  -- the same `or` — one covered channel says nothing about the other.
+  update notifications
+     set email_status = 'sent', email_claimed_at = null,
+         push_status = 'pending', push_claimed_at = now()
+   where id = v_id;
+  select count(*) into v_n from fn_notification_backlog() b where b.id = v_id;
+  if v_n <> 0 then
+    raise exception 'FAIL: the backlog handed out a row under a live PUSH claim (0051)';
+  end if;
+  update notifications set push_claimed_at = null where id = v_id;
+  select count(*) into v_n from fn_notification_backlog() b where b.id = v_id;
+  if v_n <> 1 then
+    raise exception 'FAIL: the backlog dropped a row whose push claim was released (0051)';
+  end if;
+
   begin
     perform fn_claim_notification_send(v_id, 'sms');
     raise exception 'FAIL: an unknown channel was accepted (0051)';
@@ -5789,6 +5819,11 @@ begin
   -- Service role only. Granted inside this rolled-back suite so the BODY guard
   -- is what refuses, not a missing EXECUTE (the 0048 lesson).
   grant execute on function fn_claim_notification_send(uuid, text, interval) to authenticated;
+  -- The lease too: it is the parameter DEFAULT, evaluated in the CALLER's
+  -- context, so without this the call dies on `permission denied for function
+  -- fn_notification_claim_lease` before the body runs -- and this block would
+  -- report the body guard working while never reaching it.
+  grant execute on function fn_notification_claim_lease() to authenticated;
   -- BOTH inputs. fn_is_service_session() is
   --   auth.role() = 'service_role'  OR  session_user = 'postgres'
   -- so switching only the session authorization leaves the suite's earlier
@@ -5810,6 +5845,29 @@ begin
   reset session authorization;
   perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
   revoke execute on function fn_claim_notification_send(uuid, text, interval) from authenticated;
+  revoke execute on function fn_notification_claim_lease() from authenticated;
+
+  -- ONE lease, consumed by both. Drift here is silent in both directions, so
+  -- the assertion is BEHAVIOURAL: move the single definition and watch both
+  -- consumers move with it. A structural check (does the text mention the
+  -- function) would pass on a mention in a comment -- the 0046 lesson.
+  create or replace function fn_notification_claim_lease() returns interval
+  language sql immutable parallel safe as $lease$ select interval '1 hour' $lease$;
+
+  update notifications
+     set email_status = 'pending', email_attempts = 0,
+         email_claimed_at = now() - interval '30 minutes',
+         push_status = 'sent', push_claimed_at = null
+   where id = v_id;
+  -- 30 minutes is expired under the 5-minute lease and live under the 1-hour
+  -- one, so a consumer still carrying its own copy answers the other way.
+  if fn_claim_notification_send(v_id, 'email') then
+    raise exception 'FAIL: the claim kept its own lease when the shared one moved (0051)';
+  end if;
+  select count(*) into v_n from fn_notification_backlog() b where b.id = v_id;
+  if v_n <> 0 then
+    raise exception 'FAIL: the backlog kept its own lease when the shared one moved (0051)';
+  end if;
 
   raise notice 'notification send claim: atomic, leased, per-channel, service-only (0051): OK';
 end $$;

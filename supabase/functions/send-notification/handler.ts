@@ -139,6 +139,39 @@ export function isSettled(status: string | null | undefined): boolean {
 }
 
 /**
+ * Claim one channel of one notification for sending (0051).
+ *
+ * One RPC, one conditional UPDATE. A database error must NOT be read as
+ * "somebody else has it": that would silently skip a delivery on a transient
+ * failure, which is the defect this whole change is about, inverted. It
+ * throws, and the caller's 502 says so.
+ *
+ * There is ONE implementation because both arms need exactly this and two
+ * copies of one rule is drift already paid for here (the `payment_status`
+ * sets). It also makes the rule testable at all: `index.ts` binds a port on
+ * import, so the copy that lived there could never be driven by a test.
+ *
+ * `db` is structural rather than the supabase client type, so this module
+ * keeps its single `_lib/http.ts` import and a stub is enough to drive it.
+ */
+export async function claimNotificationSend(
+  db: { rpc(fn: string, args: Record<string, unknown>): PromiseLike<{ data: unknown; error: unknown }> },
+  id: string,
+  channel: "email" | "push",
+): Promise<boolean> {
+  const { data, error } = await db.rpc("fn_claim_notification_send", {
+    p_id: id,
+    p_channel: channel,
+  });
+  if (error) {
+    throw new HttpError(500, "db_error", "could not claim the notification", error, {
+      notification_id: id,
+    });
+  }
+  return data === true;
+}
+
+/**
  * Deliver one notification and record what happened.
  *
  * Returns the outcome rather than throwing, so a drain can carry on through a
@@ -378,6 +411,31 @@ export function failureResponse(row: NotificationRow, outcome: Outcome): HttpErr
  * `serveFunction`, which binds a port — so anything a test needs to reach has
  * to live on this side of the split.
  */
+/**
+ * Recording an outcome RELEASES the claim, in the same UPDATE.
+ *
+ * The claim excludes concurrent senders for the duration of a send; the lease
+ * exists for a sender that CRASHED. One that recorded an outcome did neither,
+ * so holding its claim afterwards buys nothing and costs two things.
+ *
+ * The first is the serious one. `fn_notification_backlog` skips rows under a
+ * live claim, and the nightly ops check drains and then RE-READS the backlog,
+ * going red if anything survives — H17's only alarm for undelivered email.
+ * A drain that claims each row and keeps the claim makes that re-read 0
+ * seconds later, so a permanently failing provider reported green. Measured
+ * before this line existed: a row left `failed` with a fresh claim is invisible
+ * to `fn_notification_backlog()`, and reappears only once the lease lapses.
+ * That is a check reporting success having verified nothing, which is this
+ * repository's most repeated defect, introduced by the fix for a different one.
+ *
+ * The second is smaller: a `failed` row could not be retried by hand for five
+ * minutes, and the refusal would say another sender held it, which is false.
+ *
+ * Nulling on every outcome rather than only on `failed` keeps one rule. A
+ * settled row is excluded by its STATUS, so releasing the claim there changes
+ * nothing a caller can observe — and a rule with an exception is the shape that
+ * drifts.
+ */
 export function recordPatch(outcome: Outcome, previousAttempts: number): Record<string, unknown> {
   switch (outcome.kind) {
     case "sent":
@@ -386,17 +444,19 @@ export function recordPatch(outcome: Outcome, previousAttempts: number): Record<
         email_sent_at: new Date().toISOString(),
         email_attempts: previousAttempts + 1,
         email_last_error: null,
+        email_claimed_at: null,
       };
     case "skipped":
       // No attempt was made, so the count does not move. A skip is a decision,
       // not a try, and inflating attempts here would push terminal rows toward
       // the give-up ceiling for no reason.
-      return { email_status: "skipped", email_last_error: outcome.reason };
+      return { email_status: "skipped", email_last_error: outcome.reason, email_claimed_at: null };
     case "failed":
       return {
         email_status: "failed",
         email_attempts: previousAttempts + 1,
         email_last_error: outcome.error.slice(0, 500),
+        email_claimed_at: null,
       };
   }
 }

@@ -25,21 +25,7 @@ before you hit them.
 
 ## Open
 
-### 1. Make send-once atomic on BOTH channels
-`deliverNotification` and `deliverPush` both read `*_status === 'sent'` and
-write unconditionally later, so two concurrent invocations — the INSERT
-webhook racing the nightly drain, or an operator POSTing `notification_id`
-directly — can both pass the guard and both deliver. Raised by Codex on PR #85
-against the push arm; it is pre-existing in the email arm since M1, which is
-why it belongs here as one change rather than half of it in a push PR.
-
-Harm is asymmetric: the worker sets `tag` to the notification type, so a
-duplicate push COLLAPSES on the lock screen, while a duplicate email is a
-second email. Fix is the `0013` shape — an atomic claim with a LEASE, so a
-process that dies mid-send does not strand the row — and the lease is why this
-is not a two-line change.
-
-### 2. Small batch (one PR)
+### 1. Small batch (one PR)
 - `fn_walk_cost` is LOAD-BEARING (`fn_debit_walk` calls it, smoke pins it) —
   do NOT touch it. The dead code is `api.ts`'s `walkCost()` wrapper, itself
   with zero importers: delete it, or wire it where a persisted walk's display
@@ -53,6 +39,26 @@ is not a two-line change.
   dependency-injection pattern, `create-plan` first. `materialize-walks` is
   the deliberate thin-wrapper exception (its logic is SQL-side);
   `charge-overage` is already covered through `_lib/overage*.ts`.
+
+### 2. `getClient`/`getOperator` swallow the error, so a blip becomes terminal
+Found by the adversarial review of the send-once PR, and **pre-existing** —
+identical on `main` and untouched by that diff, which is why it is here rather
+than folded into a money-path PR.
+
+`send-notification`'s `getClient` destructures `const { data } = await
+db.from("clients")…maybeSingle()` and never inspects `error`, unlike
+`getNotification`, `backlogIds` and `isSuppressed` in the same object, which
+all throw. supabase-js reports a PostgREST or transport failure in the
+RESOLVED result, so a statement timeout or a reset connection yields
+`client === null` and the arm records the TERMINAL skip "client has no email
+address". `isSettled` treats `skipped` as final and `fn_notification_backlog`
+excludes it, so a transient blip permanently cancels a `payment_failed`
+email. `getOperator` has the same unchecked shape; its failure only degrades
+the business name.
+
+The fix is four lines in each, but the rule worth having with it is the one
+`fix(edge-errors)` states: a supabase-js call whose `error` is discarded is
+indistinguishable from one that succeeded and found nothing.
 
 ### 3. Tell the operator when an edited address is already suppressed
 Also recorded in spec 04. Editing a client's address to one already in
@@ -105,3 +111,11 @@ a product question.
 - **Client & property editing** — the header's *Edit details* and per-property
   *Edit* on ClientDetail. Shipped with the `clients` wildcard-select fix it
   depended on; see the `fix(client-columns)` status-log entry.
+- **Atomic send-once on both channels** — migration `0051`'s
+  `fn_claim_notification_send`, a conditional UPDATE with a lease, called by
+  both delivery arms before anything leaves. The claim is RELEASED when an
+  outcome is recorded, which the pre-PR review caught as a P1: holding it hid
+  the row from `fn_notification_backlog` for five minutes, and H17's only
+  alarm drains and then re-reads that backlog seconds later — so a
+  permanently failing provider would have reported green. See the
+  `money(send-once)` status-log entry.
