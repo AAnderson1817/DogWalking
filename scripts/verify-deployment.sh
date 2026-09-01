@@ -64,19 +64,12 @@ good() { printf '  ok    %s\n' "$*"; }
 mgmt() { curl -sS --max-time 30 -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" "$@"; }
 
 # ── the functions this repository ships ───────────────────────────────────
-# Directories only, `_lib` and `_tests` excluded the same way the CLI excludes
-# them: a leading underscore is not a function.
-# Also read by `scripts/check-status-counters.py` (validate gate 10d), which
-# asserts CLAUDE.md's "there are N edge functions" against this same rule.
-# Change the predicate here and change it there in the same commit.
+# Delegated to `scripts/repo-functions.sh` so there is exactly one definition
+# of "a function this repository ships". It used to live here and be mirrored
+# in `check-status-counters.py`; the two disagreed twice (see that script's
+# header), so the mirror is gone rather than annotated.
 repo_functions() {
-  local d
-  for d in "$FUNCTIONS_DIR"/*/; do
-    d=$(basename "$d")
-    case "$d" in _*) continue ;; esac
-    [ -f "$FUNCTIONS_DIR/$d/index.ts" ] || continue
-    printf '%s\n' "$d"
-  done | sort
+  FUNCTIONS_DIR="$FUNCTIONS_DIR" "$(dirname "$0")/repo-functions.sh"
 }
 
 # ── phase 1: inventory ────────────────────────────────────────────────────

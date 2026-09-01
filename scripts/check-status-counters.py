@@ -13,8 +13,10 @@ when it cannot find the sentence carrying one — a parser that matches nothing
 reports agreement, which is how `column-grants.test.ts` and
 `db-push-check.sh`'s object derivation both had to be fixed.
 """
+import os
 import pathlib
 import re
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -23,22 +25,39 @@ CLAUDE_MD = ROOT / "CLAUDE.md"
 def deployable_functions(root):
     """The functions this repository actually ships.
 
-    The predicate is `repo_functions()` in `scripts/verify-deployment.sh`
-    (skip a leading-underscore directory, require `index.ts`), which is the
-    inventory the deploy probe compares against the Management API — so it is
-    what "N edge functions" means. An enumerated exception list was the first
-    version and Codex was right to refuse it: `{"_lib", "_tests"}` counts the
-    next `_shared/` helper or a scaffold directory with no entrypoint, and a
-    gate that goes red on a healthy tree is the one that gets deleted by
-    whoever is trying to ship something else. Keep the two in step; a guard
-    whose scope disagrees with what it guards is this repository's
-    most-repeated defect.
+    Asks `scripts/repo-functions.sh`, which is also what
+    `scripts/verify-deployment.sh` asks — so "N edge functions" here is the
+    same set the deploy probe compares against the Management API, by
+    construction rather than by two implementations agreeing.
+
+    They did not agree. Codex found both divergences on PR #87: an enumerated
+    `{"_lib", "_tests"}` where the shell excluded any leading underscore and
+    required `index.ts`, and then `Path.iterdir()` yielding dot-directories
+    that the shell glob `*/` never matched. A cross-reference comment was the
+    first answer to that and the second finding is what refuted it, so the
+    second implementation is gone.
     """
-    return sorted(
-        p.name
-        for p in root.iterdir()
-        if p.is_dir() and not p.name.startswith("_") and (p / "index.ts").is_file()
-    )
+    helper = ROOT / "scripts" / "repo-functions.sh"
+    try:
+        out = subprocess.run(
+            [str(helper)],
+            cwd=ROOT,
+            env={**os.environ, "FUNCTIONS_DIR": str(root)},
+            capture_output=True,
+            text=True,
+        )
+    except OSError as e:
+        # A named sentence, not a traceback: an unrunnable helper reads as a
+        # broken gate rather than a broken rule, which is the smoke.sql
+        # lesson (`session-notes.md`, "assert on a named sentence").
+        raise SystemExit(f"FAIL: could not run {helper.relative_to(ROOT)}: {e}")
+    if out.returncode != 0:
+        raise SystemExit(
+            "FAIL: scripts/repo-functions.sh exited "
+            f"{out.returncode}: {out.stderr.strip()}"
+        )
+    return sorted(n for n in out.stdout.split("\n") if n)
+
 
 failures = []
 text = CLAUDE_MD.read_text()
