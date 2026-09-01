@@ -83,6 +83,15 @@ if [ "$FAST" = 1 ]; then
   skip_gate "7-8. database" "--fast"
 elif [ -n "${LOCAL_DB_URL:-}" ] && have psql; then
   run "7. db reset" scripts/db-reset.sh
+  # 7b is SKILL.md's and ci.yml's (ci.yml:673) and was missing here, so
+  # `validate.sh` did not in fact run "the same gates in the same order" as
+  # CLAUDE.md's command list claims. Gate 7 connects as the cluster's bootstrap
+  # SUPERUSER, which skips every ownership and privilege check a deploy
+  # performs; 7b re-applies all of them as a non-superuser holding only the
+  # privileges in platform-roles.sql, one transaction per file. It is also the
+  # only gate that can see a missing `grant ... to service_role`, because the
+  # objects it creates carry no platform default ACL to hide behind (0050).
+  run "7b. db push check" scripts/db-push-check.sh
   for f in supabase/tests/*.sql; do
     run "8. $(basename "$f")" psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f "$f"
   done
