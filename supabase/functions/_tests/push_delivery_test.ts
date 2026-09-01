@@ -339,6 +339,9 @@ Deno.test("the record patch mirrors the email arm's rules", () => {
   assertEquals(pushRecordPatch({ kind: "skipped", reason: "no registered devices" }, 2), {
     push_status: "skipped",
     push_last_error: "no registered devices",
+    // 0051: recording an outcome releases the claim. Asserted exhaustively in
+    // "push: recording an outcome RELEASES the claim, on every kind" below.
+    push_claimed_at: null,
   });
   const failed = pushRecordPatch({ kind: "failed", error: "503", permanent: false }, 2);
   assertEquals(failed.push_attempts, 3, "a real attempt counts");
@@ -475,4 +478,40 @@ Deno.test("push: winning the claim still delivers", async () => {
 
   assertEquals(outcome.kind, "sent");
   assertEquals(h.sent.length, 1);
+});
+
+Deno.test("push: recording an outcome RELEASES the claim, on every kind", () => {
+  // The sibling of the email rule, tested rather than assumed — a rule applied
+  // to one arm and not the other is the shape this repository keeps recording.
+  for (const outcome of [
+    { kind: "sent" } as const,
+    { kind: "skipped", reason: "no registered devices" } as const,
+    { kind: "failed", error: "503", permanent: false } as const,
+  ]) {
+    const patch = pushRecordPatch(outcome, 1);
+    assertEquals(patch.push_claimed_at, null, `${outcome.kind} kept the push claim`);
+  }
+});
+
+Deno.test("push: the claim names the PUSH channel, and is taken before any skip", async () => {
+  // Nothing pinned the argument, so the whole suite stayed green with
+  // `deliverPush` claiming "email": every test above wires claimSend to a
+  // constant and never looks at what it was asked for. That mistake would
+  // wire the two arms to one claim — a row already being emailed would refuse
+  // push and vice versa, and each arm's send-once guard would be answering
+  // about the other channel's sender.
+  const asked: Array<[string, string]> = [];
+  const h = harness([], () => ({ status: 201 })); // no devices: a terminal skip
+  h.deps.claimSend = (id, channel) => {
+    asked.push([id, channel]);
+    return Promise.resolve(false);
+  };
+
+  const outcome = await deliverPush(ROW, h.deps);
+
+  assertEquals(asked.length, 1, "the terminal path skipped the claim entirely");
+  assertEquals(asked[0]?.[0], ROW.id);
+  assertEquals(asked[0]?.[1], "push");
+  assertEquals(outcome.kind, "skipped");
+  assertEquals(h.recorded.length, 0, "recorded a terminal outcome without holding the claim");
 });

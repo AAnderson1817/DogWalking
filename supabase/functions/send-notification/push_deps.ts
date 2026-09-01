@@ -14,6 +14,7 @@
 //
 // `fetchImpl` is injected for that reason and defaults to the global.
 import { HttpError } from "../_lib/http.ts";
+import { claimNotificationSend } from "./handler.ts";
 import {
   encryptPushPayload,
   vapidAuthorization,
@@ -67,23 +68,10 @@ export function makePushDeps(
 ): PushDeps {
   const rid = requestId(req);
   return {
-    /**
-     * The same claim the email arm uses (0051). Throws rather than answering
-     * false on a database error — reading a transient failure as "already
-     * claimed" would silently drop the delivery.
-     */
-    async claimSend(id, channel) {
-      const { data, error } = await db.rpc("fn_claim_notification_send", {
-        p_id: id,
-        p_channel: channel,
-      });
-      if (error) {
-        throw new HttpError(500, "db_error", "could not claim the notification", error, {
-          notification_id: id,
-        });
-      }
-      return data === true;
-    },
+    // The same claim the email arm uses, and literally the same code (0051):
+    // two copies of one rule is the drift this repository has already paid
+    // for, and one of them was untestable where it sat.
+    claimSend: (id, channel) => claimNotificationSend(db, id, channel),
     async getSubscriptions(operatorId, clientId) {
       // Explicit columns, never `*`: 0049 makes this a column-restricted table
       // (the encryption secrets are withheld from `authenticated`), and

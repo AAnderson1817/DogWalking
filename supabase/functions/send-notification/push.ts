@@ -339,22 +339,29 @@ export function pushRecordPatch(
   previousAttempts: number,
 ): Record<string, unknown> {
   switch (outcome.kind) {
+    // Releases the claim in the same UPDATE, for the reason `recordPatch`
+    // states at length: the lease is for a CRASHED sender, and one that
+    // recorded an outcome did not crash. Holding it afterwards hides the row
+    // from `fn_notification_backlog` for five minutes, which is what the
+    // nightly ops check re-reads.
     case "sent":
       return {
         push_status: "sent",
         push_sent_at: new Date().toISOString(),
         push_attempts: previousAttempts + 1,
         push_last_error: null,
+        push_claimed_at: null,
       };
     case "skipped":
       // A skip is a decision, not a try. Counting it would march terminal rows
       // toward the give-up ceiling for nothing (0029's rule).
-      return { push_status: "skipped", push_last_error: outcome.reason };
+      return { push_status: "skipped", push_last_error: outcome.reason, push_claimed_at: null };
     case "failed":
       return {
         push_status: "failed",
         push_attempts: previousAttempts + 1,
         push_last_error: outcome.error.slice(0, 500),
+        push_claimed_at: null,
       };
   }
 }
