@@ -66,6 +66,9 @@ mgmt() { curl -sS --max-time 30 -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKE
 # ── the functions this repository ships ───────────────────────────────────
 # Directories only, `_lib` and `_tests` excluded the same way the CLI excludes
 # them: a leading underscore is not a function.
+# Also read by `scripts/check-status-counters.py` (validate gate 10d), which
+# asserts CLAUDE.md's "there are N edge functions" against this same rule.
+# Change the predicate here and change it there in the same commit.
 repo_functions() {
   local d
   for d in "$FUNCTIONS_DIR"/*/; do
