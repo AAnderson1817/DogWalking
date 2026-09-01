@@ -500,8 +500,17 @@ a table added to a handler is covered without anyone remembering, and it
 refuses outright if the derivation returns nothing rather than passing by
 looking at nothing.
 
-Its blind spot, stated: a `.from()` built from a variable is invisible to that
-grep, so the rule remains a review concern as well as a gate.
+Its blind spots, stated rather than left to be discovered:
+
+- a `.from()` or `.rpc()` built from a variable is invisible to that grep, so
+  the rule remains a review concern as well as a gate;
+- RPC argument keys are checked only for *existence* — every key a handler
+  supplies must be an IN parameter of some overload, because PostgREST
+  resolves overloads by argument name and a misspelled key names a function
+  that does not exist. It deliberately does NOT check that required arguments
+  are present, or their types. That is a typechecker's job, and this gate is a
+  privilege-and-existence gate; extending it into signature validation would
+  make it two gates in one script and a heuristic nobody can reason about.
 
 ## Definer function catalog + grant pattern
 Every definer fn: `SECURITY DEFINER SET search_path = public`, then

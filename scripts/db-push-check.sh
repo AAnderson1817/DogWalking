@@ -306,8 +306,36 @@ if unparsed:
 print(";".join("%s=%s" % (t, ",".join(sorted(p))) for t, p in sorted(need.items())))
 DERIVE
 )
-SENDER_FNS=$(grep -rhoE '\.rpc\("[a-z_]+"' supabase/functions/ \
-  | sed -E 's/\.rpc\("(.*)"/\1/' | sort -u | paste -sd, || true)
+SENDER_FNS=$(python3 - <<'RPCS' || true
+import re, pathlib
+# name=key,key;... An RPC is identified by its name AND its argument keys:
+# PostgREST resolves overloads by argument NAME, so `.rpc("fn_x", {p_eror: 1})`
+# references a function that does not exist even though `fn_x` does (Codex
+# review on PR #85). Deliberately narrow -- every key supplied must be a
+# parameter of some overload. It does NOT check for omitted required
+# arguments or types; that is a typechecker's job and this gate is not one.
+out = {}
+for f in sorted(pathlib.Path("supabase/functions").rglob("*.ts")):
+    src = f.read_text()
+    for m in re.finditer(r'\.rpc\(\s*"([a-z_]+)"\s*(,)?', src):
+        keys = set()
+        if m.group(2):
+            i = src.find("{", m.end())
+            # only a literal object directly after the comma is readable; a
+            # variable or spread is left to review rather than guessed at
+            if i != -1 and src[m.end():i].strip() == "":
+                depth, j = 0, i
+                while j < len(src):
+                    if src[j] == "{": depth += 1
+                    elif src[j] == "}":
+                        depth -= 1
+                        if depth == 0: break
+                    j += 1
+                keys = set(re.findall(r'(?:^|[{,\s])([a-z_][a-z0-9_]*)\s*:', src[i:j]))
+        out.setdefault(m.group(1), set()).update(keys)
+print(";".join("%s=%s" % (n, ",".join(sorted(k))) for n, k in sorted(out.items())))
+RPCS
+)
 
 if [ -z "$SENDER_TABLES" ] || [ -z "$SENDER_FNS" ]; then
   echo "FAIL: derived no sender objects from supabase/functions, so this check would" >&2
@@ -346,15 +374,38 @@ begin
        and not has_table_privilege('service_role', ('public.' || r.tbl)::regclass, r.priv)
     union all
     select 'f', 'function ' || f.name || ' does not exist'
-      from unnest(string_to_array('${SENDER_FNS}', ',')) f(name)
+      from (select split_part(p, '=', 1) as name
+              from unnest(string_to_array('${SENDER_FNS}', ';')) p) f
      where not exists (
        select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
         where n.nspname = 'public' and p.proname = f.name)
     union all
+    -- an argument key matching no IN parameter of any overload names a
+    -- function PostgREST cannot resolve, however well the name matches
+    select 'f', 'function ' || a.name || ' has no argument ' || a.key
+      from (
+        select split_part(p, '=', 1) as name,
+               unnest(string_to_array(split_part(p, '=', 2), ',')) as key
+          from unnest(string_to_array('${SENDER_FNS}', ';')) p
+      ) a
+     where a.key <> ''
+       and exists (select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+                    where n.nspname = 'public' and p.proname = a.name)
+       and not exists (
+         select 1
+           from pg_proc p
+           join pg_namespace n on n.oid = p.pronamespace
+           left join lateral unnest(p.proargnames, coalesce(p.proargmodes,
+                     array_fill('i'::"char", array[coalesce(array_length(p.proargnames,1),0)])))
+                     as arg(nm, md) on true
+          where n.nspname = 'public' and p.proname = a.name
+            and arg.md in ('i', 'b', 'v') and arg.nm = a.key)
+    union all
     select 'f', 'function ' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
       from pg_proc p join pg_namespace n on n.oid = p.pronamespace
      where n.nspname = 'public'
-       and p.proname = any(string_to_array('${SENDER_FNS}', ','))
+       and p.proname in (select split_part(x, '=', 1)
+                           from unnest(string_to_array('${SENDER_FNS}', ';')) x)
        and not has_function_privilege('service_role', p.oid, 'execute')
   ) x;
 
