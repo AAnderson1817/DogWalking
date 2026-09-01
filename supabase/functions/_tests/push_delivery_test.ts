@@ -18,6 +18,9 @@ import {
 } from "../send-notification/push.ts";
 import { isSettled, type Outcome } from "../send-notification/handler.ts";
 
+/** A claim token as the RPC returns one: a uuid, not a timestamp. */
+const PUSH_STAMP = "9c1e5b73-2d40-4f8a-b6e1-77a3c9d2e510";
+
 const ROW: PushableRow = {
   id: "n1",
   operator_id: "op1",
@@ -55,7 +58,7 @@ interface Harness {
   failures: Array<{ id: string; error: string }>;
   recorded: Array<{ outcome: Outcome; attempts: number }>;
   sent: string[];
-  released: Array<[string, string]>;
+  released: Array<[string, string, string]>;
 }
 
 function harness(subs: PushSubscription[], reply: (s: PushSubscription) => PushAttempt | Error): Harness {
@@ -64,15 +67,15 @@ function harness(subs: PushSubscription[], reply: (s: PushSubscription) => PushA
     deps: null as unknown as PushDeps,
   };
   h.deps = {
-    releaseSend: (id, channel) => {
-      h.released.push([id, channel]);
+    releaseSend: (id, channel, stamp) => {
+      h.released.push([id, channel, stamp]);
       return Promise.resolve();
     },
     // Defaults to WINNING the claim, so every existing case still
     // exercises the delivery path it was written for. The refusal is its
     // own test below — a default of `false` would make the whole file
     // pass by never sending anything.
-    claimSend: () => Promise.resolve(true),
+    claimSend: () => Promise.resolve(PUSH_STAMP),
     getSubscriptions: () => Promise.resolve(subs),
     sendPush: (s) => {
       h.sent.push(s.id);
@@ -347,9 +350,10 @@ Deno.test("the record patch mirrors the email arm's rules", () => {
   assertEquals(pushRecordPatch({ kind: "skipped", reason: "no registered devices" }, 2), {
     push_status: "skipped",
     push_last_error: "no registered devices",
-    // 0051: recording an outcome releases the claim. Asserted exhaustively in
-    // "push: recording an outcome RELEASES the claim, on every kind" below.
+    // 0051: recording an outcome releases the claim, token and all. Asserted
+    // exhaustively in "push: recording an outcome RELEASES the claim" below.
     push_claimed_at: null,
+    push_claim_token: null,
   });
   const failed = pushRecordPatch({ kind: "failed", error: "503", permanent: false }, 2);
   assertEquals(failed.push_attempts, 3, "a real attempt counts");
@@ -389,7 +393,7 @@ Deno.test("the drain delivers BOTH channels, and each stays send-once", async ()
   const pushed: string[] = [];
   const emailed: string[] = [];
   const deps = {
-    claimSend: () => Promise.resolve(true),
+    claimSend: () => Promise.resolve(PUSH_STAMP),
     getNotification: () => Promise.resolve(row),
     backlogIds: () => Promise.resolve(["n1"]),
     getClient: () => Promise.resolve({ full_name: "x", email: "a@b.test", unsubscribe_token: "t" }),
@@ -421,7 +425,7 @@ Deno.test("a push failure in the drain never strands the rest of the backlog", a
   };
   const seen: string[] = [];
   const deps = {
-    claimSend: () => Promise.resolve(true),
+    claimSend: () => Promise.resolve(PUSH_STAMP),
     getNotification: (id: string) => Promise.resolve(rows[id]),
     backlogIds: () => Promise.resolve(["a", "b"]),
     record: () => Promise.resolve(),
@@ -467,7 +471,7 @@ Deno.test("push: losing the claim race POSTs nothing and records nothing", async
   // — but the fanout still POSTs every device again, and the loser must not
   // write an outcome over the winner's.
   const h = harness([sub("a"), sub("b")], () => ({ status: 201 }));
-  h.deps.claimSend = () => Promise.resolve(false);
+  h.deps.claimSend = () => Promise.resolve(null);
 
   const outcome = await deliverPush(ROW, h.deps);
 
@@ -480,7 +484,7 @@ Deno.test("push: winning the claim still delivers", async () => {
   // Without this, a claim wired to refuse everything would pass the test above
   // while push never worked again.
   const h = harness([sub("a")], () => ({ status: 201 }));
-  h.deps.claimSend = () => Promise.resolve(true);
+  h.deps.claimSend = () => Promise.resolve(PUSH_STAMP);
 
   const outcome = await deliverPush(ROW, h.deps);
 
@@ -498,6 +502,7 @@ Deno.test("push: recording an outcome RELEASES the claim, on every kind", () => 
   ]) {
     const patch = pushRecordPatch(outcome, 1);
     assertEquals(patch.push_claimed_at, null, `${outcome.kind} kept the push claim`);
+    assertEquals(patch.push_claim_token, null, `${outcome.kind} kept the push token`);
   }
 });
 
@@ -512,7 +517,7 @@ Deno.test("push: the claim names the PUSH channel, and is taken before any skip"
   const h = harness([], () => ({ status: 201 })); // no devices: a terminal skip
   h.deps.claimSend = (id, channel) => {
     asked.push([id, channel]);
-    return Promise.resolve(false);
+    return Promise.resolve(null);
   };
 
   const outcome = await deliverPush(ROW, h.deps);
@@ -539,7 +544,7 @@ Deno.test("push: a pre-send throw releases the push claim", async () => {
   assert(/statement timeout/.test(err.message), `unexpected error: ${err.message}`);
 
   assertEquals(h.recorded.length, 0, "a throw must not settle the row");
-  assertEquals(h.released, [[ROW.id, "push"]], "the claim outlived the sender");
+  assertEquals(h.released, [[ROW.id, "push", PUSH_STAMP]], "the claim outlived the sender");
 });
 
 Deno.test("push: a recorded outcome does NOT double-release", async () => {

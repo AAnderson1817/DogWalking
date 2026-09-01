@@ -339,6 +339,8 @@ export type Database = {
           push_last_error: string | null;
           email_claimed_at: string | null;
           push_claimed_at: string | null;
+          email_claim_token: string | null;
+          push_claim_token: string | null;
         };
         Insert: {
           id?: string;
@@ -361,6 +363,8 @@ export type Database = {
           push_last_error?: string | null;
           email_claimed_at?: string | null;
           push_claimed_at?: string | null;
+          email_claim_token?: string | null;
+          push_claim_token?: string | null;
         };
         Update: {
           id?: string;
@@ -383,6 +387,8 @@ export type Database = {
           push_last_error?: string | null;
           email_claimed_at?: string | null;
           push_claimed_at?: string | null;
+          email_claim_token?: string | null;
+          push_claim_token?: string | null;
         };
         Relationships: [];
       };
@@ -1280,7 +1286,7 @@ export type Database = {
           p_channel: string;
           p_lease: unknown;
         };
-        Returns: boolean;
+        Returns: string;
       };
       fn_credential_log_block_mutation: {
         Args: Record<string, never>;

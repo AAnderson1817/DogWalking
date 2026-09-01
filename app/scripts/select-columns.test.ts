@@ -224,10 +224,11 @@ describe("every selected column exists", () => {
     const cols = tableColumns();
     expect(cols.size).toBeGreaterThan(20);
     expect([...(cols.get("notifications") ?? [])].sort()).toEqual([
-      "body", "client_id", "created_at", "email_attempts", "email_claimed_at",
-      "email_last_error", "email_sent_at", "email_status", "id", "operator_id",
-      "push_attempts", "push_claimed_at", "push_last_error", "push_sent_at",
-      "push_status", "read_at", "title", "type", "updated_at", "walk_id",
+      "body", "client_id", "created_at", "email_attempts", "email_claim_token",
+      "email_claimed_at", "email_last_error", "email_sent_at", "email_status",
+      "id", "operator_id", "push_attempts", "push_claim_token",
+      "push_claimed_at", "push_last_error", "push_sent_at", "push_status",
+      "read_at", "title", "type", "updated_at", "walk_id",
     ]);
     // The trap this file is named after: the ENUM TYPE 0029 created shares a
     // prefix with the column and is NOT one.

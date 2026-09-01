@@ -520,6 +520,30 @@ is contained, because replacing "RESEND_API_KEY is unset" with "db unreachable"
 tells the operator the wrong thing about why nothing was sent; the lease is
 what makes swallowing it affordable.
 
+**A lease cannot tell a crashed sender from a slow one**, so the claim is
+FENCED. A sender still running when its lease lapses is replaced and both are
+then live; without a token the first one's outcome write is unconditional, so
+it clears the replacement's claim and can mark the row sent while the
+replacement is still delivering — the row's record of what happened becomes
+the losing sender's. `fn_claim_notification_send` therefore returns a uuid
+token rather than a boolean, and every later write by that sender is
+conditioned on it: a fenced-out sender updates zero rows.
+
+A dedicated token column rather than reusing `claimed_at`, which was the first
+design and is subtly wrong in a way a probe caught rather than review: `now()`
+is TRANSACTION-constant, so two claims in one transaction share a timestamp
+exactly. Unreachable in production, where every sender is its own transaction
+— but it makes the property unassertable in `smoke.sql`, which runs in one
+transaction, and a token that collides under the very conditions a test uses
+is one nobody can check.
+
+Fencing protects the WRITE. What stops the second SEND is a **deadline**: the
+Resend request now carries `AbortSignal.timeout`, which the push arm has had
+since PR #85 and this one did not. That is not tidiness — a request with no
+bound can outlive its five-minute lease, at which point a second sender takes
+the channel and two emails go out. The two mitigations close different halves
+and neither is sufficient alone.
+
 **What the claim does not buy.** It excludes CONCURRENT senders. It does not
 make delivery exactly-once across a crash between Resend accepting a message
 and us recording that it did — `deps.record` throwing after a successful send

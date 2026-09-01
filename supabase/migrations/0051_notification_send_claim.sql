@@ -32,7 +32,27 @@
 
 alter table notifications
   add column if not exists email_claimed_at timestamptz,
-  add column if not exists push_claimed_at  timestamptz;
+  add column if not exists push_claimed_at  timestamptz,
+  -- The FENCING TOKEN for each channel's current claim.
+  --
+  -- A lease can only recover a crashed sender by assuming a slow one has died,
+  -- and it cannot tell them apart: a sender still running when its lease
+  -- lapses is replaced, and both are then live (Codex, PR #86). Without a
+  -- token the first one's outcome write is unconditional, so it clears the
+  -- REPLACEMENT's claim and can mark the row sent while the replacement is
+  -- still delivering — the row's record of what happened becomes the losing
+  -- sender's.
+  --
+  -- A dedicated uuid rather than reusing `claimed_at`, which was the first
+  -- design and is subtly wrong in a way a probe caught rather than review:
+  -- `now()` is TRANSACTION-constant, so two claims in one transaction share a
+  -- timestamp exactly. Unreachable in production, where every sender is its
+  -- own transaction — but it makes the property unassertable in `smoke.sql`,
+  -- which runs in one transaction, and a token that collides under the very
+  -- conditions a test uses is one nobody can check. `gen_random_uuid()` is
+  -- volatile, so it differs per row and per call.
+  add column if not exists email_claim_token uuid,
+  add column if not exists push_claim_token  uuid;
 
 comment on column notifications.email_claimed_at is
   'When a sender claimed the email channel (0051). NULL = unclaimed. A claim '
@@ -93,13 +113,13 @@ create function fn_claim_notification_send(
   p_id uuid,
   p_channel text,
   p_lease interval default fn_notification_claim_lease()
-) returns boolean
+) returns uuid
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
-  v_claimed int;
+  v_token uuid;
 begin
   if not fn_is_service_session() then
     raise exception 'fn_claim_notification_send: service role only';
@@ -113,23 +133,29 @@ begin
 
   if p_channel = 'email' then
     update notifications
-       set email_claimed_at = now()
+       set email_claimed_at = now(),
+           email_claim_token = gen_random_uuid()
      where id = p_id
        -- Only the retryable set, so this cannot revive a settled channel.
        -- Deliberately the same two values `fn_notification_backlog` selects
        -- and `isSettled` refuses, rather than a third list that can drift.
        and email_status in ('pending', 'failed')
-       and (email_claimed_at is null or email_claimed_at < now() - p_lease);
+       and (email_claimed_at is null or email_claimed_at < now() - p_lease)
+    returning email_claim_token into v_token;
   else
     update notifications
-       set push_claimed_at = now()
+       set push_claimed_at = now(),
+           push_claim_token = gen_random_uuid()
      where id = p_id
        and push_status in ('pending', 'failed')
-       and (push_claimed_at is null or push_claimed_at < now() - p_lease);
+       and (push_claimed_at is null or push_claimed_at < now() - p_lease)
+    returning push_claim_token into v_token;
   end if;
 
-  get diagnostics v_claimed = row_count;
-  return v_claimed = 1;
+  -- NULL means refused. Every later write by this sender carries the token,
+  -- so a sender that has been fenced out updates zero rows instead of
+  -- clobbering its replacement. See the column comment above.
+  return v_token;
 end $$;
 
 revoke all on function fn_claim_notification_send(uuid, text, interval)

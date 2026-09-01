@@ -55,7 +55,17 @@ export interface SendDeps {
    * mutual exclusion on its own — two invocations both pass it and both
    * deliver. See 0051; the exclusion is the conditional UPDATE inside the RPC.
    */
-  claimSend(id: string, channel: "email" | "push"): Promise<boolean>;
+  /**
+   * Claim one channel for sending, returning the claim's FENCING STAMP —
+   * `null` means another sender holds it (0051).
+   *
+   * A stamp rather than a boolean because a lease cannot tell a crashed
+   * sender from a slow one: a sender still running when its lease lapses is
+   * replaced, and both are then live (Codex, PR #86). Every later write by
+   * this sender carries the stamp, so a sender that has been fenced out
+   * cannot clear the replacement's claim or record an outcome over it.
+   */
+  claimSend(id: string, channel: "email" | "push"): Promise<string | null>;
   /**
    * Give a claim back without recording an outcome (0051).
    *
@@ -67,7 +77,7 @@ export interface SendDeps {
    * whole lease and job-health.yml's drain-then-re-read comes back empty:
    * H17's only alarm, dead again, through the throw path (Codex, PR #86).
    */
-  releaseSend(id: string, channel: "email" | "push"): Promise<void>;
+  releaseSend(id: string, channel: "email" | "push", stamp: string): Promise<void>;
   /** Rows the nightly job counted as still owed an email. */
   backlogIds(): Promise<string[]>;
   getClient(id: string): Promise<{
@@ -107,7 +117,7 @@ export interface SendDeps {
    */
   assertEmailConfigured(): void;
   /** Stamp the outcome. The whole point of H17: no path leaves the row silent. */
-  record(id: string, outcome: Outcome, previousAttempts: number): Promise<void>;
+  record(id: string, outcome: Outcome, previousAttempts: number, stamp: string): Promise<void>;
   renderEmail(business: string, title: string, body: string, unsubscribeUrl: string): string;
   /** The one-click URL for a token, so the handler stays free of env lookups. */
   unsubscribeUrl(token: string): string;
@@ -170,7 +180,7 @@ export async function claimNotificationSend(
   db: { rpc(fn: string, args: Record<string, unknown>): PromiseLike<{ data: unknown; error: unknown }> },
   id: string,
   channel: "email" | "push",
-): Promise<boolean> {
+): Promise<string | null> {
   const { data, error } = await db.rpc("fn_claim_notification_send", {
     p_id: id,
     p_channel: channel,
@@ -180,7 +190,10 @@ export async function claimNotificationSend(
       notification_id: id,
     });
   }
-  return data === true;
+  // The RPC returns the claim's timestamp, or null for a refusal. Anything
+  // that is not a string is not a claim — an RPC that answered nothing must
+  // never read as "we hold it", or two senders both proceed.
+  return typeof data === "string" ? data : null;
 }
 
 /**
@@ -197,14 +210,25 @@ export async function claimNotificationSend(
 export async function releaseNotificationSend(
   db: {
     from(table: string): {
-      update(patch: Record<string, unknown>): { eq(col: string, val: string): PromiseLike<{ error: unknown }> };
+      update(patch: Record<string, unknown>): {
+        eq(col: string, val: string): { eq(col: string, val: string): PromiseLike<{ error: unknown }> };
+      };
     };
   },
   id: string,
   channel: "email" | "push",
+  stamp: string,
 ): Promise<void> {
   const column = channel === "email" ? "email_claimed_at" : "push_claimed_at";
-  const { error } = await db.from("notifications").update({ [column]: null }).eq("id", id);
+  const tokenColumn = channel === "email" ? "email_claim_token" : "push_claim_token";
+  // FENCED on the stamp: a sender whose lease lapsed and was replaced must not
+  // hand back a claim that is no longer its own, or it silently unlocks the
+  // row under a replacement that is still sending.
+  const { error } = await db
+    .from("notifications")
+    .update({ [column]: null, [tokenColumn]: null })
+    .eq("id", id)
+    .eq(tokenColumn, stamp);
   if (error) {
     console.error(
       JSON.stringify({
@@ -250,7 +274,8 @@ export async function deliverNotification(
   // those checks write `skipped`, and two callers racing to write it is
   // harmless, but placing the claim first means every path out of here is
   // covered by one rule instead of most of them.
-  if (!(await deps.claimSend(row.id, "email"))) {
+  const stamp = await deps.claimSend(row.id, "email");
+  if (stamp === null) {
     return { kind: "skipped", reason: "another sender holds the email claim" };
   }
 
@@ -262,7 +287,7 @@ export async function deliverNotification(
   // classification). Anything added between here and the send is covered
   // without its author knowing the rule exists.
   try {
-    return await sendClaimed(row, deps);
+    return await sendClaimed(row, deps, stamp);
   } catch (e) {
     // BEST-EFFORT, and it must not become the error the caller sees: replacing
     // a missing RESEND_API_KEY with "db unreachable" tells the operator the
@@ -270,7 +295,7 @@ export async function deliverNotification(
     // The lease is what makes swallowing this affordable — a claim nobody
     // released is retryable in five minutes rather than never.
     try {
-      await deps.releaseSend(row.id, "email");
+      await deps.releaseSend(row.id, "email", stamp);
     } catch {
       // deliberately ignored; `releaseNotificationSend` logs its own failure
     }
@@ -278,13 +303,17 @@ export async function deliverNotification(
   }
 }
 
-async function sendClaimed(row: NotificationRow, deps: SendDeps): Promise<Outcome> {
+async function sendClaimed(
+  row: NotificationRow,
+  deps: SendDeps,
+  stamp: string,
+): Promise<Outcome> {
   // Terminal, not a failure: an operator-only notification has no client to
   // email, and nothing about that will change. A sweep that treated this as
   // "not yet sent" would retry it every night forever.
   if (!row.client_id || !CLIENT_FACING.has(row.type)) {
     const outcome: Outcome = { kind: "skipped", reason: "not a client-facing notification" };
-    await deps.record(row.id, outcome, row.email_attempts);
+    await deps.record(row.id, outcome, row.email_attempts, stamp);
     return outcome;
   }
 
@@ -297,7 +326,7 @@ async function sendClaimed(row: NotificationRow, deps: SendDeps): Promise<Outcom
   // The reason lands on the row so the operator can see whose email is missing.
   if (!client?.email) {
     const outcome: Outcome = { kind: "skipped", reason: "client has no email address" };
-    await deps.record(row.id, outcome, row.email_attempts);
+    await deps.record(row.id, outcome, row.email_attempts, stamp);
     return outcome;
   }
 
@@ -323,12 +352,12 @@ async function sendClaimed(row: NotificationRow, deps: SendDeps): Promise<Outcom
       error: `suppression lookup failed: ${e instanceof Error ? e.message : "unknown"}`,
       permanent: false,
     };
-    await deps.record(row.id, outcome, row.email_attempts);
+    await deps.record(row.id, outcome, row.email_attempts, stamp);
     return outcome;
   }
   if (suppressed) {
     const outcome: Outcome = { kind: "skipped", reason: "recipient unsubscribed" };
-    await deps.record(row.id, outcome, row.email_attempts);
+    await deps.record(row.id, outcome, row.email_attempts, stamp);
     return outcome;
   }
 
@@ -363,7 +392,7 @@ async function sendClaimed(row: NotificationRow, deps: SendDeps): Promise<Outcom
       error: `resend unreachable: ${e instanceof Error ? e.message : "unknown"}`,
       permanent: false,
     };
-    await deps.record(row.id, outcome, row.email_attempts);
+    await deps.record(row.id, outcome, row.email_attempts, stamp);
     return outcome;
   }
 
@@ -373,12 +402,12 @@ async function sendClaimed(row: NotificationRow, deps: SendDeps): Promise<Outcom
       error: `resend ${result.status}: ${result.detail.slice(0, 300)}`,
       permanent: isPermanentSendFailure(result.status),
     };
-    await deps.record(row.id, outcome, row.email_attempts);
+    await deps.record(row.id, outcome, row.email_attempts, stamp);
     return outcome;
   }
 
   const outcome: Outcome = { kind: "sent" };
-  await deps.record(row.id, outcome, row.email_attempts);
+  await deps.record(row.id, outcome, row.email_attempts, stamp);
   return outcome;
 }
 
@@ -516,18 +545,20 @@ export function recordPatch(outcome: Outcome, previousAttempts: number): Record<
         email_attempts: previousAttempts + 1,
         email_last_error: null,
         email_claimed_at: null,
+        email_claim_token: null,
       };
     case "skipped":
       // No attempt was made, so the count does not move. A skip is a decision,
       // not a try, and inflating attempts here would push terminal rows toward
       // the give-up ceiling for no reason.
-      return { email_status: "skipped", email_last_error: outcome.reason, email_claimed_at: null };
+      return { email_status: "skipped", email_last_error: outcome.reason, email_claimed_at: null, email_claim_token: null };
     case "failed":
       return {
         email_status: "failed",
         email_attempts: previousAttempts + 1,
         email_last_error: outcome.error.slice(0, 500),
         email_claimed_at: null,
+        email_claim_token: null,
       };
   }
 }

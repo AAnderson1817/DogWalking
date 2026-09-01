@@ -22,6 +22,9 @@ import {
   type SendDeps,
 } from "../send-notification/handler.ts";
 
+/** A claim token as the RPC returns one: a uuid, not a timestamp. */
+const STAMP = "3f2a1c4e-8b7d-4a19-9c52-6e0d1b8a7f34";
+
 const ROW: NotificationRow = {
   id: "n-1",
   operator_id: "op-1",
@@ -45,21 +48,22 @@ interface Opts {
   backlog?: string[];
   rows?: Record<string, NotificationRow | null>;
   /** Model losing the 0051 claim race — another sender got there first. */
-  claimSend?: (id: string, channel: "email" | "push") => Promise<boolean>;
+  claimSend?: (id: string, channel: "email" | "push") => Promise<string | null>;
   /** Make `getClient` throw, to reach a pre-send throw that is not a config error. */
   clientLookupThrows?: boolean;
 }
 
 function makeDeps(opts: Opts = {}) {
   const recorded: Array<{ id: string; outcome: Outcome; previousAttempts: number }> = [];
+  const recordedStamps: string[] = [];
   const sentTo: string[] = [];
   const sentHeaders: Array<Record<string, string>> = [];
   const suppressionAsked: Array<[string, string, string]> = [];
-  const released: Array<[string, string]> = [];
+  const released: Array<[string, string, string]> = [];
   const deps: SendDeps = {
-    claimSend: opts.claimSend ?? (() => Promise.resolve(true)),
-    releaseSend: (id, channel) => {
-      released.push([id, channel]);
+    claimSend: opts.claimSend ?? (() => Promise.resolve(STAMP)),
+    releaseSend: (id, channel, stamp) => {
+      released.push([id, channel, stamp]);
       return Promise.resolve();
     },
     getNotification: (id) => Promise.resolve(opts.rows ? (opts.rows[id] ?? null) : ROW),
@@ -89,13 +93,14 @@ function makeDeps(opts: Opts = {}) {
       sentHeaders.push(msg.headers);
       return opts.send ? opts.send() : Promise.resolve({ ok: true as const });
     },
-    record: (id, outcome, previousAttempts) => {
+    record: (id, outcome, previousAttempts, stamp) => {
+      recordedStamps.push(stamp);
       recorded.push({ id, outcome, previousAttempts });
       return Promise.resolve();
     },
     renderEmail: (b, t, _body, url) => `<p>${b}: ${t} <a href="${url}">Unsubscribe</a></p>`,
   };
-  return { deps, recorded, sentTo, sentHeaders, suppressionAsked, released };
+  return { deps, recorded, recordedStamps, sentTo, sentHeaders, suppressionAsked, released };
 }
 
 // ── every path records something ───────────────────────────────────────────
@@ -433,7 +438,7 @@ Deno.test("losing the claim race sends nothing and records nothing", async () =>
   // or an operator POSTing the same notification_id (M1). The claim is the
   // exclusion, so the loser must not send AND must not write an outcome over
   // the winner's.
-  const h = makeDeps({ claimSend: () => Promise.resolve(false) });
+  const h = makeDeps({ claimSend: () => Promise.resolve(null) });
   const outcome = await deliverNotification(ROW, h.deps);
 
   assertEquals(outcome.kind, "skipped");
@@ -444,7 +449,7 @@ Deno.test("losing the claim race sends nothing and records nothing", async () =>
 Deno.test("winning the claim still delivers — the guard is not a wall", async () => {
   // The other direction, and it is not ceremony: a claim that always refused
   // would satisfy the test above while delivering nothing, ever.
-  const h = makeDeps({ claimSend: () => Promise.resolve(true) });
+  const h = makeDeps({ claimSend: () => Promise.resolve(STAMP) });
   const outcome = await deliverNotification(ROW, h.deps);
 
   assertEquals(outcome.kind, "sent");
@@ -462,7 +467,7 @@ Deno.test("the claim is asked for BEFORE any terminal skip is recorded", async (
     email: null, // terminal: no address
     claimSend: (id, channel) => {
       asked.push([id, channel]);
-      return Promise.resolve(false);
+      return Promise.resolve(null);
     },
   });
   const outcome = await deliverNotification(ROW, h.deps);
@@ -492,6 +497,11 @@ Deno.test("recording an outcome RELEASES the claim, on every kind", () => {
       null,
       `${outcome.kind} kept the claim, so the drained row stays invisible to the ops check`,
     );
+    assertEquals(
+      patch.email_claim_token,
+      null,
+      `${outcome.kind} left a stale fencing token on a settled row`,
+    );
   }
 });
 
@@ -506,11 +516,13 @@ Deno.test("the real claim asks the RPC for the named channel and returns its ans
   const db = {
     rpc(fn: string, args: Record<string, unknown>) {
       calls.push([fn, args]);
-      return Promise.resolve({ data: true, error: null });
+      return Promise.resolve({ data: STAMP, error: null });
     },
   };
 
-  assertEquals(await claimNotificationSend(db, "n-9", "push"), true);
+  // The STAMP, not a boolean: it is the fencing token every later write by
+  // this sender carries (0051, Codex PR #86).
+  assertEquals(await claimNotificationSend(db, "n-9", "push"), STAMP);
   assertEquals(calls.length, 1);
   assertEquals(calls[0]?.[0], "fn_claim_notification_send");
   assertEquals(calls[0]?.[1], { p_id: "n-9", p_channel: "push" });
@@ -519,15 +531,22 @@ Deno.test("the real claim asks the RPC for the named channel and returns its ans
   assertFalse("p_lease" in (calls[0]?.[1] ?? {}), "the caller pinned its own lease");
 });
 
-Deno.test("the real claim returns false ONLY for a genuine refusal", async () => {
-  const refused = { rpc: () => Promise.resolve({ data: false, error: null }) };
-  assertEquals(await claimNotificationSend(refused, "n-9", "email"), false);
+Deno.test("the real claim returns null ONLY for a genuine refusal", async () => {
+  const refused = { rpc: () => Promise.resolve({ data: null, error: null }) };
+  assertEquals(await claimNotificationSend(refused, "n-9", "email"), null);
 
-  // Anything that is not a literal `true` is not a claim. A null answer — an
-  // RPC that returned nothing — must not read as "we hold it", or two senders
-  // both proceed.
-  const nothing = { rpc: () => Promise.resolve({ data: null, error: null }) };
-  assertEquals(await claimNotificationSend(nothing, "n-9", "email"), false);
+  // Anything that is not a STRING is not a claim, and the stamp is what every
+  // later write is fenced on — so a non-string answer read as a claim would
+  // produce a sender holding a token no row can match. An RPC that answered
+  // `true` (the pre-fencing shape) must not read as "we hold it".
+  for (const data of [true, 1, {}, []]) {
+    const odd = { rpc: () => Promise.resolve({ data, error: null }) };
+    assertEquals(
+      await claimNotificationSend(odd, "n-9", "email"),
+      null,
+      `a ${typeof data} answer was read as a claim`,
+    );
+  }
 });
 
 Deno.test("the real claim THROWS on a database error, never answers false", async () => {
@@ -571,7 +590,7 @@ Deno.test("a pre-send throw releases the email claim", async () => {
   assert(err instanceof HttpError, `expected HttpError, got ${err.name}`);
 
   assertEquals(h.recorded.length, 0, "a config error must not settle the row");
-  assertEquals(h.released, [[ROW.id, "email"]], "the claim outlived the sender");
+  assertEquals(h.released, [[ROW.id, "email", STAMP]], "the claim outlived the sender");
 });
 
 Deno.test("a pre-send throw that is NOT a config error releases the claim too", async () => {
@@ -588,7 +607,7 @@ Deno.test("a pre-send throw that is NOT a config error releases the claim too", 
   assert(/statement timeout/.test(err.message), `unexpected error: ${err.message}`);
 
   assertEquals(h.recorded.length, 0);
-  assertEquals(h.released, [[ROW.id, "email"]], "the claim outlived the sender");
+  assertEquals(h.released, [[ROW.id, "email", STAMP]], "the claim outlived the sender");
 });
 
 Deno.test("a recorded outcome does NOT double-release", async () => {
@@ -645,5 +664,69 @@ Deno.test("a throw AFTER a successful send also releases — and that is the hon
   assert(/db unreachable/.test(err.message), `unexpected error: ${err.message}`);
 
   assertEquals(h.sentTo.length, 1, "the email did leave");
-  assertEquals(h.released, [[ROW.id, "email"]]);
+  assertEquals(h.released, [[ROW.id, "email", STAMP]]);
+});
+
+// ── fencing: a sender that lost its lease may not write ────────────────────
+
+Deno.test("every outcome write carries the claim's stamp", async () => {
+  // Codex round 2 on PR #86. A lease cannot tell a crashed sender from a slow
+  // one, so a sender still running when its lease lapses is replaced and both
+  // are live. Without the stamp on the write, the first one's outcome update
+  // is unconditional: it clears the REPLACEMENT's claim and records its own
+  // outcome over it, marking the row sent while the replacement is still
+  // delivering. The database enforces this — the write is `.eq(column, stamp)`
+  // — so what is checked here is that the stamp actually reaches it.
+  const h = makeDeps();
+  await deliverNotification(ROW, h.deps);
+  assertEquals(h.recordedStamps, [STAMP], "an outcome was written unfenced");
+});
+
+Deno.test("the stamp written is the one THIS claim returned, not a constant", async () => {
+  // A stamp hard-coded anywhere would fence nothing: every sender would carry
+  // the same token and the replacement's row would still match.
+  const other = "2026-09-01T17:30:00.000Z";
+  const h = makeDeps({ claimSend: () => Promise.resolve(other) });
+  await deliverNotification(ROW, h.deps);
+  assertEquals(h.recordedStamps, [other]);
+});
+
+Deno.test("a terminal skip is fenced too, not only the send path", async () => {
+  // The skips write outcomes as well, so an unfenced one lets a lapsed sender
+  // mark the row `skipped` over a replacement that is mid-send.
+  const h = makeDeps({ email: null });
+  const outcome = await deliverNotification(ROW, h.deps);
+  assertEquals(outcome.kind, "skipped");
+  assertEquals(h.recordedStamps, [STAMP]);
+});
+
+Deno.test("the Resend request carries a deadline below the claim lease", async () => {
+  // Codex round 2 on PR #86. The push arm has had `AbortSignal.timeout` since
+  // PR #85 and this one had nothing — the sibling asymmetry this repository
+  // keeps recording. It is load-bearing beyond tidiness: a send with no bound
+  // can outlive its 5-minute lease, at which point a second sender takes the
+  // channel and both are live. That is the duplicate email send-once exists to
+  // prevent, and no amount of fencing stops it — fencing protects the WRITE,
+  // the deadline is what stops the second SEND.
+  const { makeSendDeps } = await import("../send-notification/deps.ts");
+  const calls: RequestInit[] = [];
+  const fetchImpl = ((_url: string | URL | Request, init?: RequestInit) => {
+    calls.push(init ?? {});
+    return Promise.resolve(new Response("{}", { status: 200 }));
+  }) as unknown as typeof fetch;
+
+  const deps = makeSendDeps(
+    {
+      db: {} as never,
+      apiKey: "re_test_key",
+      operatorId: null,
+      fromEmail: "Sanpo <n@sanpo.test>",
+      unsubscribeBase: "https://x.test/unsubscribe",
+    },
+    fetchImpl,
+  );
+  await deps.sendEmail({ to: "a@b.test", subject: "s", html: "<p>h</p>", headers: {} });
+
+  assertEquals(calls.length, 1);
+  assert(calls[0]?.signal instanceof AbortSignal, "the Resend request has no deadline");
 });
