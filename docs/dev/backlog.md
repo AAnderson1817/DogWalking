@@ -129,6 +129,9 @@ HEAD and none is fixed by that PR, which corrected documents only.
   `ci.yml` step name appears in `SKILL.md` as a gate or in its §13), wire it
   as a gate, and point session-notes at §13. Relabel `ci.yml`'s "Secret-leak
   grep (validate gate 7)" — it is gate 11, and gate 7 is `db reset`.
+- `scripts/gen-definer-catalog.py` still strips comments with the naive regex
+  pair `gen-enum-catalog.py` had to replace (labels containing `--`, nested
+  block comments). Share the state machine rather than copy it.
 - `verify-deployment.test.ts`: assert every function calling `Deno.serve`
   directly (`stripe-webhook`, `platform-webhook` today) has a `contract_for`
   case, so the read-only argument is derived rather than enumerated.
