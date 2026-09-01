@@ -347,9 +347,10 @@ fi
 psql "$CHECK_URL" -v ON_ERROR_STOP=1 -q <<SQL
 do \$$
 declare
-  v_missing text;
-  v_tables  int;
-  v_fns     int;
+  v_missing    text;
+  v_tables     int;
+  v_fns        int;
+  v_overloaded text;
 begin
   select string_agg(x.what, E'\n  ' order by x.what), count(*) filter (where x.kind = 't'),
          count(*) filter (where x.kind = 'f')
@@ -415,16 +416,28 @@ begin
   -- would satisfy each from a different row while PostgREST could resolve
   -- neither (Codex review on PR #85, round 23). Closing that needs per-call
   -- key sets and overload grouping -- machinery for a state this schema cannot
-  -- reach, since NO fn_ function is overloaded. So the precondition is pinned
-  -- here instead of the check being grown: the day someone adds an overload,
-  -- this says so, and whoever adds it decides. pgcrypto's digest/hmac/pgp_*
-  -- are overloaded and are deliberately out of scope -- no handler .rpc()s them.
-  perform 1 from pg_proc p
-    join pg_namespace n on n.oid = p.pronamespace
-   where n.nspname = 'public' and p.proname like 'fn\_%'
-   group by p.proname having count(*) > 1;
-  if found then
-    raise exception 'FAIL: an fn_ function is now overloaded, so the RPC argument-key check is no longer exact -- it matches each key against ANY overload. Give it per-call key sets, or keep fn_ names unique.';
+  -- reach today. So the precondition is pinned here instead of the check being
+  -- grown: the day a called function gains a second signature, this says so,
+  -- and whoever adds it decides.
+  --
+  -- Scoped to the names actually DERIVED, not to `fn\_%` (Codex review on PR
+  -- #85, round 24). The extractor accepts any lowercase RPC name, so a guard
+  -- keyed on our naming convention did not cover its own subject -- one rule
+  -- with two scopes, which is the disagreement check-push-endpoint-parity.sh
+  -- exists for one file over. This way pgcrypto needs no carve-out either:
+  -- digest/hmac/pgp_* are overloaded and simply are not called, and if a
+  -- handler ever calls one, that is precisely when this should fire.
+  select string_agg(d.name, ', ' order by d.name) into v_overloaded
+    from (
+      select x.name
+        from (select distinct split_part(p, '=', 1) as name
+                from unnest(string_to_array('${SENDER_FNS}', ';')) p) x
+        join pg_proc pr on pr.proname = x.name
+        join pg_namespace n on n.oid = pr.pronamespace and n.nspname = 'public'
+       group by x.name having count(*) > 1
+    ) d;
+  if v_overloaded is not null then
+    raise exception 'FAIL: a called RPC is overloaded (%), so the argument-key check is no longer exact -- it matches each key against ANY overload. Give it per-call key sets, or keep called function names unique.', v_overloaded;
   end if;
 
   if v_missing is not null then
