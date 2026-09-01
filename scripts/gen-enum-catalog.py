@@ -26,6 +26,15 @@ is how a generator reports agreement while describing a type that no longer
 exists — the parser-that-sees-nothing defect this repository has fixed in
 `column-grants.test.ts` and `db-push-check.sh`. So does finding zero enums.
 
+What this gate is FOR: catching mistakes in migrations written in good
+faith — a value added and never catalogued, a type dropped and left in the
+spec. It refuses what it cannot read rather than modelling it (a body that
+EXECUTEs anything but a plain literal or a `format()` of one is refused
+outright), and it does not defend against SQL assembled to evade it: a
+`format('%s type …', 'create')` template supplies the verb through a
+placeholder and is not detected. That boundary is stated here so nobody
+mistakes a stricter parser for a proof.
+
 Writes between the markers in docs/spec/01-data-model.md. Idempotent.
 """
 from __future__ import annotations
@@ -111,6 +120,18 @@ DDL_INSIDE = re.compile(r"\b(?:create|alter|drop)\s+type\b", re.I)
 # value and the fix is one reworded sentence.
 BODY_UNREADABLE = re.compile(r"\b(?:create|alter|drop)\s+type\b|\bsearch_path\b", re.I)
 FUNCTION_HEAD = re.compile(r"^\s*create\s+(?:or\s+replace\s+)?(?:function|procedure)\b", re.I)
+# A PL/pgSQL EXECUTE runs whatever its expression evaluates to, and
+# `execute 'create ' || 'type …'` carries no contiguous keyword for
+# BODY_UNREADABLE to see (Codex round thirteen). So the command text of every
+# EXECUTE in a body must be a plain literal or a `format()` whose template is
+# one — the only two forms this repository's migrations use — and anything
+# else (a variable, `||`, `concat()`, a function) is refused as unreadable.
+# Matched on the body's SKELETON, so `grant execute on`, a trigger's
+# `execute function`, and the word inside a string are not EXECUTE statements.
+EXECUTE_STMT = re.compile(
+    r"\bexecute\s+(?!(?:on|function|procedure)\b)(.*?)(?=;|\binto\b|\busing\b|$)", re.I | re.S
+)
+READABLE_COMMAND = re.compile(r"^\s*(?:'x*'|format\s*\(\s*'x*'\s*(?:,.*)?\))\s*$", re.I | re.S)
 
 
 class HiddenDDL(Exception):
@@ -168,8 +189,15 @@ def strip_sql(sql: str, *, inside_dollar: bool = False) -> tuple[str, str]:
 
     def check_body(body: str, where: str) -> None:
         """`body` is the clean text of a DO or function body."""
-        if is_body() and BODY_UNREADABLE.search(body):
+        if not is_body():
+            return
+        if BODY_UNREADABLE.search(body):
             raise HiddenDDL(" ".join(where.split())[:120])
+        body_skel = strip_sql(body, inside_dollar=True)[1]
+        for ex in EXECUTE_STMT.finditer(body_skel):
+            if not READABLE_COMMAND.match(ex.group(1)):
+                raise HiddenDDL("EXECUTE of a command this generator cannot read: "
+                                + " ".join(body[ex.start() : ex.end()].split())[:100])
 
     while i < n:
         c = sql[i]
@@ -391,6 +419,10 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
                 file=sys.stderr,
             )
             sys.exit(1)
+        if skel.strip() and not skel.rstrip().endswith(";"):
+            # PostgreSQL runs a final statement with no `;`; every scan here
+            # keys on one (Codex round thirteen), so EOF is made a terminator.
+            sql, skel = sql + ";", skel + ";"
         refuse_search_path_changes(path, sql, skel)
         # Scan the SKELETON: a literal's contents cannot open, close or name a
         # statement. Spans line up with `sql`, which is where labels are read.
