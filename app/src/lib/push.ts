@@ -125,6 +125,20 @@ export function subscriptionUsesKey(
   } catch {
     return true;
   }
+  // The CONFIGURED key has to be trustworthy before a mismatch against it
+  // means anything (Codex review on PR #85, round 27). A key truncated in the
+  // dashboard is still valid base64url, so it decodes without throwing and
+  // then differs from every real subscription — which would call a WORKING
+  // device stale and unsubscribe it, converting a configuration typo into
+  // lost notifications while the edge function still holds the good key.
+  //
+  // An application-server key is an uncompressed P-256 point: 65 bytes
+  // beginning 0x04. That is a shape check, not a curve check — a 65-byte
+  // non-point still reaches subscribe(), which refuses it loudly, and the
+  // point of this rule is only to stop a malformed setting DESTROYING a
+  // working subscription. Same fail-open reasoning as an unreadable bound
+  // key: no trustworthy evidence of a mismatch is not evidence of one.
+  if (expected.length !== 65 || expected[0] !== 0x04) return true;
   const actual = new Uint8Array(bound as ArrayBuffer);
   if (actual.length !== expected.length) return false;
   for (let i = 0; i < actual.length; i++) {

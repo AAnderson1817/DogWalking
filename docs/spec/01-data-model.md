@@ -174,10 +174,19 @@ subscription exists under different options, so without this the offered action
 would throw), and `reclaimPushDevice()` leaves it alone rather than keeping a
 row alive that no send can reach.
 
-It **fails open**: `options.applicationServerKey` is not readable everywhere,
-and answering "stale" because we could not look would unsubscribe working
-devices on that browser — a browser limitation turned into lost notifications.
-An unreadable key is no evidence of a mismatch, never evidence of one.
+It **fails open**, on both sides of the comparison. `options.applicationServerKey`
+is not readable everywhere, and answering "stale" because we could not look
+would unsubscribe working devices on that browser — a browser limitation turned
+into lost notifications. The **configured** key gets the same treatment: a
+setting truncated in a dashboard is still valid base64url, so it decodes
+without throwing and then differs from every real subscription, which would
+condemn working devices over a typo while the edge function still holds the
+good key. An application-server key is an uncompressed P-256 point — 65 bytes
+beginning `0x04` — and anything else is treated as no evidence rather than as
+evidence of a mismatch. That is a shape check and not a curve check on purpose:
+a 65-byte non-point still reaches `subscribe()`, which refuses it loudly, and
+this rule exists only to stop a malformed setting DESTROYING a working
+subscription. No trustworthy evidence of a mismatch is not evidence of one.
 
 A session can also end WITHOUT the sign-out path — a failed refresh token,
 cleared auth storage, a tab killed mid-session — leaving the browser
