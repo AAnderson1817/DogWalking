@@ -28,7 +28,15 @@ vi.mock("./api", () => ({
   registerPushSubscription: API.registerPushSubscription,
   removePushSubscription: API.removePushSubscription,
 }));
-vi.mock("./env", () => ({ env: { vapidPublicKey: "BHYK" } }));
+// A realistically SHAPED application-server key: 65 bytes beginning 0x04.
+// "BHYK" decoded to 3 bytes, which no browser would ever have subscribed
+// under — a fixture that could not exercise the configured-key validation.
+// vi.hoisted: vi.mock is hoisted above ordinary consts, so the factory
+// cannot close over a plain top-level binding.
+const VAPID = vi.hoisted(
+  () => "BAsSGSAnLjU8Q0pRWF9mbXR7gomQl56lrLO6wcjP1t3k6_L5BQwTGiEoLzY9REtSWWBnbnV8g4qRmJ-mrbS7wsk",
+);
+vi.mock("./env", () => ({ env: { vapidPublicKey: VAPID } }));
 
 beforeEach(() => {
   API.registerPushSubscription.mockReset().mockResolvedValue("id");
@@ -250,7 +258,7 @@ describe("enable/disable failure paths", () => {
     expect(env.subscribed, "bound to a key we no longer sign with").toBe(false);
     expect(pushState(env)).toBe("off");
 
-    const good = fakeSub("https://push.example/new", base64UrlToBytes("BHYK").buffer as ArrayBuffer);
+    const good = fakeSub("https://push.example/new", base64UrlToBytes(VAPID).buffer as ArrayBuffer);
     stubBrowser(good, good);
     expect(pushState(await readPushEnvironment())).toBe("on");
   });
@@ -261,7 +269,7 @@ describe("enable/disable failure paths", () => {
     // would offer the action and the action would throw — the device could
     // never be re-enabled at all.
     const retired = fakeSub("https://push.example/old", new Uint8Array([9, 9, 9]).buffer);
-    const fresh = fakeSub("https://push.example/new", base64UrlToBytes("BHYK").buffer as ArrayBuffer);
+    const fresh = fakeSub("https://push.example/new", base64UrlToBytes(VAPID).buffer as ArrayBuffer);
     stubBrowser(fresh, retired);
     await enablePush();
     expect(retired.unsubscribed, "the stale subscription was left in place").toBe(true);
@@ -269,7 +277,7 @@ describe("enable/disable failure paths", () => {
   });
 
   it("enabling does NOT drop a subscription that still matches", async () => {
-    const good = fakeSub("https://push.example/a", base64UrlToBytes("BHYK").buffer as ArrayBuffer);
+    const good = fakeSub("https://push.example/a", base64UrlToBytes(VAPID).buffer as ArrayBuffer);
     stubBrowser(good, good);
     await enablePush();
     expect(good.unsubscribed, "unsubscribed a perfectly good device").toBe(false);
@@ -503,9 +511,9 @@ describe("reclaiming a device the sign-out path never saw", () => {
 });
 
 describe("a subscription bound to a retired VAPID key", () => {
-  // `env.vapidPublicKey` is mocked as "BHYK" above; base64UrlToBytes("BHYK")
+  // `env.vapidPublicKey` is mocked as "BHYK" above; base64UrlToBytes(VAPID)
   // is the byte sequence a current subscription must carry.
-  const current = () => base64UrlToBytes("BHYK").buffer as ArrayBuffer;
+  const current = () => base64UrlToBytes(VAPID).buffer as ArrayBuffer;
   const other = () => new Uint8Array([9, 9, 9]).buffer as ArrayBuffer;
 
   const withKey = (key: ArrayBuffer | undefined) => ({
@@ -513,24 +521,47 @@ describe("a subscription bound to a retired VAPID key", () => {
   }) as unknown as Pick<PushSubscription, "options">;
 
   it("matches the configured key, and rejects a different one", () => {
-    expect(subscriptionUsesKey(withKey(current()), "BHYK")).toBe(true);
-    expect(subscriptionUsesKey(withKey(other()), "BHYK")).toBe(false);
+    expect(subscriptionUsesKey(withKey(current()), VAPID)).toBe(true);
+    expect(subscriptionUsesKey(withKey(other()), VAPID)).toBe(false);
   });
 
   it("a same-length key that differs in one byte is still a mismatch", () => {
     // A length-only comparison would pass this, and VAPID keys are all the
     // same length — so length alone would never catch a real rotation.
-    const bytes = new Uint8Array(base64UrlToBytes("BHYK"));
+    const bytes = new Uint8Array(base64UrlToBytes(VAPID));
     bytes[0] = (bytes[0]! + 1) & 0xff;
-    expect(subscriptionUsesKey(withKey(bytes.buffer as ArrayBuffer), "BHYK")).toBe(false);
+    expect(subscriptionUsesKey(withKey(bytes.buffer as ArrayBuffer), VAPID)).toBe(false);
   });
 
   it("FAILS OPEN when the bound key cannot be read", () => {
     // `options.applicationServerKey` is not exposed everywhere. Answering
     // "stale" because we could not look would unsubscribe working devices on
     // that browser — a browser limitation turned into lost notifications.
-    expect(subscriptionUsesKey(withKey(undefined), "BHYK")).toBe(true);
-    expect(subscriptionUsesKey({ options: undefined } as never, "BHYK")).toBe(true);
+    expect(subscriptionUsesKey(withKey(undefined), VAPID)).toBe(true);
+    expect(subscriptionUsesKey({ options: undefined } as never, VAPID)).toBe(true);
     expect(subscriptionUsesKey(withKey(other()), "")).toBe(true);
   });
+
+  it("FAILS OPEN when the CONFIGURED key is malformed", () => {
+    // A key truncated in the dashboard is still valid base64url: it decodes
+    // without throwing and then differs from every real subscription. Treating
+    // that as a mismatch would unsubscribe a WORKING device while the edge
+    // function still holds the good key — a typo turned into lost
+    // notifications. Same rule as an unreadable bound key.
+    const good = withKey(current());
+    expect(subscriptionUsesKey(good, VAPID.slice(0, 20)), "truncated").toBe(true);
+    expect(subscriptionUsesKey(good, "BHYK"), "too short to be a P-256 point").toBe(true);
+    const notAPoint = new Uint8Array(base64UrlToBytes(VAPID));
+    notAPoint[0] = 0x03;
+    expect(
+      subscriptionUsesKey(good, bytesToB64UrlForTest(notAPoint)),
+      "65 bytes but not an uncompressed point",
+    ).toBe(true);
+  });
 });
+
+function bytesToB64UrlForTest(b: Uint8Array): string {
+  let bin = "";
+  for (const x of b) bin += String.fromCharCode(x);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
