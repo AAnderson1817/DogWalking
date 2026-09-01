@@ -51,7 +51,18 @@ ADD_VALUE = re.compile(
     re.I | re.S,
 )
 RENAME_VALUE = re.compile(r"^rename\s+value\s+'([^']+)'\s+to\s+'([^']+)'$", re.I | re.S)
-DROP = re.compile(r"drop\s+type\s+(?:if\s+exists\s+)?(?:public\.)?([a-z0-9_]+)\s*;", re.I)
+# Every `drop type` statement, loosely, so an unparsed one can be REFUSED —
+# and the strict shape Postgres allows: a comma list of names, optional
+# CASCADE/RESTRICT. Codex on PR #88 round two: the first regex demanded the
+# semicolon straight after the name, so `drop type payment_status cascade;`
+# matched nothing and the dropped enum stayed in the catalogue while CI
+# reported agreement — a parser that sees nothing reports agreement.
+DROP_ANY = re.compile(r"drop\s+type\b[^;]*;", re.I | re.S)
+DROP = re.compile(
+    r"drop\s+type\s+(?:if\s+exists\s+)?((?:(?:public\.)?[a-z0-9_]+\s*,\s*)*(?:public\.)?[a-z0-9_]+)"
+    r"\s*(?:cascade|restrict)?\s*;",
+    re.I | re.S,
+)
 LABEL = re.compile(r"'([^']*)'")
 
 
@@ -77,13 +88,32 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
     for path in sorted(MIGRATIONS.glob("*.sql")):
         version = path.name.split("_", 1)[0]
         sql = strip_sql_comments(path.read_text())
+        drops = list(DROP.finditer(sql))
+        strict_starts = {m.start() for m in drops}
+        for loose in DROP_ANY.finditer(sql):
+            if loose.start() not in strict_starts:
+                print(
+                    f"FAIL: {path.name}: `{' '.join(loose.group(0).split())}` is a `drop type` "
+                    "this generator cannot read; teach gen-enum-catalog.py the shape rather "
+                    "than letting the catalogue keep a type the migrations dropped",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
         stream = sorted(
             [(m.start(), "create", m) for m in CREATE.finditer(sql)]
             + [(m.start(), "alter", m) for m in ALTER.finditer(sql)]
-            + [(m.start(), "drop", m) for m in DROP.finditer(sql)],
+            + [(m.start(), "drop", m) for m in drops],
             key=lambda item: item[0],
         )
         for _, kind, m in stream:
+            if kind == "drop":
+                for raw in m.group(1).split(","):
+                    name = raw.strip().lower().removeprefix("public.")
+                    values.pop(name, None)
+                    touched.pop(name, None)
+                    if name in order:
+                        order.remove(name)
+                continue
             name = m.group(1).lower()
             if kind == "create":
                 values[name] = LABEL.findall(m.group(2))
@@ -118,11 +148,6 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
                     )
                     sys.exit(1)
                 touched.setdefault(name, []).append(version)
-            else:  # drop
-                values.pop(name, None)
-                touched.pop(name, None)
-                if name in order:
-                    order.remove(name)
     return values, touched, order
 
 
