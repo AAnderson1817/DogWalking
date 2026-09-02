@@ -126,7 +126,14 @@ def unquote(lit: str) -> str:
     return lit.replace("''", "'")
 
 
-DOLLAR_TAG = re.compile(r"[$](?:[A-Za-z_][A-Za-z0-9_]*)?[$]")
+# A tag follows identifier rules, so `$é$` opens a region: an ASCII-only
+# pattern made such a body invisible AS a body — its text was scanned as
+# top-level statements and the EXECUTE it could not read was never asked
+# about, so the gate passed while recording nothing (Codex round
+# twenty-nine; measured, the block runs and creates the type). Everywhere
+# else an unreadable name fails safe by being refused; here it failed open
+# by not being a region at all. Tags accept every identifier character.
+DOLLAR_TAG = re.compile(r"[$](?:[A-Za-z_\u0080-\U0010ffff][A-Za-z0-9_\u0080-\U0010ffff]*)?[$]")
 DDL_INSIDE = re.compile(r"\b(?:create|alter|drop)\s+type\b", re.I)
 # A procedural BODY — a DO block, or a function/procedure definition — may
 # not mention enum DDL or `search_path` anywhere in its CLEAN text: an
