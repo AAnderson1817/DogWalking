@@ -154,13 +154,26 @@ BODY_UNREADABLE = re.compile(
 # plain literal is refused as unreadable. Matched on the CLEAN text, where
 # literal contents are still visible; a doubled quote inside an EXECUTE'd
 # literal is why the quote runs are `'+`.
-BODY_SET_CONFIG = re.compile(
-    # `"set_config"(` is the same call with a quoted name; the closing quote
-    # sits between the name and the paren, which the first pattern missed —
-    # caught by the proof set, not by review.
-    r"\b\"?set_config\"?\s*\(\s*(?:'+\s*(?:search_path|standard_conforming_strings|role|session_authorization)\s*'+|[^'\s)])",
-    re.I,
-)
+# The name must be the ENTIRE first argument — one plain literal followed by
+# the comma. `set_config('ro' || 'le', …)` begins with a literal that is not
+# a guarded name and continues into an expression PostgreSQL evaluates to
+# `role` (measured; Codex round twenty-four), so a pattern that read the
+# first literal and stopped let it through. `"set_config"(` is the same call
+# with a quoted name (the proof set caught the first pattern requiring the
+# name and the paren to be adjacent). The quote runs are `'+` because an
+# EXECUTE'd literal doubles them.
+BODY_SET_CONFIG_CALL = re.compile(r'\b"?set_config"?\s*\(\s*', re.I)
+BODY_SET_CONFIG_NAME = re.compile(r"'+\s*([a-z_][a-z0-9_.]*)\s*'+\s*,", re.I)
+
+
+def body_set_config_unreadable(clean: str) -> bool:
+    """True if any set_config call in a body names a guarded setting, or names
+    its setting with anything but one plain literal."""
+    for call in BODY_SET_CONFIG_CALL.finditer(clean):
+        name = BODY_SET_CONFIG_NAME.match(clean, call.end())
+        if not name or name.group(1).lower() in GUARDED:
+            return True
+    return False
 FUNCTION_HEAD = re.compile(r"^\s*create\s+(?:or\s+replace\s+)?(?:function|procedure)\b", re.I)
 # A PL/pgSQL EXECUTE runs whatever its expression evaluates to, and
 # `execute 'create ' || 'type …'` carries no contiguous keyword for
@@ -240,7 +253,7 @@ def strip_sql(sql: str, *, inside_dollar: bool = False, in_body: bool = False) -
         clean, body_skel = strip_sql(body, in_body=True)
         if BODY_UNREADABLE.search(clean):
             raise HiddenDDL(" ".join(where.split())[:120])
-        if BODY_SET_CONFIG.search(clean):
+        if body_set_config_unreadable(clean):
             raise HiddenDDL("set_config of a guarded (or unreadable) setting in a body: "
                             + " ".join(where.split())[:100])
         for ex in EXECUTE_STMT.finditer(body_skel):
@@ -514,12 +527,15 @@ def set_config_changes(stmt: str, stmt_skel: str) -> str | None:
             if quoted_name(stmt, q) != "set_config":
                 continue  # some other quoted function
         name = LITERAL_AT.match(stmt, call.end())
-        if not name:
-            return "search_path"  # a computed GUC name could be either setting
+        sep = re.compile(r"\s*,\s*").match(stmt, name.end()) if name else None
+        if not name or not sep:
+            # No literal, or a literal that is only the START of the name
+            # (`'ro' || 'le'`, Codex round twenty-four): a computed GUC name
+            # could be any guarded setting.
+            return "search_path"
         guc = unquote(name.group(1)).strip().lower()
         if guc not in GUARDED:
             continue
-        sep = re.compile(r"\s*,\s*").match(stmt, name.end())
         value = LITERAL_AT.match(stmt, sep.end()) if sep else None
         if not value or not re.compile(r"\s*[,)]").match(stmt, value.end()):
             return guc  # not a bare literal: concat(), ||, a function, …
