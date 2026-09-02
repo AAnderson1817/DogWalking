@@ -684,8 +684,25 @@ def qualifier_before(text: str, pos: int) -> str | None:
     while j > 0 and text[j - 1].isspace():
         j -= 1
     if j > 0 and text[j - 1] == '"':
-        k = text.rfind('"', 0, j - 1)
-        return text[k + 1 : j - 1].replace('""', '"') if k >= 0 else ""
+        # Walk back from the closing quote to the OPENING one through any
+        # doubled pair: `"evil""pg_catalog"` is one identifier, `evil"pg_catalog`,
+        # and an rfind for the previous quote stopped at the second half of
+        # the pair and read `pg_catalog` — a custom function called the
+        # built-in, a healthy migration refused (Codex round forty-one). This
+        # reader stays on the intact text because the body scan reads inside
+        # an EXECUTE'd literal, where the skeleton is all mask; a doubled pair
+        # is content, and in valid SQL two quoted names never touch, so the
+        # first quote NOT preceded by another is the opening one.
+        k = j - 1
+        while True:
+            k = text.rfind('"', 0, k)
+            if k < 0:
+                return ""
+            if k > 0 and text[k - 1] == '"':
+                k -= 1
+                continue
+            break
+        return text[k + 1 : j - 1].replace('""', '"')
     k = j
     while k > 0 and IDENT_CHAR.match(text[k - 1]):
         k -= 1
