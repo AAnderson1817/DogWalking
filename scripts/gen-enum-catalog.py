@@ -424,7 +424,28 @@ def strip_sql(sql: str, *, inside_dollar: bool = False, in_body: bool = False) -
                 prev = sql[i - 1] if i > 0 else ""
                 before = sql[i - 2] if i > 1 else ""
                 escapes = prev in "eE" and not (before.isalnum() or before == "_")
-                lit_body = body_position(prefix=1 if escapes else 0)
+                # `U&'…'` is the Unicode-escape string; `U&` is not an identifier
+                # tail, so it is the prefix only at a token boundary.
+                unicode = prev == "&" and before in ("u", "U") and not (
+                    i > 2 and IDENT_CHAR.match(sql[i - 3]) is not None
+                )
+                lit_body = body_position(prefix=2 if unicode else 1 if escapes else 0)
+                if lit_body and (escapes or unicode):
+                    # A routine body written as an escape string is refused by
+                    # name, not read: PostgreSQL decodes the escapes BEFORE running
+                    # it, so `\x63reate type` in an E'…' body and `\0063reate type`
+                    # in a U&'…' body are `create type` to the server (measured, the
+                    # enum appears) and nothing to the mention rule — which is how
+                    # an E body had been "read" since round eight, and how a U& body
+                    # was masked as data (Codex round thirty-eight). No migration in
+                    # the tree writes a body either way; a body this generator
+                    # cannot read is refused whether or not the server would run
+                    # it (the round twenty-eight rule).
+                    raise HiddenDDL(
+                        "a routine body written as an escape string (E'…' or U&'…'), whose "
+                        "escapes PostgreSQL decodes before running it and this generator does "
+                        "not: " + " ".join(statement().split())[:80]
+                    )
                 both(c)
                 lit_start = len(out)
                 i += 1
