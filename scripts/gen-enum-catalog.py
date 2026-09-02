@@ -96,7 +96,14 @@ LABEL = re.compile(LIT)
 # still match, so nothing else would notice (Codex round four). Decoding
 # every literal form PostgreSQL has is more parser than a catalogue of
 # fifteen enums earns; refusing keeps the gate honest.
-ENUM_BODY = re.compile(r"^\s*" + LIT + r"(?:\s*,\s*" + LIT + r")*\s*,?\s*$", re.S)
+# An EMPTY body is legal SQL: `create type phase as enum ()` is the
+# create-then-`add value` workflow, and PostgreSQL accepts it (measured:
+# zero labels after the create, `add value` populates it). The first
+# version of this pattern demanded at least one literal, so a valid
+# migration could not pass the gate — a gate red on a healthy tree, the
+# worst shape available (Codex round sixteen). The whole label list is
+# optional; a bare comma or an empty literal is still refused.
+ENUM_BODY = re.compile(r"^\s*(?:" + LIT + r"(?:\s*,\s*" + LIT + r")*\s*,?)?\s*$", re.S)
 
 
 def unquote(lit: str) -> str:
@@ -580,7 +587,10 @@ def render(values: dict[str, list[str]], touched: dict[str, list[str]], order: l
         created = versions[0]
         later = sorted(set(versions[1:]) - {created})  # altered in its own migration is not a later change
         where = created + "".join(f", +{v}" for v in later)
-        lines.append(f"- `{name}` ({where}): " + " · ".join(code_span(v) for v in values[name]))
+        # An enum created empty and never populated has nothing to list; say so
+        # in a form no value can take (every value is a code span).
+        shown = " · ".join(code_span(v) for v in values[name]) or "(no values)"
+        lines.append(f"- `{name}` ({where}): {shown}")
     lines += ["", END]
     return "\n".join(lines)
 
