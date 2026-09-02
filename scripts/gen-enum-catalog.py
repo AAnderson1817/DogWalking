@@ -100,6 +100,16 @@ IDENT_CHARS = r"A-Za-z0-9_$\u0080-\U0010ffff"
 IDENT_CHAR = re.compile("[" + IDENT_CHARS + "]")
 IDENT_START = r"(?<![" + IDENT_CHARS + r"])"
 IDENT_END = r"(?![" + IDENT_CHARS + r"])"
+# A setting's name may be dotted — `search_path.custom` is a CUSTOM setting
+# sharing nothing but a prefix with `search_path` (measured: stored as its
+# own entry, the real path untouched) — so a guarded name is only the WHOLE
+# name: nothing that continues an identifier, and no dot, may follow it
+# (Codex round thirty-two).
+GUC_END = IDENT_END + r"(?!\s*\.)"
+# The readers below spell a quoted name as ONE alternative, never as an
+# optional quote pair: with `"?name"?` the closing quote is optional, so the
+# engine backtracks to the unclosed `"name` when GUC_END refuses the dot
+# after it (the proof set caught `set "search_path".custom` still refused).
 # Every `drop type` statement, loosely, so an unparsed one can be REFUSED —
 # and the strict shape Postgres allows: a comma list of names, optional
 # CASCADE/RESTRICT. Codex on PR #88 round two: the first regex demanded the
@@ -221,6 +231,12 @@ def body_set_config_unreadable(clean: str) -> bool:
             return True
     return False
 FUNCTION_HEAD = re.compile(r"^\s*create\s+(?:or\s+replace\s+)?(?:function|procedure)" + IDENT_END, re.I)
+# Where a routine's BODY literal begins: a DO block's code follows `do` and an
+# optional LANGUAGE clause; a function or procedure body follows AS. Both are
+# matched against the statement's skeleton so far, so a masked literal
+# before the body (a quoted language name) reads as one token.
+DO_BODY_NEXT = re.compile(r"^\s*do(?:\s+language\s+\S+)?$", re.I)
+AS_LAST = re.compile(IDENT_START + r"as$", re.I)
 # A PL/pgSQL EXECUTE runs whatever its expression evaluates to, and
 # `execute 'create ' || 'type …'` carries no contiguous keyword for
 # BODY_UNREADABLE to see (Codex round thirteen). So the command text of every
@@ -277,6 +293,7 @@ def strip_sql(sql: str, *, inside_dollar: bool = False, in_body: bool = False) -
     depth = 0
     escapes = False  # inside an E'...' literal a backslash escapes the next char
     lit_start = 0  # index in `out` where the current literal's contents begin
+    lit_body = False  # whether the literal being read is a routine body
     last_semi = -1  # index in `skel` of the last top-level `;`
 
     def both(ch: str) -> None:
@@ -291,13 +308,25 @@ def strip_sql(sql: str, *, inside_dollar: bool = False, in_body: bool = False) -
         parts = statement().split()
         return parts[0].lower() if parts else ""
 
-    def is_body() -> bool:
-        return head() == "do" or bool(FUNCTION_HEAD.match(statement()))
+    def body_position(prefix: int = 0) -> bool:
+        """True when a literal opening HERE is the routine's body: a DO block's
+        code (after an optional LANGUAGE clause), or the literal after AS in a
+        CREATE FUNCTION/PROCEDURE. Every other literal in such a statement — a
+        parameter DEFAULT, a SET clause value, a C function's link symbol — is
+        a value, masked as any value is; every one of them was checked as
+        procedural code until Codex round thirty-two, so `default 'create
+        type'` refused a healthy migration (measured: the default comes back
+        as data). `prefix` is the escape-string `E` already in the skeleton
+        ahead of the quote, which is part of the literal, not a token before
+        it (the proof set caught `do E'…'` losing its body)."""
+        before = statement()
+        before = before[: len(before) - prefix].rstrip()
+        if head() == "do":
+            return DO_BODY_NEXT.match(before) is not None
+        return bool(FUNCTION_HEAD.match(before)) and AS_LAST.search(before) is not None
 
     def check_body(body: str, where: str) -> None:
         """`body` is the raw text of a DO or function body, either quoting."""
-        if not is_body():
-            return
         clean, body_skel = strip_sql(body, in_body=True)
         if BODY_UNREADABLE.search(clean):
             raise HiddenDDL(" ".join(where.split())[:120])
@@ -344,7 +373,7 @@ def strip_sql(sql: str, *, inside_dollar: bool = False, in_body: bool = False) -
                     skel.extend("'" + "x" * (len(region) - 2) + "'")
                     i = close + len(tag.group(0))
                     continue
-                if is_body():
+                if body_position():
                     check_body(sql[tag.end() : close], region)
                 else:
                     _, inner_skel = strip_sql(sql[tag.end() : close], inside_dollar=True)
@@ -367,6 +396,7 @@ def strip_sql(sql: str, *, inside_dollar: bool = False, in_body: bool = False) -
                 prev = sql[i - 1] if i > 0 else ""
                 before = sql[i - 2] if i > 1 else ""
                 escapes = prev in "eE" and not (before.isalnum() or before == "_")
+                lit_body = body_position(prefix=1 if escapes else 0)
                 both(c)
                 lit_start = len(out)
                 i += 1
@@ -391,7 +421,8 @@ def strip_sql(sql: str, *, inside_dollar: bool = False, in_body: bool = False) -
                 content = "".join(out[lit_start:])
                 both(c)
                 state = "code"
-                check_body(unquote(content), sql[max(0, i - len(content) - 1) : i + 1])
+                if lit_body:
+                    check_body(unquote(content), sql[max(0, i - len(content) - 1) : i + 1])
             else:
                 out.append(c); skel.append("x")
         elif state == "dq":
@@ -440,7 +471,7 @@ def strip_sql(sql: str, *, inside_dollar: bool = False, in_body: bool = False) -
 # round nine) — one word the first regex did not know, and the whole gate
 # passed a migration that moved every unqualified statement into `x`.
 SET_SEARCH_PATH = re.compile(
-    r"^\s*set\s+(?:local\s+|session\s+)?(?:\"?search_path\"?|schema)\s*(?:=|to)?\s*(.*?)\s*$",
+    r"^\s*set\s+(?:local\s+|session\s+)?(?:\"search_path\"|search_path|schema)" + GUC_END + r"\s*(?:=|to)?\s*(.*?)\s*$",
     re.I | re.S,
 )
 # `set_config` takes expressions, so `set_config('search_path', concat(…),
@@ -472,7 +503,7 @@ SET_SEARCH_PATH = re.compile(
 # `reset`, which return to the cluster default — `on` since PostgreSQL 9.1.
 # `backslash_quote` needs no guard: it applies only while this is off.
 SET_STANDARD_STRINGS = re.compile(
-    r"^\s*set\s+(?:local\s+|session\s+)?\"?standard_conforming_strings\"?\s*(?:=|to)?\s*(.*?)\s*$",
+    r"^\s*set\s+(?:local\s+|session\s+)?(?:\"standard_conforming_strings\"|standard_conforming_strings)" + GUC_END + r"\s*(?:=|to)?\s*(.*?)\s*$",
     re.I | re.S,
 )
 ON_SPELLINGS = {"on", "true", "yes", "1"}
@@ -492,10 +523,11 @@ ON_SPELLINGS = {"on", "true", "yes", "1"}
 # had carried the quoted and `=`/`to` forms since round eleven (Codex round
 # twenty-two). One shape for all four now.
 SET_ROLE = re.compile(
-    r"^\s*set\s+(?:local\s+|session\s+)?\"?role\"?\s*(?:=|" + IDENT_START + r"to" + IDENT_END + r")?\s*(.*?)\s*$", re.I | re.S
+    r"^\s*set\s+(?:local\s+|session\s+)?(?:\"role\"|role)" + GUC_END + r"\s*(?:=|" + IDENT_START + r"to" + IDENT_END + r")?\s*(.*?)\s*$",
+    re.I | re.S,
 )
 SET_SESSION_AUTH = re.compile(
-    r"^\s*set\s+(?:local\s+|session\s+)?(?:session\s+authorization|\"?session_authorization\"?)"
+    r"^\s*set\s+(?:local\s+|session\s+)?(?:session\s+authorization|\"session_authorization\"|session_authorization)" + GUC_END +
     r"\s*(?:=|" + IDENT_START + r"to" + IDENT_END + r")?\s*(.*?)\s*$",
     re.I | re.S,
 )
@@ -528,17 +560,33 @@ ALTER_RESET = re.compile(
 # name is resolved and a value cannot pose as one. A word-grep cannot do
 # this for `role`: `alter role x set role = y` and `alter role x set
 # work_mem = …` both contain the word (Codex round twenty-one).
-ALTER_SET_NAME = re.compile(IDENT_START + r'set\s+(?:("x+")|([a-z_]+)' + IDENT_END + ")", re.I)
+# The WHOLE name, dots included: `search_path.custom` is a custom setting and
+# a reader that stopped at the dot returned `search_path` for it (Codex round
+# thirty-two). Each component is a bare identifier or a masked quoted one.
+GUC_COMPONENT = r'(?:"x+"|[A-Za-z_\u0080-\U0010ffff][' + IDENT_CHARS + r"]*)"
+ALTER_SET_NAME = re.compile(
+    IDENT_START + r"set\s+(" + GUC_COMPONENT + r"(?:\s*\.\s*" + GUC_COMPONENT + r")*)" + IDENT_END, re.I
+)
+GUC_PART = re.compile(r'"x+"|[^\s".]+')
 
 
 def alter_set_target(stmt: str, stmt_skel: str) -> str | None:
+    """The setting an ALTER … SET names, read whole from the skeleton with each
+    quoted component resolved from the intact text and every component
+    lower-cased, since PostgreSQL folds a setting's name (measured: `set
+    "SEARCH_PATH"` moves the path). A dotted name is a custom setting and is
+    never a guarded one, whatever its first component."""
     m = ALTER_SET_NAME.search(stmt_skel)
     if not m:
         return None
-    if m.group(1):
-        q = QUOTED_IDENT.match(stmt_skel, m.start(1))
-        return quoted_name(stmt, q)
-    return m.group(2).lower()
+    parts = []
+    for part in GUC_PART.finditer(m.group(1)):
+        at = m.start(1) + part.start()
+        if part.group(0).startswith('"'):
+            parts.append(quoted_name(stmt, QUOTED_IDENT.match(stmt_skel, at)))
+        else:
+            parts.append(part.group(0).lower())
+    return ".".join(parts)
 
 
 def qualifier_before(text: str, pos: int) -> str | None:
