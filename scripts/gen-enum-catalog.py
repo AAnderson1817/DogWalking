@@ -50,6 +50,11 @@ makes the default path land an unqualified type there with no session
 change to see, and the deploy role is not knowable from a file. So once a
 migration creates or renames a schema, other than `public` itself, every
 later enum statement must be qualified with `public.` or is refused.
+A sixth is SPELLING: an identifier written `U&"…"` names anything by code
+point — a guarded setting, `set_config`, `public`, a schema — and no reader
+here decodes it, so one is refused wherever this generator reads code (a
+statement, a body, an EXECUTE'd command) and left alone inside a string or
+a dollar-quoted value, where it is text.
 
 Writes between the markers in docs/spec/01-data-model.md. Idempotent.
 """
@@ -258,6 +263,11 @@ class HiddenDDL(Exception):
     generator does not read."""
 
 
+class UnreadableIdentifier(HiddenDDL):
+    """An identifier spelled `U&"…"`: code-point escapes this generator does
+    not decode, in text it reads as code."""
+
+
 SKEL_LITERAL = re.compile(r"'x*'")
 
 
@@ -451,6 +461,27 @@ def strip_sql(sql: str, *, inside_dollar: bool = False, in_body: bool = False) -
                 i += 1
                 continue
             if c == '"':
+                # `U&"…"` spells an identifier by CODE POINT, so it can be any
+                # name — `U&"\0073earch_path"`, `U&"\0073et_config"`, `U&"public"`
+                # — and no reader here decodes it. Rounds thirty-five and
+                # thirty-nine refused it at two sites (a schema name, a setting
+                # name); Codex round forty found the third and fourth (a body's
+                # SET, a top-level set_config call), which is the per-site
+                # disease. One rule, at the lexer, for every site: refused
+                # wherever this generator reads CODE — a top-level statement, a
+                # body, an EXECUTE'd command — and left alone inside a
+                # dollar-quoted VALUE, where it is text (a string literal never
+                # reaches this branch). The same token-boundary test as the
+                # U&'…' string above: `xu&"col"` is `xu & "col"`.
+                prev = sql[i - 1] if i > 0 else ""
+                before = sql[i - 2] if i > 1 else ""
+                if (
+                    prev == "&"
+                    and before in ("u", "U")
+                    and not (i > 2 and IDENT_CHAR.match(sql[i - 3]) is not None)
+                    and not inside_dollar
+                ):
+                    raise UnreadableIdentifier(" ".join((statement() + '"…"').split())[:80])
                 state = "dq"
             both(c)
             if c == ";":
@@ -617,20 +648,6 @@ ALTER_SET_NAME = re.compile(
     IDENT_START + r"set\s+(" + GUC_COMPONENT + r"(?:\s*\.\s*" + GUC_COMPONENT + r")*)" + IDENT_END, re.I
 )
 GUC_PART = re.compile(r'"x+"|[^\s".]+')
-# A setting's name may also be spelled `U&"…"` (round thirty-five's alphabet
-# applied to the session guards): `set U&"standard_conforming_strings" =
-# off` turns the lexer's escape handling on under the gate — measured, a
-# later `'line\nfeed'` label stores a real newline, the round seventeen
-# defect exactly — and `alter role … set U&"search_path" = private` stores
-# the path (measured), while every SET reader knew the bare and quoted
-# spellings only and passed both (Codex round thirty-nine). Refused by
-# name for EVERY setting, since the reader cannot tell which one it is; a
-# RESET spelled that way still passes, being a return to the default in
-# either direction. Read off the intact statement at top level (the
-# quotes are intact there) and off the skeleton inside an ALTER, where
-# the `U&` prefix survives the masking.
-UNICODE_SET_NAME = re.compile(r'^\s*set\s+(?:local\s+|session\s+)?u&"', re.I)
-ALTER_UNICODE_SET = re.compile(IDENT_START + r'set\s+u&"', re.I)
 
 
 def alter_set_target(stmt: str, stmt_skel: str) -> str | None:
@@ -758,18 +775,6 @@ def refuse_session_changes(path: pathlib.Path, sql: str, skel: str) -> None:
     for end in [m.start() for m in re.finditer(";", skel)] + [len(skel)]:
         stmt_skel, stmt = skel[start:end], sql[start:end]
         start = end + 1
-        if UNICODE_SET_NAME.match(stmt) or (
-            ALTER_SESSION_DEFAULTS.match(stmt_skel) and ALTER_UNICODE_SET.search(stmt_skel)
-        ):
-            print(
-                f"FAIL: {path.name}: `{' '.join(stmt.split())[:120]}` spells its setting's name as a "
-                "U&\"…\" Unicode-escaped identifier, which this generator does not read, so it "
-                "cannot tell whether one of the settings it depends on (search_path, "
-                "standard_conforming_strings, role, session_authorization) is the one being "
-                "moved; write the name plainly, or teach gen-enum-catalog.py the form",
-                file=sys.stderr,
-            )
-            sys.exit(1)
         which = None
         m = SET_SEARCH_PATH.match(stmt)
         if m and not IS_DEFAULT.match(m.group(1)) and first_schema(m.group(1)) != "public":
@@ -852,15 +857,15 @@ SCHEMA_DDL = re.compile(
 # (Codex round thirty-six). Each name is resolved from the intact text at the
 # same span, the alter_set_target technique: a quoted name is exact
 # (`"Public"` is another schema), a bare one folds.
-# A spelling that is neither is refused rather than decoded: PostgreSQL also
-# writes an identifier as `U&"…"` with code-point escapes, so `U&"public"`
-# and `U&"\0070ublic"` are `public` (measured: the rename moves the enums
-# and the drop takes them), and a reader that knew only bare and quoted
-# names passed the drop and merely shadowed the rename (Codex round
-# thirty-five). Refused for every schema, since the reader cannot tell which
-# one it is — code-point escapes plus a UESCAPE clause are more parser than
-# fifteen enums earn. A `create schema` it cannot read already falls to the
-# conservative branch (a shadow) without decoding.
+# A spelling that is neither is refused rather than decoded. The one
+# PostgreSQL offers is `U&"…"` with code-point escapes, so `U&"public"` and
+# `U&"\0070ublic"` are `public` (measured: the rename moves the enums and
+# the drop takes them), and a reader that knew only bare and quoted names
+# passed the drop and merely shadowed the rename (Codex round thirty-five).
+# Round forty moved that refusal into strip_sql, which refuses the spelling
+# wherever it reads code — it can name a setting or `set_config` as easily
+# as a schema — so what reaches this reader unread is a schema list it
+# cannot split into tokens, and that is refused too rather than guessed at.
 SCHEMA_BARE = re.compile(r"[A-Za-z_\u0080-\U0010ffff][" + IDENT_CHARS + r"]*")
 SCHEMA_RENAME = re.compile(r"^\s*alter\s+schema\s+(.+?)\s+rename" + IDENT_END, re.I | re.S)
 # The drop behaviour is a separate KEYWORD: whitespace before it and an
@@ -878,7 +883,8 @@ SCHEMA_PART = re.compile(r'"x+"|[^\s,]+')
 def schema_name_at(stmt: str, stmt_skel: str, start: int, end: int) -> str | None:
     """The name the skeleton token at [start, end) carries — a quoted one
     exact, a bare one folded — or None for a spelling this reader does not
-    know (`U&"…"`, or anything that is not one token)."""
+    know (anything that is not one token; `U&"…"` is refused by strip_sql
+    before this reads it)."""
     token = stmt_skel[start:end]
     if QUOTED_IDENT.fullmatch(token):
         return stmt[start + 1 : end - 1].replace('""', '"')
@@ -964,6 +970,16 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
         version = path.name.split("_", 1)[0]
         try:
             sql, skel = strip_sql(path.read_text())
+        except UnreadableIdentifier as e:
+            print(
+                f"FAIL: {path.name}: `{e}` carries a U&\"…\" Unicode-escaped identifier, which this "
+                "generator does not read — spelled by code point it can be any name: a guarded "
+                "setting (search_path, standard_conforming_strings, role, session_authorization), "
+                "`set_config`, `public`, a schema; write the name plainly, or teach "
+                "gen-enum-catalog.py the form",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         except HiddenDDL as e:
             print(
                 f"FAIL: {path.name}: enum DDL (or a change of search_path, standard_conforming_strings, "
@@ -1024,8 +1040,8 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
                 if targets is None:
                     print(
                         f"FAIL: {path.name}: `{' '.join(stmt.split())[:120]}` carries a schema name "
-                        "this generator cannot read (a U&\"…\" Unicode-escaped identifier, or another "
-                        "spelling), so it cannot tell whether `public` — the only schema this "
+                        "this generator cannot read (not one plain or quoted token), so it cannot tell "
+                        "whether `public` — the only schema this "
                         "catalogue describes — is the one renamed or dropped; write the name plainly, "
                         "or teach gen-enum-catalog.py the form",
                         file=sys.stderr,
