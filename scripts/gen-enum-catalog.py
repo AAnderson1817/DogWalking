@@ -43,7 +43,13 @@ AUTHORIZATION (the default path is `"$user", public`, so a switched role
 puts an unqualified type into a schema named after that role when one
 exists). A statement that moves any of them off its default is refused by
 name — `set`, `set_config`, `alter database|role|user|system … set`, and any
-mention inside a procedural body — while the reset forms pass.
+mention inside a procedural body — while the reset forms pass. A fifth
+precondition is that `"$user"` never resolves: `create schema authorization
+current_user` (or any schema that happens to carry the deploy role's name)
+makes the default path land an unqualified type there with no session
+change to see, and the deploy role is not knowable from a file. So once a
+migration creates or renames a schema, other than `public` itself, every
+later enum statement must be qualified with `public.` or is refused.
 
 Writes between the markers in docs/spec/01-data-model.md. Idempotent.
 """
@@ -141,7 +147,8 @@ DDL_INSIDE = re.compile(r"\b(?:create|alter|drop)\s+type\b", re.I)
 # way only.
 BODY_UNREADABLE = re.compile(
     r"\b(?:create|alter|drop)\s+type\b|\bsearch_path\b|\bstandard_conforming_strings\b"
-    r"|\bset\s+(?:local\s+|session\s+)?\"?role\b|\bsession\s+authorization\b|\bsession_authorization\b",
+    r"|\bset\s+(?:local\s+|session\s+)?\"?role\b|\bsession\s+authorization\b|\bsession_authorization\b"
+    r"|\b(?:create|alter)\s+schema\b",
     re.I,
 )
 # In a body, `set_config` reaches every guarded setting through a literal the
@@ -613,6 +620,18 @@ def strip_sql_comments(sql: str) -> str:
     return strip_sql(sql)[0]
 
 
+# `create schema authorization current_user` brings into existence the schema
+# the default path names FIRST, so the next unqualified `create type` lands
+# in it — measured — with no role switch for any guard to see; a rename to
+# the role's name does the same (Codex round twenty-five). The deploy role is
+# not knowable from a file, so the rule is structural: after any schema is
+# created or renamed (other than `public` itself), every later enum
+# statement, in that file and every file after it, must name `public.`.
+SCHEMA_DDL = re.compile(r"create\s+schema\b[^;]*;|alter\s+schema\b[^;]*\brename\b[^;]*;", re.I | re.S)
+SCHEMA_PUBLIC = re.compile(r"^create\s+schema\s+(?:if\s+not\s+exists\s+)?public\b", re.I)
+QUALIFIED = re.compile(r"^(?:create|alter)\s+type\s+public\.", re.I)
+
+
 def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
     """-> (name -> values in sort order, name -> migration versions that
     created or changed it, creation order).
@@ -625,6 +644,19 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
     values: dict[str, list[str]] = {}
     touched: dict[str, list[str]] = {}
     order: list[str] = []
+    shadow: str | None = None  # the migration that created or renamed a schema, if any
+
+    def require_public(path: pathlib.Path, stmt: str, qualified: bool) -> None:
+        if shadow is not None and not qualified:
+            print(
+                f"FAIL: {path.name}: `{' '.join(stmt.split())[:120]}` is unqualified, and a schema "
+                f"created or renamed in {shadow} may be the current user's — the default "
+                "search_path names `\"$user\"` before `public` — so this generator can no longer "
+                "tell where the type lands; qualify it with `public.`",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
     for path in sorted(MIGRATIONS.glob("*.sql")):
         version = path.name.split("_", 1)[0]
         try:
@@ -632,7 +664,7 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
         except HiddenDDL as e:
             print(
                 f"FAIL: {path.name}: enum DDL (or a change of search_path, standard_conforming_strings, "
-                f"role or session authorization) inside a DO body, a "
+                f"role or session authorization, or schema DDL) inside a DO body, a "
                 f"function body or a dollar-quoted value, which this generator does not read — "
                 f"`{e}`; lift it to a top-level statement or teach gen-enum-catalog.py the form",
                 file=sys.stderr,
@@ -663,15 +695,21 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
                         file=sys.stderr,
                     )
                     sys.exit(1)
+        schemas = [m for m in SCHEMA_DDL.finditer(skel) if not SCHEMA_PUBLIC.match(skel[m.start() : m.end()])]
         stream = sorted(
             [(m.start(), "create", m) for m in creates]
             + [(m.start(), "alter", m) for m in alters]
-            + [(m.start(), "drop", m) for m in drops],
+            + [(m.start(), "drop", m) for m in drops]
+            + [(m.start(), "schema", m) for m in schemas],
             key=lambda item: item[0],
         )
         for _, kind, m in stream:
+            if kind == "schema":
+                shadow = version
+                continue
             if kind == "drop":
                 for raw in m.group(1).split(","):
+                    require_public(path, sql[m.start() : m.end()], raw.strip().lower().startswith("public."))
                     name = raw.strip().lower().removeprefix("public.")
                     values.pop(name, None)
                     touched.pop(name, None)
@@ -679,6 +717,7 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
                         order.remove(name)
                 continue
             name = m.group(1).lower()
+            require_public(path, sql[m.start() : m.end()], bool(QUALIFIED.match(skel[m.start() : m.end()])))
             if kind == "create":
                 body = sql[m.start(2) : m.end(2)]
                 if not ENUM_BODY.match(body):
