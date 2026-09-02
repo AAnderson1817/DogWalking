@@ -640,7 +640,20 @@ ALTER_SESSION_DEFAULTS = re.compile(r"^\s*alter\s+(?:database|role|user|system)"
 # mention in such a statement, including `from current` (which copies a
 # session state this generator cannot see), is refused by the mention rule.
 ALTER_RESET = re.compile(
-    IDENT_START + r"(?:set\s+(?:\"[^\"]+\"|[a-z_]+)\s*(?:=|to)\s*default|reset\s+(?:all|\"[^\"]+\"|[a-z_]+))\s*$",
+    r"(?:set\s+(?:\"x+\"|[a-z_]+)\s*(?:=|to)\s*default|reset\s+(?:all|\"x+\"|[a-z_]+))\s*$",
+    re.I | re.S,
+)
+# The statement's HEAD — the object kind, its target, an optional `in
+# database` clause — parsed before either clause reader runs. `set` is a
+# non-reserved word, so a role or a database may be NAMED `set`, and a
+# search for the first `set` followed by a name took the target for the
+# keyword and the keyword for a setting called `set`, so `alter role set set
+# search_path = private` passed while `rolconfig` stored the path (measured;
+# Codex round forty-three). A head this reader cannot parse is refused.
+ALTER_TARGET = r'(?:"x+"|[A-Za-z_\u0080-\U0010ffff][' + IDENT_CHARS + r"]*)"
+ALTER_HEAD = re.compile(
+    r"^\s*alter\s+(?:(?:database|role|user)\s+" + ALTER_TARGET
+    + r"(?:\s+in\s+database\s+" + ALTER_TARGET + r")?|system)\s+",
     re.I | re.S,
 )
 # The parameter an ALTER … SET names, read from the skeleton so a quoted
@@ -662,8 +675,11 @@ def alter_set_target(stmt: str, stmt_skel: str) -> str | None:
     quoted component resolved from the intact text and every component
     lower-cased, since PostgreSQL folds a setting's name (measured: `set
     "SEARCH_PATH"` moves the path). A dotted name is a custom setting and is
-    never a guarded one, whatever its first component."""
-    m = ALTER_SET_NAME.search(stmt_skel)
+    never a guarded one, whatever its first component. The clause is read
+    only AFTER the statement's head (ALTER_HEAD), never searched for: a role
+    may be named `set` (Codex round forty-three)."""
+    head = ALTER_HEAD.match(stmt_skel)
+    m = ALTER_SET_NAME.match(stmt_skel, head.end()) if head else None
     if not m:
         return None
     parts = []
@@ -813,10 +829,20 @@ def refuse_session_changes(path: pathlib.Path, sql: str, skel: str) -> None:
         if m and not IS_DEFAULT.match(m.group(1)):
             which = "session_authorization"
         which = set_config_changes(stmt, stmt_skel) or which
-        if ALTER_SESSION_DEFAULTS.match(stmt_skel) and not ALTER_RESET.search(stmt):
-            target = alter_set_target(stmt, stmt_skel)
-            if target in GUARDED:
-                which = target
+        if ALTER_SESSION_DEFAULTS.match(stmt_skel):
+            head = ALTER_HEAD.match(stmt_skel)
+            if not head:
+                print(
+                    f"FAIL: {path.name}: `{' '.join(stmt.split())[:120]}` is an ALTER whose target this "
+                    "generator cannot read, so it cannot tell which clause sets a session default; "
+                    "name the role or database plainly, or teach gen-enum-catalog.py the form",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if not ALTER_RESET.match(stmt_skel, head.end()):
+                target = alter_set_target(stmt, stmt_skel)
+                if target in GUARDED:
+                    which = target
         if which in ("role", "session_authorization"):
             print(
                 f"FAIL: {path.name}: `{' '.join(stmt.split())[:120]}` switches the current role, and "
