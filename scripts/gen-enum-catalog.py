@@ -141,7 +141,7 @@ DDL_INSIDE = re.compile(r"\b(?:create|alter|drop)\s+type\b", re.I)
 # way only.
 BODY_UNREADABLE = re.compile(
     r"\b(?:create|alter|drop)\s+type\b|\bsearch_path\b|\bstandard_conforming_strings\b"
-    r"|\bset\s+(?:local\s+|session\s+)?role\b|\bsession\s+authorization\b|\bsession_authorization\b",
+    r"|\bset\s+(?:local\s+|session\s+)?\"?role\b|\bsession\s+authorization\b|\bsession_authorization\b",
     re.I,
 )
 FUNCTION_HEAD = re.compile(r"^\s*create\s+(?:or\s+replace\s+)?(?:function|procedure)\b", re.I)
@@ -393,11 +393,23 @@ ON_SPELLINGS = {"on", "true", "yes", "1"}
 # Refused on the same allow-list shape as the two settings above: `reset
 # role`, `set role none`, `reset session authorization` and `set session
 # authorization default` pass; any other switch is refused.
-SET_ROLE = re.compile(r"^\s*set\s+(?:local\s+|session\s+)?role\s+(.*?)\s*$", re.I | re.S)
-SET_SESSION_AUTH = re.compile(
-    r"^\s*set\s+(?:local\s+|session\s+)?session\s+authorization\s+(.*?)\s*$", re.I | re.S
+# Both are GUCs as well as special syntax: `set "role" = authenticated` and
+# `set session_authorization = authenticated` switch through the generic
+# form (measured), and the first patterns here matched only the bare `set
+# role` / `set session authorization` spellings while the two settings above
+# had carried the quoted and `=`/`to` forms since round eleven (Codex round
+# twenty-two). One shape for all four now.
+SET_ROLE = re.compile(
+    r"^\s*set\s+(?:local\s+|session\s+)?\"?role\"?\s*(?:=|\bto\b)?\s*(.*?)\s*$", re.I | re.S
 )
-IS_NONE = re.compile(r"^\s*none\s*$", re.I)
+SET_SESSION_AUTH = re.compile(
+    r"^\s*set\s+(?:local\s+|session\s+)?(?:session\s+authorization|\"?session_authorization\"?)"
+    r"\s*(?:=|\bto\b)?\s*(.*?)\s*$",
+    re.I | re.S,
+)
+# `none` resets the role in either syntax, bare or as a literal; DEFAULT is
+# the keyword reset for any setting (IS_DEFAULT).
+IS_NONE = re.compile(r"^\s*(?:none|'none')\s*$", re.I)
 GUARDED = ("search_path", "standard_conforming_strings", "role", "session_authorization")
 # The bare keyword DEFAULT is a reset for any setting — measured, `set
 # search_path to default` reads `"$user", public` afterwards, exactly as
@@ -520,7 +532,7 @@ def refuse_session_changes(path: pathlib.Path, sql: str, skel: str) -> None:
         if m and not IS_DEFAULT.match(m.group(1)) and not keeps_standard_strings(m.group(1)):
             which = "standard_conforming_strings"
         m = SET_ROLE.match(stmt)
-        if m and not IS_NONE.match(m.group(1)):
+        if m and not IS_NONE.match(m.group(1)) and not IS_DEFAULT.match(m.group(1)):
             which = "role"
         m = SET_SESSION_AUTH.match(stmt)
         if m and not IS_DEFAULT.match(m.group(1)):
