@@ -35,6 +35,16 @@ outright), and it does not defend against SQL assembled to evade it: a
 placeholder and is not detected. That boundary is stated here so nobody
 mistakes a stricter parser for a proof.
 
+The gate reads every unqualified `create/alter/drop type` as landing in
+`public`, and that rests on four session states a migration could change:
+`search_path` (must stay public-first), `standard_conforming_strings` (must
+stay on, or literals lex differently), and the current ROLE and SESSION
+AUTHORIZATION (the default path is `"$user", public`, so a switched role
+puts an unqualified type into a schema named after that role when one
+exists). A statement that moves any of them off its default is refused by
+name — `set`, `set_config`, `alter database|role|user|system … set`, and any
+mention inside a procedural body — while the reset forms pass.
+
 Writes between the markers in docs/spec/01-data-model.md. Idempotent.
 """
 from __future__ import annotations
@@ -130,7 +140,9 @@ DDL_INSIDE = re.compile(r"\b(?:create|alter|drop)\s+type\b", re.I)
 # the same session is lexed, and this generator reads literals the standard
 # way only.
 BODY_UNREADABLE = re.compile(
-    r"\b(?:create|alter|drop)\s+type\b|\bsearch_path\b|\bstandard_conforming_strings\b", re.I
+    r"\b(?:create|alter|drop)\s+type\b|\bsearch_path\b|\bstandard_conforming_strings\b"
+    r"|\bset\s+(?:local\s+|session\s+)?role\b|\bsession\s+authorization\b|\bsession_authorization\b",
+    re.I,
 )
 FUNCTION_HEAD = re.compile(r"^\s*create\s+(?:or\s+replace\s+)?(?:function|procedure)\b", re.I)
 # A PL/pgSQL EXECUTE runs whatever its expression evaluates to, and
@@ -372,6 +384,21 @@ SET_STANDARD_STRINGS = re.compile(
     re.I | re.S,
 )
 ON_SPELLINGS = {"on", "true", "yes", "1"}
+# The default search_path is `"$user", public` and `$user` follows the
+# CURRENT role, so `set role authenticated` before an unqualified `create
+# type` lands the type in a schema named `authenticated` when one exists —
+# measured, `pg_type` shows it there — while this generator records it as
+# public (Codex round twenty-one). `set session authorization` moves both
+# session_user and current_user, and both are GUCs `set_config` reaches.
+# Refused on the same allow-list shape as the two settings above: `reset
+# role`, `set role none`, `reset session authorization` and `set session
+# authorization default` pass; any other switch is refused.
+SET_ROLE = re.compile(r"^\s*set\s+(?:local\s+|session\s+)?role\s+(.*?)\s*$", re.I | re.S)
+SET_SESSION_AUTH = re.compile(
+    r"^\s*set\s+(?:local\s+|session\s+)?session\s+authorization\s+(.*?)\s*$", re.I | re.S
+)
+IS_NONE = re.compile(r"^\s*none\s*$", re.I)
+GUARDED = ("search_path", "standard_conforming_strings", "role", "session_authorization")
 # The bare keyword DEFAULT is a reset for any setting — measured, `set
 # search_path to default` reads `"$user", public` afterwards, exactly as
 # `reset` does — so it passes both guards below. Quoted, it is a VALUE: a
@@ -390,10 +417,24 @@ ALTER_SESSION_DEFAULTS = re.compile(r"^\s*alter\s+(?:database|role|user|system)\
 # mention in such a statement, including `from current` (which copies a
 # session state this generator cannot see), is refused by the mention rule.
 ALTER_RESET = re.compile(
-    r"\b(?:set\s+\"?(?:search_path|standard_conforming_strings)\"?\s*(?:=|to)\s*default|"
-    r"reset\s+(?:all|\"?(?:search_path|standard_conforming_strings)\"?))\s*$",
+    r"\b(?:set\s+(?:\"[^\"]+\"|[a-z_]+)\s*(?:=|to)\s*default|reset\s+(?:all|\"[^\"]+\"|[a-z_]+))\s*$",
     re.I | re.S,
 )
+# The parameter an ALTER … SET names, read from the skeleton so a quoted
+# name is resolved and a value cannot pose as one. A word-grep cannot do
+# this for `role`: `alter role x set role = y` and `alter role x set
+# work_mem = …` both contain the word (Codex round twenty-one).
+ALTER_SET_NAME = re.compile(r'\bset\s+(?:("x+")|([a-z_]+)\b)', re.I)
+
+
+def alter_set_target(stmt: str, stmt_skel: str) -> str | None:
+    m = ALTER_SET_NAME.search(stmt_skel)
+    if not m:
+        return None
+    if m.group(1):
+        q = QUOTED_IDENT.match(stmt_skel, m.start(1))
+        return quoted_name(stmt, q)
+    return m.group(2).lower()
 
 
 def keeps_standard_strings(value: str) -> bool:
@@ -428,12 +469,6 @@ def quoted_name(stmt: str, skel_match: "re.Match[str]") -> str:
     return raw[1:-1].replace('""', '"').lower()
 
 
-def mentions_guc(stmt: str, stmt_skel: str, guc: str) -> bool:
-    if re.search(r"\b" + guc + r"\b", stmt_skel, re.I):
-        return True
-    return any(quoted_name(stmt, q) == guc for q in QUOTED_IDENT.finditer(stmt_skel))
-
-
 def set_config_changes(stmt: str, stmt_skel: str) -> str | None:
     """Which setting a `set_config(...)` in this statement might move off the
     value this generator assumes: `search_path` (a computed name, a computed
@@ -450,7 +485,7 @@ def set_config_changes(stmt: str, stmt_skel: str) -> str | None:
         if not name:
             return "search_path"  # a computed GUC name could be either setting
         guc = unquote(name.group(1)).strip().lower()
-        if guc not in ("search_path", "standard_conforming_strings"):
+        if guc not in GUARDED:
             continue
         sep = re.compile(r"\s*,\s*").match(stmt, name.end())
         value = LITERAL_AT.match(stmt, sep.end()) if sep else None
@@ -461,6 +496,10 @@ def set_config_changes(stmt: str, stmt_skel: str) -> str | None:
             return guc
         if guc == "standard_conforming_strings" and not keeps_standard_strings(literal):
             return guc
+        if guc == "role" and not IS_NONE.match(literal):
+            return guc
+        if guc == "session_authorization":
+            return guc  # no literal restores the original session user
     return None
 
 
@@ -480,11 +519,27 @@ def refuse_session_changes(path: pathlib.Path, sql: str, skel: str) -> None:
         m = SET_STANDARD_STRINGS.match(stmt)
         if m and not IS_DEFAULT.match(m.group(1)) and not keeps_standard_strings(m.group(1)):
             which = "standard_conforming_strings"
+        m = SET_ROLE.match(stmt)
+        if m and not IS_NONE.match(m.group(1)):
+            which = "role"
+        m = SET_SESSION_AUTH.match(stmt)
+        if m and not IS_DEFAULT.match(m.group(1)):
+            which = "session_authorization"
         which = set_config_changes(stmt, stmt_skel) or which
         if ALTER_SESSION_DEFAULTS.match(stmt_skel) and not ALTER_RESET.search(stmt):
-            for guc in ("search_path", "standard_conforming_strings"):
-                if mentions_guc(stmt, stmt_skel, guc):
-                    which = guc
+            target = alter_set_target(stmt, stmt_skel)
+            if target in GUARDED:
+                which = target
+        if which in ("role", "session_authorization"):
+            print(
+                f"FAIL: {path.name}: `{' '.join(stmt.split())[:120]}` switches the current role, and "
+                "the default search_path `\"$user\", public` resolves an unqualified "
+                "`create/alter/drop type` into a schema named after the CURRENT role when one "
+                "exists, so this generator can no longer tell where the type lands; keep the "
+                "migration's own role, or qualify the statement with `public.`",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         if which == "standard_conforming_strings":
             print(
                 f"FAIL: {path.name}: `{' '.join(stmt.split())[:120]}` turns "
@@ -528,7 +583,8 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
             sql, skel = strip_sql(path.read_text())
         except HiddenDDL as e:
             print(
-                f"FAIL: {path.name}: enum DDL (or a search_path or standard_conforming_strings change) inside a DO body, a "
+                f"FAIL: {path.name}: enum DDL (or a change of search_path, standard_conforming_strings, "
+                f"role or session authorization) inside a DO body, a "
                 f"function body or a dollar-quoted value, which this generator does not read — "
                 f"`{e}`; lift it to a top-level statement or teach gen-enum-catalog.py the form",
                 file=sys.stderr,
