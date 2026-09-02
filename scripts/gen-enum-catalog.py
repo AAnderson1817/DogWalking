@@ -125,7 +125,13 @@ DDL_INSIDE = re.compile(r"\b(?:create|alter|drop)\s+type\b", re.I)
 # also refuses prose such as `raise notice 'create type is not allowed
 # here'` — a decision reversed from round six — because a body is not a
 # value and the fix is one reworded sentence.
-BODY_UNREADABLE = re.compile(r"\b(?:create|alter|drop)\s+type\b|\bsearch_path\b", re.I)
+# `standard_conforming_strings` joins `search_path` here (Codex round
+# seventeen): a body that turns it off changes how every later literal in
+# the same session is lexed, and this generator reads literals the standard
+# way only.
+BODY_UNREADABLE = re.compile(
+    r"\b(?:create|alter|drop)\s+type\b|\bsearch_path\b|\bstandard_conforming_strings\b", re.I
+)
 FUNCTION_HEAD = re.compile(r"^\s*create\s+(?:or\s+replace\s+)?(?:function|procedure)\b", re.I)
 # A PL/pgSQL EXECUTE runs whatever its expression evaluates to, and
 # `execute 'create ' || 'type …'` carries no contiguous keyword for
@@ -348,10 +354,37 @@ SET_SEARCH_PATH = re.compile(
 # intact text is `set_config`; quoted names are case-sensitive in PostgreSQL,
 # so `"SET_CONFIG"` is a different (nonexistent) function, but refusing it
 # costs nothing and is one less thing to argue about.
+# `standard_conforming_strings = off` makes PostgreSQL read a backslash in an
+# ordinary literal as an escape, so `create type mood as enum ('line\nfeed')`
+# stores a real newline where this generator records a backslash and an `n`
+# — a catalogue blessed with a value the live enum does not hold, and the
+# control-character rule bypassed on the way (Codex round seventeen).
+# Measured: sent as separate statements, the way `psql -f` and `db push`
+# apply a file, the label is nine characters with a newline inside (a
+# `psql -c` string is one message, lexed whole, so a `set` in it does not
+# reach the literal beside it — the first probe refuted the finding falsely).
+# Refused rather than modelled, on the search_path rule: only an explicit
+# `on` passes (any boolean spelling PostgreSQL accepts), plus `default` and
+# `reset`, which return to the cluster default — `on` since PostgreSQL 9.1.
+# `backslash_quote` needs no guard: it applies only while this is off.
+SET_STANDARD_STRINGS = re.compile(
+    r"^\s*set\s+(?:local\s+|session\s+)?\"?standard_conforming_strings\"?\s*(?:=|to)?\s*(.*?)\s*$",
+    re.I | re.S,
+)
+ON_SPELLINGS = {"on", "true", "yes", "1", "default"}
 SET_CONFIG_OPEN = re.compile(r'(?:\bset_config|"x+")\s*\(\s*', re.I)
 QUOTED_IDENT = re.compile(r'"x+"')
 LITERAL_AT = re.compile(LIT)
-ALTER_SESSION_DEFAULTS = re.compile(r"^\s*alter\s+(?:database|role|user)\b", re.I)
+ALTER_SESSION_DEFAULTS = re.compile(r"^\s*alter\s+(?:database|role|user|system)\b", re.I)
+
+
+def keeps_standard_strings(value: str) -> bool:
+    """True only for a SET or set_config value that leaves
+    standard_conforming_strings on; anything else, computed or off, is refused."""
+    value = value.strip()
+    if len(value) >= 2 and value[0] == "'" and value[-1] == "'":
+        value = unquote(value[1:-1])
+    return value.strip().lower() in ON_SPELLINGS
 
 
 def first_schema(value: str) -> str:
@@ -375,16 +408,19 @@ def quoted_name(stmt: str, skel_match: "re.Match[str]") -> str:
     return raw[1:-1].replace('""', '"').lower()
 
 
-def mentions_search_path(stmt: str, stmt_skel: str) -> bool:
-    if re.search(r"\bsearch_path\b", stmt_skel, re.I):
+def mentions_guc(stmt: str, stmt_skel: str, guc: str) -> bool:
+    if re.search(r"\b" + guc + r"\b", stmt_skel, re.I):
         return True
-    return any(quoted_name(stmt, q) == "search_path" for q in QUOTED_IDENT.finditer(stmt_skel))
+    return any(quoted_name(stmt, q) == guc for q in QUOTED_IDENT.finditer(stmt_skel))
 
 
-def set_config_moves_search_path(stmt: str, stmt_skel: str) -> bool:
-    """True if any `set_config(...)` in this statement might move search_path
-    off `public`: a computed name, a computed value, or a literal value that
-    is not public-first. A literal name other than search_path is not ours."""
+def set_config_changes(stmt: str, stmt_skel: str) -> str | None:
+    """Which setting a `set_config(...)` in this statement might move off the
+    value this generator assumes: `search_path` (a computed name, a computed
+    value, or a literal value that is not public-first) or
+    `standard_conforming_strings` (a computed value, or a literal value that
+    is not an `on` spelling). A literal name for any other setting is not
+    ours; a computed name could be either and is reported as search_path."""
     for call in SET_CONFIG_OPEN.finditer(stmt_skel):
         if call.group(0).startswith('"'):
             q = QUOTED_IDENT.match(stmt_skel, call.start())
@@ -392,32 +428,54 @@ def set_config_moves_search_path(stmt: str, stmt_skel: str) -> bool:
                 continue  # some other quoted function
         name = LITERAL_AT.match(stmt, call.end())
         if not name:
-            return True  # a computed GUC name could be search_path
-        if unquote(name.group(1)).strip().lower() != "search_path":
+            return "search_path"  # a computed GUC name could be either setting
+        guc = unquote(name.group(1)).strip().lower()
+        if guc not in ("search_path", "standard_conforming_strings"):
             continue
         sep = re.compile(r"\s*,\s*").match(stmt, name.end())
         value = LITERAL_AT.match(stmt, sep.end()) if sep else None
         if not value or not re.compile(r"\s*[,)]").match(stmt, value.end()):
-            return True  # not a bare literal: concat(), ||, a function, …
-        if first_schema(unquote(value.group(1))) != "public":
-            return True
-    return False
+            return guc  # not a bare literal: concat(), ||, a function, …
+        literal = unquote(value.group(1))
+        if guc == "search_path" and first_schema(literal) != "public":
+            return guc
+        if guc == "standard_conforming_strings" and not keeps_standard_strings(literal):
+            return guc
+    return None
 
 
-def refuse_search_path_changes(path: pathlib.Path, sql: str, skel: str) -> None:
+def refuse_session_changes(path: pathlib.Path, sql: str, skel: str) -> None:
+    """Refuse a top-level statement that moves search_path off public-first or
+    standard_conforming_strings off `on`; each is a session setting under
+    which this generator would read later statements differently from
+    PostgreSQL. `reset` returns to the cluster default and passes."""
     start = 0
     for end in [m.start() for m in re.finditer(";", skel)] + [len(skel)]:
         stmt_skel, stmt = skel[start:end], sql[start:end]
         start = end + 1
-        bad = None
+        which = None
         m = SET_SEARCH_PATH.match(stmt)
         if m and first_schema(m.group(1)) != "public":
+            which = "search_path"
+        m = SET_STANDARD_STRINGS.match(stmt)
+        if m and not keeps_standard_strings(m.group(1)):
+            which = "standard_conforming_strings"
+        which = set_config_changes(stmt, stmt_skel) or which
+        if ALTER_SESSION_DEFAULTS.match(stmt_skel):
+            for guc in ("search_path", "standard_conforming_strings"):
+                if mentions_guc(stmt, stmt_skel, guc):
+                    which = guc
+        if which == "standard_conforming_strings":
+            print(
+                f"FAIL: {path.name}: `{' '.join(stmt.split())[:120]}` turns "
+                "standard_conforming_strings off (or to a value this generator cannot read), so "
+                "PostgreSQL would read a backslash in every later literal as an escape and the "
+                "catalogue would record labels the live enum does not hold; leave it on",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if which is not None:
             bad = stmt
-        if set_config_moves_search_path(stmt, stmt_skel):
-            bad = stmt
-        if ALTER_SESSION_DEFAULTS.match(stmt_skel) and mentions_search_path(stmt, stmt_skel):
-            bad = stmt
-        if bad is not None:
             print(
                 f"FAIL: {path.name}: `{' '.join(bad.split())[:120]}` moves search_path off "
                 "`public`, so this generator can no longer tell which schema an unqualified "
@@ -450,7 +508,7 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
             sql, skel = strip_sql(path.read_text())
         except HiddenDDL as e:
             print(
-                f"FAIL: {path.name}: enum DDL (or a search_path change) inside a DO body, a "
+                f"FAIL: {path.name}: enum DDL (or a search_path or standard_conforming_strings change) inside a DO body, a "
                 f"function body or a dollar-quoted value, which this generator does not read — "
                 f"`{e}`; lift it to a top-level statement or teach gen-enum-catalog.py the form",
                 file=sys.stderr,
@@ -460,7 +518,7 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
             # PostgreSQL runs a final statement with no `;`; every scan here
             # keys on one (Codex round thirteen), so EOF is made a terminator.
             sql, skel = sql + ";", skel + ";"
-        refuse_search_path_changes(path, sql, skel)
+        refuse_session_changes(path, sql, skel)
         # Scan the SKELETON: a literal's contents cannot open, close or name a
         # statement. Spans line up with `sql`, which is where labels are read.
         creates = list(CREATE.finditer(skel))
