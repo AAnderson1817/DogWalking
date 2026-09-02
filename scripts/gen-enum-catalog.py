@@ -433,7 +433,14 @@ def strip_sql(sql: str, *, inside_dollar: bool = False, in_body: bool = False) -
                 state = "sq"
                 prev = sql[i - 1] if i > 0 else ""
                 before = sql[i - 2] if i > 1 else ""
-                escapes = prev in "eE" and not (before.isalnum() or before == "_")
+                # `E'…'` is the escape string only at a token boundary, by the
+                # LEXER's rule: `foo$e'x\'` is the identifier `foo$e` and then an
+                # ordinary string (measured — a typed literal on a domain of
+                # that name), and `isalnum()` — which knows neither `$` nor `€`
+                # — read it as an escape string whose `\'` carried it through
+                # the `;` and swallowed the `create type` after it (Codex round
+                # forty-two; the `U&` test below already asked IDENT_CHAR).
+                escapes = prev in "eE" and not (i > 1 and IDENT_CHAR.match(before) is not None)
                 # `U&'…'` is the Unicode-escape string; `U&` is not an identifier
                 # tail, so it is the prefix only at a token boundary.
                 unicode = prev == "&" and before in ("u", "U") and not (
