@@ -371,7 +371,14 @@ SET_STANDARD_STRINGS = re.compile(
     r"^\s*set\s+(?:local\s+|session\s+)?\"?standard_conforming_strings\"?\s*(?:=|to)?\s*(.*?)\s*$",
     re.I | re.S,
 )
-ON_SPELLINGS = {"on", "true", "yes", "1", "default"}
+ON_SPELLINGS = {"on", "true", "yes", "1"}
+# The bare keyword DEFAULT is a reset for any setting — measured, `set
+# search_path to default` reads `"$user", public` afterwards, exactly as
+# `reset` does — so it passes both guards below. Quoted, it is a VALUE: a
+# schema named default for search_path, and for a boolean an error
+# PostgreSQL raises (`requires a Boolean value`). The first version read the
+# keyword as a schema and refused a healthy migration (Codex round nineteen).
+IS_DEFAULT = re.compile(r"^\s*default\s*$", re.I)
 SET_CONFIG_OPEN = re.compile(r'(?:\bset_config|"x+")\s*\(\s*', re.I)
 QUOTED_IDENT = re.compile(r'"x+"')
 LITERAL_AT = re.compile(LIT)
@@ -380,7 +387,9 @@ ALTER_SESSION_DEFAULTS = re.compile(r"^\s*alter\s+(?:database|role|user|system)\
 
 def keeps_standard_strings(value: str) -> bool:
     """True only for a SET or set_config value that leaves
-    standard_conforming_strings on; anything else, computed or off, is refused."""
+    standard_conforming_strings on; anything else, computed or off, is refused.
+    The bare keyword DEFAULT is handled by the caller (IS_DEFAULT); quoted, it
+    is not a value PostgreSQL accepts for a boolean, and is refused here."""
     value = value.strip()
     if len(value) >= 2 and value[0] == "'" and value[-1] == "'":
         value = unquote(value[1:-1])
@@ -455,10 +464,10 @@ def refuse_session_changes(path: pathlib.Path, sql: str, skel: str) -> None:
         start = end + 1
         which = None
         m = SET_SEARCH_PATH.match(stmt)
-        if m and first_schema(m.group(1)) != "public":
+        if m and not IS_DEFAULT.match(m.group(1)) and first_schema(m.group(1)) != "public":
             which = "search_path"
         m = SET_STANDARD_STRINGS.match(stmt)
-        if m and not keeps_standard_strings(m.group(1)):
+        if m and not IS_DEFAULT.match(m.group(1)) and not keeps_standard_strings(m.group(1)):
             which = "standard_conforming_strings"
         which = set_config_changes(stmt, stmt_skel) or which
         if ALTER_SESSION_DEFAULTS.match(stmt_skel):
