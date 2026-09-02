@@ -816,8 +816,14 @@ SCHEMA_DDL = re.compile(
 # conservative branch (a shadow) without decoding.
 SCHEMA_BARE = re.compile(r"[A-Za-z_\u0080-\U0010ffff][" + IDENT_CHARS + r"]*")
 SCHEMA_RENAME = re.compile(r"^\s*alter\s+schema\s+(.+?)\s+rename" + IDENT_END, re.I | re.S)
+# The drop behaviour is a separate KEYWORD: whitespace before it and an
+# identifier boundary after it, or `drop schema publiccascade` — a legal
+# name (measured) — loses its tail to the keyword and reads as `public`
+# (Codex round thirty-seven; the boundary rule round thirty-one settled for
+# every keyword in this file, skipped by this regex).
 SCHEMA_DROP = re.compile(
-    r"^\s*drop\s+schema\s+(?:if\s+exists\s+)?(.*?)\s*(?:cascade|restrict)?\s*;?\s*$", re.I | re.S
+    r"^\s*drop\s+schema\s+(?:if\s+exists\s+)?(.*?)(?:\s+(?:cascade|restrict)" + IDENT_END + r")?\s*;?\s*$",
+    re.I | re.S,
 )
 SCHEMA_PART = re.compile(r'"x+"|[^\s,]+')
 
