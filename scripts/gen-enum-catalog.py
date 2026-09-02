@@ -797,48 +797,61 @@ SCHEMA_DDL = re.compile(
 # catalogue; Codex round thirty-four) nor drop it (`drop schema public
 # cascade` takes every enum with it — measured). Any other schema may be
 # created, renamed or dropped; a drop creates no shadow.
-SCHEMA_NAME = r'(?:"((?:[^"]|"")+)"|([A-Za-z_\u0080-\U0010ffff][' + IDENT_CHARS + r"]*))"
-SCHEMA_NAME_RE = re.compile(SCHEMA_NAME + r"\s*$")
-# The NAME TEXT of a rename, whatever its spelling, so an unreadable one is
-# refused rather than mistaken for another schema: PostgreSQL also spells an
-# identifier as `U&"…"` with code-point escapes, so `U&"public"` and
-# `U&"\0070ublic"` are `public` (measured: the rename moves the enums and
-# the drop takes them), and a reader that knew only bare and quoted names
-# passed the drop and merely shadowed the rename (Codex round thirty-five).
-# Refused rather than decoded — code-point escapes plus a UESCAPE clause
-# are more parser than fifteen enums earn — for every schema, since the
-# reader cannot tell which one it is. A `create schema` it cannot read
-# already falls to the conservative branch (a shadow) without decoding.
+# Read off the SKELETON, where a quoted identifier is ONE masked token that
+# can hold no comma, no space and no keyword: `drop schema "tenant,archive"`
+# was split at the comma inside the name and `alter schema "tenant rename
+# archive" rename …` was cut at the word inside it — both legal (measured),
+# both refused as unreadable while the names were read off the intact text
+# (Codex round thirty-six). Each name is resolved from the intact text at the
+# same span, the alter_set_target technique: a quoted name is exact
+# (`"Public"` is another schema), a bare one folds.
+# A spelling that is neither is refused rather than decoded: PostgreSQL also
+# writes an identifier as `U&"…"` with code-point escapes, so `U&"public"`
+# and `U&"\0070ublic"` are `public` (measured: the rename moves the enums
+# and the drop takes them), and a reader that knew only bare and quoted
+# names passed the drop and merely shadowed the rename (Codex round
+# thirty-five). Refused for every schema, since the reader cannot tell which
+# one it is — code-point escapes plus a UESCAPE clause are more parser than
+# fifteen enums earn. A `create schema` it cannot read already falls to the
+# conservative branch (a shadow) without decoding.
+SCHEMA_BARE = re.compile(r"[A-Za-z_\u0080-\U0010ffff][" + IDENT_CHARS + r"]*")
 SCHEMA_RENAME = re.compile(r"^\s*alter\s+schema\s+(.+?)\s+rename" + IDENT_END, re.I | re.S)
 SCHEMA_DROP = re.compile(
     r"^\s*drop\s+schema\s+(?:if\s+exists\s+)?(.*?)\s*(?:cascade|restrict)?\s*;?\s*$", re.I | re.S
 )
+SCHEMA_PART = re.compile(r'"x+"|[^\s,]+')
 
 
-def names_public(m: "re.Match[str]") -> bool:
-    """A quoted name is exact (`"Public"` is another schema); a bare one folds."""
-    quoted, bare = m.group(1), m.group(2)
-    return quoted.replace('""', '"') == "public" if quoted is not None else bare.lower() == "public"
+def schema_name_at(stmt: str, stmt_skel: str, start: int, end: int) -> str | None:
+    """The name the skeleton token at [start, end) carries — a quoted one
+    exact, a bare one folded — or None for a spelling this reader does not
+    know (`U&"…"`, or anything that is not one token)."""
+    token = stmt_skel[start:end]
+    if QUOTED_IDENT.fullmatch(token):
+        return stmt[start + 1 : end - 1].replace('""', '"')
+    if SCHEMA_BARE.fullmatch(token):
+        return token.lower()
+    return None
 
 
-def schema_targets(stmt: str) -> list[str] | None | bool:
-    """The schema names an `alter schema … rename` or `drop schema` names,
-    read from the intact statement (bare names folded, quoted ones exact),
-    or None when one of them is a spelling this generator does not read;
-    False when the statement is neither (a `create schema`)."""
-    m = SCHEMA_RENAME.match(stmt)
-    parts = [m.group(1)] if m else None
-    if parts is None:
-        m = SCHEMA_DROP.match(stmt)
+def schema_targets(stmt: str, stmt_skel: str) -> list[str] | None | bool:
+    """The schema names an `alter schema … rename` or `drop schema` names, or
+    None when one of them is a spelling this generator does not read; False
+    when the statement is neither (a `create schema`)."""
+    m = SCHEMA_RENAME.match(stmt_skel)
+    if m:
+        spans = [(m.start(1), m.end(1))]
+    else:
+        m = SCHEMA_DROP.match(stmt_skel)
         if not m:
             return False
-        parts = m.group(1).split(",")
+        spans = [(m.start(1) + p.start(), m.start(1) + p.end()) for p in SCHEMA_PART.finditer(m.group(1))]
     names: list[str] = []
-    for part in parts:
-        n = SCHEMA_NAME_RE.match(part.strip())
-        if not n:
+    for lo, hi in spans:
+        name = schema_name_at(stmt, stmt_skel, lo, hi)
+        if name is None:
             return None
-        names.append("public" if names_public(n) else (n.group(1) or n.group(2).lower()))
+        names.append(name)
     return names
 # A SQL-standard routine body (`create procedure … language sql begin atomic
 # … end`, PostgreSQL 14+) has no quotes around it, so its statements sit at
@@ -953,8 +966,8 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
         )
         for _, kind, m in stream:
             if kind == "schema":
-                stmt = sql[m.start() : m.end()]
-                targets = schema_targets(stmt)
+                stmt, stmt_skel = sql[m.start() : m.end()], skel[m.start() : m.end()]
+                targets = schema_targets(stmt, stmt_skel)
                 if targets is None:
                     print(
                         f"FAIL: {path.name}: `{' '.join(stmt.split())[:120]}` carries a schema name "
@@ -974,7 +987,7 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
                         file=sys.stderr,
                     )
                     sys.exit(1)
-                if SCHEMA_DROP.match(stmt):
+                if SCHEMA_DROP.match(stmt_skel):
                     continue  # dropping another schema creates no shadow
                 shadow = version
                 continue
