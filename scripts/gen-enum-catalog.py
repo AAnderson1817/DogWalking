@@ -799,7 +799,17 @@ SCHEMA_DDL = re.compile(
 # created, renamed or dropped; a drop creates no shadow.
 SCHEMA_NAME = r'(?:"((?:[^"]|"")+)"|([A-Za-z_\u0080-\U0010ffff][' + IDENT_CHARS + r"]*))"
 SCHEMA_NAME_RE = re.compile(SCHEMA_NAME + r"\s*$")
-SCHEMA_RENAME = re.compile(r"^\s*alter\s+schema\s+" + SCHEMA_NAME + r"\s+rename" + IDENT_END, re.I | re.S)
+# The NAME TEXT of a rename, whatever its spelling, so an unreadable one is
+# refused rather than mistaken for another schema: PostgreSQL also spells an
+# identifier as `U&"…"` with code-point escapes, so `U&"public"` and
+# `U&"\0070ublic"` are `public` (measured: the rename moves the enums and
+# the drop takes them), and a reader that knew only bare and quoted names
+# passed the drop and merely shadowed the rename (Codex round thirty-five).
+# Refused rather than decoded — code-point escapes plus a UESCAPE clause
+# are more parser than fifteen enums earn — for every schema, since the
+# reader cannot tell which one it is. A `create schema` it cannot read
+# already falls to the conservative branch (a shadow) without decoding.
+SCHEMA_RENAME = re.compile(r"^\s*alter\s+schema\s+(.+?)\s+rename" + IDENT_END, re.I | re.S)
 SCHEMA_DROP = re.compile(
     r"^\s*drop\s+schema\s+(?:if\s+exists\s+)?(.*?)\s*(?:cascade|restrict)?\s*;?\s*$", re.I | re.S
 )
@@ -811,20 +821,25 @@ def names_public(m: "re.Match[str]") -> bool:
     return quoted.replace('""', '"') == "public" if quoted is not None else bare.lower() == "public"
 
 
-def touches_public_schema(stmt: str) -> bool:
-    """True for `alter schema public rename …` and for a `drop schema` naming
-    `public` among its targets, read from the intact statement."""
+def schema_targets(stmt: str) -> list[str] | None | bool:
+    """The schema names an `alter schema … rename` or `drop schema` names,
+    read from the intact statement (bare names folded, quoted ones exact),
+    or None when one of them is a spelling this generator does not read;
+    False when the statement is neither (a `create schema`)."""
     m = SCHEMA_RENAME.match(stmt)
-    if m:
-        return names_public(m)
-    m = SCHEMA_DROP.match(stmt)
-    if not m:
-        return False
-    for part in m.group(1).split(","):
+    parts = [m.group(1)] if m else None
+    if parts is None:
+        m = SCHEMA_DROP.match(stmt)
+        if not m:
+            return False
+        parts = m.group(1).split(",")
+    names: list[str] = []
+    for part in parts:
         n = SCHEMA_NAME_RE.match(part.strip())
-        if n and names_public(n):
-            return True
-    return False
+        if not n:
+            return None
+        names.append("public" if names_public(n) else (n.group(1) or n.group(2).lower()))
+    return names
 # A SQL-standard routine body (`create procedure … language sql begin atomic
 # … end`, PostgreSQL 14+) has no quotes around it, so its statements sit at
 # top level for every scan here and its own semicolons split it, so an enum
@@ -939,7 +954,18 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
         for _, kind, m in stream:
             if kind == "schema":
                 stmt = sql[m.start() : m.end()]
-                if touches_public_schema(stmt):
+                targets = schema_targets(stmt)
+                if targets is None:
+                    print(
+                        f"FAIL: {path.name}: `{' '.join(stmt.split())[:120]}` carries a schema name "
+                        "this generator cannot read (a U&\"…\" Unicode-escaped identifier, or another "
+                        "spelling), so it cannot tell whether `public` — the only schema this "
+                        "catalogue describes — is the one renamed or dropped; write the name plainly, "
+                        "or teach gen-enum-catalog.py the form",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                if targets and "public" in targets:
                     print(
                         f"FAIL: {path.name}: `{' '.join(stmt.split())[:120]}` renames or drops "
                         "`public`, the only schema this catalogue describes, so every enum it "
