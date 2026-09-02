@@ -189,7 +189,7 @@ BODY_UNREADABLE = re.compile(
             r"set\s+(?:local\s+|session\s+)?\"?role",
             r"session\s+authorization",
             r"session_authorization",
-            r"(?:create|alter)\s+schema",
+            r"(?:create|alter|drop)\s+schema",
         )
     ),
     re.I,
@@ -785,9 +785,46 @@ def strip_sql_comments(sql: str) -> str:
 # statement, in that file and every file after it, must name `public.`.
 SCHEMA_DDL = re.compile(
     r"create\s+schema" + IDENT_END + r"[^;]*;"
-    r"|alter\s+schema" + IDENT_END + r"[^;]*" + IDENT_START + r"rename" + IDENT_END + r"[^;]*;",
+    r"|alter\s+schema" + IDENT_END + r"[^;]*" + IDENT_START + r"rename" + IDENT_END + r"[^;]*;"
+    r"|drop\s+schema" + IDENT_END + r"[^;]*;",
     re.I | re.S,
 )
+# `public` is the only schema this catalogue describes, so a migration may
+# neither rename it (`alter schema public rename to old_public; create
+# schema public;` moves every catalogued enum into `old_public` — measured,
+# none left in `public` — while the shipped generator only armed the
+# qualification guard and, with no later enum statement, blessed the
+# catalogue; Codex round thirty-four) nor drop it (`drop schema public
+# cascade` takes every enum with it — measured). Any other schema may be
+# created, renamed or dropped; a drop creates no shadow.
+SCHEMA_NAME = r'(?:"((?:[^"]|"")+)"|([A-Za-z_\u0080-\U0010ffff][' + IDENT_CHARS + r"]*))"
+SCHEMA_NAME_RE = re.compile(SCHEMA_NAME + r"\s*$")
+SCHEMA_RENAME = re.compile(r"^\s*alter\s+schema\s+" + SCHEMA_NAME + r"\s+rename" + IDENT_END, re.I | re.S)
+SCHEMA_DROP = re.compile(
+    r"^\s*drop\s+schema\s+(?:if\s+exists\s+)?(.*?)\s*(?:cascade|restrict)?\s*;?\s*$", re.I | re.S
+)
+
+
+def names_public(m: "re.Match[str]") -> bool:
+    """A quoted name is exact (`"Public"` is another schema); a bare one folds."""
+    quoted, bare = m.group(1), m.group(2)
+    return quoted.replace('""', '"') == "public" if quoted is not None else bare.lower() == "public"
+
+
+def touches_public_schema(stmt: str) -> bool:
+    """True for `alter schema public rename …` and for a `drop schema` naming
+    `public` among its targets, read from the intact statement."""
+    m = SCHEMA_RENAME.match(stmt)
+    if m:
+        return names_public(m)
+    m = SCHEMA_DROP.match(stmt)
+    if not m:
+        return False
+    for part in m.group(1).split(","):
+        n = SCHEMA_NAME_RE.match(part.strip())
+        if n and names_public(n):
+            return True
+    return False
 # A SQL-standard routine body (`create procedure … language sql begin atomic
 # … end`, PostgreSQL 14+) has no quotes around it, so its statements sit at
 # top level for every scan here and its own semicolons split it, so an enum
@@ -901,6 +938,18 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
         )
         for _, kind, m in stream:
             if kind == "schema":
+                stmt = sql[m.start() : m.end()]
+                if touches_public_schema(stmt):
+                    print(
+                        f"FAIL: {path.name}: `{' '.join(stmt.split())[:120]}` renames or drops "
+                        "`public`, the only schema this catalogue describes, so every enum it "
+                        "records would no longer be where the catalogue says; keep `public` in "
+                        "place, or teach gen-enum-catalog.py to follow it",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                if SCHEMA_DROP.match(stmt):
+                    continue  # dropping another schema creates no shadow
                 shadow = version
                 continue
             if kind == "drop":
