@@ -258,6 +258,25 @@ class HiddenDDL(Exception):
     generator does not read."""
 
 
+SKEL_LITERAL = re.compile(r"'x*'")
+
+
+def check_command(command: str, where: str) -> None:
+    """An EXECUTE'd command is CODE: PostgreSQL parses the dynamic command as
+    SQL, comments and all, so `execute 'create /*gap*/ type …'` creates the
+    enum while the enclosing body's clean text — which keeps comments INSIDE
+    literals, a literal being data — shows no contiguous `create type`
+    (Codex round thirty-three; measured). So the command is read as a
+    migration fragment of its own: the top-level scanner runs over it (a DO
+    or function body inside it is checked as a body, a dollar-quoted value
+    inside it is scanned — both recursively), and its own clean text is
+    held to the body rules."""
+    clean, _ = strip_sql(command)
+    if BODY_UNREADABLE.search(clean) or body_set_config_unreadable(clean):
+        raise HiddenDDL("an EXECUTE'd command carrying enum DDL or a guarded session change: "
+                        + " ".join(where.split())[:100])
+
+
 def strip_sql(sql: str, *, inside_dollar: bool = False, in_body: bool = False) -> tuple[str, str]:
     """-> (clean, skeleton). Both have `--` and /* */ comments removed —
     OUTSIDE string literals and quoted identifiers, with nesting, and with a
@@ -337,6 +356,15 @@ def strip_sql(sql: str, *, inside_dollar: bool = False, in_body: bool = False) -
             if not READABLE_COMMAND.match(ex.group(1)):
                 raise HiddenDDL("EXECUTE of a command this generator cannot read: "
                                 + " ".join(clean[ex.start() : ex.end()].split())[:100])
+            # Every literal in the command expression — the command, a format()
+            # template, its arguments (%s and %L are not told apart) — is a
+            # fragment of its own (check_command). A nested dollar string's
+            # tags are blanked in `clean` with its content verbatim; a
+            # single-quoted literal doubles its quotes.
+            for lit in SKEL_LITERAL.finditer(ex.group(1)):
+                a, b = ex.start(1) + lit.start(), ex.start(1) + lit.end()
+                raw = clean[a + 1 : b - 1]
+                check_command(unquote(raw) if clean[a] == "'" else raw, clean[a:b])
 
     while i < n:
         c = sql[i]
