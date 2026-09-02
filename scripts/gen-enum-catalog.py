@@ -617,6 +617,20 @@ ALTER_SET_NAME = re.compile(
     IDENT_START + r"set\s+(" + GUC_COMPONENT + r"(?:\s*\.\s*" + GUC_COMPONENT + r")*)" + IDENT_END, re.I
 )
 GUC_PART = re.compile(r'"x+"|[^\s".]+')
+# A setting's name may also be spelled `U&"…"` (round thirty-five's alphabet
+# applied to the session guards): `set U&"standard_conforming_strings" =
+# off` turns the lexer's escape handling on under the gate — measured, a
+# later `'line\nfeed'` label stores a real newline, the round seventeen
+# defect exactly — and `alter role … set U&"search_path" = private` stores
+# the path (measured), while every SET reader knew the bare and quoted
+# spellings only and passed both (Codex round thirty-nine). Refused by
+# name for EVERY setting, since the reader cannot tell which one it is; a
+# RESET spelled that way still passes, being a return to the default in
+# either direction. Read off the intact statement at top level (the
+# quotes are intact there) and off the skeleton inside an ALTER, where
+# the `U&` prefix survives the masking.
+UNICODE_SET_NAME = re.compile(r'^\s*set\s+(?:local\s+|session\s+)?u&"', re.I)
+ALTER_UNICODE_SET = re.compile(IDENT_START + r'set\s+u&"', re.I)
 
 
 def alter_set_target(stmt: str, stmt_skel: str) -> str | None:
@@ -744,6 +758,18 @@ def refuse_session_changes(path: pathlib.Path, sql: str, skel: str) -> None:
     for end in [m.start() for m in re.finditer(";", skel)] + [len(skel)]:
         stmt_skel, stmt = skel[start:end], sql[start:end]
         start = end + 1
+        if UNICODE_SET_NAME.match(stmt) or (
+            ALTER_SESSION_DEFAULTS.match(stmt_skel) and ALTER_UNICODE_SET.search(stmt_skel)
+        ):
+            print(
+                f"FAIL: {path.name}: `{' '.join(stmt.split())[:120]}` spells its setting's name as a "
+                "U&\"…\" Unicode-escaped identifier, which this generator does not read, so it "
+                "cannot tell whether one of the settings it depends on (search_path, "
+                "standard_conforming_strings, role, session_authorization) is the one being "
+                "moved; write the name plainly, or teach gen-enum-catalog.py the form",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         which = None
         m = SET_SEARCH_PATH.match(stmt)
         if m and not IS_DEFAULT.match(m.group(1)) and first_schema(m.group(1)) != "public":
