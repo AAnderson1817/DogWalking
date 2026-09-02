@@ -636,8 +636,12 @@ SCHEMA_DDL = re.compile(r"create\s+schema\b[^;]*;|alter\s+schema\b[^;]*\brename\
 # Matched on the INTACT text, not the skeleton, which masks a quoted name to
 # `"xxxxxx"` (the proof set caught the first version reading the skeleton).
 # The unquoted form folds case; the quoted form is exact, so `"PUBLIC"` counts.
+# PostgreSQL's lexer treats EVERY non-ASCII byte as an identifier letter, so
+# `create schema publicé` is legal (measured) and an ASCII-only lookahead
+# exempted it (Codex round twenty-seven); the lookahead refuses any
+# identifier character now.
 SCHEMA_PUBLIC = re.compile(
-    r'^(?i:create\s+schema\s+(?:if\s+not\s+exists\s+)?)(?:(?i:public)(?![A-Za-z0-9_$])|"public")'
+    r'^(?i:create\s+schema\s+(?:if\s+not\s+exists\s+)?)(?:(?i:public)(?![A-Za-z0-9_$\u0080-\U0010ffff])|"public")'
 )
 QUALIFIED = re.compile(r"^(?:create|alter)\s+type\s+public\.", re.I)
 
