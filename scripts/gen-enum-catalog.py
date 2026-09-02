@@ -144,6 +144,23 @@ BODY_UNREADABLE = re.compile(
     r"|\bset\s+(?:local\s+|session\s+)?\"?role\b|\bsession\s+authorization\b|\bsession_authorization\b",
     re.I,
 )
+# In a body, `set_config` reaches every guarded setting through a literal the
+# word rules above cannot see — `perform set_config('role', 'authenticated',
+# false)` carries no `set role` phrase, and the switch persists past the
+# block (measured; Codex round twenty-three) — and an EXECUTE'd command or a
+# `format()` template carries the same call with doubled quotes or a `%L`.
+# So a body may not call `set_config` on a guarded name at all, whatever the
+# value (a body is not a value), and a `set_config` whose name is not a
+# plain literal is refused as unreadable. Matched on the CLEAN text, where
+# literal contents are still visible; a doubled quote inside an EXECUTE'd
+# literal is why the quote runs are `'+`.
+BODY_SET_CONFIG = re.compile(
+    # `"set_config"(` is the same call with a quoted name; the closing quote
+    # sits between the name and the paren, which the first pattern missed —
+    # caught by the proof set, not by review.
+    r"\b\"?set_config\"?\s*\(\s*(?:'+\s*(?:search_path|standard_conforming_strings|role|session_authorization)\s*'+|[^'\s)])",
+    re.I,
+)
 FUNCTION_HEAD = re.compile(r"^\s*create\s+(?:or\s+replace\s+)?(?:function|procedure)\b", re.I)
 # A PL/pgSQL EXECUTE runs whatever its expression evaluates to, and
 # `execute 'create ' || 'type …'` carries no contiguous keyword for
@@ -223,6 +240,9 @@ def strip_sql(sql: str, *, inside_dollar: bool = False, in_body: bool = False) -
         clean, body_skel = strip_sql(body, in_body=True)
         if BODY_UNREADABLE.search(clean):
             raise HiddenDDL(" ".join(where.split())[:120])
+        if BODY_SET_CONFIG.search(clean):
+            raise HiddenDDL("set_config of a guarded (or unreadable) setting in a body: "
+                            + " ".join(where.split())[:100])
         for ex in EXECUTE_STMT.finditer(body_skel):
             if not READABLE_COMMAND.match(ex.group(1)):
                 raise HiddenDDL("EXECUTE of a command this generator cannot read: "
