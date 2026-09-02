@@ -184,6 +184,8 @@ def body_set_config_unreadable(clean: str) -> bool:
     """True if any set_config call in a body names a guarded setting, or names
     its setting with anything but one plain literal."""
     for call in BODY_SET_CONFIG_CALL.finditer(clean):
+        if qualifier_before(clean, call.start()) not in BUILTIN_SCHEMAS:
+            continue  # a schema-qualified function that is not the built-in
         name = BODY_SET_CONFIG_NAME.match(clean, call.end())
         if not name or name.group(1).lower() in GUARDED:
             return True
@@ -285,7 +287,10 @@ def strip_sql(sql: str, *, inside_dollar: bool = False, in_body: bool = False) -
             # enum statement between them (Codex round fifteen). A closing
             # tag needs no boundary: the lexer ends the string at the first
             # occurrence of it.
-            after_ident = i > 0 and (sql[i - 1].isalnum() or sql[i - 1] in "_$")
+            # The lexer treats EVERY non-ASCII character as an identifier
+            # character; `isalnum()` does not (`€`), so `first€$tag$` opened a
+            # region where an alias stood (Codex round thirty).
+            after_ident = i > 0 and (sql[i - 1].isalnum() or sql[i - 1] in "_$" or ord(sql[i - 1]) >= 0x80)
             tag = DOLLAR_TAG.match(sql, i) if (c == "$" and not inside_dollar and not after_ident) else None
             if tag:
                 close = sql.find(tag.group(0), tag.end())
@@ -496,6 +501,35 @@ def alter_set_target(stmt: str, stmt_skel: str) -> str | None:
     return m.group(2).lower()
 
 
+IDENT_CHAR = re.compile(r"[A-Za-z0-9_$\u0080-\U0010ffff]")
+
+
+def qualifier_before(text: str, pos: int) -> str | None:
+    """The schema a `name(` beginning at `pos` is qualified with, read from the
+    intact text, or None when the call is unqualified. `app.set_config(…)` is a
+    different function from the built-in (Codex round thirty); only an
+    unqualified, `pg_catalog.` or `public.` call is treated as the built-in —
+    `public` because that is where a public-first path resolves a wrapper."""
+    j = pos
+    while j > 0 and text[j - 1].isspace():
+        j -= 1
+    if j == 0 or text[j - 1] != ".":
+        return None
+    j -= 1
+    while j > 0 and text[j - 1].isspace():
+        j -= 1
+    if j > 0 and text[j - 1] == '"':
+        k = text.rfind('"', 0, j - 1)
+        return text[k + 1 : j - 1].replace('""', '"') if k >= 0 else ""
+    k = j
+    while k > 0 and IDENT_CHAR.match(text[k - 1]):
+        k -= 1
+    return text[k:j].lower()
+
+
+BUILTIN_SCHEMAS = (None, "pg_catalog", "public")
+
+
 def keeps_standard_strings(value: str) -> bool:
     """True only for a SET or set_config value that leaves
     standard_conforming_strings on; anything else, computed or off, is refused.
@@ -540,6 +574,8 @@ def set_config_changes(stmt: str, stmt_skel: str) -> str | None:
             q = QUOTED_IDENT.match(stmt_skel, call.start())
             if quoted_name(stmt, q) != "set_config":
                 continue  # some other quoted function
+        if qualifier_before(stmt, call.start()) not in BUILTIN_SCHEMAS:
+            continue  # `app.set_config(...)` is somebody else's function
         name = LITERAL_AT.match(stmt, call.end())
         sep = re.compile(r"\s*,\s*").match(stmt, name.end()) if name else None
         if not name or not sep:
