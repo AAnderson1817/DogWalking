@@ -38,6 +38,7 @@ import type { Operators, Plans, ServiceTypes } from "@/lib/types";
 import { dateLocal, money } from "@/lib/format";
 import { PLATFORM_PRICE_PENCE, TRIAL_KEEP_FLOOR_MS } from "@/lib/operator-access";
 import { parseVisitPriceInput } from "@/lib/visit-price";
+import { centsFrom, planFormReady } from "@/lib/plan-form";
 import { useDocumentTitle } from "@/lib/use-document-title";
 import { useAuth } from "@/lib/auth-context";
 
@@ -413,7 +414,10 @@ function ServicesSection({
 }
 
 // ── Plans ──────────────────────────────────────────────────────────────────
-function PlansSection({
+// Exported for Settings.plans.test.tsx, which pins that the button consults
+// the rule in lib/plan-form.ts — a guard correct in `lib/` and ignored by
+// the screen is a shape this repository has recorded more than once.
+export function PlansSection({
   plans,
   onChanged,
   onError,
@@ -438,11 +442,13 @@ function PlansSection({
         name: name.trim(),
         credits_per_cycle: Number(credits),
         // Entered in dollars, stored in cents — the *_pence columns hold cents.
-        price_pence: Math.round(Number(price) * 100),
+        // The same conversion the button gates on (plan-form.ts), so a draft
+        // the button accepts is the draft the server receives.
+        price_pence: centsFrom(price) ?? 0,
         cycle,
         rollover_policy: rollover,
         rollover_cap: rollover === "capped" ? Number(cap) : null,
-        overage_rate_pence: Math.round(Number(overage) * 100),
+        overage_rate_pence: centsFrom(overage) ?? 0,
       });
       onChanged([...plans, plan], `Created ${plan.name}.`);
       setName("");
@@ -546,7 +552,7 @@ function PlansSection({
       </div>
       <Button
         onClick={() => void add()}
-        disabled={busy || !name.trim() || !price || !overage}
+        disabled={busy || !planFormReady({ name, price, overage })}
       >
         {busy ? <Spinner /> : "Create plan"}
       </Button>

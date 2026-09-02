@@ -156,6 +156,18 @@ created, the Price is left in place — an orphan Price nothing references is
 inert and free, whereas archiving it would strand a retry into creating a
 second one.
 
+Every validation refusal — and the Connect refusal — lands **before the
+first Stripe call**; `create_plan_test.ts` asserts it on a deps recorder. The
+overage rate must be a positive whole number of cents, mirroring 0026's
+`plans_overage_rate_positive` (an overage rate of 0 is invalid: a walk
+credits cannot cover is charged in full at that rate, and "in full at
+nothing" is a free walk, not a price). Until PR C of the spec-drift audit the
+check refused only `< 0`, so a zero-rate body minted the Price and then hit
+the CHECK at insert — "plan could not be saved", no rule named, one orphaned
+Price per attempt. The Settings form gates its button on the same rule
+(`lib/plan-form.ts`), computing the cents it would send, so "0" and "0.004"
+never leave the browser.
+
 ## connect-onboarding — POST, operator JWT (review B5)
 Body `{ action: 'start' | 'status' }`. `status` reports `{ connected,
 charges_enabled, payouts_enabled, details_submitted }` from the local mirror;

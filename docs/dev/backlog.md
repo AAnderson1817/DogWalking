@@ -33,12 +33,12 @@ before you hit them.
   prices walks that do not exist yet). The residual worth a test: `0043` made
   server pricing snapshot-first while `effectiveWalkCost` computes live
   service arithmetic, and nothing ties the two together.
-- Three edge functions are `index.ts`-only with no handler seam and no test:
-  `billing-portal`, `connect-onboarding`, and `create-plan` (a money path — it
-  mints Stripe Products and Prices). Extract and test per the house
-  dependency-injection pattern, `create-plan` first. `materialize-walks` is
-  the deliberate thin-wrapper exception (its logic is SQL-side);
-  `charge-overage` is already covered through `_lib/overage*.ts`.
+- Two edge functions are `index.ts`-only with no handler seam and no test:
+  `billing-portal` and `connect-onboarding`. Extract and test per the house
+  dependency-injection pattern (`create-plan` got its seam in the
+  `money(create-plan)` PR). `materialize-walks` is the deliberate
+  thin-wrapper exception (its logic is SQL-side); `charge-overage` is already
+  covered through `_lib/overage*.ts`.
 
 ### 2. `getClient`/`getOperator` swallow the error, so a blip becomes terminal
 Found by the adversarial review of the send-once PR, and **pre-existing** —
@@ -102,7 +102,7 @@ Not urgent: nothing is broken, and the cost of being wrong here is a deploy
 that fails at `link` or `push`, which is exactly the failure 2.109.1 was
 pinned to avoid.
 
-### 5. Spec-drift audit follow-ups (three PRs, in this order)
+### 5. Spec-drift audit follow-ups (two PRs left, in this order)
 Found by the audit recorded as `docs(spec-drift)`; each was verified against
 HEAD and none is fixed by that PR, which corrected documents only.
 
@@ -151,13 +151,6 @@ smoke block asserting no `prosecdef` function in `public` grants EXECUTE to
 `public` or `anon` (red against HEAD first); make
 `scripts/gen-definer-catalog.py` read `revoke` too and render an unrevoked
 function as `PUBLIC` rather than **none**.
-
-**PR C — `create-plan` accepts an overage rate of 0** (money path):
-`index.ts:61` refuses only `< 0`; `plans_overage_rate_positive` (0026) is
-`> 0`, so the Stripe Price is minted at `:71` and the INSERT then 500s with
-the Price orphaned. Refuse `<= 0` before the Stripe call with a sentence
-naming the rule; disable `Settings.tsx`'s button on a non-positive parsed
-value. Red-first: a zero-rate body must 400 with zero recorded Stripe calls.
 
 ## Done
 
