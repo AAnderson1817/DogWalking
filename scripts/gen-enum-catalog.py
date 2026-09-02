@@ -86,19 +86,36 @@ ADD_VALUE = re.compile(
     re.I | re.S,
 )
 RENAME_VALUE = re.compile(r"^\s*rename\s+value\s+" + LIT + r"\s+to\s+" + LIT + r"\s*$", re.I | re.S)
+# Where an identifier begins and ends — by PostgreSQL's lexer, not Python's
+# `\b`. The lexer continues an identifier through `$` and through EVERY
+# non-ASCII character; `\b` stops at `$` and at any non-ASCII character that
+# is not a letter, so `custom$set_config(` — a call of a different function,
+# measured — read as the built-in and the gate refused a healthy migration
+# (Codex round thirty-one), the third time this boundary has bitten a scan
+# here (rounds twenty-six and twenty-seven fixed it at one site each; this
+# time `alter role my$set set search_path = …` also read its target as `set`
+# and PASSED). Every keyword and name match in this file uses these two, so
+# there is one definition of a boundary rather than one per pattern.
+IDENT_CHARS = r"A-Za-z0-9_$\u0080-\U0010ffff"
+IDENT_CHAR = re.compile("[" + IDENT_CHARS + "]")
+IDENT_START = r"(?<![" + IDENT_CHARS + r"])"
+IDENT_END = r"(?![" + IDENT_CHARS + r"])"
 # Every `drop type` statement, loosely, so an unparsed one can be REFUSED —
 # and the strict shape Postgres allows: a comma list of names, optional
 # CASCADE/RESTRICT. Codex on PR #88 round two: the first regex demanded the
 # semicolon straight after the name, so `drop type payment_status cascade;`
 # matched nothing and the dropped enum stayed in the catalogue while CI
 # reported agreement — a parser that sees nothing reports agreement.
-DROP_ANY = re.compile(r"drop\s+type\b[^;]*;", re.I | re.S)
+DROP_ANY = re.compile(r"drop\s+type" + IDENT_END + r"[^;]*;", re.I | re.S)
 # The same loose-versus-strict pairing for the other two statement kinds
 # (Codex round three): `create type public."delivery_status" as enum (…)` is
 # valid SQL the strict regex does not read, and with fifteen enums already
 # in `order` the parser-saw-nothing guard cannot notice one skipped type.
-CREATE_ANY = re.compile(r"create\s+type\b[^;]*?\bas\s+enum\b[^;]*;", re.I | re.S)
-ALTER_ANY = re.compile(r"alter\s+type\b[^;]*;", re.I | re.S)
+CREATE_ANY = re.compile(
+    r"create\s+type" + IDENT_END + r"[^;]*?" + IDENT_START + r"as\s+enum" + IDENT_END + r"[^;]*;",
+    re.I | re.S,
+)
+ALTER_ANY = re.compile(r"alter\s+type" + IDENT_END + r"[^;]*;", re.I | re.S)
 DROP = re.compile(
     r"drop\s+type\s+(?:if\s+exists\s+)?((?:(?:public\.)?[a-z0-9_]+\s*,\s*)*(?:public\.)?[a-z0-9_]+)"
     r"\s*(?:cascade|restrict)?\s*;",
@@ -134,7 +151,7 @@ def unquote(lit: str) -> str:
 # else an unreadable name fails safe by being refused; here it failed open
 # by not being a region at all. Tags accept every identifier character.
 DOLLAR_TAG = re.compile(r"[$](?:[A-Za-z_\u0080-\U0010ffff][A-Za-z0-9_\u0080-\U0010ffff]*)?[$]")
-DDL_INSIDE = re.compile(r"\b(?:create|alter|drop)\s+type\b", re.I)
+DDL_INSIDE = re.compile(IDENT_START + r"(?:create|alter|drop)\s+type" + IDENT_END, re.I)
 # A procedural BODY — a DO block, or a function/procedure definition — may
 # not mention enum DDL or `search_path` anywhere in its CLEAN text: an
 # `execute 'create type …'` is enum DDL inside a string, and a
@@ -153,9 +170,18 @@ DDL_INSIDE = re.compile(r"\b(?:create|alter|drop)\s+type\b", re.I)
 # the same session is lexed, and this generator reads literals the standard
 # way only.
 BODY_UNREADABLE = re.compile(
-    r"\b(?:create|alter|drop)\s+type\b|\bsearch_path\b|\bstandard_conforming_strings\b"
-    r"|\bset\s+(?:local\s+|session\s+)?\"?role\b|\bsession\s+authorization\b|\bsession_authorization\b"
-    r"|\b(?:create|alter)\s+schema\b",
+    "|".join(
+        IDENT_START + word + IDENT_END
+        for word in (
+            r"(?:create|alter|drop)\s+type",
+            r"search_path",
+            r"standard_conforming_strings",
+            r"set\s+(?:local\s+|session\s+)?\"?role",
+            r"session\s+authorization",
+            r"session_authorization",
+            r"(?:create|alter)\s+schema",
+        )
+    ),
     re.I,
 )
 # In a body, `set_config` reaches every guarded setting through a literal the
@@ -176,7 +202,11 @@ BODY_UNREADABLE = re.compile(
 # with a quoted name (the proof set caught the first pattern requiring the
 # name and the paren to be adjacent). The quote runs are `'+` because an
 # EXECUTE'd literal doubles them.
-BODY_SET_CONFIG_CALL = re.compile(r'\b"?set_config"?\s*\(\s*', re.I)
+# This scan reads the CLEAN text on purpose — an EXECUTE'd literal carries
+# its `set_config(''role'', …)` inside a string — so it cannot see where a
+# quoted identifier begins, and the price is that a quoted function name
+# ending in ` set_config` is refused; a name ending in `$set_config` is not.
+BODY_SET_CONFIG_CALL = re.compile(IDENT_START + r'"?set_config"?\s*\(\s*', re.I)
 BODY_SET_CONFIG_NAME = re.compile(r"'+\s*([a-z_][a-z0-9_.]*)\s*'+\s*,", re.I)
 
 
@@ -190,7 +220,7 @@ def body_set_config_unreadable(clean: str) -> bool:
         if not name or name.group(1).lower() in GUARDED:
             return True
     return False
-FUNCTION_HEAD = re.compile(r"^\s*create\s+(?:or\s+replace\s+)?(?:function|procedure)\b", re.I)
+FUNCTION_HEAD = re.compile(r"^\s*create\s+(?:or\s+replace\s+)?(?:function|procedure)" + IDENT_END, re.I)
 # A PL/pgSQL EXECUTE runs whatever its expression evaluates to, and
 # `execute 'create ' || 'type …'` carries no contiguous keyword for
 # BODY_UNREADABLE to see (Codex round thirteen). So the command text of every
@@ -200,7 +230,9 @@ FUNCTION_HEAD = re.compile(r"^\s*create\s+(?:or\s+replace\s+)?(?:function|proced
 # Matched on the body's SKELETON, so `grant execute on`, a trigger's
 # `execute function`, and the word inside a string are not EXECUTE statements.
 EXECUTE_STMT = re.compile(
-    r"\bexecute\s+(?!(?:on|function|procedure)\b)(.*?)(?=;|\binto\b|\busing\b|$)", re.I | re.S
+    IDENT_START + r"execute\s+(?!(?:on|function|procedure)" + IDENT_END + r")(.*?)"
+    r"(?=;|" + IDENT_START + r"(?:into|using)" + IDENT_END + r"|$)",
+    re.I | re.S,
 )
 READABLE_COMMAND = re.compile(r"^\s*(?:'x*'|format\s*\(\s*'x*'\s*(?:,.*)?\))\s*$", re.I | re.S)
 
@@ -289,8 +321,9 @@ def strip_sql(sql: str, *, inside_dollar: bool = False, in_body: bool = False) -
             # occurrence of it.
             # The lexer treats EVERY non-ASCII character as an identifier
             # character; `isalnum()` does not (`€`), so `first€$tag$` opened a
-            # region where an alias stood (Codex round thirty).
-            after_ident = i > 0 and (sql[i - 1].isalnum() or sql[i - 1] in "_$" or ord(sql[i - 1]) >= 0x80)
+            # region where an alias stood (Codex round thirty). IDENT_CHAR is
+            # the lexer's definition, shared with every boundary in the file.
+            after_ident = i > 0 and IDENT_CHAR.match(sql[i - 1]) is not None
             tag = DOLLAR_TAG.match(sql, i) if (c == "$" and not inside_dollar and not after_ident) else None
             if tag:
                 close = sql.find(tag.group(0), tag.end())
@@ -298,9 +331,16 @@ def strip_sql(sql: str, *, inside_dollar: bool = False, in_body: bool = False) -
                     raise HiddenDDL(f"unterminated dollar quote {tag.group(0)}")
                 region = sql[i : close + len(tag.group(0))]
                 if in_body:
-                    # A nested dollar string inside a body is a literal:
-                    # kept intact in `clean`, masked in the skeleton.
-                    out.extend(region)
+                    # A nested dollar string inside a body is a literal: its
+                    # CONTENT is kept intact in `clean` at the same offsets
+                    # and the two tags are blanked to spaces, so the mention
+                    # scans see `$q$create type$q$` at a token boundary — `$`
+                    # continues an identifier for IDENT_START, and a tag's
+                    # closing `$` is a delimiter, not one (the proof set
+                    # caught this in Codex round thirty-one's fix). Masked in
+                    # the skeleton.
+                    k = len(tag.group(0))
+                    out.extend(" " * k + region[k:-k] + " " * k)
                     skel.extend("'" + "x" * (len(region) - 2) + "'")
                     i = close + len(tag.group(0))
                     continue
@@ -452,11 +492,11 @@ ON_SPELLINGS = {"on", "true", "yes", "1"}
 # had carried the quoted and `=`/`to` forms since round eleven (Codex round
 # twenty-two). One shape for all four now.
 SET_ROLE = re.compile(
-    r"^\s*set\s+(?:local\s+|session\s+)?\"?role\"?\s*(?:=|\bto\b)?\s*(.*?)\s*$", re.I | re.S
+    r"^\s*set\s+(?:local\s+|session\s+)?\"?role\"?\s*(?:=|" + IDENT_START + r"to" + IDENT_END + r")?\s*(.*?)\s*$", re.I | re.S
 )
 SET_SESSION_AUTH = re.compile(
     r"^\s*set\s+(?:local\s+|session\s+)?(?:session\s+authorization|\"?session_authorization\"?)"
-    r"\s*(?:=|\bto\b)?\s*(.*?)\s*$",
+    r"\s*(?:=|" + IDENT_START + r"to" + IDENT_END + r")?\s*(.*?)\s*$",
     re.I | re.S,
 )
 # `none` resets the role in either syntax, bare or as a literal; DEFAULT is
@@ -470,10 +510,10 @@ GUARDED = ("search_path", "standard_conforming_strings", "role", "session_author
 # PostgreSQL raises (`requires a Boolean value`). The first version read the
 # keyword as a schema and refused a healthy migration (Codex round nineteen).
 IS_DEFAULT = re.compile(r"^\s*default\s*$", re.I)
-SET_CONFIG_OPEN = re.compile(r'(?:\bset_config|"x+")\s*\(\s*', re.I)
+SET_CONFIG_OPEN = re.compile("(?:" + IDENT_START + r'set_config|"x+")\s*\(\s*', re.I)
 QUOTED_IDENT = re.compile(r'"x+"')
 LITERAL_AT = re.compile(LIT)
-ALTER_SESSION_DEFAULTS = re.compile(r"^\s*alter\s+(?:database|role|user|system)\b", re.I)
+ALTER_SESSION_DEFAULTS = re.compile(r"^\s*alter\s+(?:database|role|user|system)" + IDENT_END, re.I)
 # `alter role … set search_path to default` and `alter role … reset
 # search_path` REMOVE a stored setting rather than set one — measured,
 # `rolconfig` goes back to null — the same keyword one clause over (Codex
@@ -481,14 +521,14 @@ ALTER_SESSION_DEFAULTS = re.compile(r"^\s*alter\s+(?:database|role|user|system)\
 # mention in such a statement, including `from current` (which copies a
 # session state this generator cannot see), is refused by the mention rule.
 ALTER_RESET = re.compile(
-    r"\b(?:set\s+(?:\"[^\"]+\"|[a-z_]+)\s*(?:=|to)\s*default|reset\s+(?:all|\"[^\"]+\"|[a-z_]+))\s*$",
+    IDENT_START + r"(?:set\s+(?:\"[^\"]+\"|[a-z_]+)\s*(?:=|to)\s*default|reset\s+(?:all|\"[^\"]+\"|[a-z_]+))\s*$",
     re.I | re.S,
 )
 # The parameter an ALTER … SET names, read from the skeleton so a quoted
 # name is resolved and a value cannot pose as one. A word-grep cannot do
 # this for `role`: `alter role x set role = y` and `alter role x set
 # work_mem = …` both contain the word (Codex round twenty-one).
-ALTER_SET_NAME = re.compile(r'\bset\s+(?:("x+")|([a-z_]+)\b)', re.I)
+ALTER_SET_NAME = re.compile(IDENT_START + r'set\s+(?:("x+")|([a-z_]+)' + IDENT_END + ")", re.I)
 
 
 def alter_set_target(stmt: str, stmt_skel: str) -> str | None:
@@ -499,9 +539,6 @@ def alter_set_target(stmt: str, stmt_skel: str) -> str | None:
         q = QUOTED_IDENT.match(stmt_skel, m.start(1))
         return quoted_name(stmt, q)
     return m.group(2).lower()
-
-
-IDENT_CHAR = re.compile(r"[A-Za-z0-9_$\u0080-\U0010ffff]")
 
 
 def qualifier_before(text: str, pos: int) -> str | None:
@@ -670,7 +707,11 @@ def strip_sql_comments(sql: str) -> str:
 # not knowable from a file, so the rule is structural: after any schema is
 # created or renamed (other than `public` itself), every later enum
 # statement, in that file and every file after it, must name `public.`.
-SCHEMA_DDL = re.compile(r"create\s+schema\b[^;]*;|alter\s+schema\b[^;]*\brename\b[^;]*;", re.I | re.S)
+SCHEMA_DDL = re.compile(
+    r"create\s+schema" + IDENT_END + r"[^;]*;"
+    r"|alter\s+schema" + IDENT_END + r"[^;]*" + IDENT_START + r"rename" + IDENT_END + r"[^;]*;",
+    re.I | re.S,
+)
 # A SQL-standard routine body (`create procedure … language sql begin atomic
 # … end`, PostgreSQL 14+) has no quotes around it, so its statements sit at
 # top level for every scan here and its own semicolons split it, so an enum
@@ -680,11 +721,12 @@ SCHEMA_DDL = re.compile(r"create\s+schema\b[^;]*;|alter\s+schema\b[^;]*\brename\
 # run here), but a body this generator cannot read is refused whether or
 # not the server would run it. Write the body as a dollar-quoted string,
 # which the body rules read.
-ATOMIC_BODY = re.compile(r"\bbegin\s+atomic\b", re.I)
+ATOMIC_BODY = re.compile(IDENT_START + r"begin\s+atomic" + IDENT_END, re.I)
 # The exemption reads the WHOLE identifier: `$` is legal inside an unquoted
 # name and `\b` treats it as a boundary, so `create schema public$deploy`
 # matched a `public\b` pattern (Codex round twenty-six — round fifteen's
-# lesson, one round after it was used). `"public"` is the same schema;
+# lesson, one round after it was used; since round thirty-one that boundary
+# is IDENT_END, defined once above). `"public"` is the same schema;
 # `"Public"` is not.
 # Matched on the INTACT text, not the skeleton, which masks a quoted name to
 # `"xxxxxx"` (the proof set caught the first version reading the skeleton).
@@ -694,7 +736,7 @@ ATOMIC_BODY = re.compile(r"\bbegin\s+atomic\b", re.I)
 # exempted it (Codex round twenty-seven); the lookahead refuses any
 # identifier character now.
 SCHEMA_PUBLIC = re.compile(
-    r'^(?i:create\s+schema\s+(?:if\s+not\s+exists\s+)?)(?:(?i:public)(?![A-Za-z0-9_$\u0080-\U0010ffff])|"public")'
+    r'^(?i:create\s+schema\s+(?:if\s+not\s+exists\s+)?)(?:(?i:public)' + IDENT_END + r'|"public")'
 )
 QUALIFIED = re.compile(r"^(?:create|alter)\s+type\s+public\.", re.I)
 
