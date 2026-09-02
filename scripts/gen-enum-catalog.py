@@ -628,6 +628,16 @@ def strip_sql_comments(sql: str) -> str:
 # created or renamed (other than `public` itself), every later enum
 # statement, in that file and every file after it, must name `public.`.
 SCHEMA_DDL = re.compile(r"create\s+schema\b[^;]*;|alter\s+schema\b[^;]*\brename\b[^;]*;", re.I | re.S)
+# A SQL-standard routine body (`create procedure … language sql begin atomic
+# … end`, PostgreSQL 14+) has no quotes around it, so its statements sit at
+# top level for every scan here and its own semicolons split it, so an enum
+# created inside one was catalogued as created by the migration (Codex
+# round twenty-eight). PostgreSQL 16 refuses create/alter/drop type inside
+# such a body at definition time (measured; 17, the target, could not be
+# run here), but a body this generator cannot read is refused whether or
+# not the server would run it. Write the body as a dollar-quoted string,
+# which the body rules read.
+ATOMIC_BODY = re.compile(r"\bbegin\s+atomic\b", re.I)
 # The exemption reads the WHOLE identifier: `$` is legal inside an unquoted
 # name and `\b` treats it as a boundary, so `create schema public$deploy`
 # matched a `public\b` pattern (Codex round twenty-six — round fifteen's
@@ -689,6 +699,17 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
             # keys on one (Codex round thirteen), so EOF is made a terminator.
             sql, skel = sql + ";", skel + ";"
         refuse_session_changes(path, sql, skel)
+        atomic = ATOMIC_BODY.search(skel)
+        if atomic:
+            start = skel.rfind(";", 0, atomic.start()) + 1
+            print(
+                f"FAIL: {path.name}: `{' '.join(sql[start:atomic.end()].split())[:120]} …` is a SQL-standard "
+                "routine body (BEGIN ATOMIC), which this generator does not read: its statements "
+                "run when the routine is called, not when the migration applies; write the body "
+                "as a dollar-quoted string instead",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         # Scan the SKELETON: a literal's contents cannot open, close or name a
         # statement. Spans line up with `sql`, which is where labels are read.
         creates = list(CREATE.finditer(skel))
