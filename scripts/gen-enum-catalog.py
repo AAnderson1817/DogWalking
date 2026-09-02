@@ -628,7 +628,17 @@ def strip_sql_comments(sql: str) -> str:
 # created or renamed (other than `public` itself), every later enum
 # statement, in that file and every file after it, must name `public.`.
 SCHEMA_DDL = re.compile(r"create\s+schema\b[^;]*;|alter\s+schema\b[^;]*\brename\b[^;]*;", re.I | re.S)
-SCHEMA_PUBLIC = re.compile(r"^create\s+schema\s+(?:if\s+not\s+exists\s+)?public\b", re.I)
+# The exemption reads the WHOLE identifier: `$` is legal inside an unquoted
+# name and `\b` treats it as a boundary, so `create schema public$deploy`
+# matched a `public\b` pattern (Codex round twenty-six — round fifteen's
+# lesson, one round after it was used). `"public"` is the same schema;
+# `"Public"` is not.
+# Matched on the INTACT text, not the skeleton, which masks a quoted name to
+# `"xxxxxx"` (the proof set caught the first version reading the skeleton).
+# The unquoted form folds case; the quoted form is exact, so `"PUBLIC"` counts.
+SCHEMA_PUBLIC = re.compile(
+    r'^(?i:create\s+schema\s+(?:if\s+not\s+exists\s+)?)(?:(?i:public)(?![A-Za-z0-9_$])|"public")'
+)
 QUALIFIED = re.compile(r"^(?:create|alter)\s+type\s+public\.", re.I)
 
 
@@ -695,7 +705,7 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
                         file=sys.stderr,
                     )
                     sys.exit(1)
-        schemas = [m for m in SCHEMA_DDL.finditer(skel) if not SCHEMA_PUBLIC.match(skel[m.start() : m.end()])]
+        schemas = [m for m in SCHEMA_DDL.finditer(skel) if not SCHEMA_PUBLIC.match(sql[m.start() : m.end()])]
         stream = sorted(
             [(m.start(), "create", m) for m in creates]
             + [(m.start(), "alter", m) for m in alters]
