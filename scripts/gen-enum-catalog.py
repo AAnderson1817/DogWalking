@@ -383,6 +383,17 @@ SET_CONFIG_OPEN = re.compile(r'(?:\bset_config|"x+")\s*\(\s*', re.I)
 QUOTED_IDENT = re.compile(r'"x+"')
 LITERAL_AT = re.compile(LIT)
 ALTER_SESSION_DEFAULTS = re.compile(r"^\s*alter\s+(?:database|role|user|system)\b", re.I)
+# `alter role … set search_path to default` and `alter role … reset
+# search_path` REMOVE a stored setting rather than set one — measured,
+# `rolconfig` goes back to null — the same keyword one clause over (Codex
+# round twenty). The reset forms pass for both guarded settings; any other
+# mention in such a statement, including `from current` (which copies a
+# session state this generator cannot see), is refused by the mention rule.
+ALTER_RESET = re.compile(
+    r"\b(?:set\s+\"?(?:search_path|standard_conforming_strings)\"?\s*(?:=|to)\s*default|"
+    r"reset\s+(?:all|\"?(?:search_path|standard_conforming_strings)\"?))\s*$",
+    re.I | re.S,
+)
 
 
 def keeps_standard_strings(value: str) -> bool:
@@ -470,7 +481,7 @@ def refuse_session_changes(path: pathlib.Path, sql: str, skel: str) -> None:
         if m and not IS_DEFAULT.match(m.group(1)) and not keeps_standard_strings(m.group(1)):
             which = "standard_conforming_strings"
         which = set_config_changes(stmt, stmt_skel) or which
-        if ALTER_SESSION_DEFAULTS.match(stmt_skel):
+        if ALTER_SESSION_DEFAULTS.match(stmt_skel) and not ALTER_RESET.search(stmt):
             for guc in ("search_path", "standard_conforming_strings"):
                 if mentions_guc(stmt, stmt_skel, guc):
                     which = guc
