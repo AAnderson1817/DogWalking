@@ -83,6 +83,17 @@ def sql_re(pattern: str, flags: int = 0) -> re.Pattern[str]:
     return re.compile(pattern, flags)
 
 
+def text_re(pattern: str, flags: int = 0) -> re.Pattern[str]:
+    """Compile a regex over Markdown or file text — anything that is NOT SQL.
+    No rule but the declaration itself: every pattern in this file is built
+    by one of the two factories, so its author says what it reads, and the
+    proof set refuses a bare `re.compile`/`re.search`/… anywhere else (Codex
+    on PR #90, round eight: a floor on the number of `sql_re` calls let a
+    scanner bypass the factory unnoticed). A `\\b` is fine here; it is wrong
+    only in SQL, where identifiers continue through `$` and non-ASCII."""
+    return re.compile(pattern, flags)
+
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 MIGRATIONS = ROOT / "supabase" / "migrations"
 SPEC = ROOT / "docs" / "spec" / "01-data-model.md"
@@ -156,6 +167,8 @@ DROP = sql_re(
     re.I | re.S,
 )
 LABEL = sql_re(LIT)
+STATEMENT_END = sql_re(";")  # a literal, but it reads SQL and says so
+BACKTICK_RUNS = text_re(r"`+")  # Markdown: the fence a code span needs
 
 
 def enum_statement_spans(skel: str) -> list[tuple[str, int, int]]:
@@ -852,7 +865,7 @@ def refuse_session_changes(path: pathlib.Path, sql: str, skel: str) -> None:
     which this generator would read later statements differently from
     PostgreSQL. `reset` returns to the cluster default and passes."""
     start = 0
-    for end in [m.start() for m in re.finditer(";", skel)] + [len(skel)]:
+    for end in [m.start() for m in STATEMENT_END.finditer(skel)] + [len(skel)]:
         stmt_skel, stmt = skel[start:end], sql[start:end]
         start = end + 1
         which = None
@@ -1227,7 +1240,7 @@ def code_span(label: str) -> str:
     with a space or a backtick is padded by one space on each side, which
     CommonMark strips. A label rendered bare could not be told from two —
     `'two · labels'` is one legal PostgreSQL label (Codex round fourteen)."""
-    fence = "`" * (max((len(r) for r in re.findall(r"`+", label)), default=0) + 1)
+    fence = "`" * (max((len(r) for r in BACKTICK_RUNS.findall(label)), default=0) + 1)
     pad = " " if (label[:1] in (" ", "`") or label[-1:] in (" ", "`")) else ""
     return f"{fence}{pad}{label}{pad}{fence}"
 
@@ -1269,7 +1282,7 @@ def main() -> int:
     if BEGIN not in spec or END not in spec:
         print(f"FAIL: {SPEC} has no generated-enum-catalog markers", file=sys.stderr)
         return 1
-    updated = re.sub(re.escape(BEGIN) + r".*?" + re.escape(END), lambda _: block, spec, flags=re.S)
+    updated = text_re(re.escape(BEGIN) + r".*?" + re.escape(END), re.S).sub(lambda _: block, spec)
     if updated != spec:
         SPEC.write_text(updated)
     print(f"{len(order)} enum types catalogued in {SPEC.relative_to(ROOT)}")
