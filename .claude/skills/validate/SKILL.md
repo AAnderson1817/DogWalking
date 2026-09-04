@@ -181,6 +181,19 @@ whole enums — on the file an engineer reads to learn which statuses exist.
 Same shape as 10a, and red for the same false reason when
 `docs/spec/01-data-model.md` is merely uncommitted.
 
+## 10f. The enum catalogue generator's proof set holds
+Reads the migrations only, so it always runs:
+```
+python3 scripts/gen-enum-catalog-proofs.py
+```
+Forty-three review rounds on PR #88 each fixed one way `gen-enum-catalog.py`
+could bless a wrong catalogue or refuse a healthy migration, and each fix was
+proven red before it shipped — in a session scratchpad, which is a rule
+connected to nothing once the container is gone. The probes are committed
+now: each writes a migration into a scratch copy of the real set and asserts
+the generator either renders the expected catalogue or refuses with the
+sentence the rule names. About half a minute; a FAIL line names the rule.
+
 ## 11. Secret-leak grep
 ```
 grep -RInE "(VAULT_MASTER_KEY|SERVICE_ROLE|sk_live|sk_test)" app/src supabase/functions --include='*.ts' --include='*.tsx' | grep -v 'Deno.env.get' | grep -v env.ts && echo "FAIL: literal secret reference" || echo "PASS: no secret literals"
