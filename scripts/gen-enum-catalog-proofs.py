@@ -29,11 +29,17 @@ arguments (it is a pure function of the text it is given), so the 51 real
 migrations are parsed once rather than once per probe. The control check
 runs BEFORE the cache is installed and is repeated after it, so the cache is
 itself proven to change nothing. Each probe is written into its own named
-copy of the migrations under a temporary directory (a later check may refer
-back to an earlier copy by name), under a version that sorts AFTER every
-real migration — derived, not hard-coded, so a real `0052` landing later
-cannot slip in behind a probe and change the scenario under test (Codex on
-PR #90); a two-file probe takes the two versions after that, adjacent.
+copy of the ENUM-ONLY baseline under a temporary directory (a later check
+may refer back to an earlier copy by name), under a version that sorts AFTER
+every real migration — derived, not hard-coded, so a real `0052` landing
+later cannot slip in behind a probe and change the scenario under test
+(Codex on PR #90); a two-file probe takes the two versions after that,
+adjacent. The baseline is the real migrations' enum DDL, every statement
+verbatim under its own file name, and nothing else — so a probe inherits the
+real enums and no STATE: a real migration creating a schema would otherwise
+arm the generator's shadow guard against every unqualified probe (Codex on
+PR #90, round four). A control asserts that baseline renders the committed
+block before any probe runs.
 Refusals are captured in-process (stderr + SystemExit), so a run of the
 whole set takes about a minute.
 """
@@ -74,6 +80,36 @@ committed_count = int(committed.splitlines()[2].split()[0])
 
 TMP = tempfile.TemporaryDirectory(prefix="enum-proofs-")
 S = pathlib.Path(TMP.name)  # every named scratch copy lives here, and a check may refer back to one by name
+BASELINE = S / "_baseline"  # the probes' baseline: the real migrations' enum DDL and nothing else
+
+
+def enum_only_baseline():
+    """Build BASELINE: every `create type … as enum`, `alter type` and `drop
+    type` statement of every real migration, verbatim, under its own file name
+    — and NOTHING else. The names keep the creation order and the versions the
+    catalogue prints, so it renders the committed block (asserted below, before
+    any probe runs); the omissions are the point. A probe must not inherit
+    STATE from the baseline: a real migration that creates or renames a
+    non-public schema arms the generator's shadow guard for every later
+    unqualified enum statement, so a probe appended after the full real set
+    fails while the real tree stays green — one `create schema aux_future;`
+    migration turned 64 proofs red on a healthy tree (Codex on PR #90, round
+    four). Session settings, bodies and schema DDL are the real tree's business
+    and gate 10e checks them there; a probe needs the real enums and a baseline
+    that carries no state. The statements are found with the generator's own
+    loose scanners on the skeleton and copied from the clean text at the same
+    spans, which is exactly how `collect()` reads them."""
+    BASELINE.mkdir()
+    for path in sorted(MIGRATIONS.glob("*.sql")):
+        sql, skel = gen.strip_sql(path.read_text())
+        if skel.strip() and not skel.rstrip().endswith(";"):
+            sql, skel = sql + ";", skel + ";"  # collect() makes EOF a terminator the same way
+        spans = sorted(
+            (m.start(), m.end())
+            for scanner in (gen.CREATE_ANY, gen.ALTER_ANY, gen.DROP_ANY)
+            for m in scanner.finditer(skel)
+        )
+        (BASELINE / path.name).write_text("".join(sql[a:b] + "\n" for a, b in spans))
 
 
 class Refused(Exception):
@@ -128,21 +164,23 @@ PROBE, PROBE2 = probe_versions()
 
 
 def scratch(name, sql):
-    """A named copy of the real migrations with `sql` as its probe, versioned
-    past every real file. Named, because a later check may refer back to it
-    (`S / name`)."""
+    """A named copy of the enum-only baseline with `sql` as its probe,
+    versioned past every real file. Named, because a later check may refer
+    back to it (`S / name`)."""
     d = S / name
     shutil.rmtree(d, ignore_errors=True)
-    shutil.copytree(MIGRATIONS, d)
+    shutil.copytree(BASELINE, d)
     (d / f"{PROBE}_probe.sql").write_text(sql)
     return d
 
 
 def scratch_edit(name, filename, old, new):
-    """A named copy of the real migrations with one file edited."""
+    """A named copy of the enum-only baseline with one file edited; `old`
+    must be an enum statement, since nothing else survives into the
+    baseline."""
     d = S / name
     shutil.rmtree(d, ignore_errors=True)
-    shutil.copytree(MIGRATIONS, d)
+    shutil.copytree(BASELINE, d)
     p = d / filename
     text = p.read_text()
     assert text.count(old) == 1, (filename, old)
@@ -176,6 +214,12 @@ check("control byte-identical (uncached)", lambda: run(MIGRATIONS)[0] == committ
 # repeated below under the cache so the cache is proven to change nothing.
 gen.strip_sql = functools.lru_cache(maxsize=None)(gen.strip_sql)
 check("control byte-identical (cached)", lambda: run(MIGRATIONS)[0] == committed)
+# The probes' baseline must render the committed block too: the same enums,
+# in the same order, created and altered in the same versions. A future
+# migration whose enum DDL the filter did not carry across fails HERE, by
+# name, rather than as sixty unexplained reds further down.
+enum_only_baseline()
+check("the enum-only probe baseline renders the committed block", lambda: run(BASELINE)[0] == committed)
 d = scratch("s1", "select 'drop type payment_status;';\n")
 check("DDL in a string value: fixed leaves the catalogue unchanged", lambda: run(d)[0] == committed)
 d = scratch("s2", "alter type payment_status add value 'awaiting;review';\n")
