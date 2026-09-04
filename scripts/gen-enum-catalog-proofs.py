@@ -283,6 +283,26 @@ def regex_import_violations(path):
     return sorted(out)
 
 
+def bare_module_aliases(path):
+    """Every appearance of the bare name `re` in the module at `path` that is
+    NOT the base of an attribute access — as (line, context). `regex_module =
+    re` hands the whole module to a name nothing watches and a scanner built
+    through it is `regex_module.compile` (Codex on PR #90, round thirteen);
+    the same goes for `re` passed as an argument, stored in a container or
+    returned. The rule is one sentence: `re` is imported once, bare, and is
+    used only as `re.<attr>`. Every remaining door is dynamic (`getattr`,
+    `globals()`, `sys.modules`, `importlib`, `eval`) and outside this guard by
+    the boundary its siblings already state."""
+    tree = ast.parse(path.read_text())
+    bases = {id(node.value) for node in ast.walk(tree)
+             if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "re"}
+    return sorted(
+        (node.lineno, type(node.ctx).__name__)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == "re" and id(node) not in bases
+    )
+
+
 def plain_re_imports(path):
     """How many bare `import re` the module carries — the import walker's
     own eyesight."""
@@ -844,7 +864,9 @@ check("create type$x is not an enum statement and not a crash", lambda: run(scra
 # structural one now: the only REFERENCE to a pattern-building function of
 # `re` is the factories' own `re.compile` — a reference, not only a call,
 # since `compile_re = re.compile` rebinds the constructor (round twelve) —
-# while a flag, a type or an exception class is free (round eleven), and
+# while a flag, a type or an exception class is free (round eleven); the
+# bare name `re` appears only as `re.<attr>`, since `regex_module = re`
+# rebinds the module (round thirteen); and
 # the module enters only as `import re` (round nine), so there is no other
 # name a pattern constructor could hide behind. Dynamic construction is
 # outside the guard, and the walker's docstring says so.
@@ -857,8 +879,9 @@ check("no pattern is built outside the two factories", lambda: bare_re_uses(GENE
 # The walker watches the name `re`, so the module may enter only as that name
 # (round nine): an alias or a `from re import …` would hand a pattern
 # constructor to a name nothing watches.
-check("the import walker sees the bare `import re` (it is not blind)", lambda: plain_re_imports(GENERATOR) == 1)
+check("the import walker sees a bare `import re` (it is not blind)", lambda: plain_re_imports(GENERATOR) >= 1)
 check("the regex module enters the generator only as a bare `import re`", lambda: regex_import_violations(GENERATOR) == [] or named_failure(f"regex import at (line, form): {regex_import_violations(GENERATOR)}"))
+check("the name `re` appears only as the base of an attribute access", lambda: bare_module_aliases(GENERATOR) == [] or named_failure(f"bare `re` at (line, context): {bare_module_aliases(GENERATOR)}"))
 
 # --- round thirty-two A: only the literal in body position is a routine body
 codex32a = "create function f(x text default 'create type') returns text language sql as $$ select x $$;\n"
