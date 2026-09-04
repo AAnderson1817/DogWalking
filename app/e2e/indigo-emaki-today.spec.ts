@@ -178,3 +178,48 @@ test("an empty day offers a way to fill it", async ({ page }) => {
   // day that most needs one.
   await expect(page.getByRole("link", { name: "Add a walk" })).toBeVisible();
 });
+
+// A candidate must earn its space on a phone. These assertions run against
+// the real shared component, rather than a separately drawn mockup.
+for (const viewport of [{ width: 320, height: 740 }, ...viewports]) {
+  test(`compact Today keeps the current action and three visits in view at ${viewport.width}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/dev/today?layout=compact");
+    await page.getByText("Mochi", { exact: true }).waitFor();
+    await page.evaluate(() => document.fonts.ready);
+    const art = await page.locator(".today-emaki__backdrop").boundingBox();
+    expect(art!.height, "decorative art must fit the compact header budget").toBeLessThanOrEqual(96);
+    const m = await geometry(page);
+    expect(m.names).toEqual(["Juniper", "Mochi", "Luna"]);
+    expect(m.horizontalOverflow).toBe(false);
+    expect(m.rowsBelowFold).toBe(0);
+    expect(m.rowsUnderBar).toBe(0);
+    expect(m.actionHeight).toBeGreaterThanOrEqual(44);
+    expect(m.actionBottom).toBeLessThanOrEqual(m.navIsBottomBar ? m.navTop : viewport.height);
+    await expect(page.getByRole("link", { name: "End walk" })).toHaveAttribute("href", "/walks/walk-mochi/live");
+    await expect(page.getByRole("link", { name: /Mochi, 11:30, Lakeside Loop, underway/ })).toHaveAttribute("href", "/clients/fixture-mochi");
+  });
+}
+
+test("compact Today retains every visit and nav clearance with enlarged text", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 740 });
+  await page.goto("/dev/today?layout=compact&visits=12");
+  await page.getByText("Mochi", { exact: true }).waitFor();
+  await page.addStyleTag({ content: "html { font-size: 200%; }" });
+  const m = await geometry(page);
+  expect(m.rowCount).toBe(12);
+  expect(m.horizontalOverflow).toBe(false);
+  expect(m.pageScrolls).toBe(true);
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  const scrolled = await geometry(page);
+  expect(scrolled.lastRowBottom).toBeLessThanOrEqual(scrolled.navTop);
+});
+
+test("compact empty day keeps its add action and can switch back to the baseline", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/dev/today?layout=compact&visits=0");
+  await expect(page.getByRole("link", { name: "Add a walk" })).toHaveAttribute("href", "/calendar");
+  await page.goto("/dev/today");
+  const art = await page.locator(".today-emaki__backdrop").boundingBox();
+  expect(art!.height / art!.width).toBeCloseTo(PLATE_RATIO, 2);
+});

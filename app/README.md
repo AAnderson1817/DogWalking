@@ -192,7 +192,12 @@ Currently here:
 
 | Prototype | What it is | What is missing |
 | --- | --- | --- |
+| `CompactTodaySchedule.tsx` | A compact wrapper around the production `TodayIllustratedSchedule`, reached through `/dev/today?layout=compact`. `/dev/today` retains the existing composition. Both use identical fixture data and the same row links and walk control. | Target-user validation and a decision to promote it to the live dashboard. See `docs/review/compact-today/README.md`. |
 | `InboxField.tsx` | A complete operator↔client correspondence surface: thread list, search, unread counts, the mobile index/thread split, compose and send. Reachable at `/dev/inbox` via `InboxPreview.tsx`. | Everything behind it. There is no `messages` or `conversations` table in any migration, no `api.ts` function and no production route. Two-way messaging is review finding H33; the models here are typed against a schema that has never existed. |
+
+`TodayPreview.tsx` lives here too: the development-only route owns the
+comparison stylesheet, so neither the candidate nor its CSS ships to production.
+Add `&visits=0`, `&visits=8` or `&visits=12` to test different day lengths.
 
 `LiveWalkBanner` used to be listed here and has been deleted rather than moved.
 It was the pre-emaki "current moment" banner, superseded by the current-visit row

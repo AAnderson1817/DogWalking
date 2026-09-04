@@ -1,6 +1,7 @@
 import { useSearchParams } from "react-router-dom";
 import { ApprovedIcon } from "@/components/ApprovedIcon";
 import { BottomNav } from "@/components/BottomNav";
+import { CompactTodaySchedule } from "./CompactTodaySchedule";
 import {
   TodayCurrentAction,
   TodayIllustratedSchedule,
@@ -63,11 +64,14 @@ export default function TodayPreview() {
     ? buildVisits(Math.max(0, Math.min(24, requested)))
     : VISITS;
   const live = visits.some((visit) => visit.state === "current");
+  const Schedule = params.get("layout") === "compact"
+    ? CompactTodaySchedule
+    : TodayIllustratedSchedule;
 
   return (
     <>
       <div className="page today-emaki-page">
-        <TodayIllustratedSchedule
+        <Schedule
           dateLabel="Wednesday, July 22"
           visits={visits}
           distanceLabel="7.2 mi"

@@ -10,6 +10,14 @@ efficient interface.
 
 ## Locked Today reference
 
+The owner has separately authorized a compact layout review at
+`/dev/today?layout=compact`. That development-only candidate deliberately
+uses an 88px crop of the existing artwork, fixed readable type sizes in rem,
+and a full-width current-walk control. It does not replace this specification
+or change the production `/` route. See
+[`../review/compact-today/README.md`](../review/compact-today/README.md) for
+scope, measured comparison and the remaining decision.
+
 - Art: one continuous Old Town Chicago field with a woman and Golden Retriever,
   Cream transition, restrained botanical corners, and no separate portraits.
 - Header: date at upper left; approved Inbox icon at upper right with a static

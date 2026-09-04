@@ -306,6 +306,15 @@ The shared state field governs full-page, section, sheet, and Walk Mode states:
 
 ## Approved Sanpo Today composition
 
+**Parallel review candidate:** the owner has reopened the artwork allocation
+question. `/dev/today?layout=compact` now evaluates an 88px decorative header
+and an open Cream schedule using the same component and fixture as `/dev/today`.
+It is a DEV-only experiment; the production rules below still govern `/`.
+The candidate's explicit crop, type, action and validation boundaries are in
+[`../review/compact-today/README.md`](../review/compact-today/README.md).
+An accepted prototype requires a separate promotion decision and specification
+update; the existence of this comparison is not production approval.
+
 The Old Town Current Moment / Daylight Arc hybrid is the locked production
 Today screen. It is implemented on `/`; `/dev/today` is its deterministic QA
 fixture, not a separate candidate or approval surface.

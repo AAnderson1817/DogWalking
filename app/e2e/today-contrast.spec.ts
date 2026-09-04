@@ -406,3 +406,23 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 640, height: 1200 
     expect(failures.map((f) => `${f.name} ${f.ratio.toFixed(2)}:1 < ${f.floor}`)).toEqual([]);
   });
 }
+
+for (const increasedContrast of [false, true]) {
+  test(`compact Today clears rendered contrast floors${increasedContrast ? " with increased contrast" : ""}`, async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    if (increasedContrast) await page.emulateMedia({ contrast: "more" });
+    await page.goto("/dev/today?layout=compact");
+    await page.getByText("Mochi", { exact: true }).waitFor();
+    await page.evaluate(() => document.fonts.ready);
+    // The compact date sits on flat Cream, not a painted field. It needs no
+    // halo; sample the actual background rather than invoking the baseline's
+    // explicit outlined-text exception. All other targets keep their rules.
+    const targets = TARGETS.map((target) => target.name === "date"
+      ? { ...target, outlined: undefined }
+      : target);
+    const samples = await sample(page, targets);
+    console.log(`\nCompact Today\n${report(samples)}`);
+    const failures = samples.filter((s) => s.floor > 0 && s.ratio < s.floor);
+    expect(failures.map((f) => `${f.name} ${f.ratio.toFixed(2)}:1 < ${f.floor}`)).toEqual([]);
+  });
+}
