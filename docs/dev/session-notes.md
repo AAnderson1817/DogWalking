@@ -66,7 +66,8 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   generator that wrongly refused a valid `drop type` passed every proof
   asserting the type was gone (Codex on PR #90, round two). Probes run on an
   ENUM-ONLY copy of the real migrations — every `create/alter/drop type`
-  verbatim under its own file name, nothing else — so a real migration that
+  verbatim under its own file name, found by the generator's own
+  `enum_statement_spans`, nothing else — so a real migration that
   creates a schema (arming the shadow guard) or sets a session state cannot
   turn the probes red while the real tree is green (round four: one
   `create schema aux_future;` turned 64 of them red); a control asserts that
