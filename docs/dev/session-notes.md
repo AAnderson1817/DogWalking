@@ -53,8 +53,11 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   red, commit and re-run before diagnosing. A dirty tree elsewhere does not
   trip them.
 - **Gate 10f is the enum-catalogue generator's proof set**
-  (`scripts/gen-enum-catalog-proofs.py`, 582 probes from the forty-three review
-  rounds on PR #88). To pin a new rule, add a `scratch("name", sql)` probe and
+  (`scripts/gen-enum-catalog-proofs.py`: the probes from the forty-three review
+  rounds on PR #88 plus the controls; its footer reports how many hold, and no
+  count is written here because a count in prose goes stale the day a control
+  is added — Codex on PR #90, round five). To pin a new rule, add a
+  `scratch("name", sql)` probe and
   assert either `unchanged(d)` (a healthy migration renders the committed
   catalogue), a value list from `run(d)[1]`, or `refuses(d, "<the sentence the
   rule names>")` — never a bare exit, which any crash satisfies. `run()` RAISES
