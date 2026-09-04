@@ -57,7 +57,11 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   rounds on PR #88). To pin a new rule, add a `scratch("name", sql)` probe and
   assert either `unchanged(d)` (a healthy migration renders the committed
   catalogue), a value list from `run(d)[1]`, or `refuses(d, "<the sentence the
-  rule names>")` — never a bare exit, which any crash satisfies. Prove it red
+  rule names>")` — never a bare exit, which any crash satisfies. `run()` RAISES
+  `Refused` when the generator refuses, so an absence proof (`"x" not in
+  run(d)[2]`) cannot pass on the empty result a refusal used to return — a
+  generator that wrongly refused a valid `drop type` passed every proof
+  asserting the type was gone (Codex on PR #90, round two). Prove it red
   by reinstating the defect on a snapshot of the generator, then `cp` the
   snapshot back and `cmp` before believing the next green run.
 - **A missing tool makes a gate PASS by not running.** `validate.sh` skips its
