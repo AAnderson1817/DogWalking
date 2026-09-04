@@ -835,7 +835,7 @@ check("E'…' as a value is still data", lambda: unchanged(scratch("e38j", "sele
 check("U&'…' value inside a dollar body is data", lambda: unchanged(scratch("e38k", "do $$ begin perform length(U&'\\0063reate type'); end $$;\n")))
 check("EXECUTE of a U&'…' command inside a body refused as unreadable", lambda: refuses(scratch("e38l", "do $$ begin execute U&'select 1'; end $$;\n"), "does not read"))
 check("EXECUTE of an E'…' command inside a body refused as unreadable", lambda: refuses(scratch("e38m", "do $$ begin execute E'select 1'; end $$;\n"), "does not read"))
-check("a schema named u followed by &? no — `u&` is only a prefix at a token boundary: xu&'…' is not one", lambda: unchanged(scratch("e38n", "select 1 as xu&'a';\n")) or run(scratch("e38n2", "select 1;\n"))[0] == committed)
+check("a schema named u followed by &? no — `u&` is only a prefix at a token boundary: xu&'…' is not one", lambda: unchanged(scratch("e38n", "select 1 as xu&'a';\n")))
 check("plain dollar DO still fine", lambda: unchanged(scratch("e38o", "do $$ begin perform 1; end $$;\n")))
 check("plain single-quoted DO body with DDL still refused", lambda: refuses(scratch("e38p", "DO 'BEGIN EXECUTE ''CREATE TYPE mood AS ENUM (''''x'''')''; END';\n"), "does not read"))
 
