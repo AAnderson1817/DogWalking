@@ -72,7 +72,11 @@ def load(path):
     return g
 
 
-gen = load(GENERATOR)
+try:
+    gen = load(GENERATOR)
+except Exception as e:  # noqa: BLE001 — the subject failing to import is the first thing to say plainly
+    print(f"FAIL: the generator could not be loaded: {type(e).__name__}: {e}", file=sys.stderr)
+    sys.exit(1)
 committed = re.search(re.escape(gen.BEGIN) + r".*?" + re.escape(gen.END), gen.SPEC.read_text(), re.S).group(0)
 # The header's own count — "15 enum types, in migration order" — read rather
 # than hard-coded, so a real migration adding an enum moves the expectation
@@ -102,12 +106,19 @@ def enum_only_baseline():
     itself iterates — copied from the clean text at the same positions, so
     the baseline and the generator cannot disagree about what an enum
     statement is."""
-    BASELINE.mkdir()
-    for path in sorted(MIGRATIONS.glob("*.sql")):
+    enum_only_copy(MIGRATIONS, BASELINE)
+
+
+def enum_only_copy(src, dst):
+    """Write `dst` as the enum-only image of the migrations in `src` (see
+    `enum_only_baseline`): every enum statement, in source position, nothing
+    else."""
+    dst.mkdir()
+    for path in sorted(src.glob("*.sql")):
         sql, skel = gen.strip_sql(path.read_text())
         if skel.strip() and not skel.rstrip().endswith(";"):
             sql, skel = sql + ";", skel + ";"  # collect() makes EOF a terminator the same way
-        (BASELINE / path.name).write_text(
+        (dst / path.name).write_text(
             "".join(sql[a:b] + "\n" for _kind, a, b in gen.enum_statement_spans(skel))
         )
 
@@ -192,45 +203,22 @@ def unchanged(d):
     return run(d)[0] == committed
 
 
-def regex_pattern_strings(path):
-    """Every string that feeds a pattern argument of `re.compile`, `re.search`,
-    `re.match`, `re.fullmatch`, `re.finditer`, `re.findall`, `re.sub` or
-    `re.split` in the module at `path`: the first argument, walked through
-    concatenation, f-strings and module-level names bound to strings (the
-    `IDENT_CHARS`/`IDENT_START`/`IDENT_END`/`LIT` building blocks). Docstrings,
-    messages and comments are not patterns and are not returned."""
+def refused_with(fn, needle):
+    """True only when `fn()` raises ValueError AND the message names the rule."""
+    try:
+        fn()
+    except ValueError as e:
+        return needle in str(e)
+    return False
+
+
+def sql_re_call_count(path):
+    """How many times the module at `path` builds a pattern through `sql_re`."""
     tree = ast.parse(path.read_text())
-    bound = {
-        node.targets[0].id: node.value
-        for node in tree.body
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
-    }
-
-    def strings(node, seen=()):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            yield node.value
-        elif isinstance(node, ast.BinOp):
-            yield from strings(node.left, seen)
-            yield from strings(node.right, seen)
-        elif isinstance(node, ast.JoinedStr):
-            for part in node.values:
-                yield from strings(part, seen)
-        elif isinstance(node, ast.FormattedValue):
-            yield from strings(node.value, seen)
-        elif isinstance(node, ast.Name) and node.id in bound and node.id not in seen:
-            yield from strings(bound[node.id], seen + (node.id,))
-        elif isinstance(node, ast.Call):
-            for arg in node.args:
-                yield from strings(arg, seen)
-
-    out = []
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and isinstance(node.func.value, ast.Name) and node.func.value.id == "re"
-                and node.func.attr in {"compile", "search", "match", "fullmatch", "finditer", "findall", "sub", "split"}
-                and node.args):
-            out.extend(strings(node.args[0]))
-    return out
+    return sum(
+        1 for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "sql_re"
+    )
 
 
 checks = []
@@ -261,6 +249,13 @@ check("control byte-identical (cached)", lambda: run(MIGRATIONS)[0] == committed
 # name, rather than as sixty unexplained reds further down.
 enum_only_baseline()
 check("the enum-only probe baseline renders the committed block", lambda: run(BASELINE)[0] == committed)
+# The filter must keep statement ORDER, not just statements: a migration that
+# drops a type and then creates it again is a net create, and an image sorted
+# by statement kind would have copied it as create-then-drop, so a healthy
+# future migration of that shape turned the control red (Codex round seven).
+d = scratch("order7", "drop type if exists mood;\ncreate type mood as enum ('x');\n")
+enum_only_copy(d, S / "order7-filtered")
+check("the enum-only filter keeps drop-then-create in source order", lambda: run(S / "order7-filtered")[1].get("mood") == ["x"] and run(d)[1].get("mood") == ["x"])
 d = scratch("s1", "select 'drop type payment_status;';\n")
 check("DDL in a string value: fixed leaves the catalogue unchanged", lambda: run(d)[0] == committed)
 d = scratch("s2", "alter type payment_status add value 'awaiting;review';\n")
@@ -729,17 +724,18 @@ check("begin atomic still refused", lambda: refuses(scratch("r31t", "create proc
 check("drop type with cascade still read", lambda: "payment_status" not in run(scratch("r31u", "drop type payment_status cascade;\n"))[2])
 check("create type$x is not an enum statement and not a crash", lambda: run(scratch("r31v", "select 1 as type$x;\n"))[0] == committed)
 # Round thirty-one made the lexer's identifier boundary the one rule for every
-# scan, because Python's `\b` stops at `$` and at non-ASCII letters where
+# SQL scan, because Python's `\b` stops at `$` and at non-ASCII letters where
 # PostgreSQL's lexer continues an identifier — four rounds paid for that. The
-# guard against the class is scoped to what can carry it: the PATTERNS the
-# generator compiles, walked out of the source with `ast` (Codex on PR #90,
-# round six: a ban over every source line would refuse a `\b` in a docstring
-# or an error message, i.e. a healthy change). Every regex in this file reads
-# SQL, where `\b` is wrong at `$` and non-ASCII; a future regex over other
-# text that genuinely wants a word boundary is a decision to record here.
-regex_patterns = regex_pattern_strings(GENERATOR)
-check("the regex scan sees the generator's patterns (not a scan of nothing)", lambda: len(regex_patterns) >= 40)
-check("no `\\b` in any regex the generator compiles", lambda: not any(chr(92) + "b" in pat for pat in regex_patterns))
+# rule lives in the GENERATOR now: every SQL-reading pattern is built by
+# `sql_re`, which refuses `\b` at construction, so the proofs pin the factory
+# and that the scanners go through it. A ban over source lines refused a `\b`
+# in an error message (Codex on PR #90, round six) and a scan over every
+# compiled pattern would refuse one in the Markdown-label or block-replacement
+# regexes, which read no SQL (round seven); those use `re` directly and are
+# outside the rule by construction.
+check("sql_re refuses a word boundary and names the rule", lambda: refused_with(lambda: gen.sql_re(r"alter\s+type\b"), "IDENT_START"))
+check("sql_re compiles an ordinary SQL pattern", lambda: gen.sql_re(r"alter\s+type", re.I).match("ALTER TYPE x") is not None)
+check("the generator builds its SQL scanners through sql_re (a rule applied to something)", lambda: sql_re_call_count(GENERATOR) >= 40)
 
 # --- round thirty-two A: only the literal in body position is a routine body
 codex32a = "create function f(x text default 'create type') returns text language sql as $$ select x $$;\n"
