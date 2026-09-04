@@ -213,19 +213,24 @@ def refused_with(fn, needle):
 
 
 RE_FACTORIES = {"sql_re", "text_re"}
-RE_CALLS_WITHOUT_A_PATTERN = {"escape", "purge"}
+RE_FUNCTIONS_WITHOUT_A_PATTERN = {"escape", "purge", "error"}  # `error` is the exception class, lowercase by history
+RE_CLASSES_THAT_BUILD_PATTERNS = {"Scanner"}  # the one capitalised name in `re` that compiles what it is given
 
 
 def bare_re_uses(path):
-    """Every CALL `re.<name>(…)` in the module at `path` that builds or uses a
-    pattern outside the two factories — as (line, name). A pattern is built
-    by a call, so only calls are judged: a flag, a type name or an exception
-    class is an attribute, not a call, and is free (Codex on PR #90, round
-    eleven: a whitelist of attribute names refused `re.ASCII` on a pattern
-    that still went through `text_re` — an enumeration, connected to nothing).
-    `re.escape` and `re.purge` are calls that build no pattern; `re.compile`
-    is allowed only inside a factory; every other call is refused by name,
-    so a new `re` function is a one-line decision here rather than a hole."""
+    """Every REFERENCE `re.<name>` in the module at `path` to a function that
+    builds or uses a pattern, outside the two factories — called or merely
+    rebound — as (line, name). The convention of the `re` module is the
+    rule: a lowercase attribute is a function, and every function but
+    `escape`, `purge` and the exception `error` builds or uses a pattern; a
+    capitalised attribute is a flag, a type or an exception class and is free
+    (round eleven: a whitelist of flag names refused `re.ASCII` on a pattern
+    that still went through `text_re`), except `Scanner`, which compiles.
+    References rather than calls, because `compile_re = re.compile` hands the
+    constructor to a name nothing watches and a later call through it is an
+    `ast.Name` (Codex on PR #90, round twelve). `re.compile` is allowed only
+    inside a factory; a new lowercase `re` function is a one-line decision
+    here rather than a hole."""
     tree = ast.parse(path.read_text())
     inside = set()
     for node in ast.walk(tree):
@@ -233,14 +238,14 @@ def bare_re_uses(path):
             inside.update(id(sub) for sub in ast.walk(node))
     out = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
+        if not (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "re"):
             continue
-        fn = node.func
-        if not (isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name) and fn.value.id == "re"):
+        name = node.attr
+        if name[:1].isupper() and name not in RE_CLASSES_THAT_BUILD_PATTERNS:
+            continue  # a flag, a type or an exception class
+        if name in RE_FUNCTIONS_WITHOUT_A_PATTERN or (name == "compile" and id(node) in inside):
             continue
-        if fn.attr in RE_CALLS_WITHOUT_A_PATTERN or (fn.attr == "compile" and id(fn) in inside):
-            continue
-        out.append((node.lineno, fn.attr))
+        out.append((node.lineno, name))
     return sorted(out)
 
 
@@ -309,8 +314,8 @@ def reports_detail(fn, needle):
 
 
 def factory_compiles(path):
-    """How many `re.compile(…)` calls the two factories themselves contain —
-    the walker's own eyesight, asserted so a rule that sees nothing cannot
+    """How many `re.compile` references the two factories themselves contain
+    — the walker's own eyesight, asserted so a rule that sees nothing cannot
     pass."""
     tree = ast.parse(path.read_text())
     return sum(
@@ -318,8 +323,8 @@ def factory_compiles(path):
         for fn in ast.walk(tree)
         if isinstance(fn, ast.FunctionDef) and fn.name in RE_FACTORIES
         for node in ast.walk(fn)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name) and node.func.value.id == "re" and node.func.attr == "compile"
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+        and node.value.id == "re" and node.attr == "compile"
     )
 
 
@@ -836,9 +841,10 @@ check("create type$x is not an enum statement and not a crash", lambda: run(scra
 # scan over every compiled pattern would refuse one in a Markdown regex
 # (round seven), and a floor on the number of `sql_re` calls let a scanner
 # bypass the factory unnoticed (round eight) — so the rule is an exact
-# structural one now: the only pattern-building CALLS on `re` are the
-# factories' own `re.compile` (flags, type names and exception classes are
-# attributes, not calls, and are free — round eleven), and
+# structural one now: the only REFERENCE to a pattern-building function of
+# `re` is the factories' own `re.compile` — a reference, not only a call,
+# since `compile_re = re.compile` rebinds the constructor (round twelve) —
+# while a flag, a type or an exception class is free (round eleven), and
 # the module enters only as `import re` (round nine), so there is no other
 # name a pattern constructor could hide behind. Dynamic construction is
 # outside the guard, and the walker's docstring says so.
