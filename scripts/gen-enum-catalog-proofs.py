@@ -242,7 +242,14 @@ def named_failure(detail):
     raise AssertionError(detail)
 
 
-REGEX_MODULES = {"re", "regex", "sre_compile", "sre_parse", "_sre"}
+REGEX_MODULES = ("re", "regex", "sre_compile", "sre_parse", "_sre")
+
+
+def is_regex_module(name):
+    """`re` itself, any of its submodules (`re._compiler`, `re._parser` — the
+    engine behind `re.compile`, importable by name), and the other engines,
+    with THEIR submodules: a package is not entered only at its top."""
+    return name is not None and any(name == m or name.startswith(m + ".") for m in REGEX_MODULES)
 
 
 def regex_import_violations(path):
@@ -252,18 +259,19 @@ def regex_import_violations(path):
     enter the file only as a bare `import re`: no alias (`import re as r`),
     no `from re import …` (Codex on PR #90, round nine: `from re import
     compile as compile_re` bypassed the factory rule with every proof green),
-    and no other regex engine at all. Dynamic construction — `getattr`,
-    `importlib`, `eval` — is outside this guard, as SQL assembled to evade
-    the generator is outside the generator's: both catch the mistake, not the
-    adversary, and say so."""
+    no submodule (round ten: `from re._compiler import compile` — an exact
+    name match let the package in by a side door), and no other regex engine
+    at all. Dynamic construction — `getattr`, `importlib`, `eval` — is outside
+    this guard, as SQL assembled to evade the generator is outside the
+    generator's: both catch the mistake, not the adversary, and say so."""
     tree = ast.parse(path.read_text())
     out = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name in REGEX_MODULES and (alias.name != "re" or alias.asname is not None):
+                if is_regex_module(alias.name) and (alias.name != "re" or alias.asname is not None):
                     out.append((node.lineno, f"import {alias.name}" + (f" as {alias.asname}" if alias.asname else "")))
-        elif isinstance(node, ast.ImportFrom) and node.module in REGEX_MODULES:
+        elif isinstance(node, ast.ImportFrom) and is_regex_module(node.module):
             out.append((node.lineno, f"from {node.module} import " + ", ".join(a.name for a in node.names)))
     return sorted(out)
 
