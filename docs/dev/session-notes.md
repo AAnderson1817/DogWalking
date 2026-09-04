@@ -52,6 +52,14 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   only the case where the generator produced a change. If they are the only
   red, commit and re-run before diagnosing. A dirty tree elsewhere does not
   trip them.
+- **Gate 10f is the enum-catalogue generator's proof set**
+  (`scripts/gen-enum-catalog-proofs.py`, 582 probes from the forty-three review
+  rounds on PR #88). To pin a new rule, add a `scratch("name", sql)` probe and
+  assert either `unchanged(d)` (a healthy migration renders the committed
+  catalogue), a value list from `run(d)[1]`, or `refuses(d, "<the sentence the
+  rule names>")` — never a bare exit, which any crash satisfies. Prove it red
+  by reinstating the defect on a snapshot of the generator, then `cp` the
+  snapshot back and `cmp` before believing the next green run.
 - **A missing tool makes a gate PASS by not running.** `validate.sh` skips its
   deno gate when deno is absent. Install it first; a gate that goes green by
   not running is this repository's most-recorded failure.

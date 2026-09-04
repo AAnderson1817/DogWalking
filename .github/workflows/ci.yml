@@ -796,6 +796,14 @@ jobs:
           fi
           echo "PASS: the enum catalogue matches the migrations"
 
+      # Forty-three review rounds on PR #88 each fixed one way the generator
+      # above could bless a wrong catalogue or refuse a healthy migration, and
+      # each fix was proven red first — in a session scratchpad, which is a
+      # rule connected to nothing once the container is gone. The probes are
+      # a committed test now (validate gate 10f).
+      - name: The enum catalogue generator's proof set holds
+        run: python3 scripts/gen-enum-catalog-proofs.py
+
   # CLAUDE.md invariant 6 says migrations are append-only once applied. That
   # rule has been enforced only by a local PreToolUse hook and by whoever is
   # paying attention — nothing a reviewer or CI could see. An edit to an

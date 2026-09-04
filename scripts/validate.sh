@@ -160,6 +160,12 @@ enum_catalog() {
 }
 run "10e. enum catalogue" enum_catalog
 
+# 10f. The generator's own proof set: the probes from the forty-three review
+# rounds on PR #88, each a healthy migration it must read or a defect it must
+# refuse by name. They lived in a session scratchpad until they were a test.
+# Reads the migrations only, so it always runs.
+run "10f. enum catalogue proofs" python3 scripts/gen-enum-catalog-proofs.py
+
 # ── 11. Secret-leak grep ──────────────────────────────────────────────────
 no_secret_literals() {
   local hits
