@@ -137,6 +137,24 @@ DROP = re.compile(
     re.I | re.S,
 )
 LABEL = re.compile(LIT)
+
+
+def enum_statement_spans(skel: str) -> list[tuple[str, int, int]]:
+    """Every enum statement the loose scanners see in a skeleton — (kind,
+    start, end), in position order. `collect()` refuses any of them the strict
+    readers do not also match, and the proof set builds its enum-only probe
+    baseline from the same spans (copying the clean text at each), so the two
+    cannot disagree about what an enum statement is: this is the one seam the
+    proofs depend on besides `strip_sql`, `collect` and `render`."""
+    return sorted(
+        (kind, m.start(), m.end())
+        for kind, scanner in (
+            ("create type … as enum", CREATE_ANY),
+            ("alter type", ALTER_ANY),
+            ("drop type", DROP_ANY),
+        )
+        for m in scanner.finditer(skel)
+    )
 # The whole parenthesis must be standard literals separated by commas. An
 # escape string (the E prefix, backslash escapes inside), a dollar-quoted
 # label or anything else is refused rather than half-read: on an escape
@@ -1060,21 +1078,20 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
         creates = list(CREATE.finditer(skel))
         alters = list(ALTER.finditer(skel))
         drops = list(DROP.finditer(skel))
-        for kind, loose_re, strict in (
-            ("create type … as enum", CREATE_ANY, creates),
-            ("alter type", ALTER_ANY, alters),
-            ("drop type", DROP_ANY, drops),
-        ):
-            strict_starts = {m.start() for m in strict}
-            for loose in loose_re.finditer(skel):
-                if loose.start() not in strict_starts:
-                    print(
-                        f"FAIL: {path.name}: `{' '.join(sql[loose.start():loose.end()].split())}` is a `{kind}` "
-                        "this generator cannot read; teach gen-enum-catalog.py the shape rather "
-                        "than letting the catalogue silently disagree with the migrations",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
+        strict_starts = {
+            "create type … as enum": {m.start() for m in creates},
+            "alter type": {m.start() for m in alters},
+            "drop type": {m.start() for m in drops},
+        }
+        for kind, start, end in enum_statement_spans(skel):
+            if start not in strict_starts[kind]:
+                print(
+                    f"FAIL: {path.name}: `{' '.join(sql[start:end].split())}` is a `{kind}` "
+                    "this generator cannot read; teach gen-enum-catalog.py the shape rather "
+                    "than letting the catalogue silently disagree with the migrations",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
         schemas = [m for m in SCHEMA_DDL.finditer(skel) if not SCHEMA_PUBLIC.match(sql[m.start() : m.end()])]
         stream = sorted(
             [(m.start(), "create", m) for m in creates]

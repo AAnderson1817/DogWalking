@@ -45,6 +45,8 @@ whole set takes about a minute.
 """
 from __future__ import annotations
 
+import ast
+
 import contextlib
 import functools
 import importlib.util
@@ -58,7 +60,6 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 GENERATOR = ROOT / "scripts" / "gen-enum-catalog.py"
 MIGRATIONS = ROOT / "supabase" / "migrations"
-NEW = str(GENERATOR)
 BS = chr(92)
 DQ = chr(34)
 Q = chr(39)
@@ -96,20 +97,19 @@ def enum_only_baseline():
     migration turned 64 proofs red on a healthy tree (Codex on PR #90, round
     four). Session settings, bodies and schema DDL are the real tree's business
     and gate 10e checks them there; a probe needs the real enums and a baseline
-    that carries no state. The statements are found with the generator's own
-    loose scanners on the skeleton and copied from the clean text at the same
-    spans, which is exactly how `collect()` reads them."""
+    that carries no state. The statements are the spans the generator's own
+    `enum_statement_spans` reports on the skeleton — the seam `collect()`
+    itself iterates — copied from the clean text at the same positions, so
+    the baseline and the generator cannot disagree about what an enum
+    statement is."""
     BASELINE.mkdir()
     for path in sorted(MIGRATIONS.glob("*.sql")):
         sql, skel = gen.strip_sql(path.read_text())
         if skel.strip() and not skel.rstrip().endswith(";"):
             sql, skel = sql + ";", skel + ";"  # collect() makes EOF a terminator the same way
-        spans = sorted(
-            (m.start(), m.end())
-            for scanner in (gen.CREATE_ANY, gen.ALTER_ANY, gen.DROP_ANY)
-            for m in scanner.finditer(skel)
+        (BASELINE / path.name).write_text(
+            "".join(sql[a:b] + "\n" for _kind, a, b in gen.enum_statement_spans(skel))
         )
-        (BASELINE / path.name).write_text("".join(sql[a:b] + "\n" for a, b in spans))
 
 
 class Refused(Exception):
@@ -190,6 +190,47 @@ def scratch_edit(name, filename, old, new):
 
 def unchanged(d):
     return run(d)[0] == committed
+
+
+def regex_pattern_strings(path):
+    """Every string that feeds a pattern argument of `re.compile`, `re.search`,
+    `re.match`, `re.fullmatch`, `re.finditer`, `re.findall`, `re.sub` or
+    `re.split` in the module at `path`: the first argument, walked through
+    concatenation, f-strings and module-level names bound to strings (the
+    `IDENT_CHARS`/`IDENT_START`/`IDENT_END`/`LIT` building blocks). Docstrings,
+    messages and comments are not patterns and are not returned."""
+    tree = ast.parse(path.read_text())
+    bound = {
+        node.targets[0].id: node.value
+        for node in tree.body
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+    }
+
+    def strings(node, seen=()):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            yield node.value
+        elif isinstance(node, ast.BinOp):
+            yield from strings(node.left, seen)
+            yield from strings(node.right, seen)
+        elif isinstance(node, ast.JoinedStr):
+            for part in node.values:
+                yield from strings(part, seen)
+        elif isinstance(node, ast.FormattedValue):
+            yield from strings(node.value, seen)
+        elif isinstance(node, ast.Name) and node.id in bound and node.id not in seen:
+            yield from strings(bound[node.id], seen + (node.id,))
+        elif isinstance(node, ast.Call):
+            for arg in node.args:
+                yield from strings(arg, seen)
+
+    out = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == "re"
+                and node.func.attr in {"compile", "search", "match", "fullmatch", "finditer", "findall", "sub", "split"}
+                and node.args):
+            out.extend(strings(node.args[0]))
+    return out
 
 
 checks = []
@@ -687,8 +728,18 @@ check("create schema public$deploy still counts (round 26 control)", lambda: ref
 check("begin atomic still refused", lambda: refuses(scratch("r31t", "create procedure later() language sql begin atomic select 1; end;\n"), "BEGIN ATOMIC"))
 check("drop type with cascade still read", lambda: "payment_status" not in run(scratch("r31u", "drop type payment_status cascade;\n"))[2])
 check("create type$x is not an enum statement and not a crash", lambda: run(scratch("r31v", "select 1 as type$x;\n"))[0] == committed)
-src31 = GENERATOR.read_text().splitlines()
-check("no `\\b` survives outside comments", lambda: not any(chr(92) + "b" in l for l in src31 if not l.lstrip().startswith("#")))
+# Round thirty-one made the lexer's identifier boundary the one rule for every
+# scan, because Python's `\b` stops at `$` and at non-ASCII letters where
+# PostgreSQL's lexer continues an identifier — four rounds paid for that. The
+# guard against the class is scoped to what can carry it: the PATTERNS the
+# generator compiles, walked out of the source with `ast` (Codex on PR #90,
+# round six: a ban over every source line would refuse a `\b` in a docstring
+# or an error message, i.e. a healthy change). Every regex in this file reads
+# SQL, where `\b` is wrong at `$` and non-ASCII; a future regex over other
+# text that genuinely wants a word boundary is a decision to record here.
+regex_patterns = regex_pattern_strings(GENERATOR)
+check("the regex scan sees the generator's patterns (not a scan of nothing)", lambda: len(regex_patterns) >= 40)
+check("no `\\b` in any regex the generator compiles", lambda: not any(chr(92) + "b" in pat for pat in regex_patterns))
 
 # --- round thirty-two A: only the literal in body position is a routine body
 codex32a = "create function f(x text default 'create type') returns text language sql as $$ select x $$;\n"
@@ -714,7 +765,6 @@ check("a literal in an ordinary statement is still data", lambda: unchanged(scra
 codex32b = "alter role deploy set search_path.custom = 'value';\n"
 d = scratch("s32n", codex32b)
 check("alter role … set search_path.custom: fixed allows", lambda: unchanged(d))
-check("alter role … set search_path.custom: fixed reads the target whole", lambda: load(NEW).alter_set_target("alter role deploy set search_path.custom = 'value'", "alter role deploy set search_path.custom = 'xxxxx'") == "search_path.custom")
 scratch('s32o', "set search_path.custom = 'x';\n")
 check("set search_path.custom: fixed allows", lambda: unchanged(S/"s32o"))
 check("set \"search_path\".custom allowed", lambda: unchanged(scratch("s32p", 'set "search_path".custom = ' + "'x';\n")))
