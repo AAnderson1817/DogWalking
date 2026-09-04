@@ -212,16 +212,20 @@ def refused_with(fn, needle):
     return False
 
 
-RE_ATTRS_ALLOWED = {"escape", "I", "S", "M", "X", "IGNORECASE", "DOTALL", "MULTILINE", "VERBOSE", "Pattern", "Match"}
 RE_FACTORIES = {"sql_re", "text_re"}
+RE_CALLS_WITHOUT_A_PATTERN = {"escape", "purge"}
 
 
 def bare_re_uses(path):
-    """Every `re.<name>` in the module at `path` that is neither an allowed
-    non-pattern use (escape, the flag constants, the type names) nor
-    `re.compile` inside one of the two factories — as (line, name). A
-    pattern built anywhere else has escaped the declaration the factories
-    exist to make (Codex on PR #90, round eight)."""
+    """Every CALL `re.<name>(…)` in the module at `path` that builds or uses a
+    pattern outside the two factories — as (line, name). A pattern is built
+    by a call, so only calls are judged: a flag, a type name or an exception
+    class is an attribute, not a call, and is free (Codex on PR #90, round
+    eleven: a whitelist of attribute names refused `re.ASCII` on a pattern
+    that still went through `text_re` — an enumeration, connected to nothing).
+    `re.escape` and `re.purge` are calls that build no pattern; `re.compile`
+    is allowed only inside a factory; every other call is refused by name,
+    so a new `re` function is a one-line decision here rather than a hole."""
     tree = ast.parse(path.read_text())
     inside = set()
     for node in ast.walk(tree):
@@ -229,17 +233,15 @@ def bare_re_uses(path):
             inside.update(id(sub) for sub in ast.walk(node))
     out = []
     for node in ast.walk(tree):
-        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
-                and node.value.id == "re" and node.attr not in RE_ATTRS_ALLOWED
-                and not (node.attr == "compile" and id(node) in inside)):
-            out.append((node.lineno, node.attr))
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if not (isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name) and fn.value.id == "re"):
+            continue
+        if fn.attr in RE_CALLS_WITHOUT_A_PATTERN or (fn.attr == "compile" and id(fn) in inside):
+            continue
+        out.append((node.lineno, fn.attr))
     return sorted(out)
-
-
-def named_failure(detail):
-    """Raise so `check()` reports the detail beside the proof's name — a red
-    that says WHERE, not only that."""
-    raise AssertionError(detail)
 
 
 REGEX_MODULES = ("re", "regex", "sre_compile", "sre_parse", "_sre")
@@ -286,17 +288,38 @@ def plain_re_imports(path):
     )
 
 
+def named_failure(detail):
+    """Raise so `check()` reports the detail beside the proof's name — a red
+    that says WHERE, not only that."""
+    raise AssertionError(detail)
+
+
+def reports_detail(fn, needle):
+    """True only when `fn()` raises AssertionError AND the message carries
+    the detail — the reporting path of a structural proof, pinned on the real
+    tree because it runs only when a guard FIRES: a helper deleted by an
+    edit is otherwise a NameError that appears exactly when the guard has
+    something to say (found by a sabotage in round eleven, not by the green
+    run before it)."""
+    try:
+        fn()
+    except AssertionError as e:
+        return needle in str(e)
+    return False
+
+
 def factory_compiles(path):
-    """How many `re.compile` the two factories themselves contain — the
-    walker's own eyesight, asserted so a rule that sees nothing cannot pass."""
+    """How many `re.compile(…)` calls the two factories themselves contain —
+    the walker's own eyesight, asserted so a rule that sees nothing cannot
+    pass."""
     tree = ast.parse(path.read_text())
     return sum(
         1
         for fn in ast.walk(tree)
         if isinstance(fn, ast.FunctionDef) and fn.name in RE_FACTORIES
         for node in ast.walk(fn)
-        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
-        and node.value.id == "re" and node.attr == "compile"
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name) and node.func.value.id == "re" and node.func.attr == "compile"
     )
 
 
@@ -813,8 +836,9 @@ check("create type$x is not an enum statement and not a crash", lambda: run(scra
 # scan over every compiled pattern would refuse one in a Markdown regex
 # (round seven), and a floor on the number of `sql_re` calls let a scanner
 # bypass the factory unnoticed (round eight) — so the rule is an exact
-# structural one now: the only `re.compile` in the file are the factories'
-# own, the only other `re.` uses are `escape`, flags and type names, and
+# structural one now: the only pattern-building CALLS on `re` are the
+# factories' own `re.compile` (flags, type names and exception classes are
+# attributes, not calls, and are free — round eleven), and
 # the module enters only as `import re` (round nine), so there is no other
 # name a pattern constructor could hide behind. Dynamic construction is
 # outside the guard, and the walker's docstring says so.
@@ -822,6 +846,7 @@ check("sql_re refuses a word boundary and names the rule", lambda: refused_with(
 check("sql_re compiles an ordinary SQL pattern", lambda: gen.sql_re(r"alter\s+type", re.I).match("ALTER TYPE x") is not None)
 check("text_re declares a non-SQL pattern and imposes no rule", lambda: gen.text_re(r"\bword\b").search("a word here") is not None)
 check("the walker sees the factories' own re.compile (it is not blind)", lambda: factory_compiles(GENERATOR) == 2)
+check("a structural proof can name its detail when it fires", lambda: reports_detail(lambda: named_failure("probe detail"), "probe detail"))
 check("no pattern is built outside the two factories", lambda: bare_re_uses(GENERATOR) == [] or named_failure(f"bare re.<op> at (line, name): {bare_re_uses(GENERATOR)}"))
 # The walker watches the name `re`, so the module may enter only as that name
 # (round nine): an alias or a `from re import …` would hand a pattern
