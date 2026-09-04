@@ -242,6 +242,42 @@ def named_failure(detail):
     raise AssertionError(detail)
 
 
+REGEX_MODULES = {"re", "regex", "sre_compile", "sre_parse", "_sre"}
+
+
+def regex_import_violations(path):
+    """Every way the module at `path` could bind a regex constructor to a
+    name the walker does not watch — as (line, description). The walker in
+    `bare_re_uses` reads attributes of the name `re`, so the regex module may
+    enter the file only as a bare `import re`: no alias (`import re as r`),
+    no `from re import …` (Codex on PR #90, round nine: `from re import
+    compile as compile_re` bypassed the factory rule with every proof green),
+    and no other regex engine at all. Dynamic construction — `getattr`,
+    `importlib`, `eval` — is outside this guard, as SQL assembled to evade
+    the generator is outside the generator's: both catch the mistake, not the
+    adversary, and say so."""
+    tree = ast.parse(path.read_text())
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in REGEX_MODULES and (alias.name != "re" or alias.asname is not None):
+                    out.append((node.lineno, f"import {alias.name}" + (f" as {alias.asname}" if alias.asname else "")))
+        elif isinstance(node, ast.ImportFrom) and node.module in REGEX_MODULES:
+            out.append((node.lineno, f"from {node.module} import " + ", ".join(a.name for a in node.names)))
+    return sorted(out)
+
+
+def plain_re_imports(path):
+    """How many bare `import re` the module carries — the import walker's
+    own eyesight."""
+    tree = ast.parse(path.read_text())
+    return sum(
+        1 for node in ast.walk(tree) if isinstance(node, ast.Import)
+        for alias in node.names if alias.name == "re" and alias.asname is None
+    )
+
+
 def factory_compiles(path):
     """How many `re.compile` the two factories themselves contain — the
     walker's own eyesight, asserted so a rule that sees nothing cannot pass."""
@@ -770,12 +806,20 @@ check("create type$x is not an enum statement and not a crash", lambda: run(scra
 # (round seven), and a floor on the number of `sql_re` calls let a scanner
 # bypass the factory unnoticed (round eight) — so the rule is an exact
 # structural one now: the only `re.compile` in the file are the factories'
-# own, and the only other `re.` uses are `escape`, flags and type names.
+# own, the only other `re.` uses are `escape`, flags and type names, and
+# the module enters only as `import re` (round nine), so there is no other
+# name a pattern constructor could hide behind. Dynamic construction is
+# outside the guard, and the walker's docstring says so.
 check("sql_re refuses a word boundary and names the rule", lambda: refused_with(lambda: gen.sql_re(r"alter\s+type\b"), "IDENT_START"))
 check("sql_re compiles an ordinary SQL pattern", lambda: gen.sql_re(r"alter\s+type", re.I).match("ALTER TYPE x") is not None)
 check("text_re declares a non-SQL pattern and imposes no rule", lambda: gen.text_re(r"\bword\b").search("a word here") is not None)
 check("the walker sees the factories' own re.compile (it is not blind)", lambda: factory_compiles(GENERATOR) == 2)
 check("no pattern is built outside the two factories", lambda: bare_re_uses(GENERATOR) == [] or named_failure(f"bare re.<op> at (line, name): {bare_re_uses(GENERATOR)}"))
+# The walker watches the name `re`, so the module may enter only as that name
+# (round nine): an alias or a `from re import …` would hand a pattern
+# constructor to a name nothing watches.
+check("the import walker sees the bare `import re` (it is not blind)", lambda: plain_re_imports(GENERATOR) == 1)
+check("the regex module enters the generator only as a bare `import re`", lambda: regex_import_violations(GENERATOR) == [] or named_failure(f"regex import at (line, form): {regex_import_violations(GENERATOR)}"))
 
 # --- round thirty-two A: only the literal in body position is a routine body
 codex32a = "create function f(x text default 'create type') returns text language sql as $$ select x $$;\n"
