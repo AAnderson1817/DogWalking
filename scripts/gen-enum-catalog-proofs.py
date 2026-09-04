@@ -76,9 +76,20 @@ TMP = tempfile.TemporaryDirectory(prefix="enum-proofs-")
 S = pathlib.Path(TMP.name)  # every named scratch copy lives here, and a check may refer back to one by name
 
 
+class Refused(Exception):
+    """The generator refused a probe that `run()` expected it to render.
+    Raised rather than returned as an empty result, because an absence
+    proof — `"payment_status" not in run(d)[2]` — is satisfied by an EMPTY
+    creation order, so a generator that wrongly REFUSED a valid `drop type`
+    passed every proof asserting the type was gone (Codex on PR #90, round
+    two). A refusal is a failed render; `check()` reports the raise as a
+    named FAIL carrying the generator's own sentence."""
+
+
 def run(d, path=None):
-    """(rendered block, values, creation order) for the migrations in `d`,
-    or (None, {}, []) when the generator refused. `path` is accepted for
+    """(rendered block, values, creation order) for the migrations in `d`.
+    Raises `Refused` when the generator refused — never an empty result,
+    which an absence proof cannot tell from success. `path` is accepted for
     call-site compatibility with the scratchpad harness; the generator is
     always this tree's."""
     gen.MIGRATIONS = pathlib.Path(d)
@@ -86,8 +97,8 @@ def run(d, path=None):
     with contextlib.redirect_stderr(err):
         try:
             v, t, o = gen.collect()
-        except SystemExit:
-            return None, {}, []
+        except SystemExit as e:
+            raise Refused(f"exit {e.code}: {' '.join(err.getvalue().split())[:200]}") from None
     return gen.render(v, t, o), v, o
 
 
