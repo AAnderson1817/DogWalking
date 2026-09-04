@@ -32,7 +32,7 @@ import ResetPassword from "@/screens/ResetPassword";
 // the route and the chunk from production builds (verified in build output).
 const DevKit = import.meta.env.DEV ? lazy(() => import("@/screens/DevKit")) : null;
 const InboxPreview = import.meta.env.DEV ? lazy(() => import("@/prototypes/InboxPreview")) : null;
-const TodayPreview = import.meta.env.DEV ? lazy(() => import("@/screens/TodayPreview")) : null;
+const TodayPreview = import.meta.env.DEV ? lazy(() => import("@/prototypes/TodayPreview")) : null;
 const CalendarWeekPreview = import.meta.env.DEV
   ? lazy(() => import("@/screens/CalendarWeekPreview"))
   : null;
