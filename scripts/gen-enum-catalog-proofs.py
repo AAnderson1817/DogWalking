@@ -212,12 +212,47 @@ def refused_with(fn, needle):
     return False
 
 
-def sql_re_call_count(path):
-    """How many times the module at `path` builds a pattern through `sql_re`."""
+RE_ATTRS_ALLOWED = {"escape", "I", "S", "M", "X", "IGNORECASE", "DOTALL", "MULTILINE", "VERBOSE", "Pattern", "Match"}
+RE_FACTORIES = {"sql_re", "text_re"}
+
+
+def bare_re_uses(path):
+    """Every `re.<name>` in the module at `path` that is neither an allowed
+    non-pattern use (escape, the flag constants, the type names) nor
+    `re.compile` inside one of the two factories — as (line, name). A
+    pattern built anywhere else has escaped the declaration the factories
+    exist to make (Codex on PR #90, round eight)."""
+    tree = ast.parse(path.read_text())
+    inside = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name in RE_FACTORIES:
+            inside.update(id(sub) for sub in ast.walk(node))
+    out = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and node.value.id == "re" and node.attr not in RE_ATTRS_ALLOWED
+                and not (node.attr == "compile" and id(node) in inside)):
+            out.append((node.lineno, node.attr))
+    return sorted(out)
+
+
+def named_failure(detail):
+    """Raise so `check()` reports the detail beside the proof's name — a red
+    that says WHERE, not only that."""
+    raise AssertionError(detail)
+
+
+def factory_compiles(path):
+    """How many `re.compile` the two factories themselves contain — the
+    walker's own eyesight, asserted so a rule that sees nothing cannot pass."""
     tree = ast.parse(path.read_text())
     return sum(
-        1 for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "sql_re"
+        1
+        for fn in ast.walk(tree)
+        if isinstance(fn, ast.FunctionDef) and fn.name in RE_FACTORIES
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+        and node.value.id == "re" and node.attr == "compile"
     )
 
 
@@ -726,16 +761,21 @@ check("create type$x is not an enum statement and not a crash", lambda: run(scra
 # Round thirty-one made the lexer's identifier boundary the one rule for every
 # SQL scan, because Python's `\b` stops at `$` and at non-ASCII letters where
 # PostgreSQL's lexer continues an identifier — four rounds paid for that. The
-# rule lives in the GENERATOR now: every SQL-reading pattern is built by
-# `sql_re`, which refuses `\b` at construction, so the proofs pin the factory
-# and that the scanners go through it. A ban over source lines refused a `\b`
-# in an error message (Codex on PR #90, round six) and a scan over every
-# compiled pattern would refuse one in the Markdown-label or block-replacement
-# regexes, which read no SQL (round seven); those use `re` directly and are
-# outside the rule by construction.
+# rule lives in the GENERATOR: every pattern is built by one of two factories,
+# `sql_re` (reads SQL; refuses `\b` at construction) or `text_re` (reads
+# Markdown or file text; no rule but the declaration), and the proofs pin the
+# factories and that NO pattern is built anywhere else. A ban over source
+# lines refused a `\b` in an error message (Codex on PR #90, round six), a
+# scan over every compiled pattern would refuse one in a Markdown regex
+# (round seven), and a floor on the number of `sql_re` calls let a scanner
+# bypass the factory unnoticed (round eight) — so the rule is an exact
+# structural one now: the only `re.compile` in the file are the factories'
+# own, and the only other `re.` uses are `escape`, flags and type names.
 check("sql_re refuses a word boundary and names the rule", lambda: refused_with(lambda: gen.sql_re(r"alter\s+type\b"), "IDENT_START"))
 check("sql_re compiles an ordinary SQL pattern", lambda: gen.sql_re(r"alter\s+type", re.I).match("ALTER TYPE x") is not None)
-check("the generator builds its SQL scanners through sql_re (a rule applied to something)", lambda: sql_re_call_count(GENERATOR) >= 40)
+check("text_re declares a non-SQL pattern and imposes no rule", lambda: gen.text_re(r"\bword\b").search("a word here") is not None)
+check("the walker sees the factories' own re.compile (it is not blind)", lambda: factory_compiles(GENERATOR) == 2)
+check("no pattern is built outside the two factories", lambda: bare_re_uses(GENERATOR) == [] or named_failure(f"bare re.<op> at (line, name): {bare_re_uses(GENERATOR)}"))
 
 # --- round thirty-two A: only the literal in body position is a routine body
 codex32a = "create function f(x text default 'create type') returns text language sql as $$ select x $$;\n"
