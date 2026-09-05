@@ -74,13 +74,34 @@ def sql_re(pattern: str, flags: int = 0) -> re.Pattern[str]:
     where patterns are made and the proof set only has to pin this function;
     a regex over Markdown or file text uses `re` directly and is outside the
     rule by construction (Codex on PR #90, rounds six and seven)."""
-    if "\\b" in pattern:
+    if has_word_boundary(pattern):
         raise ValueError(
-            "a SQL-reading regex may not use \\b — Python's word boundary stops at $ and at "
+            "a SQL-reading regex may not use \\b or \\B — Python's word boundary stops at $ and at "
             "non-ASCII letters, where PostgreSQL's lexer continues an identifier; use "
             "IDENT_START / IDENT_END instead: " + pattern[:80]
         )
     return re.compile(pattern, flags)
+
+
+def has_word_boundary(pattern: str) -> bool:
+    """True when `pattern` carries the regex token `\\b` or `\\B`: a backslash
+    that is itself unescaped, followed by `b` or `B`. A substring test refused
+    `\\\\b` too — an escaped backslash and then a literal `b`, no boundary at
+    all (Codex on PR #90, round sixteen) — so the scan walks escapes in pairs
+    and only the odd backslash before a `b` counts. `\\B`, the complement, is
+    refused for the same reason as `\\b`. Inside a character class `\\b` is a
+    backspace rather than a boundary and is refused all the same: no SQL
+    scanner here reads a backspace, and a factory that refuses what it cannot
+    read is the safe direction."""
+    i = 0
+    while i < len(pattern):
+        if pattern[i] != "\\":
+            i += 1
+            continue
+        if i + 1 < len(pattern) and pattern[i + 1] in "bB":
+            return True
+        i += 2  # the escaped character, whatever it is
+    return False
 
 
 def text_re(pattern: str, flags: int = 0) -> re.Pattern[str]:
