@@ -46,6 +46,7 @@ whole set takes about a minute.
 from __future__ import annotations
 
 import ast
+import collections
 
 import contextlib
 import functools
@@ -312,12 +313,16 @@ def bare_module_aliases(path):
 # — is refused by name, and a genuine new non-SQL pattern is a recorded
 # decision in this file rather than a marker anyone can paste. Identity is
 # (enclosing function or "<module>", bound name or "<inline>"), so a rename
-# is a one-line edit here in the same commit. A walker that sees nothing
-# reports both exemptions as missing, so it cannot pass by being blind.
-TEXT_RE_EXEMPTIONS = {
+# is a one-line edit here in the same commit. A LIST rather than a set, and
+# compared as a multiset: each entry excuses exactly ONE site, because a
+# second inline call in the same function shares the identity of the first
+# and membership alone would let it in unrecorded (Codex on PR #90, round
+# fifteen). A walker that sees nothing reports every entry as missing, so it
+# cannot pass by being blind.
+TEXT_RE_EXEMPTIONS = [
     ("<module>", "BACKTICK_RUNS"),  # the fence a Markdown code span needs
     ("main", "<inline>"),  # the generated-block replacement in the spec file
-}
+]
 
 
 def text_re_sites(path):
@@ -355,12 +360,21 @@ def text_re_sites(path):
     return sorted(out)
 
 
-def text_re_record_drift(path):
-    """(sites outside the record, recorded exemptions with no site) — both
-    directions, because a stale exemption excuses a real site forever."""
-    sites = text_re_sites(path)
-    extra = [s for s in sites if (s[1], s[2]) not in TEXT_RE_EXEMPTIONS]
-    missing = sorted(TEXT_RE_EXEMPTIONS - {(s[1], s[2]) for s in sites})
+def text_re_record_drift(path, record=None):
+    """(sites the record does not excuse, recorded entries with no site) —
+    both directions, because a stale exemption excuses a real site forever,
+    and as MULTISETS: each recorded entry is spent on one site in source
+    order, so a duplicate identity is an extra rather than an excused site
+    (round fifteen)."""
+    budget = collections.Counter(TEXT_RE_EXEMPTIONS if record is None else record)
+    extra = []
+    for site in text_re_sites(path):
+        identity = (site[1], site[2])
+        if budget[identity] > 0:
+            budget[identity] -= 1
+        else:
+            extra.append(site)
+    missing = sorted(budget.elements())
     return extra, missing
 
 
@@ -929,7 +943,9 @@ check("create type$x is not an enum statement and not a crash", lambda: run(scra
 # bare name `re` appears only as `re.<attr>`, since `regex_module = re`
 # rebinds the module (round thirteen); every `text_re` site is a recorded
 # exemption, since `text_re` permits `\b` by design and a SQL scanner
-# moved to it would otherwise pass (round fourteen); and
+# moved to it would otherwise pass (round fourteen), each entry excusing
+# exactly one site, since a second inline call in the same function shares
+# the identity of the first (round fifteen); and
 # the module enters only as `import re` (round nine), so there is no other
 # name a pattern constructor could hide behind. Dynamic construction is
 # outside the guard, and the walker's docstring says so.
@@ -946,6 +962,15 @@ check("the import walker sees a bare `import re` (it is not blind)", lambda: pla
 check("the regex module enters the generator only as a bare `import re`", lambda: regex_import_violations(GENERATOR) == [] or named_failure(f"regex import at (line, form): {regex_import_violations(GENERATOR)}"))
 check("the name `re` appears only as the base of an attribute access", lambda: bare_module_aliases(GENERATOR) == [] or named_failure(f"bare `re` at (line, context): {bare_module_aliases(GENERATOR)}"))
 check("every text_re site is a recorded exemption, and every recorded exemption has a site", lambda: text_re_record_drift(GENERATOR) == ([], []) or named_failure(f"text_re outside the record (line, scope, name) / recorded with no site: {text_re_record_drift(GENERATOR)}"))
+# The record's own arithmetic, on a synthetic module rather than the
+# generator, so a refactor of `text_re_record_drift` back to set membership
+# is red on the real tree: two inline calls in one function are one identity
+# and must be two entries (round fifteen), and an entry with no site is
+# reported by name.
+TEXT_RE_PROBE = S / "text_re_probe.py"
+TEXT_RE_PROBE.write_text('BACKTICK_RUNS = text_re(r"`+")\ndef main():\n    a = text_re(r"x").sub("", "")\n    b = text_re(r"y").sub("", "")\n')
+check("a duplicate text_re identity is an extra, not an excused site", lambda: text_re_record_drift(TEXT_RE_PROBE, [("<module>", "BACKTICK_RUNS"), ("main", "<inline>")]) == ([(4, "main", "<inline>")], []))
+check("a recorded text_re entry with no site is reported missing", lambda: text_re_record_drift(TEXT_RE_PROBE, [("<module>", "BACKTICK_RUNS"), ("main", "<inline>"), ("main", "<inline>"), ("main", "SPARE")]) == ([], [("main", "SPARE")]))
 
 # --- round thirty-two A: only the literal in body position is a routine body
 codex32a = "create function f(x text default 'create type') returns text language sql as $$ select x $$;\n"
