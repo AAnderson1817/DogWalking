@@ -303,6 +303,67 @@ def bare_module_aliases(path):
     )
 
 
+# `sql_re` and `text_re` split the file's patterns by what they READ, and a
+# walker cannot tell a SQL scanner from a Markdown one by looking at the
+# pattern — only the person declaring it can. So the exemptions are pinned BY
+# NAME, the `no-raw-hex.test.ts` shape: every `text_re` site must be one of
+# these and every one of these must have a site, so moving a SQL scanner to
+# `text_re` — which permits `\b` by design (Codex on PR #90, round fourteen)
+# — is refused by name, and a genuine new non-SQL pattern is a recorded
+# decision in this file rather than a marker anyone can paste. Identity is
+# (enclosing function or "<module>", bound name or "<inline>"), so a rename
+# is a one-line edit here in the same commit. A walker that sees nothing
+# reports both exemptions as missing, so it cannot pass by being blind.
+TEXT_RE_EXEMPTIONS = {
+    ("<module>", "BACKTICK_RUNS"),  # the fence a Markdown code span needs
+    ("main", "<inline>"),  # the generated-block replacement in the spec file
+}
+
+
+def text_re_sites(path):
+    """Every use of the name `text_re` in the module at `path` other than its
+    own `def`, as (line, enclosing scope, bound name): a call bound by a plain
+    assignment carries the target's name, any other call is `<inline>`, and a
+    REFERENCE that is not a call at all — `t = text_re`, or `text_re` passed
+    as an argument — is `<reference>`, because an alias would hide every site
+    built through it (the round-twelve and round-thirteen lesson, one factory
+    over)."""
+    tree = ast.parse(path.read_text())
+    scope_of, parent_of = {}, {}
+
+    def walk(node, scope):
+        for child in ast.iter_child_nodes(node):
+            parent_of[id(child)] = node
+            scope_of[id(child)] = scope
+            inner = child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else scope
+            walk(child, inner)
+
+    walk(tree, "<module>")
+    out = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Name) and node.id == "text_re"):
+            continue
+        parent = parent_of[id(node)]
+        if isinstance(parent, ast.Call) and parent.func is node:
+            grand = parent_of[id(parent)]
+            bound = (grand.targets[0].id
+                     if isinstance(grand, ast.Assign) and len(grand.targets) == 1 and isinstance(grand.targets[0], ast.Name)
+                     else "<inline>")
+        else:
+            bound = "<reference>"
+        out.append((node.lineno, scope_of[id(node)], bound))
+    return sorted(out)
+
+
+def text_re_record_drift(path):
+    """(sites outside the record, recorded exemptions with no site) — both
+    directions, because a stale exemption excuses a real site forever."""
+    sites = text_re_sites(path)
+    extra = [s for s in sites if (s[1], s[2]) not in TEXT_RE_EXEMPTIONS]
+    missing = sorted(TEXT_RE_EXEMPTIONS - {(s[1], s[2]) for s in sites})
+    return extra, missing
+
+
 def plain_re_imports(path):
     """How many bare `import re` the module carries — the import walker's
     own eyesight."""
@@ -866,7 +927,9 @@ check("create type$x is not an enum statement and not a crash", lambda: run(scra
 # since `compile_re = re.compile` rebinds the constructor (round twelve) —
 # while a flag, a type or an exception class is free (round eleven); the
 # bare name `re` appears only as `re.<attr>`, since `regex_module = re`
-# rebinds the module (round thirteen); and
+# rebinds the module (round thirteen); every `text_re` site is a recorded
+# exemption, since `text_re` permits `\b` by design and a SQL scanner
+# moved to it would otherwise pass (round fourteen); and
 # the module enters only as `import re` (round nine), so there is no other
 # name a pattern constructor could hide behind. Dynamic construction is
 # outside the guard, and the walker's docstring says so.
@@ -882,6 +945,7 @@ check("no pattern is built outside the two factories", lambda: bare_re_uses(GENE
 check("the import walker sees a bare `import re` (it is not blind)", lambda: plain_re_imports(GENERATOR) >= 1)
 check("the regex module enters the generator only as a bare `import re`", lambda: regex_import_violations(GENERATOR) == [] or named_failure(f"regex import at (line, form): {regex_import_violations(GENERATOR)}"))
 check("the name `re` appears only as the base of an attribute access", lambda: bare_module_aliases(GENERATOR) == [] or named_failure(f"bare `re` at (line, context): {bare_module_aliases(GENERATOR)}"))
+check("every text_re site is a recorded exemption, and every recorded exemption has a site", lambda: text_re_record_drift(GENERATOR) == ([], []) or named_failure(f"text_re outside the record (line, scope, name) / recorded with no site: {text_re_record_drift(GENERATOR)}"))
 
 # --- round thirty-two A: only the literal in body position is a routine body
 codex32a = "create function f(x text default 'create type') returns text language sql as $$ select x $$;\n"
