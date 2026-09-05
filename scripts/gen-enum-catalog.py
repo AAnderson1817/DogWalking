@@ -92,7 +92,17 @@ def has_word_boundary(pattern: str) -> bool:
     refused for the same reason as `\\b`. Inside a character class `\\b` is a
     backspace rather than a boundary and is refused all the same: no SQL
     scanner here reads a backspace, and a factory that refuses what it cannot
-    read is the safe direction."""
+    read is the safe direction. The same limit, stated: the scan reads the
+    pattern's TEXT and not its comments, so a `\\b` inside a `(?#...)` or a
+    verbose-mode `#` comment is refused too (Codex on PR #90, round
+    seventeen) — reword the comment. Modelling regex comments means
+    inferring verbose mode from flags, inline and scoped groups, and telling
+    a `#` in a class or behind an escape from one that opens a comment; the
+    exact alternative, asking `re._parser` for AT_BOUNDARY nodes, rests on a
+    private module a Python upgrade may rename, which is a gate red on a
+    healthy tree. The scan never fails open: every boundary token the engine
+    sees is written as an odd backslash before `b` or `B`, so a refusal here
+    is at worst a comment to reword, named by the sentence it raises."""
     i = 0
     while i < len(pattern):
         if pattern[i] != "\\":

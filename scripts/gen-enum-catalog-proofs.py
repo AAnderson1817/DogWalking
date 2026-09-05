@@ -957,6 +957,11 @@ check("sql_re compiles an ordinary SQL pattern", lambda: gen.sql_re(r"alter\s+ty
 check("sql_re accepts an escaped backslash followed by b (no boundary)", lambda: gen.sql_re(r"\\b").fullmatch(r"\b") is not None)
 check("sql_re still refuses a boundary after an escaped backslash", lambda: refused_with(lambda: gen.sql_re(r"\\\b"), "IDENT_START"))
 check("sql_re refuses the non-boundary token \\B as well", lambda: refused_with(lambda: gen.sql_re(r"x\Bx"), "IDENT_START"))
+# A stated limit rather than a defect (round seventeen): the factory reads the
+# pattern's text and not its comments, so a boundary written inside a
+# `(?#...)` comment is refused by name too — reword the comment. Pinned so
+# that modelling regex comments is a deliberate act that edits this line.
+check("a \\b inside a regex comment is refused by name (the factory reads text, not comments)", lambda: refused_with(lambda: gen.sql_re(r"foo(?# do not use \b)"), "IDENT_START"))
 check("text_re declares a non-SQL pattern and imposes no rule", lambda: gen.text_re(r"\bword\b").search("a word here") is not None)
 check("the walker sees the factories' own re.compile (it is not blind)", lambda: factory_compiles(GENERATOR) == 2)
 check("a structural proof can name its detail when it fires", lambda: reports_detail(lambda: named_failure("probe detail"), "probe detail"))
