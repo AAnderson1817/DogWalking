@@ -48,12 +48,16 @@ Every envelope is looked at, in one of three shapes:
 | return the envelope to a caller that inspects it | a helper whose caller owns the decision |
 
 `app/scripts/discarded-errors.test.ts` is the gate: it parses every
-`.from(` / `.rpc(` chain in `supabase/functions/` and fails on an envelope
-that is awaited and not bound, or bound without `error`. What it proves is
-that the error is **looked at** — `if (error) return null` passes it — so
-what is DONE with the error is pinned per site by the deno tests
-(`send_deps_test.ts` for the two lookups). Its stated blind spot: an envelope
-returned to a caller is not followed into that caller.
+`.from(` / `.rpc(` / `.auth.<member>` chain in `supabase/functions/` and
+fails on an envelope that is awaited and not bound, bound without `error`,
+or bound with an `error` that is never referenced afterwards in the same
+function (`const { data, error } = await q; return data;` names the error
+and then treats the envelope as data — the defect wearing the fix's
+clothes; Codex review on PR #92). What it proves is that the error is
+**looked at** — `if (error) return null` passes it — so what is DONE with
+the error is pinned per site by the deno tests (`send_deps_test.ts` for the
+two lookups). Its stated blind spot: an envelope returned to a caller is not
+followed into that caller.
 
 ### What must never reach a log line
 
