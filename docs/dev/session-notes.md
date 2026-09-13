@@ -202,6 +202,14 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   port. Hoist every `Deno.env.get` into `index.ts` and pass a config object.
   `push_deps.ts` and `deps.ts` are the two worked examples; backlog item 1
   asks for the same seam on three more functions.
+- **A scan OVER edge code lives in vitest, not deno.** A gate that reads
+  `supabase/functions/*.ts` as text — `select-columns.test.ts`,
+  `discarded-errors.test.ts` — is a `scripts/**/*.test.ts` file in the node
+  vitest project: that is where the precedent lives, the orphan check in
+  `ci.yml` already claims that directory, gate 3 runs it with no new line in
+  `ci.yml`/`SKILL.md`/`validate.sh`, and `app` already depends on
+  `typescript` when a real parser is wanted. Deno tests DRIVE the edge code;
+  vitest scripts READ it.
 
 ## Verifying things the gates cannot see
 
