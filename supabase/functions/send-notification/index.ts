@@ -141,5 +141,3 @@ serveFunction(async (req) => {
       : { failed: true, error: pushOutcome.error },
   });
 });
-
-/** Minimal Indigo Emaki email field, inline CSS only. */

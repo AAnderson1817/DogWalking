@@ -28,6 +28,33 @@ A **4xx logs nothing**: that is the caller being told something true about
 their own request, and burying our failures under theirs is the same as not
 logging.
 
+### The error is in the RESOLVED value
+
+supabase-js never rejects for a failed query. A PostgREST refusal, a statement
+timeout, a reset connection — all of them come back in the resolved
+`{ data, error }`, with `data` null. So a call whose `error` is discarded is
+**indistinguishable from one that succeeded and found nothing**, and the
+caller then acts on an absence that never happened. `send-notification`'s
+`getClient` did exactly that (the `fix(send-lookups)` entry): a blip read as "no such
+client", which is a TERMINAL skip, so a `payment_failed` email was cancelled
+for good over a timeout.
+
+Every envelope is looked at, in one of three shapes:
+
+| Shape | When |
+| --- | --- |
+| bind `error`, throw `HttpError(5xx, …, cause, context)` | the default — the request cannot mean anything without the row |
+| bind `error`, `console.error` one JSON line with `safeCause(error)`, carry on | a best-effort write where a throw would MISREPORT: the change-plan period cache runs after Stripe has already moved, so a 500 there tells the operator the change failed when it did not |
+| return the envelope to a caller that inspects it | a helper whose caller owns the decision |
+
+`app/scripts/discarded-errors.test.ts` is the gate: it parses every
+`.from(` / `.rpc(` chain in `supabase/functions/` and fails on an envelope
+that is awaited and not bound, or bound without `error`. What it proves is
+that the error is **looked at** — `if (error) return null` passes it — so
+what is DONE with the error is pinned per site by the deno tests
+(`send_deps_test.ts` for the two lookups). Its stated blind spot: an envelope
+returned to a caller is not followed into that caller.
+
 ### What must never reach a log line
 
 Invariant 2 says plaintext secrets are never logged; `safeCause` is the
@@ -184,6 +211,14 @@ The account id is persisted **before** the AccountLink is minted, under a
 another); losing the id is not — the next `start` would create a *second*
 Stripe account and the money would land in whichever one Stripe finished
 first, with the other left half-onboarded and invisible.
+
+The row is then **re-read**, because a guarded update that matched nothing
+means another request won the race and its account is the real one; ours is
+an inert orphan. A failed re-read is a 500 with the cause (it used to be
+discarded, and the function fell through to minting a link for the account
+it had just created — an operator finishing Stripe's forms on the orphan).
+It is recoverable precisely because the id was persisted first: the next
+`start` finds it and mints another link.
 
 The platform account carries exactly one kind of money: the operator's own
 Sanpo subscription (`operator-billing` / `platform-webhook`, review H31),
@@ -918,6 +953,11 @@ cannot tell them apart either retries forever or abandons real failures:
 | `skipped` | **terminal** non-send: operator-only, or the client has no address | **no** |
 | `failed` | provider or we broke | yes, within bounds |
 
+A lookup that FAILS is not an absence. `getClient` and `getOperator` throw
+on a query error (with the cause and the id, H14), the claim is released, and
+the row stays `pending` for the backlog; only `{ data: null, error: null }` —
+a client who genuinely has no row — records the terminal skip.
+
 A **skip does not increment `email_attempts`** — it is a decision, not a try, and
 counting it would march terminal rows toward the give-up ceiling for no reason.
 
@@ -1147,14 +1187,24 @@ returned the cached plan and the ids could never differ.
    a double-submit cannot queue two conflicting changes.
 2. The Stripe update is sent under that idempotency key, so a retried request
    cannot move the subscription twice.
-3. `customer.subscription.updated` arrives and calls
+3. `clients.current_period_end` is refreshed from the updated subscription.
+   This is a **best-effort cache write** made after Stripe has already moved,
+   so its error is bound and logged with `safeCause`, never thrown: a 500
+   here would tell the operator the change failed when it did not, and their
+   retry would mint a second update. The webhook's checked write of the same
+   column on `customer.subscription.updated` is the source of truth and
+   repairs the cache.
+4. `customer.subscription.updated` arrives and calls
    `fn_apply_plan_change_intent(intent, event_id)`, which applies
    `fn_change_plan` and flips the intent to `applied`. `stripe_event_id` is
    `unique`, so a redelivered event applies the proration exactly once.
 
-Response: `{ new_balance, plan }` reflects the intent as recorded; the durable
-plan change lands when the webhook does. `plan_change_intents` is service-role
-only — `revoke all … from public, anon, authenticated`.
+Response: `{ pending: true, new_balance, plan, intent_id }` — `new_balance`
+is the balance as it stands, since the durable plan change lands when the
+webhook does. (Manual mode, a client with no Stripe subscription, applies
+`fn_change_plan` with the supplied `fraction` in the request and answers
+`{ new_balance, plan }`.) `plan_change_intents` is service-role only —
+`revoke all … from public, anon, authenticated`.
 
 ## materialize-walks — scheduled (cron, phase 06) + POST operator JWT for manual run
 For each active schedule: generate `walks` rows for the next 14 days for matching `days_of_week`, skipping dates inside pause windows, client `status='paused'`/`'archived'`, and dates < `start_date` / > `end_date`.

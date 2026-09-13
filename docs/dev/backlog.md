@@ -40,34 +40,14 @@ before you hit them.
   thin-wrapper exception (its logic is SQL-side); `charge-overage` is already
   covered through `_lib/overage*.ts`.
 
-### 2. `getClient`/`getOperator` swallow the error, so a blip becomes terminal
-Found by the adversarial review of the send-once PR, and **pre-existing** —
-identical on `main` and untouched by that diff, which is why it is here rather
-than folded into a money-path PR.
-
-`send-notification`'s `getClient` destructures `const { data } = await
-db.from("clients")…maybeSingle()` and never inspects `error`, unlike
-`getNotification`, `backlogIds` and `isSuppressed` in the same object, which
-all throw. supabase-js reports a PostgREST or transport failure in the
-RESOLVED result, so a statement timeout or a reset connection yields
-`client === null` and the arm records the TERMINAL skip "client has no email
-address". `isSettled` treats `skipped` as final and `fn_notification_backlog`
-excludes it, so a transient blip permanently cancels a `payment_failed`
-email. `getOperator` has the same unchecked shape; its failure only degrades
-the business name.
-
-The fix is four lines in each, but the rule worth having with it is the one
-`fix(edge-errors)` states: a supabase-js call whose `error` is discarded is
-indistinguishable from one that succeeded and found nothing.
-
-### 3. Tell the operator when an edited address is already suppressed
+### 2. Tell the operator when an edited address is already suppressed
 Also recorded in spec 04. Editing a client's address to one already in
 `email_suppressions` makes every future client-facing email skip
 permanently and terminally, with no signal in the UI. Whether to surface it
 — and how, without exposing one operator's suppression list to another — is
 a product question.
 
-### 4. The pinned Supabase CLI is behind, and `db push` warns every deploy
+### 3. The pinned Supabase CLI is behind, and `db push` warns every deploy
 Read off the `24c74bd` staging deploy (run 33537033230, `Apply migrations`),
 not recalled:
 
@@ -102,7 +82,7 @@ Not urgent: nothing is broken, and the cost of being wrong here is a deploy
 that fails at `link` or `push`, which is exactly the failure 2.109.1 was
 pinned to avoid.
 
-### 5. Spec-drift audit follow-ups (two PRs left, in this order)
+### 4. Spec-drift audit follow-ups (two PRs left, in this order)
 Found by the audit recorded as `docs(spec-drift)`; each was verified against
 HEAD and none is fixed by that PR, which corrected documents only.
 

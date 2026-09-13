@@ -93,8 +93,21 @@ serveFunction(async (req) => {
     // Re-read: if the conditional update matched nothing, another request won
     // the race and its account is the real one. Ours is an orphan — harmless,
     // because an account with no onboarding and no charges is inert.
-    const { data: after } = await db
+    //
+    // The re-read's error is INSPECTED (it used to be discarded): a failed
+    // read here is not "nobody else claimed it", it is "we do not know which
+    // account is real", and falling through to ours would return an onboarding
+    // link for an account the row does not carry — an operator finishing
+    // Stripe's forms on an orphan. Same idiom as operator-billing's customer
+    // re-read.
+    const { data: after, error: readErr } = await db
       .from("operators").select("stripe_account_id").eq("id", operator.id).maybeSingle();
+    if (readErr) {
+      throw new HttpError(500, "db_error", "account re-read failed", readErr, {
+        operator_id: operator.id,
+        stripe_account_id: accountId,
+      });
+    }
     accountId = (after?.stripe_account_id as string | null) ?? accountId;
   }
 

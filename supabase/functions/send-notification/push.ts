@@ -194,8 +194,10 @@ export function pushPayload(row: PushableRow): string {
     // than a fuller tray.
     //
     // It still collapses what a tag is here for — a duplicate delivery of the
-    // SAME row, which is the residual left by send-once being a read-then-act
-    // (backlog item 1). Same id, same tag, one entry.
+    // SAME row, which was the residual of send-once being a read-then-act
+    // until 0051 made the claim atomic (`money(send-once)`), and is still what
+    // a lease-lapsed sender's late delivery would produce. Same id, same tag,
+    // one entry.
     tag: row.id,
   });
 }

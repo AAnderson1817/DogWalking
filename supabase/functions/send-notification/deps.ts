@@ -9,7 +9,10 @@
 // `overage_deps.ts` shape, twice over.
 //
 // What `send_deps_test.ts` pins is what a mocked `sendEmail` structurally
-// cannot see: the request options, and the fencing of the outcome write.
+// cannot see: the lookups' error handling (a failed query must reject, never
+// read as absence), and — through `send_notification_test.ts`, which injects
+// `makeSendDeps` with a stub fetch — the request options and the fencing of
+// the outcome write.
 import { HttpError } from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
 import {
@@ -91,11 +94,22 @@ export function makeSendDeps(cfg: SendConfig, fetchImpl: typeof fetch = fetch): 
     },
 
     async getClient(id) {
-      const { data } = await db
+      const { data, error } = await db
         .from("clients")
         .select("full_name, email, unsubscribe_token")
         .eq("id", id)
         .maybeSingle();
+      // A THROW, not a null. supabase-js reports a failed query in the RESOLVED
+      // result, so a discarded `error` made a transient blip — a paused
+      // database, a timeout, a JWT hiccup — read as "no such client", and the
+      // caller then recorded the TERMINAL skip "client has no email address",
+      // permanently cancelling a `payment_failed` email over nothing
+      // (backlog item 2 until this fix). Absence is still absence:
+      // `{ data: null, error: null }` resolves null and the caller decides
+      // what that means.
+      if (error) {
+        throw new HttpError(500, "db_error", "client lookup failed", error, { client_id: id });
+      }
       return data;
     },
 
@@ -122,7 +136,20 @@ export function makeSendDeps(cfg: SendConfig, fetchImpl: typeof fetch = fetch): 
     },
 
     async getOperator(id) {
-      const { data } = await db.from("operators").select("business_name").eq("id", id).maybeSingle();
+      const { data, error } = await db
+        .from("operators")
+        .select("business_name")
+        .eq("id", id)
+        .maybeSingle();
+      // Same rule as `getClient`, one function over. A discarded error here
+      // was quieter — the email went out as "Your walker" — but it was the
+      // same defect, and the sibling is where this repository keeps finding
+      // the fix applied once.
+      if (error) {
+        throw new HttpError(500, "db_error", "operator lookup failed", error, {
+          operator_id: id,
+        });
+      }
       return data;
     },
 
