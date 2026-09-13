@@ -197,15 +197,34 @@ function usesOf(name: string, container: ts.Node): ts.Identifier[] {
   return out;
 }
 
-/** Does the destructuring bind `error` (as `error` or `error: alias`)? */
-function bindsError(pattern: ts.ObjectBindingPattern): Verdict {
+/**
+ * Does the destructuring bind `error` (as `error` or `error: alias`) AND is
+ * the local it binds read afterwards?
+ *
+ * Presence in the binding pattern is not enough (Codex review on PR #92):
+ * `const { data, error } = await q; return data;` names the error and then
+ * treats the envelope as ordinary data, which is the defect this gate exists
+ * to catch wearing the fix's clothes. So the bound identifier — the alias,
+ * when there is one — must be referenced later in the same function. A
+ * nested pattern (`error: { code }`) is a read by construction.
+ */
+function bindsError(pattern: ts.ObjectBindingPattern): { verdict: Verdict; local?: string } {
   for (const el of pattern.elements) {
     // `{ data, ...rest }` carries error somewhere the gate cannot see read.
-    if (el.dotDotDotToken) return "UNCLASSIFIED";
+    if (el.dotDotDotToken) return { verdict: "UNCLASSIFIED" };
     const key = el.propertyName ?? el.name;
-    if ((ts.isIdentifier(key) || ts.isStringLiteral(key)) && key.text === "error") return "OK";
+    if (!((ts.isIdentifier(key) || ts.isStringLiteral(key)) && key.text === "error")) continue;
+    if (!ts.isIdentifier(el.name)) return { verdict: "OK" };
+    return isReadAfter(el.name)
+      ? { verdict: "OK" }
+      : { verdict: "DISCARDED", local: el.name.text };
   }
-  return "DISCARDED";
+  return { verdict: "DISCARDED" };
+}
+
+/** Is this bound identifier referenced anywhere after its binding, in the same function? */
+function isReadAfter(bound: ts.Identifier): boolean {
+  return usesOf(bound.text, scopeContainer(bound)).some((u) => u.pos > bound.pos);
 }
 
 interface Ctx {
@@ -235,7 +254,7 @@ function followEnvelopeVar(ctx: Ctx, nameNode: ts.Identifier, at: ts.Node): Site
   if (reads) return [site(ctx, at, "OK", `envelope in \`${name}\`, \`.error\` read later`)];
   const destructured = uses.some((u) =>
     ts.isVariableDeclaration(u.parent) && u.parent.initializer === u &&
-    ts.isObjectBindingPattern(u.parent.name) && bindsError(u.parent.name) === "OK");
+    ts.isObjectBindingPattern(u.parent.name) && bindsError(u.parent.name).verdict === "OK");
   if (destructured) return [site(ctx, at, "OK", `envelope in \`${name}\`, \`error\` destructured later`)];
   const passedOn = uses.some((u) => {
     const p = u.parent;
@@ -252,8 +271,9 @@ function classifyAwaited(ctx: Ctx, awaited: ts.AwaitExpression): Site[] {
   const p = n.parent;
   if (ts.isVariableDeclaration(p) && p.initializer === n) {
     if (ts.isObjectBindingPattern(p.name)) {
-      const v = bindsError(p.name);
-      const why = v === "OK" ? "`error` bound"
+      const { verdict: v, local } = bindsError(p.name);
+      const why = v === "OK" ? "`error` bound and read"
+        : v === "DISCARDED" && local ? `\`error\` bound as \`${local}\` and never read in this function`
         : v === "DISCARDED" ? "destructures the envelope without binding `error`"
         : "rest element in the destructuring — cannot see whether `error` is read";
       return [site(ctx, p, v, why)];
@@ -267,10 +287,16 @@ function classifyAwaited(ctx: Ctx, awaited: ts.AwaitExpression): Site[] {
   if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && p.right === n) {
     if (ts.isIdentifier(p.left)) return followEnvelopeVar(ctx, p.left, p);
     if (ts.isObjectLiteralExpression(p.left)) {
-      const bound = p.left.properties.some((pr) =>
-        (ts.isShorthandPropertyAssignment(pr) && pr.name.text === "error") ||
-        (ts.isPropertyAssignment(pr) && ts.isIdentifier(pr.name) && pr.name.text === "error"));
-      return [site(ctx, p, bound ? "OK" : "DISCARDED", bound ? "`error` assigned" : "destructuring assignment without `error`")];
+      // `({ error } = await q)` / `({ error: e } = await q)`: the target is the
+      // shorthand name itself, or the property's initializer.
+      const target = p.left.properties.map((pr) =>
+        ts.isShorthandPropertyAssignment(pr) && pr.name.text === "error" ? pr.name
+        : ts.isPropertyAssignment(pr) && ts.isIdentifier(pr.name) && pr.name.text === "error" && ts.isIdentifier(pr.initializer) ? pr.initializer
+        : null).find((t) => t !== null);
+      if (!target) return [site(ctx, p, "DISCARDED", "destructuring assignment without `error`")];
+      return isReadAfter(target)
+        ? [site(ctx, p, "OK", "`error` assigned and read")]
+        : [site(ctx, p, "DISCARDED", `\`error\` assigned to \`${target.text}\` and never read in this function`)];
     }
   }
   return [site(ctx, p, "UNCLASSIFIED", `awaited envelope consumed by ${ts.SyntaxKind[p.kind]}`)];
@@ -386,6 +412,39 @@ describe("classifySource", () => {
   if (e) throw e;
   return rows;
 }`).verdict).toBe("OK");
+  });
+
+  it("DISCARDED: `error` bound and never read (Codex, PR #92)", () => {
+    // Naming the error in the pattern and then treating the envelope as data
+    // is the original defect wearing the fix's clothes; the local must be
+    // referenced afterwards.
+    const s = one(`async function f(db: any) {
+  const { data, error } = await db.from("clients").select("id").maybeSingle();
+  return data;
+}`);
+    expect(s.verdict).toBe("DISCARDED");
+    expect(s.reason).toMatch(/`error` bound as `error` and never read/);
+    const aliased = one(`async function f(db: any) {
+  const { data, error: e } = await db.rpc("fn_x", {});
+  return data;
+}`);
+    expect(aliased.verdict).toBe("DISCARDED");
+    expect(aliased.reason).toMatch(/bound as `e` and never read/);
+  });
+
+  it("assignment form: `({ error } = await q)` is OK when read and DISCARDED when not", () => {
+    const read = one(`async function f(db: any) {
+  let error: unknown;
+  ({ error } = await db.from("walks").update({ a: 1 }).eq("id", "x"));
+  if (error) throw error;
+}`);
+    expect(read.verdict).toBe("OK");
+    const unread = one(`async function f(db: any) {
+  let error: unknown;
+  ({ error } = await db.from("walks").update({ a: 1 }).eq("id", "x"));
+}`);
+    expect(unread.verdict).toBe("DISCARDED");
+    expect(unread.reason).toMatch(/assigned to `error` and never read/);
   });
 
   it("OK: deferred builder followed to the statement that awaits it", () => {
