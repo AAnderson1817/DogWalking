@@ -75,7 +75,11 @@ read through the wrapper — and the error value read that way must itself be
 USED: a local it is bound to must be read afterwards. A reference in a
 DISCARD position — a bare statement, `void e`, the left side of a comma —
 is not a read of anything, whether it is the direct read, a bound `error`
-(`void error;`) or an envelope's `.error` (`void r.error;`). Source order is
+(`void error;`) or an envelope's `.error` (`void r.error;`); and a reference
+merely COPIED into a local (`const copy = error`, `copy = error`, `const
+copy = r.error`) is a read only if the copy is itself read — followed
+transitively, under the copy's own window, so a copy that is overwritten or
+discarded before it is read consumes nothing. Source order is
 execution order only in straight-line code: a write inside a closure counts
 from the closure's creation (or from the binding itself, for a hoisted
 function declaration, which can be called before any read), and a read
@@ -89,7 +93,12 @@ runs whenever it is called, which can be after any later write (`const check
 never = () => check();` beside it, a call that exists and never executes); a
 callback handed to a call, a closure returned on an object, or two closures
 that only call each other is execution the gate cannot see, refused rather
-than assumed. A deferred
+than assumed. A call invokes whatever the name holds when it runs, so a
+closure's call site counts only while the binding still holds that closure:
+a straight-line call before the binding's next write (a hoisted declaration
+is live from the top, so any write bounds it), or a call inside a closure
+only when no write can follow the binding at all — `let check = () => error;
+check = () => null; if (check()) …` calls the replacement. A deferred
 builder (`let q = db.from(…)`) is followed to the statement that consumes
 it: assignment to itself (`q = q.eq(…)`, through a conditional too) grows the
 same builder, while a write whose right side does not root at it — `q =
