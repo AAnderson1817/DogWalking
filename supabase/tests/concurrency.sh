@@ -974,7 +974,7 @@ psql "$DB" -q -c "delete from push_subscriptions where operator_id = '${NS}-0000
 echo
 echo "== case 10: exactly one sender may claim a notification channel =="
 
-# Backlog item 1. `deliverNotification` and `deliverPush` each READ the
+# The `money(send-once)` status-log entry. `deliverNotification` and `deliverPush` each READ the
 # channel's status and write the outcome later, so send-once was a
 # read-then-act: two invocations both pass it and both deliver. Reachable via
 # the INSERT webhook racing the nightly drain, the drain overlapping itself,

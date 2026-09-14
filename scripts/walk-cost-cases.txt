@@ -7,11 +7,14 @@
 #
 # Format: <expected>\t<credit_cost>\t<surcharge>\t<scheduled_date>, all
 # integers except the ISO date. TypeScript decides the weekday from
-# `T12:00:00Z` + getUTCDay (credits.ts's rule since phase 03); Postgres reads
-# `isodow` off the DATE. A case cannot see a zone, so none of them pins how
-# the leaf parses the date: the gate does that by running the TypeScript side
-# under two fixed offsets either side of the day boundary, where a leaf that
-# reads the LOCAL day answers a day out on one side or the other.
+# `T12:00:00Z` + getUTCDay (`walk-cost.ts`'s rule, lifted out of `credits.ts`
+# by fix(walk-cost)); Postgres reads `isodow` off the DATE. A case cannot see
+# a zone, so none of them pins how the leaf parses the date on its own: the
+# gate does that by running the TypeScript side under two fixed offsets
+# either side of the day boundary — where a leaf reading the LOCAL day at a
+# constant offset answers a day out on one side or the other — and under
+# America/Chicago, where a leaf whose error is DST-dependent answers the
+# DST-weekend rows below a day out while passing both fixed offsets.
 
 # ── the week itself ───────────────────────────────────────────────────────
 # A Friday is deliberate: `isodow in (5, 6)` — the off-by-one that reads
@@ -24,9 +27,10 @@
 1	1	1	2026-07-06
 
 # ── US daylight-saving transition Sundays (America/Chicago), each with the
-# Saturday before it — calendar coverage only: a DATE has no zone, so DST
-# cannot move its weekday, and these pin nothing about the parse (the first
-# version of this file said they did — review of PR 2) ─────────────────────
+# Saturday before it. A DATE has no zone, so DST cannot move its weekday and
+# these rows pin nothing on their own (the first version of this file said
+# they did — review of PR 2); under the gate's America/Chicago run they are
+# the rows a DST-dependent local read answers a day out (second pass) ──────
 2	1	1	2026-03-07
 2	1	1	2026-03-08
 2	1	1	2026-10-31

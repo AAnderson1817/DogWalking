@@ -19,8 +19,10 @@
 // the noon suffix keeps the instant clear of both edges of the day (the
 // `format.ts` convention) and is immaterial under a UTC read. Postgres reads
 // `isodow` off the DATE and has no such trap. Gate 8d pins this by running
-// the TypeScript side under two zones either side of the day boundary — the
-// cases in `scripts/walk-cost-cases.txt` cannot see a zone themselves.
+// the TypeScript side under two fixed offsets either side of the day boundary
+// (against a constant-offset local read) and under America/Chicago (against
+// a DST-dependent one, on the DST-weekend cases) — the cases in
+// `scripts/walk-cost-cases.txt` cannot see a zone themselves.
 
 /** Effective credit cost: `creditCost`, plus `surcharge` when `isoDate` (YYYY-MM-DD) is a Saturday or Sunday. */
 export function weekendWalkCost(creditCost: number, surcharge: number, isoDate: string): number {

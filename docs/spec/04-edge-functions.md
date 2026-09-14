@@ -336,11 +336,14 @@ charges_enabled, payouts_enabled, details_submitted }` from the local mirror;
 `start` creates the operator's **Standard** connected account if absent and
 returns a single-use `AccountLink` onboarding URL. A missing `action` means
 `status`; **any other value is `400 bad_action`**, refused before the
-operator row is even read. That is a behaviour change made with the seam:
-the shipped code tested only `=== 'status'`, so every other value — a typo,
-a stale client — fell through to `start` and MINTED a Stripe Connect
-account. A typo creating an account is worse than a 400; the frontend sends
-exactly the two values (`api.ts` `connectStatus` / `connectStart`).
+handler's own operator lookup (`requireOperator` has already read the row
+once, to authenticate the caller). That is a behaviour change made with the
+seam: the shipped code tested only `=== 'status'`, so every other value — a
+typo, a stale client — fell through to `start`, which for an operator not
+yet connected MINTS a Stripe Connect account (an already-connected
+operator's typo minted a single-use link). A typo creating an account is
+worse than a 400; the frontend sends exactly the two values (`api.ts`
+`connectStatus` / `connectStart`).
 
 Standard, not Express or Custom, because **the operator is the merchant of
 record**: they own the Stripe account, their business is on the client's card
@@ -367,13 +370,21 @@ where Sanpo is the merchant and the operator is the customer. Client money
 never moves there.
 
 The rules live in `handler.ts` behind injected deps (`getOperator`,
-`claimAccountId`, a platform-Stripe slice, `base`); `index.ts` only wires the
-real client and database to them. `connect_onboarding_test.ts` asserts on a
-deps recorder: the order (account created, id claimed, link minted), the race
-loser adopting the winner's id, a failed claim — write OR re-read — minting
-**no** link (the behavioural pin the re-read fix above could only name in a
-census), no Stripe call carrying `stripeAccount` (these are platform
-objects), and the `action` rule.
+`claimAccountId`, a platform-Stripe slice, `base`), the wiring in `deps.ts`
+(`makeConnectOnboardingDeps`, taking the client, the Stripe client and
+`APP_BASE_URL` as values), and `index.ts` only reads the environment and
+joins the two. `connect_onboarding_test.ts` asserts on a deps recorder: the
+order (account created, id claimed, link minted), the race loser adopting the
+winner's id, a failed claim minting **no** link — the recorder collapses the
+write failure and the re-read failure into one throw, so the handler cannot
+tell them apart and need not — no Stripe call carrying `stripeAccount`
+(these are platform objects), and the `action` rule.
+`connect_onboarding_deps_test.ts` drives the real wiring against a scripted
+PostgREST double: the `.select` string and its filter, the CONDITIONAL claim
+(`is("stripe_account_id", null)`), the re-read whose answer wins, a failed
+write rejecting with no re-read, and a failed re-read rejecting — the
+re-read fix above, driven rather than only named — with the failed re-read
+minting no link end to end through the handler.
 
 ## operator-billing — POST, operator JWT (review H31)
 
@@ -1288,13 +1299,22 @@ has charges paused on their walker would strand them with a subscription they
 cannot stop. A client with no `stripe_customer_id` gets `409 no_billing`.
 
 The rules live in `handler.ts` behind injected deps (`getClientForUser`,
-`createPortalSession`, `base`); `index.ts` only wires the real client and
-database to them. Until the seam the `accountOf`-not-`requireAccount` rule was
+`createPortalSession`, `base`), the wiring in `deps.ts`
+(`makeBillingPortalDeps`, taking the client, a Stripe THUNK and
+`APP_BASE_URL` as values), and `index.ts` only reads the environment and
+joins the two. Until the seam the `accountOf`-not-`requireAccount` rule was
 carried by a comment beside the call; `billing_portal_test.ts` now asserts it
 on a deps recorder — a client whose walker's charges are disabled still gets
 a session — and that every refusal (`not_client`, `no_billing`,
 `stripe_not_connected`) lands **before the first Stripe call**, and every
-Stripe call carries the connected account.
+recorded Stripe call carries the connected account. `billing_portal_deps_test.ts`
+drives the real wiring: the `.select` string filtered on the caller, the
+embed handed through as one object, a failed lookup rejecting with its
+cause, the Stripe client resolved AFTER the refusals (the thunk is called
+only when a session is minted, so a missing `STRIPE_SECRET_KEY` cannot turn
+`not_client` into a 500), and the per-request options forwarded to the real
+`create` — drop them there and every session lands on the platform account
+with the handler suite green.
 
 ## vault-rekey — POST, service-role only (review B2)
 Body: `{ action: 'verify'|'status'|'rekey', batch? }`. **Never returns a
