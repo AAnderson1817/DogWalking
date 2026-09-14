@@ -98,7 +98,24 @@ closure's call site counts only while the binding still holds that closure:
 a straight-line call before the binding's next write (a hoisted declaration
 is live from the top, so any write bounds it), or a call inside a closure
 only when no write can follow the binding at all — `let check = () => error;
-check = () => null; if (check()) …` calls the replacement. A deferred
+check = () => null; if (check()) …` calls the replacement. And a read counts
+only on EVERY path: not inside a branch that excludes the binding — the body
+of an `if`, either arm of `?:`, the right side of `&&`/`||`/`??` and of a
+logical assignment (`copy ??= error` runs its right side only when `copy`
+is nullish, so it copies nothing), a `case`, a loop body, a `catch`, the
+arguments of an optional-chain call — and not after a conditional
+`return`/`continue`/`break` (`if (!data) return null; if (error) …`), the
+same for a read inside a closure relative to that closure and for the call
+site that would establish it (`if (data && check()) …`). supabase-js
+supplies `data: null` on failure, so a read the failure path can skip runs
+exactly when there is no error to read, and the gate does not know which
+condition is the failure path — so it refuses all of them, including a
+guard that reads the error only on the right of `&&` before returning; write
+`if (error) throw error;` first. A conditional `throw` is not an exit: it
+aborts the request rather than completing it as an absence. An error STORED
+in a literal (`{ error }`, `[error]`) is a read only if the literal is
+consumed by the same rules — `logHandledError({ cause: error })` is,
+`const box = { error }; return data;` is not. A deferred
 builder (`let q = db.from(…)`) is followed to the statement that consumes
 it: assignment to itself (`q = q.eq(…)`, through a conditional too) grows the
 same builder, while a write whose right side does not root at it — `q =

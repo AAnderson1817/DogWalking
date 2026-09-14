@@ -52,10 +52,19 @@ import { describe, expect, it } from "vitest";
  *                 read of anything, for a bound `error`, an envelope's
  *                 `.error` and the direct read alike; and a reference merely
  *                 COPIED into a local (`const copy = error`, `copy = error`)
- *                 is a read only if the copy is itself read, transitively,
- *                 under the copy's own window. A closure's call site counts
- *                 only while the binding still holds that closure — a call
- *                 after `check = () => null` invokes the replacement.
+ *                 or STORED in a literal (`{ error }`, `[error]`) is a read
+ *                 only if the copy or the literal is itself read,
+ *                 transitively, under the copy's own window. A closure's
+ *                 call site counts only while the binding still holds that
+ *                 closure — a call after `check = () => null` invokes the
+ *                 replacement. And a read counts only on EVERY path: not
+ *                 inside a branch that excludes the binding (`if (data)
+ *                 log(error)`, `copy ??= error`, a loop body, a `catch`),
+ *                 and not after a conditional `return`/`continue`/`break`
+ *                 (`if (!data) return null; …`) — supabase-js supplies
+ *                 `data: null` on failure, so a read the failure path skips
+ *                 is the discard itself. A `throw` is not an exit: it aborts
+ *                 the request rather than completing it as an absence.
  *   PASSED_ON     the whole envelope is returned, or is the expression body
  *                 of an arrow that is NOT a call's argument (a deps-object
  *                 property, say) — a caller reads it. Printed, not failed: a
@@ -511,8 +520,10 @@ function closuresAround(n: ts.Node, container: ts.Node): ts.Node[] {
  * = () => error; const never = () => check(); return data;`, where the call
  * exists and never executes (Codex, one round later). `seen` breaks cycles:
  * two closures that only call each other reach straight-line code nowhere.
+ * `anchor` is where the path the call must lie on begins — the read's
+ * binding for a straight-line call, the enclosing closure for a nested one.
  */
-function visiblyInvoked(fn: ts.Node, container: ts.Node, checker: ts.TypeChecker, seen: Set<ts.Node> = new Set()): boolean {
+function visiblyInvoked(fn: ts.Node, container: ts.Node, checker: ts.TypeChecker, anchor: ts.Node, seen: Set<ts.Node> = new Set()): boolean {
   if (seen.has(fn)) return false;
   seen.add(fn);
   let top: ts.Node = fn;
@@ -548,13 +559,100 @@ function visiblyInvoked(fn: ts.Node, container: ts.Node, checker: ts.TypeChecker
     ts.forEachChild(n, visit);
   };
   visit(container);
-  // A call site executes only if every closure around IT executes.
+  // A call site executes only if every closure around IT executes — and
+  // only on every path: a call inside a branch, or after a conditional
+  // exit from the anchor (the read's binding, or the closure the call sits
+  // in), establishes nothing.
   return callSites.some((c) => {
     if ((!hoisted && c.pos <= bound.pos) || c.pos >= overwritten) return false;
     const around = closuresAround(c, container);
-    if (around.length === 0) return true;
-    return overwritten === Infinity && around.every((f) => visiblyInvoked(f, container, checker, seen));
+    if (around.length === 0) return established(c, anchor, container);
+    const inner = around[around.length - 1]!;
+    return overwritten === Infinity && established(c, inner, inner) &&
+      around.every((f) => visiblyInvoked(f, container, checker, anchor, seen));
   });
+}
+
+/** Does `outer` contain `inner` (or equal it)? */
+function contains(outer: ts.Node, inner: ts.Node): boolean {
+  for (let cur: ts.Node | undefined = inner; cur; cur = cur.parent) if (cur === outer) return true;
+  return false;
+}
+
+/**
+ * Is `child` a BRANCH of `parent` — a position that runs only when some
+ * condition holds? The body of an `if`/`else`, either arm of `?:`, the right
+ * side of `&&`/`||`/`??` and of the logical assignments `??=`/`||=`/`&&=`
+ * (which evaluate their right side only conditionally — `copy ??= error`
+ * never looks at the error when `copy` is set, Codex on PR #92), a `case`,
+ * a loop body (a `do` body runs at least once), a `catch` clause, and the
+ * arguments of an optional-chain call (`x?.log(error)`).
+ */
+function isBranchEdge(parent: ts.Node, child: ts.Node): boolean {
+  if (ts.isIfStatement(parent)) return child === parent.thenStatement || child === parent.elseStatement;
+  if (ts.isConditionalExpression(parent)) return child === parent.whenTrue || child === parent.whenFalse;
+  if (ts.isBinaryExpression(parent)) {
+    const k = parent.operatorToken.kind;
+    const logical = k === ts.SyntaxKind.AmpersandAmpersandToken || k === ts.SyntaxKind.BarBarToken ||
+      k === ts.SyntaxKind.QuestionQuestionToken || k === ts.SyntaxKind.QuestionQuestionEqualsToken ||
+      k === ts.SyntaxKind.BarBarEqualsToken || k === ts.SyntaxKind.AmpersandAmpersandEqualsToken;
+    return logical && child === parent.right;
+  }
+  if (ts.isCaseClause(child) || ts.isDefaultClause(child)) return true;
+  if (ts.isForStatement(parent) || ts.isForOfStatement(parent) || ts.isForInStatement(parent) || ts.isWhileStatement(parent)) {
+    return child === parent.statement;
+  }
+  if (ts.isCatchClause(child)) return true;
+  if (ts.isCallExpression(parent) && (parent.flags & ts.NodeFlags.OptionalChain) !== 0) {
+    return parent.arguments.some((a) => a === child);
+  }
+  return false;
+}
+
+/**
+ * A conditional EXIT between `from` and `to` inside `scope` (nested functions
+ * excluded): a `return`, or a `continue`/`break` that leaves a loop, after
+ * `from` and before `to`. A read after `if (!data) return null;` runs only
+ * on the success path — supabase-js supplies `data: null` on failure, so the
+ * one branch that reads `error` is skipped exactly when there is one (Codex
+ * on PR #92). A `throw` is deliberately NOT an exit: it aborts the request
+ * rather than completing it normally, and normal completion is what turns a
+ * failure into an absence.
+ */
+function exitsBetween(from: ts.Node, to: ts.Node, scope: ts.Node): boolean {
+  const start = from === scope ? from.pos : from.end;
+  let found = false;
+  const visit = (n: ts.Node) => {
+    if (found) return;
+    if (n !== scope && ts.isFunctionLike(n)) return;
+    if (n.pos >= start && n.end <= to.pos) {
+      if (ts.isReturnStatement(n) || ts.isContinueStatement(n)) found = true;
+      if (ts.isBreakStatement(n)) {
+        // A bare `break` inside a `switch` leaves the switch, not the scope.
+        let target: ts.Node | undefined = n.parent;
+        while (target && target !== scope && !ts.isIterationStatement(target, false) && !ts.isSwitchStatement(target)) target = target.parent;
+        if (n.label || !(target && ts.isSwitchStatement(target))) found = true;
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(scope);
+  return found;
+}
+
+/**
+ * Is `n` reached on EVERY path through `scope` that passes `from`: not
+ * inside a branch that excludes `from` (`if (data) console.error(error)`
+ * reads only on the success path), and with no conditional exit between?
+ * The failure the gate exists for is a query error that never gets looked
+ * at, and a read the failure path skips is exactly that (Codex on PR #92,
+ * round thirteen).
+ */
+function established(n: ts.Node, from: ts.Node, scope: ts.Node): boolean {
+  for (let cur: ts.Node = n; cur !== scope && cur.parent; cur = cur.parent) {
+    if (isBranchEdge(cur.parent, cur) && !contains(cur, from)) return false;
+  }
+  return !exitsBetween(from, n, scope);
 }
 
 /**
@@ -569,8 +667,10 @@ function visiblyInvoked(fn: ts.Node, container: ts.Node, checker: ts.TypeChecker
 function readsInWindow(u: ts.Identifier, bound: ts.Identifier, overwritten: number, container: ts.Node, checker: ts.TypeChecker): boolean {
   if (u.pos <= bound.pos || u.pos >= overwritten) return false;
   const closures = closuresAround(u, container);
-  if (closures.length === 0) return true;
-  return overwritten === Infinity && closures.every((fn) => visiblyInvoked(fn, container, checker));
+  if (closures.length === 0) return established(u, bound, container);
+  const inner = closures[closures.length - 1]!;
+  return overwritten === Infinity && established(u, inner, inner) &&
+    closures.every((fn) => visiblyInvoked(fn, container, checker, bound));
 }
 
 /**
@@ -630,22 +730,27 @@ function discardedAt(holder: ts.Node): boolean {
     (ts.isBinaryExpression(h) && h.operatorToken.kind === ts.SyntaxKind.CommaToken && h.left === holder);
 }
 
-/** Assignment operators that make the target a COPY of the right side: the
- * value lands in the target without being inspected on the way. */
-const ALIASING_KINDS = new Set<ts.SyntaxKind>([
-  ts.SyntaxKind.EqualsToken,
-  ts.SyntaxKind.QuestionQuestionEqualsToken,
-  ts.SyntaxKind.BarBarEqualsToken,
-  ts.SyntaxKind.AmpersandAmpersandEqualsToken,
-]);
-
-/** The local an expression is COPIED into — `const copy = e`, `copy = e`, `copy ??= e` — or null. */
+/** The local an expression is COPIED into — `const copy = e`, `copy = e` — or null.
+ * Plain `=` only: a logical assignment (`copy ??= e`) evaluates its right
+ * side conditionally, so the reference there is a branch, not a copy (Codex
+ * on PR #92, round thirteen), and `established` refuses it before this runs. */
 function aliasTarget(holder: ts.Node): ts.Identifier | null {
   const h = holder.parent;
   if (ts.isVariableDeclaration(h) && h.initializer === holder && ts.isIdentifier(h.name)) return h.name;
-  if (ts.isBinaryExpression(h) && h.right === holder && ts.isIdentifier(h.left) && ALIASING_KINDS.has(h.operatorToken.kind)) {
+  if (ts.isBinaryExpression(h) && h.right === holder && ts.isIdentifier(h.left) && h.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
     return h.left;
   }
+  return null;
+}
+
+/** The object or array literal an expression is STORED in — `{ error }`, `{ cause: e }`, `[e]`, `{ ...e }` — or null. */
+function aggregateHolding(holder: ts.Node): ts.Node | null {
+  const h = holder.parent;
+  if ((ts.isPropertyAssignment(h) && h.initializer === holder) || ts.isShorthandPropertyAssignment(h) || ts.isSpreadAssignment(h)) {
+    return h.parent;
+  }
+  if (ts.isArrayLiteralExpression(h)) return h;
+  if (ts.isSpreadElement(h) && ts.isArrayLiteralExpression(h.parent)) return h.parent;
   return null;
 }
 
@@ -662,7 +767,13 @@ function consumes(ctx: Ctx, n: ts.Node, seen: Set<ts.Node> = new Set()): boolean
   const holder = forwardedTo(n);
   if (discardedAt(holder)) return false;
   const alias = aliasTarget(holder);
-  return alias ? isReadAfter(ctx, alias, seen) : true;
+  if (alias) return isReadAfter(ctx, alias, seen);
+  // Stored in an aggregate — `const box = { error }; return data;` — the
+  // literal is what must be consumed, by the same rules (Codex on PR #92,
+  // round thirteen): passed to a call or thrown it is, bound to a local
+  // nothing reads it is not.
+  const aggregate = aggregateHolding(holder);
+  return aggregate ? consumes(ctx, aggregate, seen) : true;
 }
 
 /**
@@ -1551,10 +1662,12 @@ function u(keys: { auth: string } | null) { return keys?.auth.trim(); }`, "f.ts"
   }
   return null;
 }`).verdict).toBe("OK");
-    // Declared outside, read inside a block that does NOT redeclare it.
-    expect(one(`async function f(db: any, c: boolean) {
+    // Declared outside, read inside a block that does NOT redeclare it — a
+    // bare block, because a read inside `if (c) { … }` is a read the failure
+    // path may skip and is refused on purpose (round thirteen, below).
+    expect(one(`async function f(db: any) {
   const r = await db.from("a").select("id").maybeSingle();
-  if (c) { if (r.error) throw r.error; }
+  { if (r.error) throw r.error; }
   return r.data;
 }`).verdict).toBe("OK");
     // `var` is function-scoped: a var in a nested block is the SAME variable.
@@ -1896,8 +2009,12 @@ async function h({ db }: { db: unknown }, token: string) { const { data } = awai
   if (outer()) throw new Error("failed");
   return data;
 }`).verdict).toBe("OK");
-    // Invoked THROUGH an invoked closure, and a self-recursive closure with
-    // one call from straight-line code.
+    // Invoked THROUGH an invoked closure, and a pair of closures that call
+    // each other where the reader ALSO has one call from straight-line code
+    // — the cycle must not recurse forever, and the straight-line call is
+    // what counts. (A self-recursive reader — `i > 0 ? f(i - 1) : error` —
+    // reads only on its base case, a branch, and is refused since round
+    // thirteen; the cycle guard is exercised by the mutual case above.)
     expect(one(`async function r(db: any) {
   const { data, error } = await db.from("x").select("id");
   const check = () => error;
@@ -1907,7 +2024,8 @@ async function h({ db }: { db: unknown }, token: string) { const { data } = awai
 }`).verdict).toBe("OK");
     expect(one(`async function s(db: any, n: number) {
   const { data, error } = await db.from("x").select("id");
-  const f = (i: number): unknown => (i > 0 ? f(i - 1) : error);
+  const f = (i: number): unknown => { g(i); return error; };
+  const g = (i: number): void => { if (i > 0) f(i - 1); };
   if (f(n)) throw new Error("failed");
   return data;
 }`).verdict).toBe("OK");
@@ -1992,6 +2110,64 @@ async function h({ db }: { db: unknown }, token: string) { const { data } = awai
   return data;
   function check(): unknown { return error; }
 }`).verdict).toBe("OK");
+  });
+
+  it("a logical assignment evaluates its right side conditionally, so it copies nothing (Codex, PR #92)", () => {
+    // Round thirteen: `copy ??= error` runs the right side only when `copy`
+    // is nullish, and the round-twelve alias rule followed it as a copy.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); let copy = new Error("other"); copy ??= error; throw copy; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); let copy: unknown = 1; copy ||= error; if (copy) throw copy; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); let copy: unknown; copy = error; if (copy) throw copy; return data; }`).verdict).toBe("OK");
+  });
+
+  it("an error stored in a literal is a read only if the literal is consumed (Codex, PR #92)", () => {
+    // Round thirteen: `{ error }` is neither a discard position nor an
+    // identifier copy, so the shorthand property counted as consumption while
+    // the aggregate went nowhere. The literal is followed by the same rules.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const errs = [error]; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const r = await db.from("a").select("id"); const box = { e: r.error }; return r.data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; if (box.error) throw box.error; return data; }`).verdict).toBe("OK");
+    expect(one(`declare function log(x: unknown): void;
+async function f(db: any) { const { data, error } = await db.from("a").select("id"); log({ cause: error }); return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); if (error) throw { cause: error }; return data; }`).verdict).toBe("OK");
+  });
+
+  it("a read the failure path can skip is not a read (Codex, PR #92)", () => {
+    // Round thirteen: supabase-js supplies `data: null` on failure, so a read
+    // gated on the data — or on anything — runs exactly when there is no
+    // error to read. Inside a branch that excludes the binding, or after a
+    // conditional return, the reference establishes nothing.
+    expect(one(`declare const console: { error(x: unknown): void };
+async function f(db: any) { const { data, error } = await db.from("a").select("id"); if (data) console.error(error); return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); if (!data) return null; if (error) throw error; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, rows: number[]) { const { data, error } = await db.from("a").select("id"); for (const r of rows) { if (error) throw error; } return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`declare const log: { error(x: unknown): void } | undefined;
+async function f(db: any) { const { data, error } = await db.from("a").select("id"); log?.error(error); return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const e = data ? error : null; if (e) throw e; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`declare function log(x: unknown): void;
+async function f(db: any) { const { data, error } = await db.from("a").select("id"); data && log(error); return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const r = await db.from("a").select("id"); if (r.data) { if (r.error) throw r.error; } return r.data; }`).verdict).toBe("DISCARDED");
+    expect(one(`declare function other(): Promise<void>;
+async function f(db: any) { const { data, error } = await db.from("a").select("id"); try { await other(); } catch { if (error) throw error; } return data; }`).verdict).toBe("DISCARDED");
+    // Inside a closure, and at the call site that would establish the closure.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const check = () => { if (data) return error; return null; }; if (check()) throw new Error("x"); return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const check = () => error; if (data && check()) throw new Error("x"); return data; }`).verdict).toBe("DISCARDED");
+    // Stated as the conservative direction: the gate does not know `data` is
+    // null on failure, so a guard that reads the error only on the right of
+    // `&&` and then returns is refused even though it inspects the error on
+    // the failure path. Write `if (error) throw error;` first.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); if (!data && !error) return null; if (error) throw error; return data; }`).verdict).toBe("DISCARDED");
+    // Not exits, not branches: a conditional `throw` aborts rather than
+    // completing as an absence; a `do` body runs at least once; a `break`
+    // inside a `switch` leaves the switch; a `try` body always runs.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); if (!data) throw new Error("not found"); if (error) throw error; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); do { if (error) throw error; } while (false); return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any, k: number) { const { data, error } = await db.from("a").select("id"); let y = 0; switch (k) { case 1: y = 1; break; } if (error) throw error; return data + y; }`).verdict).toBe("OK");
+    expect(one(`declare function other(): Promise<void>;
+async function f(db: any) { const { data, error } = await db.from("a").select("id"); try { await other(); } catch (e) { throw e; } if (error) throw error; return data; }`).verdict).toBe("OK");
+    // The binding inside the same branch as its read is not a branch relative to it.
+    expect(one(`async function f(db: any, c: boolean) { if (c) { const { data, error } = await db.from("a").select("id"); if (error) throw error; return data; } return null; }`).verdict).toBe("OK");
   });
 
   it("a builder REPLACED before it is awaited never runs (Codex, PR #92)", () => {
