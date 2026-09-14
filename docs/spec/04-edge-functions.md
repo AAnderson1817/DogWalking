@@ -79,9 +79,14 @@ is not a read of anything, whether it is the direct read, a bound `error`
 execution order only in straight-line code: a write inside a closure counts
 from the closure's creation (or from the binding itself, for a hoisted
 function declaration, which can be called before any read), and a read
-inside a closure counts only when no write can follow the binding at all,
-because the closure runs whenever it is called — `const check = () => error;
-error = null; if (check()) …` reads the null. A deferred
+inside a closure counts only when no write can follow the binding at all
+AND every closure around it is visibly invoked — an IIFE, or a named
+function called in the same body — because the closure runs whenever it is
+called, which can be after any later write (`const check = () => error;
+error = null; if (check()) …` reads the null) and can be never (`const check
+= () => error; return data;` reads nothing); a callback handed to a call or
+a closure returned on an object is execution the gate cannot see, refused
+rather than assumed. A deferred
 builder (`let q = db.from(…)`) is followed to the statement that consumes
 it: assignment to itself (`q = q.eq(…)`, through a conditional too) grows the
 same builder, while a write whose right side does not root at it — `q =
