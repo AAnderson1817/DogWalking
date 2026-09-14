@@ -100,6 +100,23 @@ describe("committedCredits", () => {
     const walks = [{ status: "scheduled" }, { status: "scheduled" }];
     expect(committedCredits(walks, () => 3)).toBe(6);
   });
+
+  /**
+   * `costOf` sees the WHOLE row it is pricing. Booking prices a persisted
+   * walk from its own `cost_credits` snapshot (0043) — the figure the server
+   * will charge — and the callback used to be typed `(walk: { status: string })`,
+   * which hid that column behind a cast and left the live formula running over
+   * rows that already carried their price. This is a compile-level pin as much
+   * as a runtime one: `w.cost_credits` stops typechecking if the parameter
+   * narrows again, and `tsc -b` is the gate that sees it (vitest does not).
+   */
+  it("hands costOf the full row, so a caller can read the snapshot", () => {
+    const walks = [
+      { status: "scheduled", cost_credits: 2 },
+      { status: "scheduled", cost_credits: null },
+    ];
+    expect(committedCredits(walks, (w) => w.cost_credits ?? 7)).toBe(2 + 7);
+  });
 });
 
 describe("availableCredits", () => {

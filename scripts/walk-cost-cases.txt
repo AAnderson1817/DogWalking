@@ -1,0 +1,41 @@
+# Walk-cost cases: one weekend-surcharge question per line, asked of all
+# three implementations by scripts/check-walk-cost-parity.sh.
+#
+#   weekendWalkCost         app/src/lib/walk-cost.ts     what Booking quotes
+#   fn_walk_cost            0043, the live fallback       what fn_debit_walk charges a row with no snapshot
+#   fn_snapshot_walk_price  0044, BEFORE INSERT trigger   what every new row is stamped with
+#
+# Format: <expected>\t<credit_cost>\t<surcharge>\t<scheduled_date>, all
+# integers except the ISO date. TypeScript decides the weekday from
+# `T12:00:00Z` + getUTCDay (credits.ts's rule since phase 03); Postgres reads
+# `isodow` off the DATE. The DST transitions below are what keep those two
+# answering alike — a bare-date parse is UTC midnight, which is still the
+# previous day everywhere west of Greenwich.
+
+# ── the week itself ───────────────────────────────────────────────────────
+# A Friday is deliberate: `isodow in (5, 6)` — the off-by-one that reads
+# "Fri/Sat" for "Sat/Sun" — surcharges it and lets Sunday through, so the
+# Friday and the Sunday go red in opposite directions.
+1	1	1	2026-07-01
+1	1	1	2026-07-03
+2	1	1	2026-07-04
+2	1	1	2026-07-05
+1	1	1	2026-07-06
+
+# ── US daylight-saving transitions (America/Chicago), each a Sunday, with the
+# Saturday before it — pins the `T12:00:00Z` choice at walk-cost.ts ──────────
+2	1	1	2026-03-07
+2	1	1	2026-03-08
+2	1	1	2026-10-31
+2	1	1	2026-11-01
+
+# ── calendar edges: leap day, year boundary (Thu, Fri, Sat) ───────────────
+1	1	1	2028-02-29
+1	1	1	2026-12-31
+1	1	1	2027-01-01
+2	1	1	2027-01-02
+
+# ── the amounts: a surcharge of 0 on a weekend, and 2 + 3 both ways ────────
+1	1	0	2026-07-04
+5	2	3	2026-07-05
+2	2	3	2026-07-01

@@ -116,6 +116,25 @@ asks both the same questions from one case list
 runner here has a database AND deno; they disagreed on an uppercase scheme and
 an explicit `:443` the day they were written.
 
+## 8d. Walk cost parity (requires `LOCAL_DB_URL` and deno)
+```
+./scripts/check-walk-cost-parity.sh
+```
+The weekend-surcharge arithmetic exists THREE times — `weekendWalkCost`
+(`app/src/lib/walk-cost.ts`, what Booking quotes), `fn_walk_cost`'s live
+fallback (0043, what `fn_debit_walk` charges a row with no snapshot) and the
+`fn_snapshot_walk_price` trigger (0044, what every new row is stamped with) —
+and the trigger and the function were two copies of one expression in two
+migrations that nothing tied together. One case list
+(`scripts/walk-cost-cases.txt`), every implementation asked, answers compared,
+with a FOURTH comparison, trigger against function: the SQL side nulls the
+snapshot before asking `fn_walk_cost`, because the function coalesces the
+snapshot first and would otherwise hand back the trigger's answer. Must end
+with `WALK COST PARITY PASS`. Same prerequisites as 8c and skipped by name
+without either — a gate that goes green by not running is this repository's
+most-recorded failure, so a SKIP here is a reason to install deno, not to
+move on.
+
 ## 9. Migrations are append-only (invariant 6)
 ```
 git fetch -q origin main

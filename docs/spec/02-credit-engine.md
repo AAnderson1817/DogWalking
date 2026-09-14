@@ -44,7 +44,7 @@ against two real backends.
 
 **fn_apply_invoice_paid(…, p_is_renewal boolean) → boolean** — gained the flag in 0026. `fn_apply_rollover` runs ONLY when true. Rollover means "carry what is left of the cycle that just ended", so a first invoice (`subscription_create`) has no prior cycle and running it there is a bug rather than a policy: on `rollover_policy='none'` it inserts a negative ledger row for the whole balance before the first grant lands, destroying any credit granted before billing started. The six-argument version is dropped rather than kept as an overload — two functions differing only by a trailing boolean is the shape a caller gets wrong, and the six-argument one is the version that destroys credits.
 
-**fn_walk_cost(p_walk uuid) → int** — `coalesce(walks.cost_credits, service_types.credit_cost + weekend_surcharge_credits if scheduled_date is Sat/Sun)`. STABLE, no lock.
+**fn_walk_cost(p_walk uuid) → int** — `coalesce(walks.cost_credits, service_types.credit_cost + weekend_surcharge_credits if scheduled_date is Sat/Sun)`. STABLE, no lock. That weekend expression exists THREE times — here (the live fallback), in the `fn_snapshot_walk_price` trigger below (0044, what every new row is stamped with), and in `app/src/lib/walk-cost.ts` (what Booking quotes for a walk that has no row yet) — and until gate 8d nothing tied any two of them together. `scripts/check-walk-cost-parity.sh` now asks all three the one case list in `scripts/walk-cost-cases.txt` (weekdays, both weekend days, the US DST transitions, a leap day, a year boundary, a zero surcharge) and compares the answers pairwise; the SQL side reads the trigger's stamp and then NULLS the snapshot before calling this function, because the coalesce would otherwise hand back the trigger's answer and the function's own expression would be tied to nothing.
 
 **The price is snapshotted at creation, not read at completion (0043, review L7; completed by 0044/H32).** `walks.cost_credits`, `walks.overage_rate_pence` and `walks.visit_price_pence` are written by `trg_walks_snapshot_price`, a BEFORE INSERT trigger. The client agrees to a price at booking and is charged at completion, and until 0043 both figures were read from fully mutable tables at the later moment — so an operator editing a service type or an overage rate on the Settings screen silently re-priced every walk already on the calendar, with nothing in the database proving what was agreed.
 
@@ -96,6 +96,16 @@ that visible rather than a surprise on a statement:
    not yet started, so the disclosure matches what will actually happen.
    `scheduled` only — an `in_progress` walk has already been debited or
    flagged, and counting it twice would warn about a charge that will not come.
+   Each booked walk counts at its SNAPSHOTTED `walks.cost_credits` — the
+   figure `fn_debit_walk` will take — with the live arithmetic only for a row
+   carrying no snapshot (pre-0043), the same coalesce `fn_walk_cost` performs;
+   the walk being composed has no row yet and is the one deliberately priced
+   live. Until `fix(walk-cost)` this sum ran the live formula over every
+   persisted walk while the snapshot sat unread in the same rows, so a
+   service re-priced after a booking moved the figure — and with it whether
+   the disclosure appeared at all — away from what the server would charge.
+   `Booking.committed.test.tsx` pins both halves; gate 8d ties the arithmetic
+   itself to the two SQL copies.
 3. **At the moment money moves, and after.** `payment_taken` names the amount
    and links the receipt; the report card shows what the walk cost.
 
