@@ -120,7 +120,15 @@ in a literal (`{ error }`, `[error]`) is a read only if the literal is
 consumed by the same rules — `logHandledError({ cause: error })` is,
 `const box = { error }; return data;` is not — and the direct read is held
 to the same rule (`const box = { cause: (await q).error }; void box;` reads
-nothing). A deferred
+nothing). The key the error sits under travels with the literal: a later
+read of it counts only through THAT member (`box.error`, `box.meta.error`,
+`errs[1]`, `const { error } = box`, a rest element carrying it on, an
+object spread carrying the keys through) or when the whole value is handed
+on — a call, a return, a throw — while `box.data`, `const { data } = box`,
+`if (box)`, `errs.length`, a computed key and an index behind an array
+spread read nothing. A class field initializer, instance or static, is
+execution the gate does not follow and reads nothing; a static block runs
+with the class statement and is straight-line. A deferred
 builder (`let q = db.from(…)`) is followed to the statement that consumes
 it: assignment to itself (`q = q.eq(…)`, through a conditional too) grows the
 same builder, while a write whose right side does not root at it — `q =
