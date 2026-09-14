@@ -70,7 +70,16 @@ function makeDeps(opts: Opts = {}) {
     backlogIds: () => Promise.resolve(opts.backlog ?? []),
     getClient: () =>
       opts.clientLookupThrows
-        ? Promise.reject(new Error("statement timeout"))
+        // The shape the real wiring throws (deps.ts): the Postgres error in
+        // `cause`, the id in `context`. A bare `new Error` here left the
+        // drain line's context spread pinned by nothing (adversarial review
+        // on PR #92).
+        ? Promise.reject(
+          new HttpError(500, "db_error", "client lookup failed", {
+            code: "57014",
+            message: "canceling statement due to statement timeout",
+          }, { client_id: "cl-1" }),
+        )
         : Promise.resolve({
         full_name: "Ada",
         email: opts.email === undefined ? "ada@example.test" : opts.email,
@@ -261,10 +270,10 @@ async function captureLines(fn: () => Promise<void>): Promise<string[]> {
 Deno.test("a delivery that THROWS during the drain is logged with its cause and the drain carries on", async () => {
   // The drain is the only path on which a persistent failure recurs — a
   // lookup that throws on a paused database throws again every night — and
-  // the single-row path's log line lives in `handleRequest`, which the drain
-  // never reaches. A bare `catch { failed += 1 }` left nothing on the row and
-  // nothing in the log until the row aged out of the backlog (adversarial
-  // review on PR #92).
+  // the single-row path's log line lives in `handleRequest`'s catch, which a
+  // per-row throw inside the drain never reaches (it is caught there). A bare
+  // `catch { failed += 1 }` left nothing on the row and nothing in the log
+  // until the row aged out of the backlog (adversarial review on PR #92).
   const { deps, recorded } = makeDeps({ clientLookupThrows: true, backlog: ["n-1", "n-2"] });
   let res: Awaited<ReturnType<typeof drainBacklog>> | null = null;
   const lines = await captureLines(async () => {
@@ -280,12 +289,25 @@ Deno.test("a delivery that THROWS during the drain is logged with its cause and 
   assertEquals(parsed[0].message, "drain: email delivery threw");
   assertEquals(parsed[0].context.channel, "email");
   assertEquals(parsed[0].context.notification_id, "n-1");
-  assertEquals(parsed[0].cause.message, "statement timeout", "the cause is on the line, not just the count");
+  // The `HttpError`'s own context rides on the line — the id a person
+  // searches by — and `safeCause` follows `.cause` down to the Postgres code.
+  // Both were exercised by nothing while the fixture threw a bare Error:
+  // dropping the context spread left the whole deno suite green (adversarial
+  // review on PR #92).
+  assertEquals(parsed[0].context.client_id, "cl-1", "the HttpError's context is spread onto the line");
+  assertEquals(parsed[0].cause.code, "db_error");
+  assertEquals(parsed[0].cause.message, "client lookup failed", "the cause is on the line, not just the count");
+  assertEquals(parsed[0].cause.cause.code, "57014", "the Postgres error is one level down");
 });
 
 Deno.test("a push delivery that THROWS during the drain is logged the same way", async () => {
   const { deps } = makeDeps({ backlog: ["n-1"] });
-  const boom = () => Promise.reject(new Error("push deps unreachable"));
+  // The shape `push_deps.ts`'s `getSubscriptions` throws: the operator id in
+  // the context, so the push line carries it too.
+  const boom = () =>
+    Promise.reject(
+      new HttpError(500, "db_error", "could not read push subscriptions", { code: "57014" }, { operator_id: "op-1" }),
+    );
   let res: Awaited<ReturnType<typeof drainBacklog>> | null = null;
   const lines = await captureLines(async () => {
     res = await drainBacklog(deps, boom);
@@ -293,8 +315,9 @@ Deno.test("a push delivery that THROWS during the drain is logged the same way",
   assertEquals(res!.pushFailed, 1);
   assertEquals(res!.sent, 1, "the email still went out — the channels stay isolated");
   const line = JSON.parse(lines.find((l) => l.includes("push delivery threw"))!);
-  assertEquals(line.context, { notification_id: "n-1", channel: "push" });
-  assertEquals(line.cause.message, "push deps unreachable");
+  assertEquals(line.context, { notification_id: "n-1", channel: "push", operator_id: "op-1" });
+  assertEquals(line.cause.message, "could not read push subscriptions");
+  assertEquals(line.cause.cause.code, "57014");
 });
 
 Deno.test("a row deleted between the count and the send is skipped, not fatal", async () => {
@@ -479,9 +502,21 @@ Deno.test("the drain does not abort on one row, and stays loud by its backlog", 
     backlog: ["n1", "n2"],
     rows: { n1: ROW, n2: { ...ROW, id: "n2" } },
   });
-  const result = await drainBacklog(deps);
+  let result: Awaited<ReturnType<typeof drainBacklog>> | null = null;
+  // Captured rather than left on stdout: the two per-row lines are the
+  // drain's loudness, so they are asserted instead of being noise on a green
+  // run (adversarial review on PR #92).
+  const lines = await captureLines(async () => {
+    result = await drainBacklog(deps);
+  });
   assertEquals(result, { drained: 2, sent: 0, failed: 2, pushSent: 0, pushFailed: 0 });
   assertEquals(recorded, [], "a configuration fault must not stamp an outcome");
+  const parsed = lines.map((l) => JSON.parse(l));
+  // The line carries the ROW's id (`ROW` is "n-1" under backlog key "n1").
+  assertEquals(parsed.map((p) => [p.message, p.cause.code, p.context.notification_id]), [
+    ["drain: email delivery threw", "email_not_configured", "n-1"],
+    ["drain: email delivery threw", "email_not_configured", "n2"],
+  ]);
 });
 
 Deno.test("losing the claim race sends nothing and records nothing", async () => {
@@ -656,7 +691,7 @@ Deno.test("a pre-send throw that is NOT a config error releases the claim too", 
     () => deliverNotification(ROW, h.deps),
     "a failed client lookup must still throw",
   );
-  assert(/statement timeout/.test(err.message), `unexpected error: ${err.message}`);
+  assert(/client lookup failed/.test(err.message), `unexpected error: ${err.message}`);
 
   assertEquals(h.recorded.length, 0);
   assertEquals(h.released, [[ROW.id, "email", STAMP]], "the claim outlived the sender");

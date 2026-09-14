@@ -11,6 +11,12 @@ export function adminClient(): SupabaseClient {
       throw new Error("supabase url / service credentials are not configured");
     }
     cached = createClient(url, key, {
+      // No `auth.throwOnError` here, deliberately: it would make every
+      // `.auth.*` call REJECT instead of resolving `{ data, error }`, and
+      // `app/scripts/discarded-errors.test.ts` classifies `.auth` chains on
+      // the resolved envelope. A call site cannot tell the option is set, so
+      // the gate would go wrong silently; if it is ever wanted, that gate
+      // moves first.
       auth: { persistSession: false, autoRefreshToken: false },
     });
   }

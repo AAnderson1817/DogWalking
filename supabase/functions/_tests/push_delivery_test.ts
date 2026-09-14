@@ -430,14 +430,28 @@ Deno.test("a push failure in the drain never strands the rest of the backlog", a
     backlogIds: () => Promise.resolve(["a", "b"]),
     record: () => Promise.resolve(),
   };
-  const result = await drainBacklog(deps as never, (r) => {
-    seen.push(r.id);
-    if (r.id === "a") return Promise.reject(new Error("db blip"));
-    return Promise.resolve({ kind: "sent" as const });
-  });
+  // The per-row line is the drain's record of the failure: captured and
+  // asserted rather than left on stdout (adversarial review on PR #92).
+  const original = console.error;
+  const lines: string[] = [];
+  console.error = (...args: unknown[]) => void lines.push(args.map(String).join(" "));
+  let result: Awaited<ReturnType<typeof drainBacklog>>;
+  try {
+    result = await drainBacklog(deps as never, (r) => {
+      seen.push(r.id);
+      if (r.id === "a") return Promise.reject(new Error("db blip"));
+      return Promise.resolve({ kind: "sent" as const });
+    });
+  } finally {
+    console.error = original;
+  }
   assertEquals(seen, ["a", "b"], "the sweep stopped at the first push failure");
   assertEquals(result.pushFailed, 1);
   assertEquals(result.pushSent, 1);
+  const parsed = lines.map((l) => JSON.parse(l));
+  assertEquals(parsed.map((p) => [p.message, p.cause.message, p.context]), [
+    ["drain: push delivery threw", "db blip", { notification_id: "a", channel: "push" }],
+  ]);
 });
 
 Deno.test("the payload is clamped so one record can always frame it", async () => {

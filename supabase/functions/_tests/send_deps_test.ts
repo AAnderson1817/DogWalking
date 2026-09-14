@@ -1,7 +1,7 @@
 // The email arm's LOOKUPS: a failed query must reject, never read as absence.
 //
-// Backlog item 2, found during money(send-once) and deferred because it was
-// pre-existing and untouched by that diff. `getClient` and `getOperator` in
+// The send-lookups backlog item, found during money(send-once) and deferred
+// because it was pre-existing and untouched by that diff. `getClient` and `getOperator` in
 // `send-notification/deps.ts` destructured `{ data }` and dropped `error` —
 // and supabase-js reports a failed query in the RESOLVED result, never by
 // rejecting. So a transient failure (a paused database, a statement timeout,
@@ -105,7 +105,7 @@ function scriptedDb(results: Record<string, Result>) {
   return { db, queries, rpcs };
 }
 
-function depsOver(results: Record<string, Result>) {
+function depsOver(results: Record<string, Result>, opts: { operatorId?: string | null } = {}) {
   const fetches: string[] = [];
   const fetchImpl = ((url: string | URL | Request) => {
     fetches.push(String(url));
@@ -116,7 +116,7 @@ function depsOver(results: Record<string, Result>) {
     {
       db: db as never,
       apiKey: "re_test_key",
-      operatorId: null,
+      operatorId: opts.operatorId ?? null,
       fromEmail: "Sanpo <n@sanpo.test>",
       unsubscribeBase: "https://x.test/unsubscribe",
     },
@@ -131,6 +131,49 @@ async function rejection(fn: () => Promise<unknown>): Promise<unknown> {
   assert(err !== null, "expected a rejection, got a resolved value");
   return err;
 }
+
+// ── getNotification / backlogIds ───────────────────────────────────────────
+//
+// The two lookups the first version of this file did not drive (adversarial
+// review on PR #92): their throws, and the M1 tenant scope, were pinned by
+// nothing through the real wiring.
+
+Deno.test("getNotification: a failed query REJECTS with the cause and the notification id", async () => {
+  const { deps } = depsOver({ "notifications.select": { data: null, error: PG_ERROR } });
+  const err = await rejection(() => deps.getNotification("n-1"));
+  assert(err instanceof HttpError, `expected HttpError, got ${String(err)}`);
+  assertEquals(err.status, 500);
+  assertEquals(err.code, "db_error");
+  assertEquals(err.message, "notification lookup failed");
+  assertEquals(err.cause, PG_ERROR);
+  assertEquals(err.context, { notification_id: "n-1" });
+});
+
+Deno.test("getNotification: the service role reads every tenant; an operator reads only its own (M1)", async () => {
+  // The scope goes into the QUERY, not into a check after it: a post-fetch
+  // comparison has already read the row.
+  const service = depsOver({ "notifications.select": { data: ROW, error: null } });
+  assertEquals(await service.deps.getNotification("n-1"), ROW);
+  assertEquals(service.queries.map((q) => [q.table, q.op, q.filters]), [
+    ["notifications", "select", [["eq", "id", "n-1"]]],
+  ]);
+  const operator = depsOver({ "notifications.select": { data: null, error: null } }, { operatorId: "op-2" });
+  assertEquals(await operator.deps.getNotification("n-1"), null, "another tenant's row is absence, not a leak");
+  assertEquals(operator.queries.map((q) => [q.table, q.op, q.filters]), [
+    ["notifications", "select", [["eq", "id", "n-1"], ["eq", "operator_id", "op-2"]]],
+  ]);
+});
+
+Deno.test("backlogIds: a failed RPC REJECTS; a good one is the list of ids", async () => {
+  const failed = depsOver({ "rpc:fn_notification_backlog": { data: null, error: PG_ERROR } });
+  const err = await rejection(() => failed.deps.backlogIds());
+  assert(err instanceof HttpError, `expected HttpError, got ${String(err)}`);
+  assertEquals(err.message, "backlog lookup failed");
+  assertEquals(err.cause, PG_ERROR);
+  const ok = depsOver({ "rpc:fn_notification_backlog": { data: [{ id: "n-1" }, { id: "n-2" }], error: null } });
+  assertEquals(await ok.deps.backlogIds(), ["n-1", "n-2"]);
+  assertEquals(ok.rpcs, [["fn_notification_backlog", {}]]);
+});
 
 // ── getClient ──────────────────────────────────────────────────────────────
 

@@ -482,10 +482,11 @@ export async function drainBacklog(
       failed += 1;
       // The drain is the only path on which a PERSISTENT failure recurs —
       // a lookup that throws (a paused database) throws again every night —
-      // and the single-row path's log line lives in `handleRequest`, which
-      // the drain never reaches. Swallowing here left nothing on the row and
-      // nothing in the log until the row aged out (adversarial review on PR
-      // #92); one line per row, with the cause, and the drain carries on.
+      // and the single-row path's log line lives in `handleRequest`'s catch,
+      // which a per-row throw inside the drain never reaches: it is caught
+      // here. Swallowing here left nothing on the row and nothing in the log
+      // until the row aged out (adversarial review on PR #92); one line per
+      // row, with the cause, and the drain carries on.
       logHandledError({
         fn: "send-notification",
         message: "drain: email delivery threw",
