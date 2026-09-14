@@ -245,6 +245,58 @@ Deno.test("a drain carries on past a failure", () => {
   });
 });
 
+/** Capture every console.error line written while `fn` runs. */
+async function captureLines(fn: () => Promise<void>): Promise<string[]> {
+  const original = console.error;
+  const lines: string[] = [];
+  console.error = (...args: unknown[]) => void lines.push(args.map(String).join(" "));
+  try {
+    await fn();
+  } finally {
+    console.error = original;
+  }
+  return lines;
+}
+
+Deno.test("a delivery that THROWS during the drain is logged with its cause and the drain carries on", async () => {
+  // The drain is the only path on which a persistent failure recurs — a
+  // lookup that throws on a paused database throws again every night — and
+  // the single-row path's log line lives in `handleRequest`, which the drain
+  // never reaches. A bare `catch { failed += 1 }` left nothing on the row and
+  // nothing in the log until the row aged out of the backlog (adversarial
+  // review on PR #92).
+  const { deps, recorded } = makeDeps({ clientLookupThrows: true, backlog: ["n-1", "n-2"] });
+  let res: Awaited<ReturnType<typeof drainBacklog>> | null = null;
+  const lines = await captureLines(async () => {
+    res = await drainBacklog(deps);
+  });
+  assertEquals(res!.drained, 2, "the second row was still attempted");
+  assertEquals(res!.failed, 2);
+  assertEquals(recorded, [], "a throw records no outcome — the row stays owed");
+  const parsed = lines.map((l) => JSON.parse(l));
+  assertEquals(parsed.length, 2, `one line per row, got ${lines.length}: ${lines.join(" | ")}`);
+  assertEquals(parsed[0].handled, true);
+  assertEquals(parsed[0].fn, "send-notification");
+  assertEquals(parsed[0].message, "drain: email delivery threw");
+  assertEquals(parsed[0].context.channel, "email");
+  assertEquals(parsed[0].context.notification_id, "n-1");
+  assertEquals(parsed[0].cause.message, "statement timeout", "the cause is on the line, not just the count");
+});
+
+Deno.test("a push delivery that THROWS during the drain is logged the same way", async () => {
+  const { deps } = makeDeps({ backlog: ["n-1"] });
+  const boom = () => Promise.reject(new Error("push deps unreachable"));
+  let res: Awaited<ReturnType<typeof drainBacklog>> | null = null;
+  const lines = await captureLines(async () => {
+    res = await drainBacklog(deps, boom);
+  });
+  assertEquals(res!.pushFailed, 1);
+  assertEquals(res!.sent, 1, "the email still went out — the channels stay isolated");
+  const line = JSON.parse(lines.find((l) => l.includes("push delivery threw"))!);
+  assertEquals(line.context, { notification_id: "n-1", channel: "push" });
+  assertEquals(line.cause.message, "push deps unreachable");
+});
+
 Deno.test("a row deleted between the count and the send is skipped, not fatal", async () => {
   const { deps } = makeDeps({ backlog: ["gone"], rows: { gone: null } });
   const res = await drainBacklog(deps);

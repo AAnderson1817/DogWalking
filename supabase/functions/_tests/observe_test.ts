@@ -16,6 +16,7 @@ import {
   logServerError,
   requestId,
   safeCause,
+  logHandledError,
 } from "../_lib/observe.ts";
 
 /** Capture the single line logServerError emits. */
@@ -379,4 +380,38 @@ Deno.test("the id the client sent is the id in both the line and the envelope", 
   const body = await res.json() as { error: Record<string, string> };
   assertEquals(body.error.request_id, "trace-abc-999");
   assertEquals((JSON.parse(lines[0]) as Record<string, string>).request_id, "trace-abc-999");
+});
+
+// ── logHandledError: the non-throwing line has the SAME field names ───────
+
+Deno.test("logHandledError writes one line searchable by the same keys as logServerError", () => {
+  // Adversarial review on PR #92: two ad-hoc shapes had grown (`msg` at top
+  // level, ids at top level), so a search keyed on `message` or
+  // `context.client_id` — the keys every thrown failure is recorded under —
+  // could not find the failures a handler dealt with itself.
+  const lines = captureLog(() =>
+    logHandledError({
+      fn: "change-plan",
+      message: "could not cache current_period_end",
+      cause: { name: "PostgrestError", code: "57014", message: "canceling statement", details: "the offending VALUES" },
+      context: { client_id: "cl-1", plan_id: null, walk_id: undefined },
+    })
+  );
+  assertEquals(lines.length, 1, "exactly one line");
+  const line = JSON.parse(lines[0]!);
+  assertEquals(line.level, "error");
+  assertEquals(line.handled, true, "marked as handled, so it cannot be mistaken for an unhandled 5xx");
+  assertEquals(line.fn, "change-plan");
+  assertEquals(line.message, "could not cache current_period_end");
+  // Through safeCause: the projection that keeps `details` out of the log.
+  assertEquals(line.cause, { name: "PostgrestError", code: "57014", message: "canceling statement" });
+  assertEquals(line.context, { client_id: "cl-1" }, "null and undefined context values are dropped");
+  assertFalse("request_id" in line, "no request id is reachable from a handler; the line must not fake one");
+});
+
+Deno.test("logHandledError omits an absent cause and an empty context", () => {
+  const lines = captureLog(() => logHandledError({ fn: "send-notification", message: "x", context: { a: null } }));
+  const line = JSON.parse(lines[0]!);
+  assertFalse("cause" in line);
+  assertFalse("context" in line);
 });
