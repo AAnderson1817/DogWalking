@@ -36,9 +36,11 @@ import { describe, expect, it } from "vitest";
  *                 the same object, where a write inside a closure counts
  *                 from the closure's creation (or from the binding, for a
  *                 hoisted declaration) and a read inside a closure counts
- *                 only when no write can follow the binding at all, since
- *                 the closure runs whenever it is called — or `.error` is
- *                 read straight off the
+ *                 only when no write can follow the binding at all AND
+ *                 every closure around it is visibly invoked (an IIFE, or
+ *                 a named function called in the same body), since the
+ *                 closure runs whenever it is called, which may be never
+ *                 — or `.error` is read straight off the
  *                 awaited expression AND used (consumed in place, or bound
  *                 to a local that is read afterwards — `const e = (await
  *                 q).error; return data;` is the destructured discard with
@@ -482,16 +484,63 @@ function nextWriteTo(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node
   return Math.min(Infinity, ...writesTo(checker, sym, container).map((w) => executesAt(w, container, bound)).filter((w) => w > bound.pos));
 }
 
+/** Every function nested inside `container` that encloses `n`, outermost first. */
+function closuresAround(n: ts.Node, container: ts.Node): ts.Node[] {
+  const out: ts.Node[] = [];
+  for (let cur: ts.Node | undefined = n.parent; cur && cur !== container; cur = cur.parent) {
+    if (ts.isFunctionLike(cur)) out.unshift(cur);
+  }
+  return out;
+}
+
+/**
+ * Is this closure CALLED where the gate can see it — an IIFE, or a function
+ * bound to a name (a variable's initializer, a function declaration) that is
+ * invoked somewhere in `container`? A callback handed to a call, a closure
+ * returned or stored on an object may never run, and a read inside a closure
+ * that never runs is no read: `const check = () => error; return data;`
+ * discards the error with the closure never invoked (Codex on PR #92, the
+ * round after the closure's TIMING was fixed).
+ */
+function visiblyInvoked(fn: ts.Node, container: ts.Node, checker: ts.TypeChecker): boolean {
+  let top: ts.Node = fn;
+  while (top.parent && isTransparent(top.parent, top)) top = top.parent;
+  const p = top.parent;
+  if (ts.isCallExpression(p) && p.expression === top) return true;
+  let name: ts.Identifier | undefined;
+  if (ts.isVariableDeclaration(p) && p.initializer === top && ts.isIdentifier(p.name)) name = p.name;
+  else if (ts.isFunctionDeclaration(fn) && fn.name) name = fn.name;
+  if (!name) return false;
+  const sym = symbolOf(checker, name);
+  if (!sym) return false;
+  let called = false;
+  const visit = (n: ts.Node) => {
+    if (called) return;
+    if (ts.isIdentifier(n) && n !== name && symbolOf(checker, n) === sym) {
+      let t: ts.Node = n;
+      while (t.parent && isTransparent(t.parent, t)) t = t.parent;
+      if (ts.isCallExpression(t.parent) && t.parent.expression === t) called = true;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(container);
+  return called;
+}
+
 /**
  * Is this reference a read that observes the binding's value BEFORE the
  * window closes? A straight-line read must sit before the first write that
- * can execute after the binding. A read inside a closure runs whenever the
- * closure is called, which can be after ANY later write, so it counts only
- * when no write can follow the binding at all (Codex on PR #92).
+ * can execute after the binding. A read inside a closure runs when the
+ * closure is called — which can be after ANY later write, so it counts only
+ * when no write can follow the binding at all, and which may be never, so it
+ * counts only when every closure around it is visibly invoked (Codex on PR
+ * #92, two rounds).
  */
-function readsInWindow(u: ts.Identifier, bound: ts.Identifier, overwritten: number, container: ts.Node): boolean {
+function readsInWindow(u: ts.Identifier, bound: ts.Identifier, overwritten: number, container: ts.Node, checker: ts.TypeChecker): boolean {
   if (u.pos <= bound.pos || u.pos >= overwritten) return false;
-  return overwritten === Infinity || closureOf(u, container) === null;
+  const closures = closuresAround(u, container);
+  if (closures.length === 0) return true;
+  return overwritten === Infinity && closures.every((fn) => visiblyInvoked(fn, container, checker));
 }
 
 /**
@@ -589,7 +638,7 @@ function isReadAfter(ctx: Ctx, bound: ts.Identifier): boolean {
   if (!sym) return false;
   const container = scopeContainer(bound);
   const overwritten = nextWriteTo(ctx.checker, sym, container, bound);
-  return usesOf(ctx.checker, sym, container).some((u) => readsInWindow(u, bound, overwritten, container) && isConsumed(u));
+  return usesOf(ctx.checker, sym, container).some((u) => readsInWindow(u, bound, overwritten, container, ctx.checker) && isConsumed(u));
 }
 
 interface Ctx {
@@ -623,7 +672,7 @@ function followEnvelopeVar(ctx: Ctx, nameNode: ts.Identifier, at: ts.Node): Site
   // (Codex on PR #92: `const copy = r; r.error = null; if (copy.error) …`
   // reads the null). Each member's own window still ends where THAT binding
   // is overwritten (`let r = await a; r = await b`).
-  interface Member { id: ts.Identifier; uses: ts.Identifier[] }
+  interface Member { id: ts.Identifier; uses: ts.Identifier[]; every: ts.Identifier[] }
   const members: Member[] = [];
   const queue: ts.Identifier[] = [nameNode];
   const seenSym = new Set<ts.Symbol>();
@@ -633,8 +682,13 @@ function followEnvelopeVar(ctx: Ctx, nameNode: ts.Identifier, at: ts.Node): Site
     if (!sym || seenSym.has(sym)) continue;
     seenSym.add(sym);
     const overwritten = nextWriteTo(ctx.checker, sym, container, id);
-    const uses = usesOf(ctx.checker, sym, container).filter((u) => readsInWindow(u, id, overwritten, container));
-    members.push({ id, uses });
+    // `every` keeps the references a READ cannot claim — inside a closure
+    // nothing visibly invokes — because a `.error` WRITE in such a closure
+    // may still run, and execution the gate cannot see is assumed for a
+    // write and refused for a read: both are the false-red direction.
+    const every = usesOf(ctx.checker, sym, container).filter((u) => u.pos > id.pos);
+    const uses = every.filter((u) => readsInWindow(u, id, overwritten, container, ctx.checker));
+    members.push({ id, uses, every });
     for (const u of uses) {
       const d = u.parent;
       if (ts.isVariableDeclaration(d) && d.initializer === u && ts.isIdentifier(d.name)) queue.push(d.name);
@@ -645,7 +699,7 @@ function followEnvelopeVar(ctx: Ctx, nameNode: ts.Identifier, at: ts.Node): Site
   // called, so it closes the window from the closure's creation (or from
   // the binding, for a hoisted declaration) — the same rule as a write to
   // the binding itself.
-  const errorWrittenAt = Math.min(...allUses.map((u) => {
+  const errorWrittenAt = Math.min(...members.flatMap((m) => m.every).map((u) => {
     const a = errorAccess(u);
     return a && isErrorWrite(a) ? executesAt({ pos: u.pos, node: u }, container, nameNode) : Infinity;
   }));
@@ -1684,6 +1738,76 @@ async function h({ db }: { db: unknown }, token: string) { const { data } = awai
   let { data, error } = await db.from("x").select("id");
   if (error) throw error;
   return { data, reset: () => { error = null; } };
+}`).verdict).toBe("OK");
+  });
+
+  it("a closure that is never invoked reads nothing (Codex, PR #92)", () => {
+    // Codex's exact case, one round after the closure's TIMING was fixed: no
+    // later write, so the round-nine rule counted the closure's reference as
+    // a read — and the closure is never called.
+    expect(one(`async function f(db: any) {
+  const { data, error } = await db.from("x").select("id");
+  const check = () => error;
+  return data;
+}`).verdict).toBe("DISCARDED");
+    expect(one(`async function g(db: any) {
+  const r = await db.from("x").select("id");
+  const check = () => r.error;
+  return r.data;
+}`).verdict).toBe("DISCARDED");
+    // Execution the gate cannot see is no execution: a callback handed to a
+    // call, a closure returned on an object, an inner closure never called.
+    expect(one(`async function h(db: any, rows: number[]) {
+  const { data, error } = await db.from("x").select("id");
+  rows.forEach(() => { if (error) throw error; });
+  return data;
+}`).verdict).toBe("DISCARDED");
+    expect(one(`async function k(db: any) {
+  const { data, error } = await db.from("x").select("id");
+  return { data, check: () => error };
+}`).verdict).toBe("DISCARDED");
+    expect(one(`async function m(db: any) {
+  const { data, error } = await db.from("x").select("id");
+  const outer = () => { const inner = () => error; return 1; };
+  outer();
+  return data;
+}`).verdict).toBe("DISCARDED");
+    // A named closure MENTIONED is not a named closure CALLED: handed to a
+    // call, it is the callback case with a name.
+    expect(one(`async function mm(db: any, rows: number[]) {
+  const { data, error } = await db.from("x").select("id");
+  const check = () => { if (error) throw error; };
+  rows.forEach(check);
+  return data;
+}`).verdict).toBe("DISCARDED");
+    // Visibly invoked, at every level: a named closure that is called, an
+    // IIFE, a hoisted declaration that is called, and a nested pair both
+    // called. The closure's reference is the ONLY read in each, so the
+    // healthy verdict rests on the invocation rule and not on a straight-line
+    // read beside it (the first fixtures threw `error` itself, and a
+    // sabotage of the IIFE rule stayed green).
+    expect(one(`async function n(db: any) {
+  const { data, error } = await db.from("x").select("id");
+  const check = () => error;
+  if (check()) throw check();
+  return data;
+}`).verdict).toBe("OK");
+    expect(one(`async function o(db: any) {
+  const { data, error } = await db.from("x").select("id");
+  if ((() => error)()) throw new Error("failed");
+  return data;
+}`).verdict).toBe("OK");
+    expect(one(`async function p(db: any) {
+  const { data, error } = await db.from("x").select("id");
+  if (failed()) throw new Error("failed");
+  return data;
+  function failed() { return error !== null; }
+}`).verdict).toBe("OK");
+    expect(one(`async function q(db: any) {
+  const { data, error } = await db.from("x").select("id");
+  const outer = () => { const inner = () => error; return inner(); };
+  if (outer()) throw new Error("failed");
+  return data;
 }`).verdict).toBe("OK");
   });
 
