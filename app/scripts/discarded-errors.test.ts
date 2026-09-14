@@ -37,10 +37,12 @@ import { describe, expect, it } from "vitest";
  *                 awaited expression AND used (consumed in place, or bound
  *                 to a local that is read afterwards — `const e = (await
  *                 q).error; return data;` is the destructured discard with
- *                 more parentheses, and a bare statement, `void e` or the
- *                 left side of a comma discards it), or a deferred builder
- *                 (`let q = db.from(…)`) is followed to the statement that
- *                 awaits it and THAT is OK.
+ *                 more parentheses), or a deferred builder (`let q =
+ *                 db.from(…)`) is followed to the statement that awaits it
+ *                 and THAT is OK. A reference in a DISCARD position — a bare
+ *                 statement, `void e`, the left side of a comma — is not a
+ *                 read of anything, for a bound `error`, an envelope's
+ *                 `.error` and the direct read alike.
  *   PASSED_ON     the whole envelope is returned, or is the expression body
  *                 of an arrow that is NOT a call's argument (a deps-object
  *                 property, say) — a caller reads it. Printed, not failed: a
@@ -471,6 +473,39 @@ function isErrorWrite(access: ts.Expression): boolean {
 }
 
 /**
+ * Walk up from an expression through what FORWARDS its value unchanged —
+ * `(e)`, `e as T`, `e!`, `e satisfies T`, `await e`, the right side of a
+ * comma — to the node whose parent finally consumes it.
+ */
+function forwardedTo(n: ts.Node): ts.Node {
+  let holder = n;
+  for (;;) {
+    const up: ts.Node = holder.parent;
+    const forwards = isTransparent(up, holder) || (ts.isAwaitExpression(up) && up.expression === holder) ||
+      (ts.isBinaryExpression(up) && up.operatorToken.kind === ts.SyntaxKind.CommaToken && up.right === holder);
+    if (!forwards) return holder;
+    holder = up;
+  }
+}
+
+/**
+ * Does this holder's parent DISCARD the value — an expression statement,
+ * `void e`, the left side of a comma? A reference in such a position is not
+ * a read of anything: `void error`, `(error, 1)`, a bare `r.error;` (Codex
+ * on PR #92, after the same shapes had been closed for the direct read).
+ */
+function discardedAt(holder: ts.Node): boolean {
+  const h = holder.parent;
+  return ts.isExpressionStatement(h) || ts.isVoidExpression(h) ||
+    (ts.isBinaryExpression(h) && h.operatorToken.kind === ts.SyntaxKind.CommaToken && h.left === holder);
+}
+
+/** A reference that is consumed by something — not merely mentioned and thrown away. */
+function isConsumed(n: ts.Node): boolean {
+  return !discardedAt(forwardedTo(n));
+}
+
+/**
  * Does the destructuring bind `error` (as `error` or `error: alias`) AND is
  * the local it binds read afterwards?
  *
@@ -503,7 +538,7 @@ function isReadAfter(ctx: Ctx, bound: ts.Identifier): boolean {
   if (!sym) return false;
   const container = scopeContainer(bound);
   const overwritten = nextWriteTo(ctx.checker, sym, container, bound.pos);
-  return usesOf(ctx.checker, sym, container).some((u) => u.pos > bound.pos && u.pos < overwritten);
+  return usesOf(ctx.checker, sym, container).some((u) => u.pos > bound.pos && u.pos < overwritten && isConsumed(u));
 }
 
 interface Ctx {
@@ -559,7 +594,7 @@ function followEnvelopeVar(ctx: Ctx, nameNode: ts.Identifier, at: ts.Node): Site
   const uses = allUses.filter((u) => u.pos < errorWrittenAt);
   const via = (u: ts.Identifier) => u.text === name ? "" : ` (through alias \`${u.text}\`)`;
 
-  const read = uses.find((u) => { const a = errorAccess(u); return a !== null && !isErrorWrite(a); });
+  const read = uses.find((u) => { const a = errorAccess(u); return a !== null && !isErrorWrite(a) && isConsumed(a); });
   if (read) return [site(ctx, at, "OK", `envelope in \`${name}\`, \`.error\` read later${via(read)}`)];
   const destructured = uses.find((u) =>
     ts.isVariableDeclaration(u.parent) && u.parent.initializer === u &&
@@ -603,17 +638,9 @@ function classifyAwaited(ctx: Ctx, awaited: ts.AwaitExpression): Site[] {
     // expression statement, `void e`, the left side of a comma. `return void
     // (await q).error` is Codex's case on PR #92, and unlike a bare
     // statement it leaves nothing a linter would flag.
-    let holder: ts.Node = p;
-    for (;;) {
-      const up: ts.Node = holder.parent;
-      const forwards = isTransparent(up, holder) || (ts.isAwaitExpression(up) && up.expression === holder) ||
-        (ts.isBinaryExpression(up) && up.operatorToken.kind === ts.SyntaxKind.CommaToken && up.right === holder);
-      if (!forwards) break;
-      holder = up;
-    }
+    const holder = forwardedTo(p);
     const h = holder.parent;
-    if (ts.isExpressionStatement(h) || ts.isVoidExpression(h) ||
-      (ts.isBinaryExpression(h) && h.operatorToken.kind === ts.SyntaxKind.CommaToken && h.left === holder)) {
+    if (discardedAt(holder)) {
       return [site(ctx, p, "DISCARDED", "`.error` read off the awaited envelope and dropped — nothing consumes the value")];
     }
     const bound = ts.isVariableDeclaration(h) && h.initializer === holder && ts.isIdentifier(h.name) ? h.name
@@ -1485,6 +1512,23 @@ function g(keys: Keys = load()) { return keys.auth.trim(); }`, "f.ts")).toEqual(
     expect(one(`async function f(db: any) { void ((await db.from("a").select("id")).error as unknown); }`).verdict).toBe("DISCARDED");
     // Forwarded, not discarded: the right side of a comma reaches the local.
     expect(one(`async function f(db: any) { const e = (0, (await db.from("a").select("id")).error); if (e) throw e; }`).verdict).toBe("OK");
+  });
+
+  it("a bound `error` or an envelope's `.error` mentioned in a discard position is not read (Codex, PR #92)", () => {
+    // The direct-read fix closed `void (await q).error`; the same shapes
+    // were still reads for a BOUND local and for an envelope variable,
+    // because `isReadAfter` and the `.error`-read search counted any
+    // reference. A reference nothing consumes is not a read of anything.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); void error; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); (error, 1); return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const r = await db.from("a").select("id"); void r.error; return r.data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const r = await db.from("a").select("id"); r.error; return r.data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const e = (await db.from("a").select("id")).error; void e; return 1; }`).verdict).toBe("DISCARDED");
+    // Consumed, whatever the surrounding expression's fate: `??`, a
+    // condition, a call argument, an awaited or comma-forwarded value.
+    expect(one(`declare function log(x: unknown): void;
+async function f(db: any) { const { data, error } = await db.from("a").select("id"); void log(error); return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const r = await db.from("a").select("id"); const e = (0, r.error); if (e) throw e; return r.data; }`).verdict).toBe("OK");
   });
 
   it("`.error` read off the awaited envelope must still be USED (adversarial review on PR #92)", () => {

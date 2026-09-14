@@ -72,8 +72,10 @@ r`) is followed as the same envelope, transitively, and a `.error` write
 through any alias — `r.error = …` or `r["error"] = …` — closes the window
 for all of them. `(await q).error`, `((await q) as T)` and `(await q)!` are
 read through the wrapper — and the error value read that way must itself be
-USED: a local it is bound to must be read afterwards, and a bare `(await
-q).error;`, `void (await q).error` and the left side of a comma are no-ops.
+USED: a local it is bound to must be read afterwards. A reference in a
+DISCARD position — a bare statement, `void e`, the left side of a comma —
+is not a read of anything, whether it is the direct read, a bound `error`
+(`void error;`) or an envelope's `.error` (`void r.error;`).
 A chain carrying `.throwOnError()` is REFUSED, not
 blessed: postgrest-js then rejects with a raw `PostgrestError` that nothing
 decides, which lands in `handleRequest`'s catch as an unhandled error with no
