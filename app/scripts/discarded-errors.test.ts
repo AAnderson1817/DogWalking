@@ -37,9 +37,10 @@ import { describe, expect, it } from "vitest";
  *                 awaited expression AND used (consumed in place, or bound
  *                 to a local that is read afterwards — `const e = (await
  *                 q).error; return data;` is the destructured discard with
- *                 more parentheses), or a deferred builder (`let q =
- *                 db.from(…)`) is followed to the statement that awaits it
- *                 and THAT is OK.
+ *                 more parentheses, and a bare statement, `void e` or the
+ *                 left side of a comma discards it), or a deferred builder
+ *                 (`let q = db.from(…)`) is followed to the statement that
+ *                 awaits it and THAT is OK.
  *   PASSED_ON     the whole envelope is returned, or is the expression body
  *                 of an arrow that is NOT a call's argument (a deps-object
  *                 property, say) — a caller reads it. Printed, not failed: a
@@ -73,10 +74,14 @@ import { describe, expect, it } from "vitest";
  * for `.auth` the word is not enough and the RECEIVER decides, by the
  * declaration its SYMBOL resolves to, in three answers. A CLIENT:
  * `adminClient()` / `createClient(…)` called inline or awaited, a variable
- * initialised from one (at declaration or by a later assignment), an alias
- * of a client — `const authDb = db` — followed transitively (Codex on PR
- * #92: the first version called an untyped alias a value and skipped it),
- * or a parameter or variable TYPED as one, one type alias deep. A VALUE,
+ * initialised from one (at declaration, as a parameter default, or by a
+ * later assignment — and a factory WINS over an annotation naming
+ * something else, `const db: Db = adminClient()` being a client whatever
+ * `Db` is), an alias of a client — `const authDb = db` — followed
+ * transitively (Codex on PR #92: the first version called an untyped alias
+ * a value and skipped it, then let a value-typed annotation return before
+ * the initialiser was looked at), or a parameter or variable TYPED as one,
+ * one type alias deep. A VALUE,
  * which needs POSITIVE evidence: a type annotation naming something that is
  * not a client and is not opaque (`any`, `unknown`, `object`, `{}` say
  * nothing; `Deps["db"]` and `typeof x` would have to be evaluated), a
@@ -592,11 +597,24 @@ function classifyAwaited(ctx: Ctx, awaited: ts.AwaitExpression): Site[] {
     // local it is bound to must be read afterwards, exactly as a destructured
     // `error` must — `const e = (await q).error; return data;` is `const {
     // error } = await q; return data;` with more parentheses.
+    // Walk up through what FORWARDS the value — `(e)`, `e as T`, `e!`,
+    // `e satisfies T`, `await e`, the right side of a comma — to what holds
+    // it. A holder that DISCARDS it is the no-op wearing another shape: an
+    // expression statement, `void e`, the left side of a comma. `return void
+    // (await q).error` is Codex's case on PR #92, and unlike a bare
+    // statement it leaves nothing a linter would flag.
     let holder: ts.Node = p;
-    while (isTransparent(holder.parent, holder)) holder = holder.parent;
+    for (;;) {
+      const up: ts.Node = holder.parent;
+      const forwards = isTransparent(up, holder) || (ts.isAwaitExpression(up) && up.expression === holder) ||
+        (ts.isBinaryExpression(up) && up.operatorToken.kind === ts.SyntaxKind.CommaToken && up.right === holder);
+      if (!forwards) break;
+      holder = up;
+    }
     const h = holder.parent;
-    if (ts.isExpressionStatement(h)) {
-      return [site(ctx, p, "DISCARDED", "`.error` read off the awaited envelope and dropped — a statement that does nothing")];
+    if (ts.isExpressionStatement(h) || ts.isVoidExpression(h) ||
+      (ts.isBinaryExpression(h) && h.operatorToken.kind === ts.SyntaxKind.CommaToken && h.left === holder)) {
+      return [site(ctx, p, "DISCARDED", "`.error` read off the awaited envelope and dropped — nothing consumes the value")];
     }
     const bound = ts.isVariableDeclaration(h) && h.initializer === holder && ts.isIdentifier(h.name) ? h.name
       : ts.isBinaryExpression(h) && h.operatorToken.kind === ts.SyntaxKind.EqualsToken && h.right === holder && ts.isIdentifier(h.left) ? h.left
@@ -795,23 +813,29 @@ function declaredAsClient(ctx: Ctx, recv: ts.Expression, seen = new Set<ts.Symbo
   seen.add(sym);
   const decl = sym.valueDeclaration ?? sym.declarations?.[0];
   if (!decl) return "unknown";
-  if (ts.isVariableDeclaration(decl)) {
+  if (ts.isVariableDeclaration(decl) || ts.isParameter(decl)) {
+    // Every SOURCE of the binding: its initialiser (a parameter's default
+    // included) and, for a variable, each later `db = …`. A factory anywhere
+    // WINS, even under an annotation naming something else — `const db: Db =
+    // adminClient()` is a client whatever `Db` is called (Codex on PR #92:
+    // the first version let a value-typed annotation return before the
+    // initialiser was looked at). With no visible client the annotation
+    // decides; with no annotation, a value only when every source the gate
+    // can read is one.
+    const sources: Declared[] = decl.initializer ? [byExpression(decl.initializer)] : [];
+    if (ts.isVariableDeclaration(decl)) {
+      const visit = (n: ts.Node) => {
+        if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(n.left) &&
+          symbolOf(ctx.checker, n.left) === sym) sources.push(byExpression(n.right));
+        ts.forEachChild(n, visit);
+      };
+      visit(ctx.sf);
+    }
+    if (sources.includes("client")) return "client";
     const byType = declaredByType(ctx, decl.type);
     if (byType !== "unknown") return byType;
-    // Every SOURCE of the variable: its initialiser and each later `db = …`.
-    // A factory anywhere wins (it is what the variable is for); a value only
-    // when every source the gate can read is one.
-    const sources: Declared[] = decl.initializer ? [byExpression(decl.initializer)] : [];
-    const visit = (n: ts.Node) => {
-      if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(n.left) &&
-        symbolOf(ctx.checker, n.left) === sym) sources.push(byExpression(n.right));
-      ts.forEachChild(n, visit);
-    };
-    visit(ctx.sf);
-    if (sources.includes("client")) return "client";
     return sources.length > 0 && sources.every((d) => d === "value") ? "value" : "unknown";
   }
-  if (ts.isParameter(decl)) return declaredByType(ctx, decl.type);
   if (ts.isBindingElement(decl)) {
     // `({ db }: Deps)` — the client is somewhere inside a type the gate
     // cannot read; refuse loudly rather than guess either way.
@@ -1437,6 +1461,30 @@ async function h({ db }: { db: unknown }, token: string) { const { data } = awai
       .toMatch(/query: `\.select` is referenced and never called/);
     const viaBuilder = classifySource(`async function f(db: any) { let q = db.from("b").select("id"); const fn = q.eq; return fn; }`, "f.ts");
     expect(viaBuilder.map((s) => s.reason)).toEqual([expect.stringMatching(/builder `q`: `\.eq` is referenced and never called/)]);
+  });
+
+  it("a factory initialiser is a client whatever its annotation says (Codex, PR #92)", () => {
+    // `const db: Db = adminClient()` — the annotation names a value, the
+    // initialiser is visibly a client, and the first version returned on the
+    // annotation before looking. Client evidence wins.
+    expect(one(`interface Db { auth: unknown }
+async function f(token: string) { const db: Db = adminClient(); const { data } = await db.auth.getUser(token); return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`interface Db { auth: unknown }
+async function f(token: string, db: Db = adminClient()) { const { data } = await db.auth.getUser(token); return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`interface Db { auth: unknown }
+async function f(token: string) { let db: Db; db = adminClient(); const { data } = await db.auth.getUser(token); return data; }`).verdict).toBe("DISCARDED");
+    // With nothing visibly a client, the annotation still decides.
+    expect(classifySource(`interface Keys { auth: string }
+declare function load(): Keys;
+function g(keys: Keys = load()) { return keys.auth.trim(); }`, "f.ts")).toEqual([]);
+  });
+
+  it("a direct `.error` read that `void` or a comma discards is a discard (Codex, PR #92)", () => {
+    expect(one(`async function f(db: any) { return void (await db.from("a").select("id")).error; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const x = ((await db.from("a").select("id")).error, 1); return x; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { void ((await db.from("a").select("id")).error as unknown); }`).verdict).toBe("DISCARDED");
+    // Forwarded, not discarded: the right side of a comma reaches the local.
+    expect(one(`async function f(db: any) { const e = (0, (await db.from("a").select("id")).error); if (e) throw e; }`).verdict).toBe("OK");
   });
 
   it("`.error` read off the awaited envelope must still be USED (adversarial review on PR #92)", () => {
