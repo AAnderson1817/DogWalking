@@ -16,17 +16,24 @@ import { describe, expect, it } from "vitest";
  * has no email address", permanently cancelling a `payment_failed` email. The
  * rule was written down and connected to nothing; this file is the connection.
  *
- * Parsed, not grepped. The TypeScript compiler API walks every non-test `.ts`
- * under `supabase/functions/`, finds each supabase-js query and classifies
- * the statement that consumes its envelope:
+ * Parsed, not grepped — and RESOLVED, not name-matched: every identifier
+ * goes through the TypeScript checker's symbol, so a same-named variable in
+ * a nested block, callback, loop or catch clause is a different binding by
+ * construction. The compiler API walks every non-test `.ts` under
+ * `supabase/functions/`, finds each supabase-js query and classifies the
+ * statement that consumes its envelope:
  *
  *   OK            `error` is bound by destructuring AND referenced later in
  *                 the same function, or the envelope is held in a variable
- *                 whose `.error` is read later — before the variable is
- *                 overwritten, and by THAT variable rather than a same-named
- *                 one in a nested scope — or a deferred builder
- *                 (`let q = db.from(…)`) is followed to the statement that
- *                 awaits it and THAT is OK.
+ *                 whose `.error` is read later — before the binding is
+ *                 overwritten (by assignment, plain or through a pattern,
+ *                 a `var` re-declaration or a `var` loop variable) and
+ *                 before `.error` itself is written through any alias of
+ *                 the same object — or `.error` is read straight off the
+ *                 awaited expression, or a deferred builder (`let q =
+ *                 db.from(…)`) is followed to the statement that awaits it
+ *                 and THAT is OK, or the chain ends in `.throwOnError()`,
+ *                 which throws instead of resolving an error.
  *   PASSED_ON     the whole envelope is returned, or is the expression body
  *                 of an arrow that is NOT a call's argument (a deps-object
  *                 property, say) — a caller reads it. Printed, not failed: a
@@ -51,12 +58,15 @@ import { describe, expect, it } from "vitest";
  * user, `_lib/http.ts` resolves the token). `auth` is ALSO a plain field
  * name in this tree — `keys.auth` (`_lib/webpush.ts`, the push encryption
  * secret) and `sub.auth` (`push_deps.ts`, a subscription row's column) — so
- * for `.auth` the word is not enough and the RECEIVER decides: it must be
- * declared as a client in the file (`adminClient()` / `createClient(…)`
- * called inline, a variable initialised from one, or a parameter typed as
- * one). A receiver declared as anything else is a value and `sub.auth.length`
- * is a healthy read; a receiver with no visible declaration, or a call that
- * is not a known factory, is UNCLASSIFIED — loud, never skipped. A namespace
+ * for `.auth` the word is not enough and the RECEIVER decides, by the
+ * declaration its SYMBOL resolves to: `adminClient()` / `createClient(…)`
+ * called inline, a variable initialised from one (at declaration or by a
+ * later assignment), or a parameter or variable typed as one, one type
+ * alias deep. A receiver declared as anything else is a value and
+ * `sub.auth.length` is a healthy read; a receiver whose declaration the
+ * gate cannot read — an import, a class member, a destructured parameter,
+ * a call that is not a known factory — is UNCLASSIFIED: loud, never
+ * skipped. A namespace
  * handed off whole (`const a = db.auth`) is therefore invisible here, the
  * same blind spot as a builder passed to another function; stated, not
  * chased. No `.storage.` call exists anywhere under `supabase/functions/`,
@@ -119,11 +129,54 @@ function sourceFiles(dir: string): string[] {
 // ---------------------------------------------------------------------------
 // Classifier
 // ---------------------------------------------------------------------------
+//
+// Identifiers are resolved through the TypeScript CHECKER's symbols, never by
+// name. Four review rounds on PR #92 each found one more way a name-based
+// model attributed a same-named variable to the wrong binding — a callback
+// parameter, a block-local `const`, a `for (var r …)` loop variable, an
+// earlier declaration in a nested block — and every fix closed an instance
+// rather than the class. A symbol IS the binding, so shadows, block scope,
+// `var` hoisting and parameters fall out of the binder instead of out of a
+// list of syntactic forms. Imports are not resolved (`noResolve`), which is
+// all a per-file scan needs: a local's symbol never crosses a file.
 
 const QUERY_METHODS = new Set(["from", "rpc"]);
 const CLIENT_FACTORIES = new Set(["adminClient", "createClient"]);
 /** Consuming a builder through a thenable method is a shape this gate does not read. */
 const THENABLE = new Set(["then", "catch", "finally"]);
+/** A chain ending here THROWS on failure; there is no envelope to discard. */
+const THROWING_TERMINALS = new Set(["throwOnError"]);
+
+const COMPILER_OPTIONS: ts.CompilerOptions = {
+  noLib: true,
+  noResolve: true,
+  target: ts.ScriptTarget.Latest,
+  module: ts.ModuleKind.ESNext,
+  allowImportingTsExtensions: true,
+  skipLibCheck: true,
+  types: [],
+};
+
+/** A program over in-memory sources, so fixtures and the real tree go through one path. */
+function programOver(files: Map<string, string>): ts.Program {
+  const host: ts.CompilerHost = {
+    getSourceFile: (name) => {
+      const text = files.get(name);
+      return text === undefined ? undefined : ts.createSourceFile(name, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    },
+    getDefaultLibFileName: () => "lib.d.ts",
+    writeFile: () => {},
+    getCurrentDirectory: () => "/",
+    getCanonicalFileName: (f) => f,
+    useCaseSensitiveFileNames: () => true,
+    getNewLine: () => "\n",
+    fileExists: (f) => files.has(f),
+    readFile: (f) => files.get(f),
+    directoryExists: () => true,
+    getDirectories: () => [],
+  };
+  return ts.createProgram([...files.keys()], COMPILER_OPTIONS, host);
+}
 
 type ReceiverKind = "client" | "global" | "unknown";
 
@@ -135,7 +188,7 @@ function receiverKind(recv: ts.Expression): ReceiverKind {
   return "unknown";
 }
 
-/** The nearest function body (or the file) — where a local variable's uses live. */
+/** The nearest function body (or the file) — where a local's uses can live. */
 function scopeContainer(node: ts.Node): ts.Node {
   let n: ts.Node = node;
   while (!ts.isSourceFile(n) && !ts.isFunctionLike(n)) n = n.parent;
@@ -158,45 +211,39 @@ function enclosingStatement(node: ts.Node): ts.Node {
   return n;
 }
 
+/** Transparent wrappers around an expression: `(e)`, `e as T`, `e!`, `e satisfies T`. */
+function isTransparent(p: ts.Node, child: ts.Node): boolean {
+  return (ts.isParenthesizedExpression(p) || ts.isAsExpression(p) || ts.isNonNullExpression(p) ||
+    ts.isSatisfiesExpression(p)) && p.expression === child;
+}
+
 /**
  * Walk from a chain's root to its outermost link.
  *
  * `db.from("x").select("y").eq(…).maybeSingle()` is one expression tree with
  * the root call at the bottom; the consumer is whatever holds the top. A
  * `.then(` on the way up ends the walk with a verdict of its own: the value
- * after it is no longer the envelope.
+ * after it is no longer the envelope. A `.throwOnError()` ends it too — the
+ * builder throws instead of resolving an error, so there is nothing to bind.
  */
-function outermost(node: ts.Node): { top: ts.Node; thenable?: string } {
+function outermost(node: ts.Node): { top: ts.Node; thenable?: string; throws?: boolean } {
   let n = node;
+  let throws = false;
   for (;;) {
     const p: ts.Node = n.parent;
-    if (ts.isPropertyAccessExpression(p) && p.expression === n) {
-      if (THENABLE.has(p.name.text)) return { top: p, thenable: p.name.text };
+    const m = memberAccess(p);
+    if (m && m.receiver === n) {
+      if (THENABLE.has(m.name)) return { top: p, thenable: m.name };
+      if (THROWING_TERMINALS.has(m.name)) throws = true;
       n = p;
       continue;
     }
     if (ts.isCallExpression(p) && p.expression === n) { n = p; continue; }
-    if (
-      (ts.isNonNullExpression(p) || ts.isParenthesizedExpression(p) ||
-        ts.isAsExpression(p) || ts.isSatisfiesExpression(p)) &&
-      p.expression === n
-    ) { n = p; continue; }
+    if (isTransparent(p, n)) { n = p; continue; }
     // `q = cond ? q.is(…) : q.eq(…)` — both branches are the same builder.
     if (ts.isConditionalExpression(p) && (p.whenTrue === n || p.whenFalse === n)) { n = p; continue; }
-    return { top: n };
+    return { top: n, throws };
   }
-}
-
-/** Is this identifier a read of a variable (not a declaration, key or write)? */
-function isReference(id: ts.Identifier): boolean {
-  const p = id.parent;
-  if (ts.isPropertyAccessExpression(p) && p.name === id) return false;
-  if (ts.isPropertyAssignment(p) && p.name === id) return false;
-  if (ts.isBindingElement(p) && (p.name === id || p.propertyName === id)) return false;
-  if ((ts.isVariableDeclaration(p) || ts.isParameter(p)) && p.name === id) return false;
-  if (ts.isBinaryExpression(p) && p.left === id && isAssignmentKind(p.operatorToken.kind)) return false;
-  if (ts.isTypeNode(p) || ts.isQualifiedName(p)) return false;
-  return true;
 }
 
 /** `=` and every compound assignment (`??=`, `+=`, …) — all of them overwrite. */
@@ -204,152 +251,139 @@ function isAssignmentKind(kind: ts.SyntaxKind): boolean {
   return kind >= ts.SyntaxKind.FirstAssignment && kind <= ts.SyntaxKind.LastAssignment;
 }
 
-/** Does a binding name (identifier or destructuring pattern) introduce `name`? */
-function bindsName(binding: ts.BindingName, name: string): boolean {
-  if (ts.isIdentifier(binding)) return binding.text === name;
-  return binding.elements.some((el) => !ts.isOmittedExpression(el) && bindsName(el.name, name));
-}
-
-/**
- * A node that opens a LEXICAL SCOPE — somewhere a `let`/`const`, a parameter,
- * a loop variable or a catch binding can live. A same-named variable in a
- * nested one is a DIFFERENT variable: `others.forEach((r) => { if (r.error)
- * … })` reads the callback's `r`, `{ const r = …; if (r.error) {} }` reads
- * the block's, and counting either for the outer envelope is how a discarded
- * error passes (adversarial review on PR #92, Codex on PR #92).
- */
-function isScopeNode(n: ts.Node): boolean {
-  return ts.isBlock(n) || ts.isCaseClause(n) || ts.isDefaultClause(n) || ts.isForStatement(n) ||
-    ts.isForOfStatement(n) || ts.isForInStatement(n) || ts.isCatchClause(n) || ts.isFunctionLike(n) ||
-    ts.isSourceFile(n);
-}
-
-/** Does this scope declare `name` at its OWN level (not in a nested scope)? */
-function declaresHere(scope: ts.Node, name: string): boolean {
-  if (ts.isFunctionLike(scope)) {
-    // Parameters, plus `var`, which is function-scoped wherever it sits.
-    if (scope.parameters.some((prm) => bindsName(prm.name, name))) return true;
-    return varDeclaredIn(scope, name);
-  }
-  if (ts.isCatchClause(scope)) {
-    return scope.variableDeclaration !== undefined && bindsName(scope.variableDeclaration.name, name);
-  }
-  if (ts.isForStatement(scope) || ts.isForOfStatement(scope) || ts.isForInStatement(scope)) {
-    // Only a `let`/`const` loop variable is the loop's own; `for (var r of …)`
-    // re-assigns the FUNCTION's `r` on every iteration (Codex on PR #92).
-    const init = scope.initializer;
-    return init !== undefined && ts.isVariableDeclarationList(init) && isBlockScoped(init) &&
-      init.declarations.some((d) => bindsName(d.name, name));
-  }
-  const statements: ts.NodeArray<ts.Statement> = ts.isSourceFile(scope)
-    ? scope.statements
-    : (scope as ts.Block | ts.CaseClause | ts.DefaultClause).statements;
-  return statements.some((st) =>
-    (ts.isVariableStatement(st) &&
-      // `let`/`const` are block-scoped; a `var` here belongs to the function.
-      isBlockScoped(st.declarationList) &&
-      st.declarationList.declarations.some((d) => bindsName(d.name, name))) ||
-    ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) && st.name?.text === name)
-  );
-}
-
 /** `let` or `const` (block-scoped), as opposed to `var` (function-scoped). */
 function isBlockScoped(list: ts.VariableDeclarationList): boolean {
   return (list.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) !== 0;
 }
 
-/** Is there a `var name` anywhere in this function — a statement or a loop initialiser — outside nested functions? */
-function varDeclaredIn(fn: ts.SignatureDeclaration, name: string): boolean {
-  let found = false;
-  const visit = (n: ts.Node) => {
-    if (found) return;
-    if (n !== fn && ts.isFunctionLike(n)) return;
-    if (ts.isVariableDeclarationList(n) && !isBlockScoped(n) && n.declarations.some((d) => bindsName(d.name, name))) {
-      found = true;
-      return;
-    }
-    ts.forEachChild(n, visit);
-  };
-  visit(fn);
-  return found;
+/** Is this arrow function an argument of a call — a callback whose consumer the gate cannot see? */
+function inlineCallback(fn: ts.ArrowFunction): boolean {
+  return ts.isCallExpression(fn.parent) && fn.parent.arguments.includes(fn);
 }
 
 /**
- * Every way a statement can WRITE `name` other than `name = …`: a `var`
- * re-declaration with an initialiser (`var r = other`, anywhere in the
- * function, a nested block included), a `var` loop variable (`for (var r of
- * rows)`), and a bare loop target (`for (r of rows)`). Each overwrites the
- * binding the envelope lives in (Codex on PR #92).
+ * `<receiver>.<name>` spelled either way — `db.from(…)` or `db["from"](…)`,
+ * `r.error` or `r["error"]`; the element-access spelling is the same member
+ * and must not be invisible to the scan (adversarial review and Codex on
+ * PR #92).
  */
-function writesName(n: ts.Node, name: string): number | null {
-  if (ts.isVariableDeclaration(n) && n.initializer && ts.isVariableDeclarationList(n.parent) &&
-    !isBlockScoped(n.parent) && bindsName(n.name, name)) return n.name.pos;
-  if ((ts.isForOfStatement(n) || ts.isForInStatement(n))) {
-    const init = n.initializer;
-    if (ts.isVariableDeclarationList(init) && !isBlockScoped(init) &&
-      init.declarations.some((d) => bindsName(d.name, name))) return init.pos;
-    if (ts.isIdentifier(init) && init.text === name) return init.pos;
+function memberAccess(n: ts.Node | undefined): { receiver: ts.Expression; name: string; token: ts.Node } | null {
+  if (!n) return null;
+  if (ts.isPropertyAccessExpression(n)) return { receiver: n.expression, name: n.name.text, token: n.name };
+  if (ts.isElementAccessExpression(n) && ts.isStringLiteral(n.argumentExpression)) {
+    return { receiver: n.expression, name: n.argumentExpression.text, token: n.argumentExpression };
   }
   return null;
 }
 
 /**
- * The scope that holds the variable this identifier refers to: the nearest
- * enclosing scope that declares its name. An identifier declared nowhere in
- * the file (an import, a global) falls back to the enclosing function, so it
- * is still looked at rather than dropped.
+ * Every identifier an assignment TARGET writes: the plain `r = …`, and the
+ * pattern forms `({ r } = …)`, `({ x: r } = …)`, `[r] = …`, `[...r] = …`
+ * (Codex on PR #92: a destructuring assignment is a write like any other).
  */
-function declaringScope(id: ts.Identifier): ts.Node {
-  for (let n: ts.Node = id.parent; n; n = n.parent) {
-    if (isScopeNode(n) && declaresHere(n, id.text)) return n;
-    if (ts.isSourceFile(n)) break;
+function assignmentTargets(target: ts.Expression): ts.Identifier[] {
+  if (ts.isIdentifier(target)) return [target];
+  if (isTransparent(target, (target as ts.ParenthesizedExpression).expression ?? target) && "expression" in target) {
+    return assignmentTargets((target as ts.ParenthesizedExpression).expression);
   }
-  return scopeContainer(id);
+  if (ts.isObjectLiteralExpression(target)) {
+    return target.properties.flatMap((pr) => {
+      if (ts.isShorthandPropertyAssignment(pr)) return [pr.name];
+      if (ts.isPropertyAssignment(pr)) return assignmentTargets(pr.initializer);
+      if (ts.isSpreadAssignment(pr)) return assignmentTargets(pr.expression);
+      return [];
+    });
+  }
+  if (ts.isArrayLiteralExpression(target)) {
+    return target.elements.flatMap((el) =>
+      ts.isSpreadElement(el) ? assignmentTargets(el.expression) : ts.isOmittedExpression(el) ? [] : assignmentTargets(el));
+  }
+  return [];
+}
+
+/** The symbol an identifier resolves to — its BINDING, whatever its name. */
+function symbolOf(checker: ts.TypeChecker, id: ts.Identifier): ts.Symbol | undefined {
+  // `{ r }` in an object literal (a read, or a destructuring-assignment
+  // target) names the PROPERTY at the identifier; the value's symbol is the
+  // variable and is what the gate follows.
+  if (ts.isShorthandPropertyAssignment(id.parent) && id.parent.name === id) {
+    return checker.getShorthandAssignmentValueSymbol(id.parent) ?? checker.getSymbolAtLocation(id);
+  }
+  return checker.getSymbolAtLocation(id);
+}
+
+/** The identifier that DECLARES a binding — a variable's name, a parameter's, a binding element's. */
+function isDeclarationName(id: ts.Identifier): boolean {
+  const p = id.parent;
+  return ((ts.isVariableDeclaration(p) || ts.isParameter(p) || ts.isBindingElement(p)) && p.name === id) ||
+    (ts.isBindingElement(p) && p.propertyName === id) ||
+    (ts.isPropertyAssignment(p) && p.name === id) ||
+    ((ts.isFunctionDeclaration(p) || ts.isClassDeclaration(p)) && p.name === id) ||
+    (memberAccess(p)?.token === id);
 }
 
 /**
- * Every reference to `name` inside `scope`, skipping nested scopes that
- * redeclare it — a callback parameter, a block-local `const`, a loop
- * variable, a catch binding — because those are other variables.
+ * Every place the binding `sym` is WRITTEN inside `container`, as
+ * positions: assignments to it (any operator, plain or through a pattern),
+ * a `var` re-declaration with an initialiser (`{ var r = other; }` is the
+ * same function-scoped binding, re-assigned), a `var` loop variable
+ * (`for (var r of rows)`) and a bare loop target (`for (r of rows)`).
  */
-function usesOf(name: string, scope: ts.Node): ts.Identifier[] {
-  const out: ts.Identifier[] = [];
+function writesTo(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node): number[] {
+  const out: number[] = [];
+  const target = (t: ts.Expression) => {
+    for (const id of assignmentTargets(t)) if (symbolOf(checker, id) === sym) out.push(id.pos);
+  };
   const visit = (n: ts.Node) => {
-    if (n !== scope && isScopeNode(n) && declaresHere(n, name)) return;
-    if (ts.isIdentifier(n) && n.text === name && isReference(n)) out.push(n);
+    if (ts.isBinaryExpression(n) && isAssignmentKind(n.operatorToken.kind)) target(n.left);
+    if (ts.isVariableDeclaration(n) && n.initializer && ts.isVariableDeclarationList(n.parent) && !isBlockScoped(n.parent) &&
+      ts.isIdentifier(n.name) && symbolOf(checker, n.name) === sym) out.push(n.name.pos);
+    if (ts.isForOfStatement(n) || ts.isForInStatement(n)) {
+      const init = n.initializer;
+      if (ts.isVariableDeclarationList(init)) {
+        if (!isBlockScoped(init)) {
+          for (const d of init.declarations) if (ts.isIdentifier(d.name) && symbolOf(checker, d.name) === sym) out.push(d.name.pos);
+        }
+      } else target(init);
+    }
     ts.forEachChild(n, visit);
   };
-  visit(scope);
+  visit(container);
   return out;
 }
 
-/** The position of the next assignment to `name` (any operator) after `after`, or Infinity. */
-function nextWriteTo(name: string, scope: ts.Node, after: number): number {
-  let next = Infinity;
-  const visit = (n: ts.Node) => {
-    if (n !== scope && isScopeNode(n) && declaresHere(n, name)) return;
-    if (
-      ts.isBinaryExpression(n) && isAssignmentKind(n.operatorToken.kind) &&
-      ts.isIdentifier(n.left) && n.left.text === name && n.left.pos > after && n.left.pos < next
-    ) next = n.left.pos;
-    const w = writesName(n, name);
-    if (w !== null && w > after && w < next) next = w;
-    ts.forEachChild(n, visit);
-  };
-  visit(scope);
-  return next;
+/** The first write to `sym` after `after`, or Infinity. */
+function nextWriteTo(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node, after: number): number {
+  return Math.min(Infinity, ...writesTo(checker, sym, container).filter((w) => w > after));
 }
 
-/** Is this `r.error` access being WRITTEN (`r.error = null`, `r.error ??= x`, `delete r.error`) rather than read? */
-function isErrorWrite(access: ts.PropertyAccessExpression): boolean {
+/**
+ * Every READ of the binding `sym` inside `container`: identifiers that
+ * resolve to it and are neither its declaration nor a write target. A
+ * shadow has a different symbol and is never counted (the whole point).
+ */
+function usesOf(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node): ts.Identifier[] {
+  const written = new Set<number>(writesTo(checker, sym, container));
+  const out: ts.Identifier[] = [];
+  const visit = (n: ts.Node) => {
+    if (ts.isIdentifier(n) && !isDeclarationName(n) && !written.has(n.pos) && symbolOf(checker, n) === sym) out.push(n);
+    ts.forEachChild(n, visit);
+  };
+  visit(container);
+  return out;
+}
+
+/** `r.error` / `r["error"]` on this identifier, or null. */
+function errorAccess(u: ts.Identifier): ts.Expression | null {
+  const m = memberAccess(u.parent);
+  return m && m.receiver === u && m.name === "error" ? (u.parent as ts.Expression) : null;
+}
+
+/** Is this `.error` access being WRITTEN (`r.error = null`, `r.error ??= x`, `delete r.error`) rather than read? */
+function isErrorWrite(access: ts.Expression): boolean {
   const p = access.parent;
   return (ts.isBinaryExpression(p) && p.left === access && isAssignmentKind(p.operatorToken.kind)) ||
     ts.isDeleteExpression(p);
-}
-
-/** Is this arrow function an argument of a call — a callback whose consumer the gate cannot see? */
-function inlineCallback(fn: ts.ArrowFunction): boolean {
-  return ts.isCallExpression(fn.parent) && fn.parent.arguments.includes(fn);
 }
 
 /**
@@ -360,34 +394,37 @@ function inlineCallback(fn: ts.ArrowFunction): boolean {
  * `const { data, error } = await q; return data;` names the error and then
  * treats the envelope as ordinary data, which is the defect this gate exists
  * to catch wearing the fix's clothes. So the bound identifier — the alias,
- * when there is one — must be referenced later in the same function. A
+ * when there is one — must be referenced later, before it is overwritten. A
  * nested pattern (`error: { code }`) is a read by construction.
  */
-function bindsError(pattern: ts.ObjectBindingPattern): { verdict: Verdict; local?: string } {
+function bindsError(ctx: Ctx, pattern: ts.ObjectBindingPattern): { verdict: Verdict; local?: string } {
   for (const el of pattern.elements) {
     // `{ data, ...rest }` carries error somewhere the gate cannot see read.
     if (el.dotDotDotToken) return { verdict: "UNCLASSIFIED" };
     const key = el.propertyName ?? el.name;
     if (!((ts.isIdentifier(key) || ts.isStringLiteral(key)) && key.text === "error")) continue;
     if (!ts.isIdentifier(el.name)) return { verdict: "OK" };
-    return isReadAfter(el.name)
+    return isReadAfter(ctx, el.name)
       ? { verdict: "OK" }
       : { verdict: "DISCARDED", local: el.name.text };
   }
   return { verdict: "DISCARDED" };
 }
 
-/** Is this bound identifier referenced anywhere after its binding, in the same function? */
-function isReadAfter(bound: ts.Identifier): boolean {
+/** Is this bound identifier read after its binding and before it is overwritten? */
+function isReadAfter(ctx: Ctx, bound: ts.Identifier): boolean {
   // Before the local is overwritten: `let { error } = await q; error = null;
   // if (error) …` reads the null, not the query's error (Codex on PR #92).
-  const scope = declaringScope(bound);
-  const overwritten = nextWriteTo(bound.text, scope, bound.pos);
-  return usesOf(bound.text, scope).some((u) => u.pos > bound.pos && u.pos < overwritten);
+  const sym = symbolOf(ctx.checker, bound);
+  if (!sym) return false;
+  const container = scopeContainer(bound);
+  const overwritten = nextWriteTo(ctx.checker, sym, container, bound.pos);
+  return usesOf(ctx.checker, sym, container).some((u) => u.pos > bound.pos && u.pos < overwritten);
 }
 
 interface Ctx {
   sf: ts.SourceFile;
+  checker: ts.TypeChecker;
   file: string;
   /** The query root's line, named in the reason when it differs from the statement's. */
   queryLine: number;
@@ -408,31 +445,29 @@ function site(ctx: Ctx, at: ts.Node, verdict: Verdict, reason: string): Site {
 /** `const r = await q` or `r = await q`: is `r.error` read later in this function? */
 function followEnvelopeVar(ctx: Ctx, nameNode: ts.Identifier, at: ts.Node): Site[] {
   const name = nameNode.text;
-  const errorAccess = (u: ts.Identifier): ts.PropertyAccessExpression | null =>
-    ts.isPropertyAccessExpression(u.parent) && u.parent.expression === u && u.parent.name.text === "error" ? u.parent : null;
+  const container = scopeContainer(nameNode);
 
-  // The envelope GROUP: the variable, plus every alias (`const copy = r`)
+  // The envelope GROUP: the binding, plus every alias (`const copy = r`)
   // reached from it, transitively. All of them name ONE object, so a write
   // to `.error` through any member closes the window for every member
   // (Codex on PR #92: `const copy = r; r.error = null; if (copy.error) …`
-  // reads the null). Each member's own window still ends where THAT
-  // variable is overwritten (`let r = await a; r = await b`).
+  // reads the null). Each member's own window still ends where THAT binding
+  // is overwritten (`let r = await a; r = await b`).
   interface Member { id: ts.Identifier; uses: ts.Identifier[] }
   const members: Member[] = [];
   const queue: ts.Identifier[] = [nameNode];
-  const seenDecl = new Set<ts.Node>();
+  const seenSym = new Set<ts.Symbol>();
   while (queue.length > 0) {
     const id = queue.shift()!;
-    const scope = declaringScope(id);
-    const overwritten = nextWriteTo(id.text, scope, id.pos);
-    const uses = usesOf(id.text, scope).filter((u) => u.pos > id.pos && u.pos < overwritten);
+    const sym = symbolOf(ctx.checker, id);
+    if (!sym || seenSym.has(sym)) continue;
+    seenSym.add(sym);
+    const overwritten = nextWriteTo(ctx.checker, sym, container, id.pos);
+    const uses = usesOf(ctx.checker, sym, container).filter((u) => u.pos > id.pos && u.pos < overwritten);
     members.push({ id, uses });
     for (const u of uses) {
       const d = u.parent;
-      if (ts.isVariableDeclaration(d) && d.initializer === u && ts.isIdentifier(d.name) && !seenDecl.has(d)) {
-        seenDecl.add(d);
-        queue.push(d.name);
-      }
+      if (ts.isVariableDeclaration(d) && d.initializer === u && ts.isIdentifier(d.name)) queue.push(d.name);
     }
   }
   const allUses = members.flatMap((m) => m.uses);
@@ -444,7 +479,7 @@ function followEnvelopeVar(ctx: Ctx, nameNode: ts.Identifier, at: ts.Node): Site
   if (read) return [site(ctx, at, "OK", `envelope in \`${name}\`, \`.error\` read later${via(read)}`)];
   const destructured = uses.find((u) =>
     ts.isVariableDeclaration(u.parent) && u.parent.initializer === u &&
-    ts.isObjectBindingPattern(u.parent.name) && bindsError(u.parent.name).verdict === "OK");
+    ts.isObjectBindingPattern(u.parent.name) && bindsError(ctx, u.parent.name).verdict === "OK");
   if (destructured) return [site(ctx, at, "OK", `envelope in \`${name}\`, \`error\` destructured later${via(destructured)}`)];
   const passedOn = uses.find((u) => {
     const p = u.parent;
@@ -464,11 +499,20 @@ function followEnvelopeVar(ctx: Ctx, nameNode: ts.Identifier, at: ts.Node): Site
 /** The statement holding `await <chain>`. */
 function classifyAwaited(ctx: Ctx, awaited: ts.AwaitExpression): Site[] {
   let n: ts.Node = awaited;
-  while (ts.isParenthesizedExpression(n.parent)) n = n.parent;
+  // `(await q)`, `(await q) as T`, `(await q)!` — wrappers that change
+  // nothing about the envelope (adversarial review on PR #92).
+  while (isTransparent(n.parent, n)) n = n.parent;
   const p = n.parent;
+  // `(await q).error` read straight off the expression.
+  const direct = memberAccess(p);
+  if (direct && direct.receiver === n && direct.name === "error") {
+    return isErrorWrite(p as ts.Expression)
+      ? [site(ctx, p, "DISCARDED", "`.error` written on the awaited envelope, never read")]
+      : [site(ctx, p, "OK", "`.error` read directly off the awaited envelope")];
+  }
   if (ts.isVariableDeclaration(p) && p.initializer === n) {
     if (ts.isObjectBindingPattern(p.name)) {
-      const { verdict: v, local } = bindsError(p.name);
+      const { verdict: v, local } = bindsError(ctx, p.name);
       const why = v === "OK" ? "`error` bound and read"
         : v === "DISCARDED" && local ? `\`error\` bound as \`${local}\` and never read in this function`
         : v === "DISCARDED" ? "destructures the envelope without binding `error`"
@@ -498,7 +542,7 @@ function classifyAwaited(ctx: Ctx, awaited: ts.AwaitExpression): Site[] {
         : ts.isPropertyAssignment(pr) && ts.isIdentifier(pr.name) && pr.name.text === "error" && ts.isIdentifier(pr.initializer) ? pr.initializer
         : null).find((t) => t !== null);
       if (!target) return [site(ctx, p, "DISCARDED", "destructuring assignment without `error`")];
-      return isReadAfter(target)
+      return isReadAfter(ctx, target)
         ? [site(ctx, p, "OK", "`error` assigned and read")]
         : [site(ctx, p, "DISCARDED", `\`error\` assigned to \`${target.text}\` and never read in this function`)];
     }
@@ -517,14 +561,28 @@ function followBuilder(ctx: Ctx, nameNode: ts.Identifier, declaration: ts.Node):
   if (ctx.followed.has(declaration)) return [];
   ctx.followed.add(declaration);
   const name = nameNode.text;
+  const sym = symbolOf(ctx.checker, nameNode);
   const out: Site[] = [];
-  for (const use of usesOf(name, declaringScope(nameNode))) {
-    if (use.pos <= nameNode.pos) continue;
-    const { top, thenable } = outermost(use);
-    if (thenable) { out.push(site(ctx, top, "UNCLASSIFIED", `builder \`${name}\` consumed via .${thenable}()`)); continue; }
-    const p = top.parent;
-    if (ts.isBinaryExpression(p) && p.right === top && ts.isIdentifier(p.left) && p.left.text === name) continue;
-    out.push(...classifyTop(ctx, top, `builder \`${name}\` (line ${lineOf(ctx.sf, declaration)}) `));
+  if (sym) {
+    const container = scopeContainer(nameNode);
+    // A builder is re-assigned to itself as it grows, so its writes are its
+    // uses here: look at every reference, reads and writes alike.
+    const refs: ts.Identifier[] = [];
+    const visit = (n: ts.Node) => {
+      if (ts.isIdentifier(n) && !isDeclarationName(n) && symbolOf(ctx.checker, n) === sym) refs.push(n);
+      ts.forEachChild(n, visit);
+    };
+    visit(container);
+    for (const use of refs) {
+      if (use.pos <= nameNode.pos) continue;
+      const { top, thenable, throws } = outermost(use);
+      if (thenable) { out.push(site(ctx, top, "UNCLASSIFIED", `builder \`${name}\` consumed via .${thenable}()`)); continue; }
+      const p = top.parent;
+      if (ts.isBinaryExpression(p) && p.right === top && ts.isIdentifier(p.left) && symbolOf(ctx.checker, p.left) === sym) continue;
+      if (ts.isBinaryExpression(p) && p.left === top && isAssignmentKind(p.operatorToken.kind)) continue;
+      if (throws) { out.push(site(ctx, top, "OK", `builder \`${name}\` ends in .throwOnError() — a failure throws, no envelope to discard`)); continue; }
+      out.push(...classifyTop(ctx, top, `builder \`${name}\` (line ${lineOf(ctx.sf, declaration)}) `));
+    }
   }
   if (out.length === 0) {
     out.push(site(ctx, declaration, "UNCLASSIFIED", `builder \`${name}\` is never awaited, returned or passed on in this function`));
@@ -550,79 +608,84 @@ function classifyTop(ctx: Ctx, top: ts.Node, prefix = ""): Site[] {
   return [tag(site(ctx, p, "UNCLASSIFIED", `query consumed by ${ts.SyntaxKind[p.kind]}`))];
 }
 
-/**
- * `<receiver>.<name>` spelled either way — `db.from(…)` or `db["from"](…)`;
- * the element-access spelling is a legal call of the same method and must
- * not be invisible to the scan (adversarial review on PR #92).
- */
-function memberAccess(n: ts.Node | undefined): { receiver: ts.Expression; name: string; token: ts.Node } | null {
-  if (!n) return null;
-  if (ts.isPropertyAccessExpression(n)) return { receiver: n.expression, name: n.name.text, token: n.name };
-  if (ts.isElementAccessExpression(n) && ts.isStringLiteral(n.argumentExpression)) {
-    return { receiver: n.expression, name: n.argumentExpression.text, token: n.argumentExpression };
-  }
-  return null;
-}
-
 type Declared = "client" | "value" | "unknown";
 
-/** Is this receiver a supabase client, by how it is DECLARED in this file? */
-function declaredAsClient(recv: ts.Expression): Declared {
+/** A type annotation's text, one alias deep: `type Db = ReturnType<typeof adminClient>` counts. */
+function typeText(checker: ts.TypeChecker, t: ts.TypeNode | undefined): string {
+  if (!t) return "";
+  if (ts.isTypeReferenceNode(t) && ts.isIdentifier(t.typeName)) {
+    const sym = checker.getSymbolAtLocation(t.typeName);
+    const alias = sym?.declarations?.find(ts.isTypeAliasDeclaration);
+    if (alias) return alias.type.getText();
+  }
+  return t.getText();
+}
+
+const CLIENT_TYPE = /SupabaseClient|adminClient|createClient/;
+
+/**
+ * Is this receiver a supabase client, by how its BINDING is declared? The
+ * checker resolves the identifier to its symbol, so an earlier same-named
+ * declaration in a nested block is not consulted (Codex on PR #92). A
+ * factory call, a variable initialised from one (at declaration, or by a
+ * later `db = adminClient()`), or a parameter or variable typed as one — one
+ * alias deep — is a client; anything else declared in the file is a value;
+ * a receiver with no declaration the checker can see is unknown.
+ */
+function declaredAsClient(ctx: Ctx, recv: ts.Expression): Declared {
   if (ts.isCallExpression(recv) && ts.isIdentifier(recv.expression) && CLIENT_FACTORIES.has(recv.expression.text)) {
     return "client";
   }
   if (!ts.isIdentifier(recv)) return "unknown";
-  const decl = declarationOf(recv);
+  const sym = symbolOf(ctx.checker, recv);
+  const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
   if (!decl) return "unknown";
-  if (ts.isVariableDeclaration(decl) && decl.initializer) {
-    const init = decl.initializer;
-    if (ts.isCallExpression(init) && ts.isIdentifier(init.expression) && CLIENT_FACTORIES.has(init.expression.text)) return "client";
-    if (ts.isAwaitExpression(init) && ts.isCallExpression(init.expression) && ts.isIdentifier(init.expression.expression) &&
-      CLIENT_FACTORIES.has(init.expression.expression.text)) return "client";
-  }
-  const typeText = decl.type?.getText();
-  if (typeText && /SupabaseClient|adminClient|createClient/.test(typeText)) return "client";
-  return "value";
-}
-
-/** The nearest declaration of `id` (a variable or a parameter), walking out through enclosing scopes. */
-function declarationOf(id: ts.Identifier): ts.VariableDeclaration | ts.ParameterDeclaration | null {
-  for (let scope: ts.Node = id; scope; scope = scope.parent) {
-    if (!ts.isFunctionLike(scope) && !ts.isSourceFile(scope)) continue;
-    if (ts.isFunctionLike(scope)) {
-      const prm = scope.parameters.find((q) => bindsName(q.name, id.text));
-      if (prm) return prm;
-    }
-    let found: ts.VariableDeclaration | null = null;
+  const isFactory = (e: ts.Expression | undefined): boolean =>
+    !!e && ((ts.isCallExpression(e) && ts.isIdentifier(e.expression) && CLIENT_FACTORIES.has(e.expression.text)) ||
+      (ts.isAwaitExpression(e) && isFactory(e.expression)));
+  if (ts.isVariableDeclaration(decl)) {
+    if (isFactory(decl.initializer)) return "client";
+    if (CLIENT_TYPE.test(typeText(ctx.checker, decl.type))) return "client";
+    // `let db; … db = adminClient();`
+    let assignedFactory = false;
     const visit = (n: ts.Node) => {
-      if (found) return;
-      if (n !== scope && ts.isFunctionLike(n)) return;
-      if (ts.isVariableDeclaration(n) && bindsName(n.name, id.text)) { found = n; return; }
+      if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(n.left) &&
+        symbolOf(ctx.checker, n.left) === sym && isFactory(n.right)) assignedFactory = true;
       ts.forEachChild(n, visit);
     };
-    visit(scope);
-    if (found) return found;
-    if (ts.isSourceFile(scope)) break;
+    visit(ctx.sf);
+    return assignedFactory ? "client" : "value";
   }
-  return null;
+  if (ts.isParameter(decl)) return CLIENT_TYPE.test(typeText(ctx.checker, decl.type)) ? "client" : "value";
+  if (ts.isBindingElement(decl)) {
+    // `({ db }: Deps)` — the client is somewhere inside a type the gate
+    // cannot read; refuse loudly rather than guess either way.
+    let p: ts.Node = decl;
+    while (ts.isBindingElement(p) || ts.isObjectBindingPattern(p) || ts.isArrayBindingPattern(p)) p = p.parent;
+    const t = ts.isParameter(p) || ts.isVariableDeclaration(p) ? p.type : undefined;
+    return CLIENT_TYPE.test(typeText(ctx.checker, t)) ? "client" : "unknown";
+  }
+  // An import, a class member, a function — nothing this gate can read.
+  return "unknown";
 }
 
-/** Every supabase-js query in `text`, classified. `file` is only for reporting. */
-export function classifySource(text: string, file: string): Site[] {
-  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+/** Classify every supabase-js query in one source file of `program`. */
+function classifyFile(program: ts.Program, sf: ts.SourceFile, file: string): Site[] {
+  const checker = program.getTypeChecker();
   const sites: Site[] = [];
   const followed = new Set<ts.Node>();
 
   const seen = (root: ts.Node, recv: ts.Expression, token: ts.Node) => {
-    const ctx: Ctx = { sf, file, queryLine: lineOf(sf, token), followed };
+    const ctx: Ctx = { sf, checker, file, queryLine: lineOf(sf, token), followed };
     const kind = receiverKind(recv);
     if (kind === "global") return;
     if (kind === "unknown") {
       sites.push(site(ctx, root, "UNCLASSIFIED", `unrecognised receiver \`${recv.getText(sf)}\``));
       return;
     }
-    const { top, thenable } = outermost(root);
+    const { top, thenable, throws } = outermost(root);
     if (thenable) { sites.push(site(ctx, top, "UNCLASSIFIED", `query consumed via .${thenable}()`)); return; }
+    if (throws) { sites.push(site(ctx, top, "OK", "chain ends in .throwOnError() — a failure throws, no envelope to discard")); return; }
     sites.push(...classifyTop(ctx, top));
   };
 
@@ -639,15 +702,14 @@ export function classifySource(text: string, file: string): Site[] {
       ) {
         // `auth` is also a plain FIELD in this tree (the push encryption
         // secret), and `sub.auth.length` is a healthy read of it. So the
-        // word is not enough: the receiver must be DECLARED as a client —
-        // `adminClient()` / `createClient(…)` directly, a variable initialised
-        // from one, or a parameter typed as one. Anything else declared in
-        // the file is a value; a receiver with no visible declaration is
-        // UNCLASSIFIED, never silently skipped (adversarial review on PR #92).
-        const declared = declaredAsClient(auth.receiver);
+        // word is not enough: the receiver must be DECLARED as a client.
+        // Anything else declared in the file is a value; a receiver with no
+        // visible declaration is UNCLASSIFIED, never silently skipped
+        // (adversarial review on PR #92).
+        const ctx: Ctx = { sf, checker, file, queryLine: lineOf(sf, auth.token), followed };
+        const declared = declaredAsClient(ctx, auth.receiver);
         if (declared === "client") seen(n, auth.receiver, auth.token);
         else if (declared === "unknown") {
-          const ctx: Ctx = { sf, file, queryLine: lineOf(sf, auth.token), followed };
           sites.push(site(ctx, n, "UNCLASSIFIED", `\`.auth\` on \`${auth.receiver.getText(sf)}\`, whose declaration the gate cannot see`));
         }
       }
@@ -658,9 +720,22 @@ export function classifySource(text: string, file: string): Site[] {
   return sites;
 }
 
+/** Every supabase-js query in `text`, classified. `file` is only for reporting. */
+export function classifySource(text: string, file: string): Site[] {
+  const program = programOver(new Map([[file, text]]));
+  const sf = program.getSourceFile(file);
+  if (!sf) throw new Error(`could not parse ${file}`);
+  return classifyFile(program, sf, file);
+}
+
 function scan(): { files: string[]; sites: Site[] } {
   const files = sourceFiles(FUNCTIONS);
-  const sites = files.flatMap((f) => classifySource(readFileSync(f, "utf8"), relative(ROOT, f)));
+  const program = programOver(new Map(files.map((f) => [f, readFileSync(f, "utf8")])));
+  const sites = files.flatMap((f) => {
+    const sf = program.getSourceFile(f);
+    if (!sf) throw new Error(`could not parse ${f}`);
+    return classifyFile(program, sf, relative(ROOT, f));
+  });
   return { files, sites };
 }
 
@@ -1063,6 +1138,103 @@ function g(db: any) { return db.from("clients").select("id"); }`, "fixture.ts");
 }`);
     expect(two.verdict).toBe("OK");
     expect(two.reason).toMatch(/through alias `again`/);
+  });
+
+  it("an `.auth` receiver resolves to its LEXICAL binding, not the first same-named declaration (Codex, PR #92)", () => {
+    // Codex's exact case: a block-local `db` earlier in the function is a
+    // different binding; the checker's symbol says so, a name search did not.
+    const s = one(`async function f(value: unknown, token: string) {
+  { const db = value; use(db); }
+  const db = adminClient();
+  const { data } = await db.auth.getUser(token);
+  return data;
+}`);
+    expect(s.verdict).toBe("DISCARDED");
+  });
+
+  it("a bracketed `.error` write closes the window too (Codex, PR #92)", () => {
+    expect(one(`async function f(db: any) {
+  const r = await db.from("a").select("id").maybeSingle();
+  r["error"] = null;
+  if (r.error) throw r.error;
+  return r.data;
+}`).verdict).toBe("DISCARDED");
+    // …and a bracketed read is a read.
+    expect(one(`async function f(db: any) {
+  const r = await db.from("a").select("id").maybeSingle();
+  if (r["error"]) throw r["error"];
+  return r.data;
+}`).verdict).toBe("OK");
+  });
+
+  it("a destructuring ASSIGNMENT is a write (Codex, PR #92)", () => {
+    expect(one(`async function f(db: any, other: any) {
+  let r = await db.from("a").select("id").maybeSingle();
+  ({ r } = other);
+  if (r.error) throw r.error;
+  return r.data;
+}`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, other: any) {
+  let r = await db.from("a").select("id").maybeSingle();
+  [r] = other;
+  if (r.error) throw r.error;
+}`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, other: any) {
+  let r = await db.from("a").select("id").maybeSingle();
+  ({ x: r } = other);
+  if (r.error) throw r.error;
+}`).verdict).toBe("DISCARDED");
+  });
+
+  it("`.auth` receiver declarations: module-level, assigned later, aliased type, destructured, class member", () => {
+    // A module-level client used inside a function resolves to the same
+    // symbol; `let db; db = adminClient()` is a client by its later
+    // assignment; a one-alias-deep type still says client.
+    const sites = classifySource(`const db = adminClient();
+type Db = ReturnType<typeof adminClient>;
+async function a(token: string) { const { data } = await db.auth.getUser(token); return data; }
+async function b(token: string) { let c; c = adminClient(); const { data } = await c.auth.getUser(token); return data; }
+async function d(client: Db, token: string) { const { data } = await client.auth.getUser(token); return data; }`, "f.ts");
+    expect(sites.map((s) => s.verdict)).toEqual(["DISCARDED", "DISCARDED", "DISCARDED"]);
+    // A destructured parameter hides its type; a class member is not a
+    // declaration the gate reads. Both are refused loudly, never skipped.
+    const loud = classifySource(`class S { db: any; async g(token: string) { const { data } = await this.db.auth.getUser(token); return data; } }
+async function h({ db }: { db: unknown }, token: string) { const { data } = await db.auth.getUser(token); return data; }`, "f.ts");
+    expect(loud.map((s) => s.verdict)).toEqual(["UNCLASSIFIED", "UNCLASSIFIED"]);
+  });
+
+  it("a chain ending in .throwOnError() has no envelope to discard", () => {
+    // postgrest-js throws on failure here, so a bare await is the correct
+    // shape and must not be a red on healthy code.
+    const sites = classifySource(`async function f(db: any) {
+  await db.from("a").update({ x: 1 }).eq("id", "k").throwOnError();
+  let q = db.from("b").select("id");
+  q = q.eq("id", "k");
+  const { data } = await q.throwOnError();
+  return data;
+}`, "f.ts");
+    expect(sites.map((s) => s.verdict)).toEqual(["OK", "OK"]);
+  });
+
+  it("parenthesised, cast and non-null awaits are transparent; `.error` read directly is a read", () => {
+    const sites = classifySource(`async function f(db: any) {
+  if ((await db.from("a").select("id")).error) throw new Error("x");
+  const e = ((await db.from("b").select("id")) as { error: unknown }).error;
+  const { data, error } = (await db.from("c").select("id"))!;
+  if (error) throw error;
+  (await db.from("d").select("id")).error = null;
+  return [e, data];
+}`, "f.ts");
+    expect(sites.map((s) => s.verdict)).toEqual(["OK", "OK", "OK", "DISCARDED"]);
+  });
+
+  it("a read of the outer envelope inside a nested closure is a read of the same binding", () => {
+    expect(one(`async function f(db: any) {
+  const r = await db.from("a").select("id").maybeSingle();
+  const failed = () => r.error !== null;
+  if (failed()) throw r.error;
+  return r.data;
+}`).verdict).toBe("OK");
   });
 
   it("an envelope variable passed to a call is UNCLASSIFIED, not passed on", () => {
