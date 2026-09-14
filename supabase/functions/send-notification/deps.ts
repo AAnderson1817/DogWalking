@@ -132,8 +132,13 @@ export function makeSendDeps(cfg: SendConfig, fetchImpl: typeof fetch = fetch): 
       // outcome that cannot be taken back. The row records the reason, and the
       // nightly drain retries it.
       if (error) {
+        // The address is the client's and stays out of the log; the operator
+        // and the type are what a person can search by. (A `notification_id:
+        // null` sat here and, spread last, erased the drain line's row id —
+        // Codex on PR #92; the drain's merge order is the structural fix.)
         throw new HttpError(500, "db_error", "suppression lookup failed", error, {
-          notification_id: null,
+          operator_id: operatorId,
+          type,
         });
       }
       return data === true;
