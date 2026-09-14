@@ -73,7 +73,8 @@ through any alias — `r.error = …` or `r["error"] = …` — closes the windo
 for all of them. `(await q).error`, `((await q) as T)` and `(await q)!` are
 read through the wrapper — and the error value read that way must itself be
 USED: a local it is bound to must be read afterwards, and a bare `(await
-q).error;` is a no-op. A chain carrying `.throwOnError()` is REFUSED, not
+q).error;`, `void (await q).error` and the left side of a comma are no-ops.
+A chain carrying `.throwOnError()` is REFUSED, not
 blessed: postgrest-js then rejects with a raw `PostgrestError` that nothing
 decides, which lands in `handleRequest`'s catch as an unhandled error with no
 context — the H14 shape, one step around the CI check that every
@@ -85,7 +86,8 @@ a call (`console.log(r)`), an arrow body that is an inline callback
 `Promise.all([…])`. `.auth` is also a plain field name in this tree, so a
 `.auth.<member>` chain is a query only when its receiver is declared as a
 client (`adminClient()` / `createClient(…)`, a variable initialised from one
-or from another client — an alias is followed, transitively — or a variable
+or from another client — an alias is followed, transitively, and a factory
+initialiser wins over an annotation naming something else — or a variable
 or parameter typed as one). A receiver counts as a plain value only on
 POSITIVE evidence: a type annotation that names something (`any`, `unknown`,
 `{}` and an indexed-access type say nothing), a literal, or an alias of one.
