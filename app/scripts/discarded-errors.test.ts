@@ -54,7 +54,12 @@ import { describe, expect, it } from "vitest";
  *                 COPIED into a local (`const copy = error`, `copy = error`)
  *                 or STORED in a literal (`{ error }`, `[error]`) is a read
  *                 only if the copy or the literal is itself read,
- *                 transitively, under the copy's own window. A closure's
+ *                 transitively, under the copy's own window — and a
+ *                 literal is read only through the MEMBER that carries the
+ *                 error (`box.error`, `const { error } = box`) or handed on
+ *                 whole (a call, a return, a throw); `box.data` reads
+ *                 nothing. A class field initializer is deferred
+ *                 execution and reads nothing. A closure's
  *                 call site counts only while the binding still holds that
  *                 closure — a call after `check = () => null` invokes the
  *                 replacement. And a read counts only on EVERY path: not
@@ -617,6 +622,12 @@ function isPatternDefault(assignment: ts.BinaryExpression): boolean {
  * it defaults is undefined.
  */
 function isBranchEdge(parent: ts.Node, child: ts.Node): boolean {
+  // A class field's initializer runs per CONSTRUCTION (or, static, when the
+  // class is evaluated) and lands on an object nothing here follows — `class
+  // Never { field = error }` reads nothing with `Never` never built (Codex on
+  // PR #92, round fifteen). Refused for both kinds: construction is execution
+  // the gate cannot see, and a static field is a store the gate cannot follow.
+  if (ts.isPropertyDeclaration(parent) && child === parent.initializer) return true;
   if ((ts.isParameter(parent) || ts.isBindingElement(parent)) && child === parent.initializer) return true;
   if (ts.isShorthandPropertyAssignment(parent) && child === parent.objectAssignmentInitializer) return true;
   if (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken && child === parent.right &&
@@ -775,15 +786,84 @@ function aliasTarget(holder: ts.Node): ts.Identifier | null {
   return null;
 }
 
-/** The object or array literal an expression is STORED in — `{ error }`, `{ cause: e }`, `[e]`, `{ ...e }` — or null. */
-function aggregateHolding(holder: ts.Node): ts.Node | null {
-  const h = holder.parent;
-  if ((ts.isPropertyAssignment(h) && h.initializer === holder) || ts.isShorthandPropertyAssignment(h) || ts.isSpreadAssignment(h)) {
-    return h.parent;
+/** A key the error sits under inside an aggregate: a property name, an array index, or UNKNOWN (a computed key, an index behind a spread). */
+const UNKNOWN = Symbol("unknown-key");
+type Key = string | number | typeof UNKNOWN;
+/** Where the error sits inside the value at hand, outermost key first; empty means the value IS the error. */
+type Path = readonly Key[];
+
+/** The literal name of a property key, or UNKNOWN for a computed one. */
+function keyOf(name: ts.PropertyName | ts.Expression): Key {
+  if (ts.isIdentifier(name) || ts.isPrivateIdentifier(name)) return name.text;
+  if (ts.isStringLiteral(name) || ts.isNoSubstitutionTemplateLiteral(name)) return name.text;
+  if (ts.isNumericLiteral(name)) return Number(name.text);
+  return UNKNOWN;
+}
+
+/** The array index an element sits at, or UNKNOWN once a spread precedes it. */
+function indexOf(list: ts.NodeArray<ts.Node>, element: ts.Node): Key {
+  let i = 0;
+  for (const e of list) {
+    if (e === element) return i;
+    if (ts.isSpreadElement(e) || ts.isOmittedExpression(e)) { if (ts.isSpreadElement(e)) return UNKNOWN; }
+    i += 1;
   }
-  if (ts.isArrayLiteralExpression(h)) return h;
-  if (ts.isSpreadElement(h) && ts.isArrayLiteralExpression(h.parent)) return h.parent;
+  return UNKNOWN;
+}
+
+/**
+ * The object or array literal an expression is STORED in — `{ error }`,
+ * `{ cause: e }`, `[e]`, `{ ...e }` — with the key it sits under, or null.
+ * The key is what lets a later read of the literal be held to the MEMBER
+ * that carries the error rather than to any member at all (Codex on PR
+ * #92, round fifteen: `const box = { error, data }; return box.data;`).
+ */
+function aggregateHolding(holder: ts.Node): { literal: ts.Node; key: Key | null } | null {
+  const h = holder.parent;
+  if (ts.isPropertyAssignment(h) && h.initializer === holder) return { literal: h.parent, key: keyOf(h.name) };
+  if (ts.isShorthandPropertyAssignment(h)) return { literal: h.parent, key: h.name.text };
+  // A spread copies the keys through unchanged; an array spread scatters them.
+  if (ts.isSpreadAssignment(h)) return { literal: h.parent, key: null };
+  if (ts.isArrayLiteralExpression(h)) return { literal: h, key: indexOf(h.elements, holder) };
+  if (ts.isSpreadElement(h) && ts.isArrayLiteralExpression(h.parent)) return { literal: h.parent, key: UNKNOWN };
   return null;
+}
+
+/** Does this consumer take the WHOLE value somewhere the gate cannot follow but a reader plausibly inspects it — a call, a `return`, a `throw`, a `yield`? */
+function handedOn(holder: ts.Node): boolean {
+  const h = holder.parent;
+  return ((ts.isCallExpression(h) || ts.isNewExpression(h)) && (h.arguments?.some((a) => a === holder) ?? false)) ||
+    ts.isReturnStatement(h) || ts.isThrowStatement(h) || ts.isYieldExpression(h) ||
+    (ts.isArrowFunction(h) && h.body === holder);
+}
+
+/**
+ * Does destructuring `pattern` from a value that carries the error at
+ * `path` reach the error and read it? A rest element carries it on; an
+ * element under another key does not (Codex on PR #92, round fifteen:
+ * `const { data: d } = box` is a partial read that never touches it).
+ */
+function patternReads(ctx: Ctx, pattern: ts.BindingPattern, path: Path, seen: Set<ts.Node>): boolean {
+  if (path.length === 0) return true; // the value itself, taken apart: a read by construction
+  const [head, ...rest] = path;
+  if (head === UNKNOWN) return false;
+  const via = (name: ts.BindingName, p: Path): boolean =>
+    ts.isIdentifier(name) ? isReadAfter(ctx, name, seen, p) : patternReads(ctx, name, p, seen);
+  if (ts.isObjectBindingPattern(pattern)) {
+    return pattern.elements.some((el) => {
+      if (el.dotDotDotToken) return via(el.name, path);
+      const key = el.propertyName ? keyOf(el.propertyName) : ts.isIdentifier(el.name) ? el.name.text : UNKNOWN;
+      return key === head && via(el.name, rest);
+    });
+  }
+  let i = 0;
+  for (const el of pattern.elements) {
+    if (ts.isOmittedExpression(el)) { i += 1; continue; }
+    if (el.dotDotDotToken) return via(el.name, path);
+    if (i === head && via(el.name, rest)) return true;
+    i += 1;
+  }
+  return false;
 }
 
 /**
@@ -795,17 +875,35 @@ function aggregateHolding(holder: ts.Node): ts.Node | null {
  * transitively, and under the copy's own read window, so a copy that is
  * overwritten or discarded before it is read consumes nothing.
  */
-function consumes(ctx: Ctx, n: ts.Node, seen: Set<ts.Node> = new Set()): boolean {
+function consumes(ctx: Ctx, n: ts.Node, seen: Set<ts.Node> = new Set(), path: Path = []): boolean {
   const holder = forwardedTo(n);
   if (discardedAt(holder)) return false;
+  const h = holder.parent;
+  // A member read off a value that CARRIES the error: it counts only along
+  // the path the error sits under (`box.error`, then whatever consumes
+  // that), never for another member (`box.data`) or a key the gate cannot
+  // read (Codex on PR #92, round fifteen).
+  if ((ts.isPropertyAccessExpression(h) || ts.isElementAccessExpression(h)) && h.expression === holder) {
+    if (path.length === 0) return true;
+    const key = ts.isPropertyAccessExpression(h) ? h.name.text : keyOf(h.argumentExpression);
+    return key !== UNKNOWN && key === path[0] && consumes(ctx, h, seen, path.slice(1));
+  }
   const alias = aliasTarget(holder);
-  if (alias) return isReadAfter(ctx, alias, seen);
+  if (alias) return isReadAfter(ctx, alias, seen, path);
   // Stored in an aggregate — `const box = { error }; return data;` — the
   // literal is what must be consumed, by the same rules (Codex on PR #92,
   // round thirteen): passed to a call or thrown it is, bound to a local
-  // nothing reads it is not.
+  // nothing reads it is not — and the key it sits under travels with it.
   const aggregate = aggregateHolding(holder);
-  return aggregate ? consumes(ctx, aggregate, seen) : true;
+  if (aggregate) return consumes(ctx, aggregate.literal, seen, aggregate.key === null ? path : [aggregate.key, ...path]);
+  // Taken apart by a pattern: `const { error: e } = box`.
+  if (ts.isVariableDeclaration(h) && h.initializer === holder && !ts.isIdentifier(h.name)) {
+    return patternReads(ctx, h.name, path, seen);
+  }
+  // The value itself, consumed by anything else, is read. A value that only
+  // CARRIES the error is read only when handed on whole — a call, a return,
+  // a throw — not when its truthiness or identity is what the consumer wants.
+  return path.length === 0 || handedOn(holder);
 }
 
 /**
@@ -834,7 +932,7 @@ function bindsError(ctx: Ctx, pattern: ts.ObjectBindingPattern): { verdict: Verd
 }
 
 /** Is this bound identifier read after its binding and before it is overwritten? */
-function isReadAfter(ctx: Ctx, bound: ts.Identifier, seen: Set<ts.Node> = new Set()): boolean {
+function isReadAfter(ctx: Ctx, bound: ts.Identifier, seen: Set<ts.Node> = new Set(), path: Path = []): boolean {
   // Before the local is overwritten: `let { error } = await q; error = null;
   // if (error) …` reads the null, not the query's error (Codex on PR #92).
   // `seen` guards the copy-following recursion in `consumes`: every hop lands
@@ -847,7 +945,7 @@ function isReadAfter(ctx: Ctx, bound: ts.Identifier, seen: Set<ts.Node> = new Se
   const container = scopeContainer(bound);
   const overwritten = nextWriteTo(ctx.checker, sym, container, bound);
   return usesOf(ctx.checker, sym, container).some((u) =>
-    readsInWindow(u, bound, overwritten, container, ctx.checker) && consumes(ctx, u, seen)
+    readsInWindow(u, bound, overwritten, container, ctx.checker) && consumes(ctx, u, seen, path)
   );
 }
 
@@ -2233,6 +2331,49 @@ async function f(db: any) { const { data, error } = await db.from("a").select("i
     expect(one(`declare function log(x: unknown): void;
 async function f(db: any) { log({ cause: (await db.from("a").select("id")).error }); }`).verdict).toBe("OK");
     expect(one(`async function f(db: any) { throw { cause: (await db.from("a").select("id")).error }; }`).verdict).toBe("OK");
+  });
+
+  it("a class field initializer is deferred execution and reads nothing (Codex, PR #92)", () => {
+    // Round fifteen: a class body is not function-like, so `closuresAround`
+    // saw straight-line code in `class Never { field = error }` — an
+    // initializer that runs per construction, and `Never` is never built.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); class Never { field = error; } return data; }`).verdict).toBe("DISCARDED");
+    // Refused even when constructed: the value lands on an instance the gate
+    // does not follow. A static field is a store it does not follow either.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const C = class { f = error; }; new C(); return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); class X { static f = error; } return data; }`).verdict).toBe("DISCARDED");
+    // A static block runs when the class statement does.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); class X { static { if (error) throw error; } } return data; }`).verdict).toBe("OK");
+  });
+
+  it("a literal is read only through the member that carries the error (Codex, PR #92)", () => {
+    // Round fifteen: following the literal bound it to `box`, and any use of
+    // `box` then counted — `return box.data` included. The key the error sits
+    // under travels with the value now: a member read counts only along that
+    // path, a destructuring only through that element (a rest carries it
+    // on), and a value that merely CARRIES the error is read only when
+    // handed on whole — a call, a return, a throw — not when its truthiness
+    // is what the consumer wants.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { error, data }; return box.data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { error, data }; const { data: d } = box; return d; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; if (box) return data; return null; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { meta: { error, ok: true } }; if (box.meta.ok) return data; return null; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const errs = [error]; if (errs.length) return null; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const errs = [error]; const outer = [...errs]; if (outer[0]) throw outer[0]; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, k: string) { const { data, error } = await db.from("a").select("id"); const box = { error, data }; if (box[k]) throw box[k]; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const r = await db.from("a").select("id"); const box = { e: r.error, d: r.data }; return box.d; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const box = { e: (await db.from("a").select("id")).error, ok: true }; return box.ok; }`).verdict).toBe("DISCARDED");
+    // Along the path, one hop or two, by member or by pattern, an object
+    // spread carrying the keys through, a numeric index, and handed on whole.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { error, data }; if (box.error) throw box.error; return box.data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { cause: error }; const { cause } = box; if (cause) throw cause; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { meta: { error } }; if (box.meta.error) throw box.meta.error; return data; }`).verdict).toBe("OK");
+    expect(one(`declare function log(x: unknown): void;
+async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { meta: { error } }; log(box.meta); return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const errs = [null, error]; if (errs[1]) throw errs[1]; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; const outer = { ...box }; if (outer.error) throw outer.error; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { error, data }; const { data: d, ...rest } = box; if (rest.error) throw rest.error; return d; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { error, data }; return box; }`).verdict).toBe("OK");
   });
 
   it("a builder REPLACED before it is awaited never runs (Codex, PR #92)", () => {
