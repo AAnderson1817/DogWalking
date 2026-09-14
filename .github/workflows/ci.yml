@@ -677,9 +677,14 @@ jobs:
       # `fn_snapshot_walk_price` trigger (0044, what every new row is stamped
       # with) — and the trigger and the function were two copies of one
       # expression in two migrations that nothing tied together. One case
-      # list, every implementation asked, answers compared; the SQL side nulls
-      # the snapshot before asking the function, or its coalesce hands back
-      # the trigger's answer and the fourth comparison proves nothing.
+      # list, every implementation asked, answers compared three ways (trigger
+      # vs function, function vs TypeScript, all vs the expectation). The SQL
+      # side nulls the snapshot before asking the function — or its coalesce
+      # hands back the trigger's answer and the function's own expression is
+      # tied to nothing — and reads the function's answers through a join on
+      # the null having taken. The TypeScript side runs under two zones either
+      # side of the day boundary, because in the runner's own zone (UTC) a
+      # leaf that reads the LOCAL day answers every case correctly.
       - name: Walk cost parity — TS leaf, fn_walk_cost and the snapshot trigger agree
         run: ./scripts/check-walk-cost-parity.sh
 

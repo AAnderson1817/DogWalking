@@ -117,8 +117,10 @@ export default function Booking() {
   const committed = useMemo(
     () =>
       committedCredits(upcoming, (w) => {
+        // The live FALLBACK only — `committedCredits` reads the snapshot
+        // itself, so a row that carries one never reaches this.
         const svc = services.find((x) => x.id === w.service_type_id);
-        return w.cost_credits ?? (svc ? effectiveWalkCost(svc, w.scheduled_date) : 0);
+        return svc ? effectiveWalkCost(svc, w.scheduled_date) : 0;
       }),
     [upcoming, services],
   );

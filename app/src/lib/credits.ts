@@ -79,18 +79,21 @@ export function formatLedgerEntry(entry: CreditLedger): LedgerLine {
  * double-count and over-warn — and warning about a charge that will not happen
  * teaches people to dismiss the warning.
  *
- * Generic over the row so `costOf` sees the WHOLE walk it is pricing. The
- * callback used to be typed `(walk: { status: string })`, which is why Booking
- * cast its way to `service_type_id` and `scheduled_date` and never reached
- * `cost_credits` at all — the type hid the snapshot that was already in hand.
+ * Priced SNAPSHOT-FIRST, here and not in the caller: `walks.cost_credits`
+ * (0043) is the figure `fn_debit_walk` will take, and `liveCostOf` is the
+ * fallback for a row carrying none — the coalesce `fn_walk_cost` performs.
+ * The row type REQUIRES the column, so a caller cannot hand this function
+ * rows without it and fall to live for every one; the first version left the
+ * coalesce to Booking's callback and typed the row `{ status }`, which is
+ * exactly how the original defect was one new caller away (review of PR 2).
+ * `0` is a real snapshot and stays `0`, as it does under `coalesce`.
  */
-export function committedCredits<W extends { status: string; is_overage?: boolean | null }>(
-  walks: W[],
-  costOf: (walk: W) => number,
-): number {
+export function committedCredits<
+  W extends { status: string; is_overage?: boolean | null; cost_credits: number | null },
+>(walks: W[], liveCostOf: (walk: W) => number): number {
   return walks
     .filter((w) => w.status === "scheduled" && !w.is_overage)
-    .reduce((total, w) => total + costOf(w), 0);
+    .reduce((total, w) => total + (w.cost_credits ?? liveCostOf(w)), 0);
 }
 
 /**

@@ -3,7 +3,7 @@
 # The weekend-surcharge arithmetic exists THREE times, and this is what keeps
 # the three ANSWERING THE SAME.
 #
-#   weekendWalkCost         (app/src/lib/walk-cost.ts)  what Booking quotes
+#   weekendWalkCost         (app/src/lib/walk-cost.ts)  what Booking quotes, through effectiveWalkCost
 #   fn_walk_cost            (0043, the live fallback)   what fn_debit_walk charges a row with no snapshot
 #   fn_snapshot_walk_price  (0044, BEFORE INSERT)       what every new row is stamped with
 #
@@ -14,19 +14,41 @@
 # disclosed at all (review H12).
 #
 # One case list (scripts/walk-cost-cases.txt), every implementation asked, the
-# answers compared — check-push-endpoint-parity.sh's shape, plus a FOURTH
-# comparison: trigger against function. For that comparison to mean anything
-# the SQL side NULLS the snapshot before asking fn_walk_cost. The function
-# coalesces the snapshot first, so without the null a sabotaged trigger reads
-# as a function that agrees with it, and the function's own expression is tied
-# to nothing. The trigger's answer is read BEFORE the null, the function's
-# AFTER — that is the whole of the SQL side.
+# answers compared THREE ways — trigger against function, function against
+# TypeScript, and all of them against the expectation, since a case list that
+# has drifted away from every implementation passes the first two. The SQL
+# side reads the trigger's stamp and then NULLS it before asking fn_walk_cost.
+# Not to catch a trigger drift — the TypeScript comparison catches that with
+# or without the null, and TRG≠FN is merely the line that names which SQL copy
+# moved — but because the function COALESCES the snapshot first: with the stamp
+# in place its answer is the trigger's, and its own expression, the figure
+# fn_debit_walk charges a pre-0043 row, is tied to nothing. Its answers are
+# read through a join on `cost_credits is null`, so a null that did not take
+# yields no answers and the count sentence below, never a function echoing
+# the trigger (review of PR 2: the first version guarded the null with
+# nothing, and deleting it left a sabotaged fn_walk_cost green).
+#
+# The TypeScript side runs TWICE, under Etc/GMT+12 and Etc/GMT-14 — fixed
+# offsets, so no tzdata dependency; the POSIX sign is inverted, so those are
+# twelve hours WEST and fourteen hours EAST of Greenwich, either side of the
+# day boundary — and the two runs must agree with each other and with SQL.
+# That is what pins the leaf to the calendar day of the DATE: a leaf that
+# reads the local day (`getDay()`) answers one of the two runs a day out,
+# whichever way it parses the date, while in the caller's own zone — UTC in
+# CI — such a leaf answers every case correctly, which is exactly what the
+# first version of this gate ran (review of PR 2; the DST cases it said
+# "pin the parse" pin nothing, a DATE having no zone). The answers script
+# refuses if the runtime did not honour TZ, so an environment that ignores
+# it cannot pass silently either.
 #
 # Runs as the cluster's postgres role inside one `begin; … rollback;`: a
 # scratch tenant, a service type and a walk per case, all gone at the end and
-# none of them a lasting object. Needs a database AND deno, which is why it is
-# its own script — no single test runner in this repository has both — and
-# validate.sh skips it honestly, by name, when either is missing.
+# none of them a lasting object. Any other role — a second superuser included,
+# since a superuser bypasses RLS and not triggers — is refused BY NAME first,
+# because the `walks` update guard admits only a service session and its own
+# refusal would blame the walk's status. Needs a database AND deno, which is
+# why it is its own script — no single test runner in this repository has
+# both — and validate.sh skips it honestly, by name, when either is missing.
 #
 #   LOCAL_DB_URL=… bash scripts/check-walk-cost-parity.sh
 set -euo pipefail
@@ -71,6 +93,13 @@ SVC="('8d000000-0000-4000-8001-' || lpad(n::text, 12, '0'))::uuid"
 WALK="('8d000000-0000-4000-8002-' || lpad(n::text, 12, '0'))::uuid"
 cat > "$sql_file" <<SQL
 begin;
+-- Refused by name before anything else: the walks update guard below admits
+-- only a service session, and its own refusal would blame the walk's status.
+do \$\$ begin
+  if not fn_is_service_session() then
+    raise exception 'FAIL: gate 8d must connect as the postgres role (session_user is %) — the walks update guard refuses every other persona', session_user;
+  end if;
+end \$\$;
 insert into auth.users (id, email) values ('$OP', 'walk-cost-parity@sanpo.test');
 insert into operators (id, business_name, display_name, email)
   values ('$OP', 'Walk cost parity', 'Parity', 'walk-cost-parity@sanpo.test');
@@ -98,9 +127,12 @@ select 'trg', n, w.cost_credits
 -- Null the snapshot so fn_walk_cost has to COMPUTE (see the header).
 update walks set cost_credits = null where operator_id = '$OP';
 
--- The function's answer: its own live expression.
+-- The function's answer: its own live expression. Joined on the null having
+-- TAKEN, so a dropped or mis-scoped update above yields no answers and the
+-- count sentence, not a function echoing the trigger.
 select 'fn', n, fn_walk_cost($WALK)
   from (values $values) c(n, cc, sc, d)
+  join walks w on w.id = $WALK and w.cost_credits is null
  order by n;
 rollback;
 SQL
@@ -120,16 +152,23 @@ while IFS='|' read -r tag n answer; do
 done < <(psql "$LOCAL_DB_URL" -Atq -v ON_ERROR_STOP=1 -f "$sql_file")
 
 # ── the TypeScript side ───────────────────────────────────────────────────
-mapfile -t ts_answers < <(deno run --allow-read=. scripts/walk-cost-answers.ts "$CASES")
+# Twice, either side of the day boundary (see the header). The zone is passed
+# as an argument as well as in TZ, so the script can refuse a runtime that
+# ignored it; deno honours TZ without --allow-env.
+ts_run() { TZ="$1" deno run --allow-read=. scripts/walk-cost-answers.ts "$CASES" "$1"; }
+mapfile -t ts_west < <(ts_run Etc/GMT+12)
+mapfile -t ts_east < <(ts_run Etc/GMT-14)
 
 # ── compare ───────────────────────────────────────────────────────────────
-# Four ways to be wrong, and all four are reported: the trigger disagrees with
-# the function, the function disagrees with TypeScript, or all three agree
-# with each other and not with the expectation. A case list that has drifted
-# away from EVERY implementation would otherwise pass the first three.
+# Four ways to be wrong, and all four are reported: the two TypeScript runs
+# disagree with each other (the leaf reads the local day), the trigger
+# disagrees with the function (which SQL copy moved), the function disagrees
+# with TypeScript, or all of them agree with each other and not with the
+# expectation. A case list that has drifted away from EVERY implementation
+# would otherwise pass the first three.
 if [ "$n_trg" -ne "${#rows[@]}" ] || [ "$n_fn" -ne "${#rows[@]}" ] \
-   || [ "${#ts_answers[@]}" -ne "${#rows[@]}" ]; then
-  echo "FAIL: ${#rows[@]} cases, $n_trg trigger answers, $n_fn function answers, ${#ts_answers[@]} TS answers" >&2
+   || [ "${#ts_west[@]}" -ne "${#rows[@]}" ] || [ "${#ts_east[@]}" -ne "${#rows[@]}" ]; then
+  echo "FAIL: ${#rows[@]} cases, $n_trg trigger answers, $n_fn function answers, ${#ts_west[@]} TS answers west of Greenwich, ${#ts_east[@]} east" >&2
   exit 2
 fi
 
@@ -138,8 +177,12 @@ for i in "${!rows[@]}"; do
   n=$((i + 1))
   IFS=$'\t' read -r expected cost surcharge date <<< "${rows[$i]}"
   label="cost=$cost surcharge=$surcharge $date"
-  g="${trg[$n]:-}"; f="${fn[$n]:-}"; t="${ts_answers[$i]}"
+  g="${trg[$n]:-}"; f="${fn[$n]:-}"; t="${ts_west[$i]}"; te="${ts_east[$i]}"
   wrong=0
+  if [ "$t" != "$te" ]; then
+    echo "TZ-DEPENDENT ts(UTC-12)=$t ts(UTC+14)=$te  $label" >&2
+    wrong=1
+  fi
   if [ "$g" != "$f" ]; then
     echo "TRG≠FN    trigger=$g fn=$f  $label" >&2
     wrong=1
@@ -160,4 +203,4 @@ if [ "$bad" -gt 0 ]; then
   echo "FAIL: $bad of ${#rows[@]} walk cost cases" >&2
   exit 1
 fi
-echo "WALK COST PARITY PASS — ${#rows[@]} cases, three implementations agree"
+echo "WALK COST PARITY PASS — ${#rows[@]} cases, three implementations agree, either side of the day boundary"

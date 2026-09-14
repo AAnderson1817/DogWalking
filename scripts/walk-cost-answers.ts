@@ -5,7 +5,13 @@
 // in file order, so the shell script can line them up against what Postgres
 // says twice over — the `fn_snapshot_walk_price` trigger and `fn_walk_cost`.
 //
-//   deno run --allow-read=. scripts/walk-cost-answers.ts <cases-file>
+//   deno run --allow-read=. scripts/walk-cost-answers.ts <cases-file> [expected-zone]
+//
+// The shell script runs this twice under two TZ values either side of the
+// day boundary and passes the zone in as well, so a runtime that did not
+// honour TZ is REFUSED here rather than answering in whatever zone it woke up
+// in — the run would otherwise pin nothing about the leaf's timezone
+// handling while looking as though it had (review of PR 2).
 //
 // It imports the app's LEAF module by exact path. `walk-cost.ts` has zero
 // imports for precisely this reason: deno does not resolve the extensionless
@@ -19,9 +25,17 @@
 import { weekendWalkCost } from "../app/src/lib/walk-cost.ts";
 
 const cases = Deno.args[0];
+const zone = Deno.args[1];
 if (!cases) {
-  console.error("usage: walk-cost-answers.ts <cases-file>");
+  console.error("usage: walk-cost-answers.ts <cases-file> [expected-zone]");
   Deno.exit(2);
+}
+if (zone !== undefined) {
+  const actual = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  if (actual !== zone) {
+    console.error(`the runtime is in ${actual}, not ${zone}: TZ was not honoured, so this run would pin nothing about the leaf's zone handling`);
+    Deno.exit(2);
+  }
 }
 for (const line of Deno.readTextFileSync(cases).split("\n")) {
   if (/^\s*(#|$)/.test(line)) continue;
