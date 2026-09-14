@@ -13,7 +13,7 @@ import {
   serveFunction,
 } from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
-import { safeCause } from "../_lib/observe.ts";
+import { logHandledError } from "../_lib/observe.ts";
 import { STRIPE_META } from "../_lib/stripe_metadata.ts";
 import { stripeClient } from "../_lib/stripe.ts";
 import { type PeriodBounds, remainingFraction } from "./period.ts";
@@ -181,12 +181,12 @@ serveFunction(async (req) => {
       })
       .eq("id", client.id);
     if (cacheErr) {
-      console.error(JSON.stringify({
-        level: "error",
-        msg: "could not cache current_period_end",
-        client_id: client.id,
-        cause: safeCause(cacheErr),
-      }));
+      logHandledError({
+        fn: "change-plan",
+        message: "could not cache current_period_end",
+        cause: cacheErr,
+        context: { client_id: client.id, plan_id: plan.id },
+      });
     }
 
     return jsonOk({

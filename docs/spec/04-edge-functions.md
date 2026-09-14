@@ -44,20 +44,30 @@ Every envelope is looked at, in one of three shapes:
 | Shape | When |
 | --- | --- |
 | bind `error`, throw `HttpError(5xx, …, cause, context)` | the default — the request cannot mean anything without the row |
-| bind `error`, `console.error` one JSON line with `safeCause(error)`, carry on | a best-effort write where a throw would MISREPORT: the change-plan period cache runs after Stripe has already moved, so a 500 there tells the operator the change failed when it did not |
+| bind `error`, `logHandledError({ fn, message, cause, context })`, carry on | a best-effort write where a throw would MISREPORT: the change-plan period cache runs after Stripe has already moved, so a 500 there tells the operator the change failed when it did not. One line, the same field names as `logServerError` plus `handled: true` and minus `request_id` (not reachable from a handler), so one log search finds both kinds; the drain's per-row catch and the claim-release failure write the same line |
 | return the envelope to a caller that inspects it | a helper whose caller owns the decision |
 
 `app/scripts/discarded-errors.test.ts` is the gate: it parses every
-`.from(` / `.rpc(` / `.auth.<member>` chain in `supabase/functions/` and
-fails on an envelope that is awaited and not bound, bound without `error`,
-or bound with an `error` that is never referenced afterwards in the same
-function (`const { data, error } = await q; return data;` names the error
-and then treats the envelope as data — the defect wearing the fix's
-clothes; Codex review on PR #92). What it proves is that the error is
-**looked at** — `if (error) return null` passes it — so what is DONE with
-the error is pinned per site by the deno tests (`send_deps_test.ts` for the
-two lookups). Its stated blind spot: an envelope returned to a caller is not
-followed into that caller.
+`.from(` / `.rpc(` / `.auth.<member>` chain in `supabase/functions/` (the
+`db["from"](…)` spelling too) and fails on an envelope that is awaited and
+not bound, bound without `error`, or bound with an `error` that is never
+referenced afterwards in the same function (`const { data, error } = await
+q; return data;` names the error and then treats the envelope as data — the
+defect wearing the fix's clothes; Codex review on PR #92). A read counts
+only if it can see THIS envelope: not after the variable is overwritten by
+a later query, and not a same-named variable in a nested callback. What the
+gate cannot see it refuses loudly rather than passing: an envelope handed to
+a call (`console.log(r)`), an arrow body that is an inline callback
+(`ids.map((id) => db.from(…))`, whose array nothing reads), a `.then(`, a
+`Promise.all([…])`. `.auth` is also a plain field name in this tree, so a
+`.auth.<member>` chain is a query only when its receiver is declared as a
+client (`adminClient()` / `createClient(…)`, or a variable or parameter
+typed as one); a receiver with no visible declaration is refused, never
+skipped. What it proves is that the error is **looked at** — `if (error)
+return null` passes it — so what is DONE with the error is pinned per site
+by the deno tests (`send_deps_test.ts` for the two lookups). Its stated
+blind spot: an envelope RETURNED to a caller is not followed into that
+caller.
 
 ### What must never reach a log line
 

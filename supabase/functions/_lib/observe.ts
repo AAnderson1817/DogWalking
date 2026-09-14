@@ -128,6 +128,41 @@ export function logServerError(entry: ServerErrorEntry): void {
 }
 
 /**
+ * One JSON line for a failure the handler DEALT WITH and did not throw — a
+ * best-effort write that must not fail the request (the change-plan period
+ * cache), a claim that could not be released, a drain that carried on past
+ * one row. Same field names as `logServerError` so one log search finds
+ * both, minus `request_id`, which is minted in `handleRequest` and is not
+ * reachable from a handler; `handled: true` says which kind this is.
+ * Before this there were two ad-hoc shapes (`msg` at top level, ids at top
+ * level) that a search keyed on `message` / `context.client_id` could not
+ * find (adversarial review on PR #92).
+ */
+export function logHandledError(entry: {
+  fn: string;
+  message: string;
+  cause?: unknown;
+  context?: ErrorContext;
+}): void {
+  const line: Record<string, unknown> = {
+    level: "error",
+    handled: true,
+    fn: entry.fn,
+    message: entry.message,
+  };
+  const cause = safeCause(entry.cause);
+  if (cause) line.cause = cause;
+  if (entry.context) {
+    const ctx: ErrorContext = {};
+    for (const [k, v] of Object.entries(entry.context)) {
+      if (v !== undefined && v !== null) ctx[k] = v;
+    }
+    if (Object.keys(ctx).length > 0) line.context = ctx;
+  }
+  console.error(JSON.stringify(line));
+}
+
+/**
  * The request id for this request: the caller's if they supplied one, ours
  * otherwise. Echoed in the response headers and in the error envelope, so a
  * failure a person is looking at can be tied to the line that recorded it.

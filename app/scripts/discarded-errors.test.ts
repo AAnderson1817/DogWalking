@@ -20,35 +20,47 @@ import { describe, expect, it } from "vitest";
  * under `supabase/functions/`, finds each supabase-js query and classifies
  * the statement that consumes its envelope:
  *
- *   OK            `error` is bound by destructuring, or the envelope is held
- *                 in a variable whose `.error` is read later in the same
- *                 function, or a deferred builder (`let q = db.from(…)`) is
- *                 followed to the statement that awaits it and THAT is OK.
- *   PASSED_ON     the whole envelope is returned or is an arrow function's
- *                 expression body — a caller reads it. Printed, not failed: a
+ *   OK            `error` is bound by destructuring AND referenced later in
+ *                 the same function, or the envelope is held in a variable
+ *                 whose `.error` is read later — before the variable is
+ *                 overwritten, and by THAT variable rather than a same-named
+ *                 one in a nested scope — or a deferred builder
+ *                 (`let q = db.from(…)`) is followed to the statement that
+ *                 awaits it and THAT is OK.
+ *   PASSED_ON     the whole envelope is returned, or is the expression body
+ *                 of an arrow that is NOT a call's argument (a deps-object
+ *                 property, say) — a caller reads it. Printed, not failed: a
  *                 stated blind spot, the gate does not follow envelopes across
  *                 functions (`unsubscribe/index.ts` hands its envelope to
  *                 `handler.ts`, which reads `result.error`).
- *   DISCARDED     a bare `await <query>;`, or a destructuring that binds
- *                 `data` and not `error`. FAILS.
- *   UNCLASSIFIED  `.then(`, an array literal (`Promise.all([…])`), an
+ *   DISCARDED     a bare `await <query>;`, a destructuring that binds `data`
+ *                 and not `error`, or one that binds `error` and never reads
+ *                 it. FAILS.
+ *   UNCLASSIFIED  `.then(`, an array literal (`Promise.all([…])`), an arrow
+ *                 body that is an inline callback (`ids.map((id) =>
+ *                 db.from(…))` — the array nothing reads), an envelope
+ *                 variable passed to a call (`console.log(r)`), an
  *                 unrecognised receiver, an unrecognised consumer. FAILS —
  *                 a check that cannot classify must say so rather than pass
  *                 by seeing nothing.
  *
  * What counts as a query, read off the tree rather than recalled: a call
- * `<receiver>.from(` or `<receiver>.rpc(`, or a chain through
- * `<receiver>.auth.<member>` (four exist: `credential-vault` signs in a probe
- * client and lists MFA factors, `claim-signup` creates the user,
- * `_lib/http.ts` resolves the token). The trailing member is load-bearing:
- * `.auth` is GoTrue's NAMESPACE and is never consumed bare, while a bare
- * `keys.auth` (`_lib/webpush.ts`, the push encryption secret) and `sub.auth`
- * (`push_deps.ts`, a subscription row's column) are plain property reads —
- * the first run of this gate called both queries. A namespace handed off
- * whole (`const a = db.auth`) is therefore invisible here, the same blind
- * spot as a builder passed to another function; stated, not chased. No
- * `.storage.` call exists anywhere under `supabase/functions/`, so nothing
- * is built for one. The receiver is the
+ * `<receiver>.from(` or `<receiver>.rpc(` (spelled `db["from"](…)` too), or
+ * a chain through `<receiver>.auth.<member>` (four exist: `credential-vault`
+ * signs in a probe client and lists MFA factors, `claim-signup` creates the
+ * user, `_lib/http.ts` resolves the token). `auth` is ALSO a plain field
+ * name in this tree — `keys.auth` (`_lib/webpush.ts`, the push encryption
+ * secret) and `sub.auth` (`push_deps.ts`, a subscription row's column) — so
+ * for `.auth` the word is not enough and the RECEIVER decides: it must be
+ * declared as a client in the file (`adminClient()` / `createClient(…)`
+ * called inline, a variable initialised from one, or a parameter typed as
+ * one). A receiver declared as anything else is a value and `sub.auth.length`
+ * is a healthy read; a receiver with no visible declaration, or a call that
+ * is not a known factory, is UNCLASSIFIED — loud, never skipped. A namespace
+ * handed off whole (`const a = db.auth`) is therefore invisible here, the
+ * same blind spot as a builder passed to another function; stated, not
+ * chased. No `.storage.` call exists anywhere under `supabase/functions/`,
+ * so nothing is built for one. For `.from` / `.rpc` the receiver is the
  * supabase client when it is a lowercase identifier — `db`, which every
  * function either creates with `adminClient()` or takes as a parameter typed
  * `ReturnType<typeof adminClient>` / `SupabaseClient` / a structural
@@ -187,14 +199,64 @@ function isReference(id: ts.Identifier): boolean {
   return true;
 }
 
+/**
+ * Does this nested function declare its own `name` — as a parameter, or as a
+ * local in its own body (not in a function nested deeper still)?
+ *
+ * A same-named inner variable is a DIFFERENT variable: `others.forEach((r) =>
+ * { if (r.error) … })` reads the callback's `r`, not the outer envelope, and
+ * counting it for the outer one is how a discarded error passes (adversarial
+ * review on PR #92).
+ */
+function redeclares(fn: ts.SignatureDeclaration, name: string): boolean {
+  if (fn.parameters.some((prm) => bindsName(prm.name, name))) return true;
+  let found = false;
+  const visit = (n: ts.Node) => {
+    if (found) return;
+    if (n !== fn && ts.isFunctionLike(n)) return;
+    if (ts.isVariableDeclaration(n) && bindsName(n.name, name)) { found = true; return; }
+    ts.forEachChild(n, visit);
+  };
+  visit(fn);
+  return found;
+}
+
+/** Does a binding name (identifier or destructuring pattern) introduce `name`? */
+function bindsName(binding: ts.BindingName, name: string): boolean {
+  if (ts.isIdentifier(binding)) return binding.text === name;
+  return binding.elements.some((el) => !ts.isOmittedExpression(el) && bindsName(el.name, name));
+}
+
+/** Every reference to `name` inside `container`, skipping nested scopes that redeclare it. */
 function usesOf(name: string, container: ts.Node): ts.Identifier[] {
   const out: ts.Identifier[] = [];
   const visit = (n: ts.Node) => {
+    if (n !== container && ts.isFunctionLike(n) && redeclares(n, name)) return;
     if (ts.isIdentifier(n) && n.text === name && isReference(n)) out.push(n);
     ts.forEachChild(n, visit);
   };
   visit(container);
   return out;
+}
+
+/** The position of the next plain assignment `name = …` after `after`, or Infinity. */
+function nextWriteTo(name: string, container: ts.Node, after: number): number {
+  let next = Infinity;
+  const visit = (n: ts.Node) => {
+    if (n !== container && ts.isFunctionLike(n) && redeclares(n, name)) return;
+    if (
+      ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isIdentifier(n.left) && n.left.text === name && n.left.pos > after && n.left.pos < next
+    ) next = n.left.pos;
+    ts.forEachChild(n, visit);
+  };
+  visit(container);
+  return next;
+}
+
+/** Is this arrow function an argument of a call — a callback whose consumer the gate cannot see? */
+function inlineCallback(fn: ts.ArrowFunction): boolean {
+  return ts.isCallExpression(fn.parent) && fn.parent.arguments.includes(fn);
 }
 
 /**
@@ -249,7 +311,12 @@ function site(ctx: Ctx, at: ts.Node, verdict: Verdict, reason: string): Site {
 /** `const r = await q` or `r = await q`: is `r.error` read later in this function? */
 function followEnvelopeVar(ctx: Ctx, nameNode: ts.Identifier, at: ts.Node): Site[] {
   const name = nameNode.text;
-  const uses = usesOf(name, scopeContainer(nameNode)).filter((u) => u.pos > nameNode.pos);
+  const container = scopeContainer(nameNode);
+  // Only the uses BEFORE the variable is overwritten can see this envelope:
+  // `let r = await a; r = await b; if (r.error) …` reads b's error, and a's
+  // is discarded (adversarial review on PR #92).
+  const overwritten = nextWriteTo(name, container, nameNode.pos);
+  const uses = usesOf(name, container).filter((u) => u.pos > nameNode.pos && u.pos < overwritten);
   const reads = uses.some((u) => ts.isPropertyAccessExpression(u.parent) && u.parent.expression === u && u.parent.name.text === "error");
   if (reads) return [site(ctx, at, "OK", `envelope in \`${name}\`, \`.error\` read later`)];
   const destructured = uses.some((u) =>
@@ -258,9 +325,16 @@ function followEnvelopeVar(ctx: Ctx, nameNode: ts.Identifier, at: ts.Node): Site
   if (destructured) return [site(ctx, at, "OK", `envelope in \`${name}\`, \`error\` destructured later`)];
   const passedOn = uses.some((u) => {
     const p = u.parent;
-    return ts.isReturnStatement(p) || (ts.isArrowFunction(p) && p.body === u) || ts.isCallExpression(p) && p.arguments.includes(u);
+    return ts.isReturnStatement(p) || (ts.isArrowFunction(p) && p.body === u && !inlineCallback(p));
   });
   if (passedOn) return [site(ctx, at, "PASSED_ON", `envelope in \`${name}\` handed to a caller whole`)];
+  // `console.log(r)` / `JSON.stringify(r)` / `helper(r)`: the gate cannot see
+  // what the callee does with it, and a debug print beside `return r.data`
+  // must not turn a discard into a pass (adversarial review on PR #92).
+  const passedToCall = uses.find((u) => ts.isCallExpression(u.parent) && u.parent.arguments.includes(u));
+  if (passedToCall) {
+    return [site(ctx, at, "UNCLASSIFIED", `envelope in \`${name}\` passed to a call — its consumer is not visible`)];
+  }
   return [site(ctx, at, "DISCARDED", `envelope in \`${name}\` whose \`.error\` is never read in this function`)];
 }
 
@@ -283,7 +357,14 @@ function classifyAwaited(ctx: Ctx, awaited: ts.AwaitExpression): Site[] {
   }
   if (ts.isExpressionStatement(p)) return [site(ctx, p, "DISCARDED", "bare `await`: the resolved { data, error } is dropped")];
   if (ts.isReturnStatement(p)) return [site(ctx, p, "PASSED_ON", "awaited envelope returned to the caller")];
-  if (ts.isArrowFunction(p) && p.body === n) return [site(ctx, p, "PASSED_ON", "awaited envelope is an arrow function's expression body")];
+  if (ts.isArrowFunction(p) && p.body === n) {
+    // `ids.map(async (id) => await db.from(…)…)` inside a `Promise.all`: the
+    // envelopes land in an array nothing reads. An arrow that is a call's
+    // argument has no visible consumer (adversarial review on PR #92).
+    return inlineCallback(p)
+      ? [site(ctx, p, "UNCLASSIFIED", "awaited envelope is the body of an inline callback — its consumer is not visible")]
+      : [site(ctx, p, "PASSED_ON", "awaited envelope is an arrow function's expression body")];
+  }
   if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && p.right === n) {
     if (ts.isIdentifier(p.left)) return followEnvelopeVar(ctx, p.left, p);
     if (ts.isObjectLiteralExpression(p.left)) {
@@ -334,12 +415,73 @@ function classifyTop(ctx: Ctx, top: ts.Node, prefix = ""): Site[] {
   const tag = (s: Site): Site => ({ ...s, reason: prefix + s.reason });
   if (ts.isAwaitExpression(p)) return classifyAwaited(ctx, p).map(tag);
   if (ts.isReturnStatement(p)) return [tag(site(ctx, p, "PASSED_ON", "envelope promise returned to the caller"))];
-  if (ts.isArrowFunction(p) && p.body === top) return [tag(site(ctx, p, "PASSED_ON", "envelope promise is an arrow function's expression body"))];
+  if (ts.isArrowFunction(p) && p.body === top) {
+    return inlineCallback(p)
+      ? [tag(site(ctx, p, "UNCLASSIFIED", "envelope promise is the body of an inline callback — its consumer is not visible"))]
+      : [tag(site(ctx, p, "PASSED_ON", "envelope promise is an arrow function's expression body"))];
+  }
   if (ts.isVariableDeclaration(p) && p.initializer === top && ts.isIdentifier(p.name)) return followBuilder(ctx, p.name, p).map(tag);
   if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && p.right === top && ts.isIdentifier(p.left)) {
     return followBuilder(ctx, p.left, p).map(tag);
   }
   return [tag(site(ctx, p, "UNCLASSIFIED", `query consumed by ${ts.SyntaxKind[p.kind]}`))];
+}
+
+/**
+ * `<receiver>.<name>` spelled either way — `db.from(…)` or `db["from"](…)`;
+ * the element-access spelling is a legal call of the same method and must
+ * not be invisible to the scan (adversarial review on PR #92).
+ */
+function memberAccess(n: ts.Node | undefined): { receiver: ts.Expression; name: string; token: ts.Node } | null {
+  if (!n) return null;
+  if (ts.isPropertyAccessExpression(n)) return { receiver: n.expression, name: n.name.text, token: n.name };
+  if (ts.isElementAccessExpression(n) && ts.isStringLiteral(n.argumentExpression)) {
+    return { receiver: n.expression, name: n.argumentExpression.text, token: n.argumentExpression };
+  }
+  return null;
+}
+
+type Declared = "client" | "value" | "unknown";
+
+/** Is this receiver a supabase client, by how it is DECLARED in this file? */
+function declaredAsClient(recv: ts.Expression): Declared {
+  if (ts.isCallExpression(recv) && ts.isIdentifier(recv.expression) && CLIENT_FACTORIES.has(recv.expression.text)) {
+    return "client";
+  }
+  if (!ts.isIdentifier(recv)) return "unknown";
+  const decl = declarationOf(recv);
+  if (!decl) return "unknown";
+  if (ts.isVariableDeclaration(decl) && decl.initializer) {
+    const init = decl.initializer;
+    if (ts.isCallExpression(init) && ts.isIdentifier(init.expression) && CLIENT_FACTORIES.has(init.expression.text)) return "client";
+    if (ts.isAwaitExpression(init) && ts.isCallExpression(init.expression) && ts.isIdentifier(init.expression.expression) &&
+      CLIENT_FACTORIES.has(init.expression.expression.text)) return "client";
+  }
+  const typeText = decl.type?.getText();
+  if (typeText && /SupabaseClient|adminClient|createClient/.test(typeText)) return "client";
+  return "value";
+}
+
+/** The nearest declaration of `id` (a variable or a parameter), walking out through enclosing scopes. */
+function declarationOf(id: ts.Identifier): ts.VariableDeclaration | ts.ParameterDeclaration | null {
+  for (let scope: ts.Node = id; scope; scope = scope.parent) {
+    if (!ts.isFunctionLike(scope) && !ts.isSourceFile(scope)) continue;
+    if (ts.isFunctionLike(scope)) {
+      const prm = scope.parameters.find((q) => bindsName(q.name, id.text));
+      if (prm) return prm;
+    }
+    let found: ts.VariableDeclaration | null = null;
+    const visit = (n: ts.Node) => {
+      if (found) return;
+      if (n !== scope && ts.isFunctionLike(n)) return;
+      if (ts.isVariableDeclaration(n) && bindsName(n.name, id.text)) { found = n; return; }
+      ts.forEachChild(n, visit);
+    };
+    visit(scope);
+    if (found) return found;
+    if (ts.isSourceFile(scope)) break;
+  }
+  return null;
 }
 
 /** Every supabase-js query in `text`, classified. `file` is only for reporting. */
@@ -362,14 +504,30 @@ export function classifySource(text: string, file: string): Site[] {
   };
 
   const visit = (n: ts.Node) => {
-    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && QUERY_METHODS.has(n.expression.name.text)) {
-      seen(n, n.expression.expression, n.expression.name);
-    } else if (
-      ts.isPropertyAccessExpression(n) && n.name.text === "auth" &&
-      // The namespace, `.auth.<member>` — a bare `.auth` is a value being read.
-      ts.isPropertyAccessExpression(n.parent) && n.parent.expression === n
-    ) {
-      seen(n, n.expression, n.name);
+    const member = ts.isCallExpression(n) ? memberAccess(n.expression) : null;
+    if (member && QUERY_METHODS.has(member.name)) {
+      seen(n, member.receiver, member.token);
+    } else {
+      const auth = memberAccess(n);
+      if (
+        auth && auth.name === "auth" &&
+        // The namespace, `.auth.<member>` — a bare `.auth` is a value being read.
+        memberAccess(n.parent)?.receiver === n
+      ) {
+        // `auth` is also a plain FIELD in this tree (the push encryption
+        // secret), and `sub.auth.length` is a healthy read of it. So the
+        // word is not enough: the receiver must be DECLARED as a client —
+        // `adminClient()` / `createClient(…)` directly, a variable initialised
+        // from one, or a parameter typed as one. Anything else declared in
+        // the file is a value; a receiver with no visible declaration is
+        // UNCLASSIFIED, never silently skipped (adversarial review on PR #92).
+        const declared = declaredAsClient(auth.receiver);
+        if (declared === "client") seen(n, auth.receiver, auth.token);
+        else if (declared === "unknown") {
+          const ctx: Ctx = { sf, file, queryLine: lineOf(sf, auth.token), followed };
+          sites.push(site(ctx, n, "UNCLASSIFIED", `\`.auth\` on \`${auth.receiver.getText(sf)}\`, whose declaration the gate cannot see`));
+        }
+      }
     }
     ts.forEachChild(n, visit);
   };
@@ -532,17 +690,117 @@ function g(db: any) { return db.from("clients").select("id"); }`, "fixture.ts");
   });
 
   it("auth calls are queries too; a bare `.auth` property read is not", () => {
-    const sites = classifySource(`async function f(db: any, probe: any) {
+    // Receivers DECLARED as clients: a factory initialiser, a typed parameter,
+    // and the factory called inline.
+    const sites = classifySource(`async function f(db: ReturnType<typeof adminClient>) {
+  const probe = createClient("u", "k");
   const { error } = await probe.auth.signInWithPassword({ email: "a", password: "b" });
   if (error) return false;
   await db.auth.admin.createUser({ email: "a" });
+  const { data, error: e2 } = await adminClient().auth.getUser("t");
+  if (e2) throw e2;
+  return data;
 }`, "f.ts");
-    expect(sites.map((s) => s.verdict)).toEqual(["OK", "DISCARDED"]);
+    expect(sites.map((s) => s.verdict)).toEqual(["OK", "DISCARDED", "OK"]);
     // The two shapes the first run of this gate mistook for GoTrue calls.
     expect(classifySource(`function g(keys: { auth: string }, sub: { auth: string }) {
   const secret = decode(keys.auth);
   return { p256dh: "x", auth: sub.auth, secret };
 }`, "f.ts")).toEqual([]);
+  });
+
+  it("`.auth.<member>` on a value is a field read, on an undeclared receiver it is UNCLASSIFIED", () => {
+    // `auth` is the push encryption secret's field name in this tree, so a
+    // member read on it (`sub.auth.length`) is healthy code and must not go
+    // red (adversarial review on PR #92). Only a receiver declared as a
+    // client is a GoTrue chain; one with no visible declaration is refused
+    // loudly rather than skipped.
+    expect(classifySource(`function g(sub: { auth: string }, payload: any) {
+  const n = sub.auth.length;
+  const t = payload.auth?.token;
+  return n + t;
+}`, "f.ts")).toEqual([]);
+    // A call that is not a known client factory could be either — a wrapper
+    // returning a client, or a value — so it is refused loudly rather than
+    // guessed; adding a real factory to CLIENT_FACTORIES is the remedy.
+    expect(classifySource(`function k() { return keysOf().auth.trim(); }`, "f.ts").map((s) => s.verdict)).toEqual(["UNCLASSIFIED"]);
+    const s = one(`async function h() {
+  const { data } = await client.auth.getUser("t");
+  return data;
+}`);
+    expect(s.verdict).toBe("UNCLASSIFIED");
+    expect(s.reason).toMatch(/whose declaration the gate cannot see/);
+  });
+
+  it("element-access spelling `db[\"from\"](…)` is the same query", () => {
+    const s = one(`async function f(db: any) {
+  const { data } = await db["from"]("clients").select("id").maybeSingle();
+  return data;
+}`);
+    expect(s.verdict).toBe("DISCARDED");
+  });
+
+  it("an inline callback's arrow body is UNCLASSIFIED, not passed on", () => {
+    // `Promise.all(ids.map((id) => db.from(…)…))` drops every envelope into
+    // an array nothing reads; the array-literal spelling was already
+    // UNCLASSIFIED and `.map` must not be the quiet route round it.
+    const sites = classifySource(`async function f(db: any, ids: string[]) {
+  await Promise.all(ids.map((id) => db.from("x").delete().eq("id", id)));
+  await Promise.all(ids.map(async (id) => await db.from("y").delete().eq("id", id)));
+  return later().then(() => db.rpc("fn_z", {}));
+}`, "f.ts");
+    expect(sites.map((s) => s.verdict)).toEqual(["UNCLASSIFIED", "UNCLASSIFIED", "UNCLASSIFIED"]);
+    expect(sites[0]!.reason).toMatch(/inline callback/);
+    // An arrow that is NOT a call argument — a property of a deps object,
+    // the `unsubscribe` shape — still hands its envelope to a visible caller.
+    expect(classifySource(`const deps = { suppress: async (t: string) => await adminClient().rpc("fn_x", { p: t }) };`, "f.ts")
+      .map((s) => s.verdict)).toEqual(["PASSED_ON"]);
+  });
+
+  it("an envelope variable overwritten before its `.error` is read is DISCARDED for the first query", () => {
+    const sites = classifySource(`async function f(db: any) {
+  let r = await db.from("a").select("id").maybeSingle();
+  r = await db.from("b").select("id").maybeSingle();
+  if (r.error) throw r.error;
+  return r.data;
+}`, "f.ts");
+    expect(sites.map((s) => [s.line, s.verdict])).toEqual([[2, "DISCARDED"], [3, "OK"]]);
+    // The loop shape — assigned inside a loop, read after it — stays OK: the
+    // read is after the assignment and nothing overwrites it in between.
+    expect(classifySource(`async function g(db: any, ids: string[]) {
+  let last: any = null;
+  for (const id of ids) last = await db.from("a").select("id").eq("id", id).maybeSingle();
+  if (last?.error) throw last.error;
+}`, "f.ts").map((s) => s.verdict)).toEqual(["OK"]);
+  });
+
+  it("a same-named variable in a nested scope does not satisfy the outer envelope", () => {
+    const param = one(`async function f(db: any, others: any[]) {
+  const r = await db.from("a").select("id").maybeSingle();
+  others.forEach((r) => { if (r.error) console.log(r.error); });
+  return r.data;
+}`);
+    expect(param.verdict).toBe("DISCARDED");
+    const inner = classifySource(`async function f(db: any) {
+  const r = await db.from("a").select("id").maybeSingle();
+  const g = async () => {
+    const r = await db.from("b").select("id").maybeSingle();
+    if (r.error) throw r.error;
+  };
+  await g();
+  return r.data;
+}`, "f.ts");
+    expect(inner.map((s) => [s.line, s.verdict])).toEqual([[2, "DISCARDED"], [4, "OK"]]);
+  });
+
+  it("an envelope variable passed to a call is UNCLASSIFIED, not passed on", () => {
+    const s = one(`async function f(db: any) {
+  const r = await db.from("y").select("id");
+  console.log(r);
+  return r.data;
+}`);
+    expect(s.verdict).toBe("UNCLASSIFIED");
+    expect(s.reason).toMatch(/passed to a call/);
   });
 });
 

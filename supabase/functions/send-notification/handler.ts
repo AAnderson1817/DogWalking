@@ -7,6 +7,7 @@
 // go through here — a client learning their card failed, an operator learning a
 // walk was cancelled — so "we think it sends" is not good enough.
 import { HttpError } from "../_lib/http.ts";
+import { logHandledError } from "../_lib/observe.ts";
 
 /** Notification types whose CLIENT gets an email. Others reach the bell only. */
 export const CLIENT_FACING = new Set([
@@ -230,14 +231,12 @@ export async function releaseNotificationSend(
     .eq("id", id)
     .eq(tokenColumn, stamp);
   if (error) {
-    console.error(
-      JSON.stringify({
-        level: "error",
-        msg: "could not release the send claim",
-        notification_id: id,
-        channel,
-      }),
-    );
+    logHandledError({
+      fn: "send-notification",
+      message: "could not release the send claim",
+      cause: error,
+      context: { notification_id: id, channel },
+    });
   }
 }
 
@@ -454,8 +453,15 @@ export async function drainBacklog(
         const p = await pushDelivery(row);
         if (p.kind === "failed") pushFailed += 1;
         else if (p.kind === "sent") pushSent += 1;
-      } catch {
+      } catch (e) {
         pushFailed += 1;
+        // The same line the email arm writes below, for the same reason.
+        logHandledError({
+          fn: "send-notification",
+          message: "drain: push delivery threw",
+          cause: e,
+          context: { notification_id: row.id, channel: "push", ...(e instanceof HttpError ? e.context : {}) },
+        });
       }
     }
 
@@ -472,8 +478,20 @@ export async function drainBacklog(
       const outcome = await deliverNotification(row, deps);
       if (outcome.kind === "failed") failed += 1;
       else sent += 1;
-    } catch {
+    } catch (e) {
       failed += 1;
+      // The drain is the only path on which a PERSISTENT failure recurs —
+      // a lookup that throws (a paused database) throws again every night —
+      // and the single-row path's log line lives in `handleRequest`, which
+      // the drain never reaches. Swallowing here left nothing on the row and
+      // nothing in the log until the row aged out (adversarial review on PR
+      // #92); one line per row, with the cause, and the drain carries on.
+      logHandledError({
+        fn: "send-notification",
+        message: "drain: email delivery threw",
+        cause: e,
+        context: { notification_id: row.id, channel: "email", ...(e instanceof HttpError ? e.context : {}) },
+      });
     }
   }
   return { drained: ids.length, sent, failed, pushSent, pushFailed };
