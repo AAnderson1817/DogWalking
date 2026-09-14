@@ -11,13 +11,16 @@
 // runtime further along. Keep it a leaf: an import added here is what breaks
 // the gate, and the gate is the only thing tying the three copies together.
 //
-// `T12:00:00Z`, not a bare date: `new Date("2026-07-04")` is UTC midnight,
-// which in every timezone west of Greenwich is still Friday — so a client in
-// Chicago would be quoted the weekday price for a Saturday walk. Noon UTC is
-// the same calendar day everywhere, and `getUTCDay` reads it back without the
-// device's zone in the way. Postgres reads `isodow` off the DATE and has no
-// such trap; the DST cases in `scripts/walk-cost-cases.txt` are what keep the
-// two answering alike across the transitions.
+// `T12:00:00Z` + `getUTCDay`: the calendar day of the DATE, whatever zone
+// the device is in. The trap is a LOCAL read — `new Date(isoDate).getDay()`
+// is UTC midnight read back in the device's zone, which is still Friday for
+// a Saturday walk everywhere west of Greenwich, so a client in Chicago would
+// be quoted the weekday price. `getUTCDay` reads the same day everywhere;
+// the noon suffix keeps the instant clear of both edges of the day (the
+// `format.ts` convention) and is immaterial under a UTC read. Postgres reads
+// `isodow` off the DATE and has no such trap. Gate 8d pins this by running
+// the TypeScript side under two zones either side of the day boundary — the
+// cases in `scripts/walk-cost-cases.txt` cannot see a zone themselves.
 
 /** Effective credit cost: `creditCost`, plus `surcharge` when `isoDate` (YYYY-MM-DD) is a Saturday or Sunday. */
 export function weekendWalkCost(creditCost: number, surcharge: number, isoDate: string): number {

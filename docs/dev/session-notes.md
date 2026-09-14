@@ -200,8 +200,8 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   test imports it — and the whole reason to split a `deps.ts` out of an
   `index.ts` is that importing `index.ts` runs `serveFunction` and binds a
   port. Hoist every `Deno.env.get` into `index.ts` and pass a config object.
-  `push_deps.ts` and `deps.ts` are the two worked examples; backlog item 1
-  asks for the same seam on two more (`billing-portal`, `connect-onboarding`).
+  `push_deps.ts`, `deps.ts`, `billing-portal/handler.ts` and
+  `connect-onboarding/handler.ts` are the worked examples.
 - **A scan OVER edge code lives in vitest, not deno.** A gate that reads
   `supabase/functions/*.ts` as text — `select-columns.test.ts`,
   `discarded-errors.test.ts` — is a `scripts/**/*.test.ts` file in the node
@@ -210,6 +210,35 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   `ci.yml`/`SKILL.md`/`validate.sh`, and `app` already depends on
   `typescript` when a real parser is wanted. Deno tests DRIVE the edge code;
   vitest scripts READ it.
+
+- **`${#arr[@]}` on an EMPTY associative array is "unbound" under `set -u`
+  in bash 5.2.** `scripts/check-walk-cost-parity.sh` died with `trg: unbound
+  variable` on a dead database — exit non-zero, and the named count sentence
+  never printed. Count by hand, or read entries as `${arr[$k]-}`.
+- **A sabotage that goes red on TYPECHECK is red for the wrong reason.**
+  Deleting a refusal from a handler leaves the row possibly null, and
+  `deno check` fails before the test runs. Rewrite the sabotage so it
+  compiles and the red is the test's own sentence; three of the handler-seam
+  sabotages needed this.
+- **`assertEquals` on two Error objects cannot fail** — it compares `{}` to
+  `{}`. To pin that a raw error propagates un-wrapped, assert identity
+  (`err === boom`).
+- **Two worktrees cannot share the e2e dev server.** `playwright.config.mjs`
+  starts `npm run dev` on 5173 and REUSES an existing one outside CI, so a
+  second validate run in another worktree either kills the first's server or
+  is served the other tree. `E2E_BASE_URL` disables the managed server
+  entirely — set it only for a server you started on that port yourself.
+  Serialise the runs instead.
+- **Agents validating in parallel need their own Postgres.** `db reset` on a
+  shared cluster tears the other run's database out from under it; give each
+  run a cluster on its own port (its own `PGDATA`) and point `LOCAL_DB_URL`
+  at it.
+- **A gate that runs in the caller's zone pins nothing about zones.** CI runs
+  in UTC, where a leaf that reads the LOCAL day (`new Date(d).getDay()`)
+  answers every date correctly; gate 8d runs its TypeScript side under
+  `Etc/GMT+12` and `Etc/GMT-14` and has the answers script refuse a runtime
+  that ignored `TZ`. A DATE has no zone, so DST-transition cases cannot pin a
+  parse either — the first version of that case file said they did.
 
 ## Verifying things the gates cannot see
 

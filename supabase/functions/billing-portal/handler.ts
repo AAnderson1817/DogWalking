@@ -27,7 +27,7 @@ export interface PortalClientRow {
 export interface BillingPortalDeps {
   /** The caller's clients row, or null when the caller is not a client.
    * Throws HttpError(500, db_error) on a database failure — a failed lookup
-   * is not an absence (backlog item 2, fix(send-lookups)). */
+   * is not an absence (the send-lookups item, `fix(send-lookups)`). */
   getClientForUser(authUserId: string): Promise<PortalClientRow | null>;
   /** stripe.billingPortal.sessions.create on the operator's CONNECTED
    * account: the second argument is Stripe's per-request options and must
