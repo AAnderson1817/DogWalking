@@ -170,11 +170,17 @@ serveFunction(async (req) => {
     // A CACHE write, and the one write in this function that must not throw:
     // Stripe has already accepted the subscription update, and the intent row
     // the webhook applies is already committed. Failing the request here would
-    // tell the operator the change did not happen when it did (and their retry
-    // would mint a second update). So the error is INSPECTED and LOGGED rather
-    // than discarded — it used to be a bare await, so a failed write here was
-    // invisible — and the webhook's own write of `current_period_end` on
-    // `customer.subscription.updated` is what repairs the cache.
+    // tell the operator the change did not happen when it did. The retry
+    // itself would be safe either way — a same-target repeat replays the same
+    // Stripe idempotency key through `fn_record_plan_change_intent` (0018),
+    // and once the webhook has applied the intent the request is refused as
+    // `already_on_plan` before Stripe is touched — so the harm is the
+    // MISREPORT, not a second update (adversarial review on PR #92 corrected
+    // the first version of this comment). So the error is INSPECTED and
+    // LOGGED rather than discarded — it used to be a bare await, so a failed
+    // write here was invisible — and the webhook's own write of
+    // `current_period_end` on `customer.subscription.updated` is what repairs
+    // the cache.
     const { error: cacheErr } = await db.from("clients")
       .update({
         current_period_end: periodEnd ? new Date(periodEnd * 1000).toISOString() : null,

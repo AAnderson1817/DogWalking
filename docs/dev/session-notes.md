@@ -201,7 +201,7 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   `index.ts` is that importing `index.ts` runs `serveFunction` and binds a
   port. Hoist every `Deno.env.get` into `index.ts` and pass a config object.
   `push_deps.ts` and `deps.ts` are the two worked examples; backlog item 1
-  asks for the same seam on three more functions.
+  asks for the same seam on two more (`billing-portal`, `connect-onboarding`).
 - **A scan OVER edge code lives in vitest, not deno.** A gate that reads
   `supabase/functions/*.ts` as text — `select-columns.test.ts`,
   `discarded-errors.test.ts` — is a `scripts/**/*.test.ts` file in the node

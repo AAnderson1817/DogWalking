@@ -9,10 +9,13 @@
 // `overage_deps.ts` shape, twice over.
 //
 // What `send_deps_test.ts` pins is what a mocked `sendEmail` structurally
-// cannot see: the lookups' error handling (a failed query must reject, never
-// read as absence), and — through `send_notification_test.ts`, which injects
-// `makeSendDeps` with a stub fetch — the request options and the fencing of
-// the outcome write.
+// cannot see: every lookup's error handling (a failed query must reject,
+// never read as absence — `getNotification`, `backlogIds`, `getClient`,
+// `getOperator`), the M1 tenant scope on the notification read, and the
+// fencing of the outcome write and the claim release on the stamp.
+// `send_notification_test.ts` drives this wiring with a stub fetch for the
+// one thing that double cannot hold: the Resend request's options, the
+// deadline among them.
 import { HttpError } from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
 import {
@@ -104,7 +107,8 @@ export function makeSendDeps(cfg: SendConfig, fetchImpl: typeof fetch = fetch): 
       // database, a timeout, a JWT hiccup — read as "no such client", and the
       // caller then recorded the TERMINAL skip "client has no email address",
       // permanently cancelling a `payment_failed` email over nothing
-      // (backlog item 2 until this fix). Absence is still absence:
+      // (the send-lookups backlog item, deleted with this fix). Absence is
+      // still absence:
       // `{ data: null, error: null }` resolves null and the caller decides
       // what that means.
       if (error) {

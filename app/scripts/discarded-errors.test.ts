@@ -9,12 +9,16 @@ import { describe, expect, it } from "vitest";
  * from one that succeeded and found nothing.
  *
  * supabase-js reports PostgREST, GoTrue and transport failures in the RESOLVED
- * `{ data, error }` value and never by rejecting — so `const { data } = await
- * db.from(…)` reads a dead database as an empty table. `fix(edge-errors)`
- * recorded the rule and backlog item 2 recorded the consequence: `getClient`
- * in send-notification turned a transient blip into the TERMINAL skip "client
- * has no email address", permanently cancelling a `payment_failed` email. The
- * rule was written down and connected to nothing; this file is the connection.
+ * `{ data, error }` value and never by rejecting (unless a builder carries
+ * `.throwOnError()`, which nothing here uses and this gate refuses — see
+ * below) — so `const { data } = await db.from(…)` reads a dead database as an
+ * empty table. The rule had been stated in this repository's log three times
+ * — `feat(push)`'s fifth and sixteenth Codex rounds (`dropSubscription`,
+ * `noteFailure`) and `money(send-once)`'s deferral of the item this file
+ * closes — and enforced by nothing: `getClient` in send-notification turned
+ * a transient blip into the TERMINAL skip "client has no email address",
+ * permanently cancelling a `payment_failed` email. A rule written down and
+ * connected to nothing; this file is the connection.
  *
  * Parsed, not grepped — and RESOLVED, not name-matched: every identifier
  * goes through the TypeScript checker's symbol, so a same-named variable in
@@ -30,10 +34,12 @@ import { describe, expect, it } from "vitest";
  *                 a `var` re-declaration or a `var` loop variable) and
  *                 before `.error` itself is written through any alias of
  *                 the same object — or `.error` is read straight off the
- *                 awaited expression, or a deferred builder (`let q =
+ *                 awaited expression AND used (consumed in place, or bound
+ *                 to a local that is read afterwards — `const e = (await
+ *                 q).error; return data;` is the destructured discard with
+ *                 more parentheses), or a deferred builder (`let q =
  *                 db.from(…)`) is followed to the statement that awaits it
- *                 and THAT is OK, or the chain ends in `.throwOnError()`,
- *                 which throws instead of resolving an error.
+ *                 and THAT is OK.
  *   PASSED_ON     the whole envelope is returned, or is the expression body
  *                 of an arrow that is NOT a call's argument (a deps-object
  *                 property, say) — a caller reads it. Printed, not failed: a
@@ -46,7 +52,13 @@ import { describe, expect, it } from "vitest";
  *   UNCLASSIFIED  `.then(`, an array literal (`Promise.all([…])`), an arrow
  *                 body that is an inline callback (`ids.map((id) =>
  *                 db.from(…))` — the array nothing reads), an envelope
- *                 variable passed to a call (`console.log(r)`), an
+ *                 variable passed to a call (`console.log(r)`), a chain
+ *                 carrying `.throwOnError()` (it REJECTS with a raw
+ *                 PostgrestError that nothing decides — not one of spec 04's
+ *                 three shapes, and a route around the CI check that every
+ *                 `HttpError(5xx, …)` carries a cause and a context), a
+ *                 builder method referenced and never called
+ *                 (`.delete().throwOnError` — nothing runs), an
  *                 unrecognised receiver, an unrecognised consumer. FAILS —
  *                 a check that cannot classify must say so rather than pass
  *                 by seeing nothing.
@@ -59,27 +71,40 @@ import { describe, expect, it } from "vitest";
  * name in this tree — `keys.auth` (`_lib/webpush.ts`, the push encryption
  * secret) and `sub.auth` (`push_deps.ts`, a subscription row's column) — so
  * for `.auth` the word is not enough and the RECEIVER decides, by the
- * declaration its SYMBOL resolves to: `adminClient()` / `createClient(…)`
- * called inline, a variable initialised from one (at declaration or by a
- * later assignment), or a parameter or variable typed as one, one type
- * alias deep. A receiver declared as anything else is a value and
- * `sub.auth.length` is a healthy read; a receiver whose declaration the
- * gate cannot read — an import, a class member, a destructured parameter,
- * a call that is not a known factory — is UNCLASSIFIED: loud, never
- * skipped. A namespace
- * handed off whole (`const a = db.auth`) is therefore invisible here, the
- * same blind spot as a builder passed to another function; stated, not
- * chased. No `.storage.` call exists anywhere under `supabase/functions/`,
- * so nothing is built for one. For `.from` / `.rpc` the receiver is the
- * supabase client when it is a lowercase identifier — `db`, which every
- * function either creates with `adminClient()` or takes as a parameter typed
- * `ReturnType<typeof adminClient>` / `SupabaseClient` / a structural
- * `{ rpc() }`, and `probe`, a `createClient(…)` in credential-vault — or a
- * direct `adminClient()` / `createClient(…)` call. A CAPITALISED identifier is
- * a global and is not a query: `Uint8Array.from(binary, …)` in
- * `_lib/crypto.ts` and `Array.from(`. Anything else in receiver position is
- * UNCLASSIFIED, never silently skipped. A lowercase receiver that is not a
- * supabase client would therefore produce a loud, named false red — the
+ * declaration its SYMBOL resolves to, in three answers. A CLIENT:
+ * `adminClient()` / `createClient(…)` called inline or awaited, a variable
+ * initialised from one (at declaration or by a later assignment), an alias
+ * of a client — `const authDb = db` — followed transitively (Codex on PR
+ * #92: the first version called an untyped alias a value and skipped it),
+ * or a parameter or variable TYPED as one, one type alias deep. A VALUE,
+ * which needs POSITIVE evidence: a type annotation naming something that is
+ * not a client and is not opaque (`any`, `unknown`, `object`, `{}` say
+ * nothing; `Deps["db"]` and `typeof x` would have to be evaluated), a
+ * literal initialiser, or an alias of a value — so `sub.auth.length` on
+ * `sub: { auth: string }` is a healthy read. Everything else is UNKNOWN: an
+ * untyped parameter, an initialiser the gate cannot read (`deps.db`, a call
+ * that is not a known factory), a destructured binding, an import, a class
+ * member. A GoTrue chain is always CALLED (`.auth.getUser(…)`,
+ * `.auth.admin.createUser(…)`), so on an unknown receiver a `.auth.<member>`
+ * chain that reaches a call is UNCLASSIFIED — loud, never skipped, and
+ * typing the receiver is the remedy — while a bare read (`payload.auth?.
+ * token`) is a field read whatever the receiver is. A namespace handed off
+ * whole (`const a = db.auth`) is therefore invisible here, the same blind
+ * spot as a builder passed to another function; stated, not chased. So is
+ * supabase-js's `auth.throwOnError` client option: it makes `.auth.*` calls
+ * reject instead of resolving an envelope, `_lib/admin.ts` does not set it
+ * and says why, and a call site cannot tell. No `.storage.` call exists
+ * anywhere under `supabase/functions/`, so nothing is built for one. For
+ * `.from` / `.rpc` the receiver is the supabase client when it is a
+ * lowercase identifier — `db`, which every function either creates with
+ * `adminClient()` or takes as a parameter typed `ReturnType<typeof
+ * adminClient>` / `SupabaseClient` / a structural `{ rpc() }`, and `probe`,
+ * a `createClient(…)` in credential-vault — or a direct `adminClient()` /
+ * `createClient(…)` call. A CAPITALISED identifier is a global and is not a
+ * query: `Uint8Array.from(binary, …)` in `_lib/crypto.ts` (`Array.from(` is
+ * pinned by fixture; the tree has none). Anything else in receiver position
+ * is UNCLASSIFIED, never silently skipped. A lowercase receiver that is not
+ * a supabase client would therefore produce a loud, named false red — the
  * reviewable direction — rather than a quiet miss.
  *
  * Reported line: the START of the enclosing statement, in every case. For a
@@ -144,8 +169,24 @@ const QUERY_METHODS = new Set(["from", "rpc"]);
 const CLIENT_FACTORIES = new Set(["adminClient", "createClient"]);
 /** Consuming a builder through a thenable method is a shape this gate does not read. */
 const THENABLE = new Set(["then", "catch", "finally"]);
-/** A chain ending here THROWS on failure; there is no envelope to discard. */
-const THROWING_TERMINALS = new Set(["throwOnError"]);
+/**
+ * A chain carrying this modifier REJECTS with a raw `PostgrestError` instead
+ * of resolving an envelope. That is not one of spec 04's three accepted
+ * shapes: nothing decides the failure, so it reaches `handleRequest`'s catch
+ * as "unhandled error" with no `context` — the H14 shape, and a route around
+ * the CI check that every `HttpError(5xx, …)` carries a cause and a context.
+ * The first version of this gate blessed it as "throws, nothing to discard";
+ * the adversarial review on PR #92 argued the opposite and was right, so it
+ * is REFUSED by name.
+ */
+const REJECTING_MODIFIERS = new Set(["throwOnError"]);
+const REJECTS_REASON = "carries `.throwOnError()`, which rejects with a raw PostgrestError that nothing decides — " +
+  "it would reach `handleRequest` as an unhandled error with no context; bind `error` and throw " +
+  "`HttpError(5xx, …, cause, context)` instead";
+/** `q.delete().throwOnError` / `db.from("x").select`: a method named and never invoked. */
+function uncalledReason(what: string, member: string): string {
+  return `${what}: \`.${member}\` is referenced and never called — nothing runs`;
+}
 
 const COMPILER_OPTIONS: ts.CompilerOptions = {
   noLib: true,
@@ -181,8 +222,11 @@ function programOver(files: Map<string, string>): ts.Program {
 type ReceiverKind = "client" | "global" | "unknown";
 
 function receiverKind(recv: ts.Expression): ReceiverKind {
-  if (ts.isIdentifier(recv)) return /^[A-Z]/.test(recv.text) ? "global" : "client";
-  if (ts.isCallExpression(recv) && ts.isIdentifier(recv.expression) && CLIENT_FACTORIES.has(recv.expression.text)) {
+  // `(db as any).from(…)` is `db.from(…)` with a cast around the receiver.
+  let r: ts.Expression = recv;
+  while (ts.isParenthesizedExpression(r) || ts.isAsExpression(r) || ts.isNonNullExpression(r) || ts.isSatisfiesExpression(r)) r = r.expression;
+  if (ts.isIdentifier(r)) return /^[A-Z]/.test(r.text) ? "global" : "client";
+  if (ts.isCallExpression(r) && ts.isIdentifier(r.expression) && CLIENT_FACTORIES.has(r.expression.text)) {
     return "client";
   }
   return "unknown";
@@ -217,24 +261,46 @@ function isTransparent(p: ts.Node, child: ts.Node): boolean {
     ts.isSatisfiesExpression(p)) && p.expression === child;
 }
 
+interface Chain {
+  top: ts.Node;
+  /** Consumed through `.then(` / `.catch(` / `.finally(`. */
+  thenable?: string;
+  /** Carries an invoked `.throwOnError()`. */
+  rejects?: boolean;
+  /** A builder method referenced and never called, so nothing runs. */
+  uncalled?: string;
+}
+
 /**
  * Walk from a chain's root to its outermost link.
  *
  * `db.from("x").select("y").eq(…).maybeSingle()` is one expression tree with
  * the root call at the bottom; the consumer is whatever holds the top. A
  * `.then(` on the way up ends the walk with a verdict of its own: the value
- * after it is no longer the envelope. A `.throwOnError()` ends it too — the
- * builder throws instead of resolving an error, so there is nothing to bind.
+ * after it is no longer the envelope. A member of the builder is a method,
+ * and a method that is not CALLED runs nothing: `await
+ * db.from("walks").delete().throwOnError;` awaits a function value and the
+ * delete never happens (Codex on PR #92, which found the first version
+ * counting the bare reference as a throwing chain) — so the CALL, not the
+ * name, is what makes a link, and a bare reference ends the walk with a
+ * verdict of its own. An invoked `.throwOnError()` is remembered and refused
+ * by the caller.
  */
-function outermost(node: ts.Node): { top: ts.Node; thenable?: string; throws?: boolean } {
+function outermost(node: ts.Node): Chain {
   let n = node;
-  let throws = false;
+  let rejects = false;
   for (;;) {
     const p: ts.Node = n.parent;
     const m = memberAccess(p);
     if (m && m.receiver === n) {
-      if (THENABLE.has(m.name)) return { top: p, thenable: m.name };
-      if (THROWING_TERMINALS.has(m.name)) throws = true;
+      const next = p.parent;
+      const invoked = ts.isCallExpression(next) && next.expression === p;
+      // A namespace hop — `.auth.admin.createUser(…)`, `.auth.mfa.…` — is a
+      // property, not a method, and the call comes one link later.
+      const hop = memberAccess(next)?.receiver === p;
+      if (!invoked && !hop) return { top: p, uncalled: m.name };
+      if (invoked && THENABLE.has(m.name)) return { top: p, thenable: m.name };
+      if (invoked && REJECTING_MODIFIERS.has(m.name)) rejects = true;
       n = p;
       continue;
     }
@@ -242,7 +308,20 @@ function outermost(node: ts.Node): { top: ts.Node; thenable?: string; throws?: b
     if (isTransparent(p, n)) { n = p; continue; }
     // `q = cond ? q.is(…) : q.eq(…)` — both branches are the same builder.
     if (ts.isConditionalExpression(p) && (p.whenTrue === n || p.whenFalse === n)) { n = p; continue; }
-    return { top: n, throws };
+    return { top: n, rejects };
+  }
+}
+
+/** Does the member chain above `n` reach a call — `n.x(…)`, `n.x.y(…)` — before it ends? */
+function chainIsCalled(n: ts.Node): boolean {
+  let cur: ts.Node = n;
+  for (;;) {
+    const p: ts.Node = cur.parent;
+    if (ts.isCallExpression(p) && p.expression === cur) return true;
+    const m = memberAccess(p);
+    if (m && m.receiver === cur) { cur = p; continue; }
+    if (isTransparent(p, cur)) { cur = p; continue; }
+    return false;
   }
 }
 
@@ -506,9 +585,26 @@ function classifyAwaited(ctx: Ctx, awaited: ts.AwaitExpression): Site[] {
   // `(await q).error` read straight off the expression.
   const direct = memberAccess(p);
   if (direct && direct.receiver === n && direct.name === "error") {
-    return isErrorWrite(p as ts.Expression)
-      ? [site(ctx, p, "DISCARDED", "`.error` written on the awaited envelope, never read")]
-      : [site(ctx, p, "OK", "`.error` read directly off the awaited envelope")];
+    if (isErrorWrite(p as ts.Expression)) return [site(ctx, p, "DISCARDED", "`.error` written on the awaited envelope, never read")];
+    // The error VALUE is what is read here, so what HOLDS it decides
+    // (adversarial review on PR #92, which showed the first version blessing
+    // every read): a bare `(await q).error;` statement is a no-op, and a
+    // local it is bound to must be read afterwards, exactly as a destructured
+    // `error` must — `const e = (await q).error; return data;` is `const {
+    // error } = await q; return data;` with more parentheses.
+    let holder: ts.Node = p;
+    while (isTransparent(holder.parent, holder)) holder = holder.parent;
+    const h = holder.parent;
+    if (ts.isExpressionStatement(h)) {
+      return [site(ctx, p, "DISCARDED", "`.error` read off the awaited envelope and dropped — a statement that does nothing")];
+    }
+    const bound = ts.isVariableDeclaration(h) && h.initializer === holder && ts.isIdentifier(h.name) ? h.name
+      : ts.isBinaryExpression(h) && h.operatorToken.kind === ts.SyntaxKind.EqualsToken && h.right === holder && ts.isIdentifier(h.left) ? h.left
+      : null;
+    if (bound && !isReadAfter(ctx, bound)) {
+      return [site(ctx, p, "DISCARDED", `\`.error\` bound as \`${bound.text}\` and never read in this function`)];
+    }
+    return [site(ctx, p, "OK", "`.error` read directly off the awaited envelope")];
   }
   if (ts.isVariableDeclaration(p) && p.initializer === n) {
     if (ts.isObjectBindingPattern(p.name)) {
@@ -575,12 +671,14 @@ function followBuilder(ctx: Ctx, nameNode: ts.Identifier, declaration: ts.Node):
     visit(container);
     for (const use of refs) {
       if (use.pos <= nameNode.pos) continue;
-      const { top, thenable, throws } = outermost(use);
-      if (thenable) { out.push(site(ctx, top, "UNCLASSIFIED", `builder \`${name}\` consumed via .${thenable}()`)); continue; }
+      const chain = outermost(use);
+      const { top } = chain;
+      if (chain.thenable) { out.push(site(ctx, top, "UNCLASSIFIED", `builder \`${name}\` consumed via .${chain.thenable}()`)); continue; }
+      if (chain.uncalled) { out.push(site(ctx, top, "UNCLASSIFIED", uncalledReason(`builder \`${name}\``, chain.uncalled))); continue; }
       const p = top.parent;
       if (ts.isBinaryExpression(p) && p.right === top && ts.isIdentifier(p.left) && symbolOf(ctx.checker, p.left) === sym) continue;
       if (ts.isBinaryExpression(p) && p.left === top && isAssignmentKind(p.operatorToken.kind)) continue;
-      if (throws) { out.push(site(ctx, top, "OK", `builder \`${name}\` ends in .throwOnError() — a failure throws, no envelope to discard`)); continue; }
+      if (chain.rejects) { out.push(site(ctx, top, "UNCLASSIFIED", `builder \`${name}\` ${REJECTS_REASON}`)); continue; }
       out.push(...classifyTop(ctx, top, `builder \`${name}\` (line ${lineOf(ctx.sf, declaration)}) `));
     }
   }
@@ -610,60 +708,117 @@ function classifyTop(ctx: Ctx, top: ts.Node, prefix = ""): Site[] {
 
 type Declared = "client" | "value" | "unknown";
 
-/** A type annotation's text, one alias deep: `type Db = ReturnType<typeof adminClient>` counts. */
-function typeText(checker: ts.TypeChecker, t: ts.TypeNode | undefined): string {
-  if (!t) return "";
-  if (ts.isTypeReferenceNode(t) && ts.isIdentifier(t.typeName)) {
-    const sym = checker.getSymbolAtLocation(t.typeName);
-    const alias = sym?.declarations?.find(ts.isTypeAliasDeclaration);
-    if (alias) return alias.type.getText();
-  }
-  return t.getText();
-}
-
 const CLIENT_TYPE = /SupabaseClient|adminClient|createClient/;
+
+/**
+ * What a type annotation says about a receiver. A client by name; a VALUE
+ * only on positive evidence — a name (`PushKeys`), a shape (`{ auth: string
+ * }`), a primitive, an array, a tuple, a literal; and nothing at all for a
+ * type that says nothing (`any`, `unknown`, `object`, `{}`) or that the gate
+ * would have to evaluate to read (`Deps["db"]`, `typeof x`, a conditional or
+ * mapped type).
+ */
+function declaredByType(ctx: Ctx, t: ts.TypeNode | undefined): Declared {
+  if (!t) return "unknown";
+  let node: ts.TypeNode = t;
+  if (ts.isTypeReferenceNode(t) && ts.isIdentifier(t.typeName)) {
+    const sym = ctx.checker.getSymbolAtLocation(t.typeName);
+    const alias = sym?.declarations?.find(ts.isTypeAliasDeclaration);
+    if (alias) node = alias.type;
+  }
+  if (CLIENT_TYPE.test(node.getText())) return "client";
+  if (ts.isParenthesizedTypeNode(node)) return declaredByType(ctx, node.type);
+  if (ts.isUnionTypeNode(node) || ts.isIntersectionTypeNode(node)) {
+    const parts = node.types.map((m) => declaredByType(ctx, m));
+    return parts.includes("client") ? "client" : parts.every((d) => d === "value") ? "value" : "unknown";
+  }
+  if (ts.isTypeReferenceNode(node) || ts.isArrayTypeNode(node) || ts.isTupleTypeNode(node) || ts.isLiteralTypeNode(node)) return "value";
+  if (ts.isTypeLiteralNode(node)) return node.members.length === 0 ? "unknown" : "value";
+  switch (node.kind) {
+    case ts.SyntaxKind.StringKeyword:
+    case ts.SyntaxKind.NumberKeyword:
+    case ts.SyntaxKind.BooleanKeyword:
+    case ts.SyntaxKind.BigIntKeyword:
+    case ts.SyntaxKind.SymbolKeyword:
+    case ts.SyntaxKind.NeverKeyword:
+    case ts.SyntaxKind.VoidKeyword:
+    case ts.SyntaxKind.UndefinedKeyword:
+    case ts.SyntaxKind.NullKeyword:
+      return "value";
+    default:
+      return "unknown";
+  }
+}
 
 /**
  * Is this receiver a supabase client, by how its BINDING is declared? The
  * checker resolves the identifier to its symbol, so an earlier same-named
- * declaration in a nested block is not consulted (Codex on PR #92). A
- * factory call, a variable initialised from one (at declaration, or by a
- * later `db = adminClient()`), or a parameter or variable typed as one — one
- * alias deep — is a client; anything else declared in the file is a value;
- * a receiver with no declaration the checker can see is unknown.
+ * declaration in a nested block is not consulted (Codex on PR #92).
+ *
+ * Three answers, and "value" needs POSITIVE evidence. The first version
+ * answered "value" for anything that was not visibly a client, which made
+ * the `.auth` rule fail OPEN — no site, no red — for an untyped parameter,
+ * `const db = deps.db`, `const db = makeClient()`, `db: any`, and an untyped
+ * alias of a real client (`const authDb = db`: Codex on PR #92, after the
+ * adversarial review had named the class). Now:
+ *   client   a factory call, inline or awaited; a variable initialised from
+ *            one (at declaration or by a later assignment); an alias of a
+ *            client, transitively, through casts; a parameter or variable
+ *            TYPED as one, one type alias deep.
+ *   value    a type annotation that is positive evidence (`declaredByType`);
+ *            a literal initialiser; an alias of a value — every source the
+ *            gate can read must be one.
+ *   unknown  everything else: an untyped parameter, an initialiser the gate
+ *            cannot read (a property, a call that is not a known factory, a
+ *            conditional), a destructured binding with no readable client
+ *            type, an import, a class member, a cycle of aliases.
  */
-function declaredAsClient(ctx: Ctx, recv: ts.Expression): Declared {
-  if (ts.isCallExpression(recv) && ts.isIdentifier(recv.expression) && CLIENT_FACTORIES.has(recv.expression.text)) {
-    return "client";
-  }
-  if (!ts.isIdentifier(recv)) return "unknown";
+function declaredAsClient(ctx: Ctx, recv: ts.Expression, seen = new Set<ts.Symbol>()): Declared {
+  const byExpression = (e: ts.Expression | undefined): Declared => {
+    if (!e) return "unknown";
+    if (ts.isAsExpression(e) || ts.isSatisfiesExpression(e)) {
+      const d = declaredByType(ctx, e.type);
+      return d === "unknown" ? byExpression(e.expression) : d;
+    }
+    if (ts.isParenthesizedExpression(e) || ts.isNonNullExpression(e) || ts.isAwaitExpression(e)) return byExpression(e.expression);
+    if (ts.isCallExpression(e) && ts.isIdentifier(e.expression) && CLIENT_FACTORIES.has(e.expression.text)) return "client";
+    if (ts.isIdentifier(e)) return declaredAsClient(ctx, e, seen);
+    if (ts.isLiteralExpression(e) || ts.isObjectLiteralExpression(e) || ts.isArrayLiteralExpression(e) ||
+      ts.isTemplateExpression(e) || e.kind === ts.SyntaxKind.TrueKeyword || e.kind === ts.SyntaxKind.FalseKeyword ||
+      e.kind === ts.SyntaxKind.NullKeyword) return "value";
+    return "unknown";
+  };
+  // Inline: `adminClient().auth`, `(db as any).auth`, `keysOf().auth`, `this.db.auth`.
+  if (!ts.isIdentifier(recv)) return byExpression(recv);
   const sym = symbolOf(ctx.checker, recv);
-  const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
+  if (!sym || seen.has(sym)) return "unknown";
+  seen.add(sym);
+  const decl = sym.valueDeclaration ?? sym.declarations?.[0];
   if (!decl) return "unknown";
-  const isFactory = (e: ts.Expression | undefined): boolean =>
-    !!e && ((ts.isCallExpression(e) && ts.isIdentifier(e.expression) && CLIENT_FACTORIES.has(e.expression.text)) ||
-      (ts.isAwaitExpression(e) && isFactory(e.expression)));
   if (ts.isVariableDeclaration(decl)) {
-    if (isFactory(decl.initializer)) return "client";
-    if (CLIENT_TYPE.test(typeText(ctx.checker, decl.type))) return "client";
-    // `let db; … db = adminClient();`
-    let assignedFactory = false;
+    const byType = declaredByType(ctx, decl.type);
+    if (byType !== "unknown") return byType;
+    // Every SOURCE of the variable: its initialiser and each later `db = …`.
+    // A factory anywhere wins (it is what the variable is for); a value only
+    // when every source the gate can read is one.
+    const sources: Declared[] = decl.initializer ? [byExpression(decl.initializer)] : [];
     const visit = (n: ts.Node) => {
       if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(n.left) &&
-        symbolOf(ctx.checker, n.left) === sym && isFactory(n.right)) assignedFactory = true;
+        symbolOf(ctx.checker, n.left) === sym) sources.push(byExpression(n.right));
       ts.forEachChild(n, visit);
     };
     visit(ctx.sf);
-    return assignedFactory ? "client" : "value";
+    if (sources.includes("client")) return "client";
+    return sources.length > 0 && sources.every((d) => d === "value") ? "value" : "unknown";
   }
-  if (ts.isParameter(decl)) return CLIENT_TYPE.test(typeText(ctx.checker, decl.type)) ? "client" : "value";
+  if (ts.isParameter(decl)) return declaredByType(ctx, decl.type);
   if (ts.isBindingElement(decl)) {
     // `({ db }: Deps)` — the client is somewhere inside a type the gate
     // cannot read; refuse loudly rather than guess either way.
     let p: ts.Node = decl;
     while (ts.isBindingElement(p) || ts.isObjectBindingPattern(p) || ts.isArrayBindingPattern(p)) p = p.parent;
     const t = ts.isParameter(p) || ts.isVariableDeclaration(p) ? p.type : undefined;
-    return CLIENT_TYPE.test(typeText(ctx.checker, t)) ? "client" : "unknown";
+    return declaredByType(ctx, t) === "client" ? "client" : "unknown";
   }
   // An import, a class member, a function — nothing this gate can read.
   return "unknown";
@@ -683,10 +838,11 @@ function classifyFile(program: ts.Program, sf: ts.SourceFile, file: string): Sit
       sites.push(site(ctx, root, "UNCLASSIFIED", `unrecognised receiver \`${recv.getText(sf)}\``));
       return;
     }
-    const { top, thenable, throws } = outermost(root);
-    if (thenable) { sites.push(site(ctx, top, "UNCLASSIFIED", `query consumed via .${thenable}()`)); return; }
-    if (throws) { sites.push(site(ctx, top, "OK", "chain ends in .throwOnError() — a failure throws, no envelope to discard")); return; }
-    sites.push(...classifyTop(ctx, top));
+    const chain = outermost(root);
+    if (chain.thenable) { sites.push(site(ctx, chain.top, "UNCLASSIFIED", `query consumed via .${chain.thenable}()`)); return; }
+    if (chain.uncalled) { sites.push(site(ctx, chain.top, "UNCLASSIFIED", uncalledReason("query", chain.uncalled))); return; }
+    if (chain.rejects) { sites.push(site(ctx, chain.top, "UNCLASSIFIED", `query ${REJECTS_REASON}`)); return; }
+    sites.push(...classifyTop(ctx, chain.top));
   };
 
   const visit = (n: ts.Node) => {
@@ -702,15 +858,18 @@ function classifyFile(program: ts.Program, sf: ts.SourceFile, file: string): Sit
       ) {
         // `auth` is also a plain FIELD in this tree (the push encryption
         // secret), and `sub.auth.length` is a healthy read of it. So the
-        // word is not enough: the receiver must be DECLARED as a client.
-        // Anything else declared in the file is a value; a receiver with no
-        // visible declaration is UNCLASSIFIED, never silently skipped
-        // (adversarial review on PR #92).
+        // word is not enough: the receiver must be DECLARED as a client, or
+        // declared as a value on positive evidence. A GoTrue call is always
+        // a CALL, so on a receiver that is neither, a chain that reaches one
+        // is UNCLASSIFIED — loud, never skipped (adversarial review and
+        // Codex on PR #92) — while a bare read (`payload.auth?.token`) is a
+        // field read whatever the receiver is.
         const ctx: Ctx = { sf, checker, file, queryLine: lineOf(sf, auth.token), followed };
         const declared = declaredAsClient(ctx, auth.receiver);
         if (declared === "client") seen(n, auth.receiver, auth.token);
-        else if (declared === "unknown") {
-          sites.push(site(ctx, n, "UNCLASSIFIED", `\`.auth\` on \`${auth.receiver.getText(sf)}\`, whose declaration the gate cannot see`));
+        else if (declared === "unknown" && chainIsCalled(n)) {
+          sites.push(site(ctx, n, "UNCLASSIFIED",
+            `\`.auth.<member>(…)\` on \`${auth.receiver.getText(sf)}\`, which is declared as neither a client nor a value`));
         }
       }
     }
@@ -927,7 +1086,54 @@ function g(db: any) { return db.from("clients").select("id"); }`, "fixture.ts");
   return data;
 }`);
     expect(s.verdict).toBe("UNCLASSIFIED");
-    expect(s.reason).toMatch(/whose declaration the gate cannot see/);
+    expect(s.reason).toMatch(/declared as neither a client nor a value/);
+  });
+
+  it("`.auth` receivers: a value needs POSITIVE evidence, and an alias of a client is a client (Codex, PR #92)", () => {
+    // Codex's exact case: an untyped alias of a real client was a "value",
+    // so the chain produced no site and the discarded error passed silently.
+    expect(one(`async function f(token: string) {
+  const db = adminClient();
+  const authDb = db;
+  const { data } = await authDb.auth.getUser(token);
+  return data;
+}`).verdict).toBe("DISCARDED");
+    // Two hops, through casts, and a later assignment from an alias.
+    expect(one(`async function f(token: string) {
+  const db = adminClient();
+  const a = db as unknown;
+  const b = a;
+  let c;
+  c = b;
+  const { data } = await (c as any).auth.getUser(token);
+  return data;
+}`).verdict).toBe("DISCARDED");
+    // Receivers nobody TYPED, on a GoTrue-shaped call, are refused rather
+    // than guessed — the review's finding, one shape at a time: a property,
+    // a call that is not a known factory (awaited or not), an untyped
+    // parameter, an `any`, an indexed-access type.
+    const loud = classifySource(`declare function makeClient(): any;
+async function a(deps: any) { const db = deps.db; const { data } = await db.auth.getUser("t"); return data; }
+async function b() { const db = makeClient(); const { data } = await db.auth.getUser("t"); return data; }
+async function c() { const db = await makeClient(); const { data } = await db.auth.getUser("t"); return data; }
+async function d(db, t) { const { data } = await db.auth.getUser(t); return data; }
+async function e(db: any) { const { data } = await db.auth.getUser("t"); return data; }
+interface Deps { db: unknown }
+async function g(db: Deps["db"]) { const { data } = await (db as any).auth.getUser("t"); return data; }`, "f.ts");
+    expect(loud.map((s) => s.verdict)).toEqual(Array(6).fill("UNCLASSIFIED"));
+    for (const s of loud) expect(s.reason).toMatch(/declared as neither a client nor a value/);
+    // Positive evidence — a named type, a shape, a literal, an alias of one —
+    // makes a call on the `auth` field a healthy read; a bare read is healthy
+    // on ANY receiver.
+    expect(classifySource(`interface PushKeys { auth: string }
+function k(keys: PushKeys) { return keys.auth.replace("=", ""); }
+function r(cfg: { auth: { admin: boolean } }) { return cfg.auth.admin; }
+function q(payload) { return payload.auth?.token; }
+function l() { const keys = { auth: "abc" }; const copy = keys; return copy.auth.slice(1); }
+function u(keys: { auth: string } | null) { return keys?.auth.trim(); }`, "f.ts")).toEqual([]);
+    // The stated false red: an UNTYPED receiver whose `auth` field is called.
+    // Loud, and typing the receiver is the remedy.
+    expect(one(`function m(keys) { return keys.auth.replace("=", ""); }`).verdict).toBe("UNCLASSIFIED");
   });
 
   it("element-access spelling `db[\"from\"](…)` is the same query", () => {
@@ -1203,9 +1409,12 @@ async function h({ db }: { db: unknown }, token: string) { const { data } = awai
     expect(loud.map((s) => s.verdict)).toEqual(["UNCLASSIFIED", "UNCLASSIFIED"]);
   });
 
-  it("a chain ending in .throwOnError() has no envelope to discard", () => {
-    // postgrest-js throws on failure here, so a bare await is the correct
-    // shape and must not be a red on healthy code.
+  it("a chain carrying .throwOnError() is REFUSED: it rejects with a raw PostgrestError nothing decides", () => {
+    // postgrest-js rejects on failure here, so there is no envelope — and no
+    // `HttpError` either: the rejection lands in `handleRequest`'s catch as
+    // "unhandled error" with no context, the H14 shape, one step around the
+    // CI check on `HttpError(5xx, …)` arity. The first version of this gate
+    // blessed it; the adversarial review on PR #92 showed why that is wrong.
     const sites = classifySource(`async function f(db: any) {
   await db.from("a").update({ x: 1 }).eq("id", "k").throwOnError();
   let q = db.from("b").select("id");
@@ -1213,7 +1422,37 @@ async function h({ db }: { db: unknown }, token: string) { const { data } = awai
   const { data } = await q.throwOnError();
   return data;
 }`, "f.ts");
-    expect(sites.map((s) => s.verdict)).toEqual(["OK", "OK"]);
+    expect(sites.map((s) => s.verdict)).toEqual(["UNCLASSIFIED", "UNCLASSIFIED"]);
+    for (const s of sites) expect(s.reason).toMatch(/`\.throwOnError\(\)`, which rejects with a raw PostgrestError/);
+  });
+
+  it("a builder method referenced and never called runs nothing (Codex, PR #92)", () => {
+    // `await db.from("walks").delete().throwOnError;` awaits a function value:
+    // the delete never executes, TypeScript accepts it, and the first version
+    // read the bare name as a throwing chain and said OK.
+    const s = one(`async function f(db: any) { await db.from("walks").delete().throwOnError; }`);
+    expect(s.verdict).toBe("UNCLASSIFIED");
+    expect(s.reason).toMatch(/`\.throwOnError` is referenced and never called — nothing runs/);
+    expect(one(`async function f(db: any) { const rows = await db.from("walks").select; return rows; }`).reason)
+      .toMatch(/query: `\.select` is referenced and never called/);
+    const viaBuilder = classifySource(`async function f(db: any) { let q = db.from("b").select("id"); const fn = q.eq; return fn; }`, "f.ts");
+    expect(viaBuilder.map((s) => s.reason)).toEqual([expect.stringMatching(/builder `q`: `\.eq` is referenced and never called/)]);
+  });
+
+  it("`.error` read off the awaited envelope must still be USED (adversarial review on PR #92)", () => {
+    // The first version blessed every direct read. `const e = (await
+    // q).error; return data;` is the destructured discard with more
+    // parentheses, and a bare `(await q).error;` is a statement that does
+    // nothing; both go through the same rule a destructured `error` does.
+    expect(one(`async function f(db: any) { const e = (await db.from("a").select("id")).error; return 1; }`).reason)
+      .toMatch(/`\.error` bound as `e` and never read/);
+    expect(one(`async function f(db: any) { (await db.from("a").select("id")).error; return 1; }`).reason)
+      .toMatch(/read off the awaited envelope and dropped/);
+    expect(one(`async function f(db: any) { let e = (await db.from("a").select("id")).error; e = null; if (e) throw e; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { let e: unknown; e = (await db.from("a").select("id")).error; if (e) throw e; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const e = (await db.from("a").select("id")).error; if (e) throw e; }`).verdict).toBe("OK");
+    expect(one(`declare function log(x: unknown): void;
+async function f(db: any) { log((await db.from("a").select("id")).error); }`).verdict).toBe("OK");
   });
 
   it("parenthesised, cast and non-null awaits are transparent; `.error` read directly is a read", () => {

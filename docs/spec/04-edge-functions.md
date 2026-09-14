@@ -30,8 +30,10 @@ logging.
 
 ### The error is in the RESOLVED value
 
-supabase-js never rejects for a failed query. A PostgREST refusal, a statement
-timeout, a reset connection — all of them come back in the resolved
+supabase-js does not reject for a failed query — a builder carrying
+`.throwOnError()` would, and nothing here uses one; the gate below refuses
+it. A PostgREST refusal, a statement timeout, a reset connection — all of
+them come back in the resolved
 `{ data, error }`, with `data` null. So a call whose `error` is discarded is
 **indistinguishable from one that succeeded and found nothing**, and the
 caller then acts on an absence that never happened. `send-notification`'s
@@ -44,8 +46,8 @@ Every envelope is looked at, in one of three shapes:
 | Shape | When |
 | --- | --- |
 | bind `error`, throw `HttpError(5xx, …, cause, context)` | the default — the request cannot mean anything without the row |
-| bind `error`, `logHandledError({ fn, message, cause, context })`, carry on | a best-effort write where a throw would MISREPORT: the change-plan period cache runs after Stripe has already moved, so a 500 there tells the operator the change failed when it did not. One line, the same field names as `logServerError` plus `handled: true` and minus `request_id` (not reachable from a handler), so one log search finds both kinds; the drain's per-row catch and the claim-release failure write the same line |
-| return the envelope to a caller that inspects it | a helper whose caller owns the decision |
+| bind `error`, `logHandledError({ fn, message, cause, context })`, carry on | a best-effort write where a throw would MISREPORT: the change-plan period cache runs after Stripe has already moved, so a 500 there tells the operator the change failed when it did not. One line: `fn`, `message`, `cause` and `context` under `logServerError`'s names, plus `handled: true`, minus `request_id` (not reachable from a handler) and minus `status` / `code` (nothing was thrown), so one log search finds both kinds; the drain's per-row catch and the claim-release failure write the same line |
+| return the envelope to a caller that inspects it | a helper whose caller owns the decision — the envelope travels UP. A helper that takes the whole envelope DOWN (`unwrap(r)`) is the refused shape below; one that takes the error VALUE (`causeCode(error)` in credential-vault) is an ordinary read |
 
 `app/scripts/discarded-errors.test.ts` is the gate: it parses every
 `.from(` / `.rpc(` / `.auth.<member>` chain in `supabase/functions/` (the
@@ -69,18 +71,31 @@ assignment (`({ r } = other)`) has written it, and, for a destructured
 r`) is followed as the same envelope, transitively, and a `.error` write
 through any alias — `r.error = …` or `r["error"] = …` — closes the window
 for all of them. `(await q).error`, `((await q) as T)` and `(await q)!` are
-read through the wrapper, and a chain ending in `.throwOnError()` has no
-envelope to discard.
+read through the wrapper — and the error value read that way must itself be
+USED: a local it is bound to must be read afterwards, and a bare `(await
+q).error;` is a no-op. A chain carrying `.throwOnError()` is REFUSED, not
+blessed: postgrest-js then rejects with a raw `PostgrestError` that nothing
+decides, which lands in `handleRequest`'s catch as an unhandled error with no
+context — the H14 shape, one step around the CI check that every
+`HttpError(5xx, …)` carries a cause and a context. So is a builder method
+referenced and never called (`.delete().throwOnError` — nothing runs).
 What the gate cannot see it refuses loudly rather than passing: an envelope handed to
 a call (`console.log(r)`), an arrow body that is an inline callback
 (`ids.map((id) => db.from(…))`, whose array nothing reads), a `.then(`, a
 `Promise.all([…])`. `.auth` is also a plain field name in this tree, so a
 `.auth.<member>` chain is a query only when its receiver is declared as a
-client (`adminClient()` / `createClient(…)`, or a variable or parameter
-typed as one); a receiver with no visible declaration is refused, never
-skipped. What it proves is that the error is **looked at** — `if (error)
-return null` passes it — so what is DONE with the error is pinned per site
-by the deno tests (`send_deps_test.ts` for the two lookups). Its stated
+client (`adminClient()` / `createClient(…)`, a variable initialised from one
+or from another client — an alias is followed, transitively — or a variable
+or parameter typed as one). A receiver counts as a plain value only on
+POSITIVE evidence: a type annotation that names something (`any`, `unknown`,
+`{}` and an indexed-access type say nothing), a literal, or an alias of one.
+Anything else — an untyped parameter, `const db = deps.db`, a call that is
+not a known factory — is refused when the chain reaches a call, never
+skipped, since a GoTrue call is always a call; a bare read
+(`payload.auth?.token`) is a field read on any receiver. What it proves is
+that the error is **looked at** — `if (error) return null` passes it — so
+what is DONE with the error is pinned per site by the deno tests
+(`send_deps_test.ts` for the four lookups and the M1 scope). Its stated
 blind spot: an envelope RETURNED to a caller is not followed into that
 caller.
 
@@ -1219,10 +1234,13 @@ returned the cached plan and the ids could never differ.
 3. `clients.current_period_end` is refreshed from the updated subscription.
    This is a **best-effort cache write** made after Stripe has already moved,
    so its error is bound and logged with `safeCause`, never thrown: a 500
-   here would tell the operator the change failed when it did not, and their
-   retry would mint a second update. The webhook's checked write of the same
-   column on `customer.subscription.updated` is the source of truth and
-   repairs the cache.
+   here would tell the operator the change failed when it did not. The retry
+   itself would be safe — a same-target repeat replays the same Stripe
+   idempotency key (`0018`), and once the webhook has applied the intent the
+   request is refused as `already_on_plan` before Stripe is touched — so the
+   harm is the misreport, not a second update. The webhook's checked write
+   of the same column on `customer.subscription.updated` is the source of
+   truth and repairs the cache.
 4. `customer.subscription.updated` arrives and calls
    `fn_apply_plan_change_intent(intent, event_id)`, which applies
    `fn_change_plan` and flips the intent to `applied`. `stripe_event_id` is
