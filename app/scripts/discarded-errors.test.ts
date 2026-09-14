@@ -235,8 +235,10 @@ function declaresHere(scope: ts.Node, name: string): boolean {
     return scope.variableDeclaration !== undefined && bindsName(scope.variableDeclaration.name, name);
   }
   if (ts.isForStatement(scope) || ts.isForOfStatement(scope) || ts.isForInStatement(scope)) {
+    // Only a `let`/`const` loop variable is the loop's own; `for (var r of …)`
+    // re-assigns the FUNCTION's `r` on every iteration (Codex on PR #92).
     const init = scope.initializer;
-    return init !== undefined && ts.isVariableDeclarationList(init) &&
+    return init !== undefined && ts.isVariableDeclarationList(init) && isBlockScoped(init) &&
       init.declarations.some((d) => bindsName(d.name, name));
   }
   const statements: ts.NodeArray<ts.Statement> = ts.isSourceFile(scope)
@@ -245,26 +247,50 @@ function declaresHere(scope: ts.Node, name: string): boolean {
   return statements.some((st) =>
     (ts.isVariableStatement(st) &&
       // `let`/`const` are block-scoped; a `var` here belongs to the function.
-      (st.declarationList.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) !== 0 &&
+      isBlockScoped(st.declarationList) &&
       st.declarationList.declarations.some((d) => bindsName(d.name, name))) ||
     ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) && st.name?.text === name)
   );
 }
 
-/** Is there a `var name` anywhere in this function's body outside nested functions? */
+/** `let` or `const` (block-scoped), as opposed to `var` (function-scoped). */
+function isBlockScoped(list: ts.VariableDeclarationList): boolean {
+  return (list.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) !== 0;
+}
+
+/** Is there a `var name` anywhere in this function — a statement or a loop initialiser — outside nested functions? */
 function varDeclaredIn(fn: ts.SignatureDeclaration, name: string): boolean {
   let found = false;
   const visit = (n: ts.Node) => {
     if (found) return;
     if (n !== fn && ts.isFunctionLike(n)) return;
-    if (
-      ts.isVariableStatement(n) && (n.declarationList.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) === 0 &&
-      n.declarationList.declarations.some((d) => bindsName(d.name, name))
-    ) { found = true; return; }
+    if (ts.isVariableDeclarationList(n) && !isBlockScoped(n) && n.declarations.some((d) => bindsName(d.name, name))) {
+      found = true;
+      return;
+    }
     ts.forEachChild(n, visit);
   };
   visit(fn);
   return found;
+}
+
+/**
+ * Every way a statement can WRITE `name` other than `name = …`: a `var`
+ * re-declaration with an initialiser (`var r = other`, anywhere in the
+ * function, a nested block included), a `var` loop variable (`for (var r of
+ * rows)`), and a bare loop target (`for (r of rows)`). Each overwrites the
+ * binding the envelope lives in (Codex on PR #92).
+ */
+function writesName(n: ts.Node, name: string): number | null {
+  if (ts.isVariableDeclaration(n) && n.initializer && ts.isVariableDeclarationList(n.parent) &&
+    !isBlockScoped(n.parent) && bindsName(n.name, name)) return n.name.pos;
+  if ((ts.isForOfStatement(n) || ts.isForInStatement(n))) {
+    const init = n.initializer;
+    if (ts.isVariableDeclarationList(init) && !isBlockScoped(init) &&
+      init.declarations.some((d) => bindsName(d.name, name))) return init.pos;
+    if (ts.isIdentifier(init) && init.text === name) return init.pos;
+  }
+  return null;
 }
 
 /**
@@ -306,6 +332,8 @@ function nextWriteTo(name: string, scope: ts.Node, after: number): number {
       ts.isBinaryExpression(n) && isAssignmentKind(n.operatorToken.kind) &&
       ts.isIdentifier(n.left) && n.left.text === name && n.left.pos > after && n.left.pos < next
     ) next = n.left.pos;
+    const w = writesName(n, name);
+    if (w !== null && w > after && w < next) next = w;
     ts.forEachChild(n, visit);
   };
   visit(scope);
@@ -380,43 +408,55 @@ function site(ctx: Ctx, at: ts.Node, verdict: Verdict, reason: string): Site {
 /** `const r = await q` or `r = await q`: is `r.error` read later in this function? */
 function followEnvelopeVar(ctx: Ctx, nameNode: ts.Identifier, at: ts.Node): Site[] {
   const name = nameNode.text;
-  const scope = declaringScope(nameNode);
-  // Only the uses BEFORE the variable is overwritten can see this envelope:
-  // `let r = await a; r = await b; if (r.error) …` reads b's error, and a's
-  // is discarded (adversarial review on PR #92). Writing the PROPERTY closes
-  // the window the same way: after `r.error = null` every later read sees
-  // the null (Codex on PR #92).
-  const overwritten = nextWriteTo(name, scope, nameNode.pos);
-  const all = usesOf(name, scope).filter((u) => u.pos > nameNode.pos && u.pos < overwritten);
   const errorAccess = (u: ts.Identifier): ts.PropertyAccessExpression | null =>
     ts.isPropertyAccessExpression(u.parent) && u.parent.expression === u && u.parent.name.text === "error" ? u.parent : null;
-  const errorWrittenAt = Math.min(...all.map((u) => { const a = errorAccess(u); return a && isErrorWrite(a) ? u.pos : Infinity; }));
-  const uses = all.filter((u) => u.pos <= errorWrittenAt);
-  const reads = uses.some((u) => { const a = errorAccess(u); return a !== null && !isErrorWrite(a); });
-  if (reads) return [site(ctx, at, "OK", `envelope in \`${name}\`, \`.error\` read later`)];
-  // An ALIAS — `const res = r;` — is the same envelope under another name, so
-  // it is followed the same way (a copy nobody reads is still a discard).
-  const alias = uses.find((u) => ts.isVariableDeclaration(u.parent) && u.parent.initializer === u && ts.isIdentifier(u.parent.name));
-  if (alias && !ctx.followed.has(alias.parent)) {
-    ctx.followed.add(alias.parent);
-    const via = followEnvelopeVar(ctx, (alias.parent as ts.VariableDeclaration).name as ts.Identifier, at);
-    if (via.some((v) => v.verdict === "OK")) return [site(ctx, at, "OK", `envelope in \`${name}\`, read through alias \`${(alias.parent as ts.VariableDeclaration).name.getText()}\``)];
+
+  // The envelope GROUP: the variable, plus every alias (`const copy = r`)
+  // reached from it, transitively. All of them name ONE object, so a write
+  // to `.error` through any member closes the window for every member
+  // (Codex on PR #92: `const copy = r; r.error = null; if (copy.error) …`
+  // reads the null). Each member's own window still ends where THAT
+  // variable is overwritten (`let r = await a; r = await b`).
+  interface Member { id: ts.Identifier; uses: ts.Identifier[] }
+  const members: Member[] = [];
+  const queue: ts.Identifier[] = [nameNode];
+  const seenDecl = new Set<ts.Node>();
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    const scope = declaringScope(id);
+    const overwritten = nextWriteTo(id.text, scope, id.pos);
+    const uses = usesOf(id.text, scope).filter((u) => u.pos > id.pos && u.pos < overwritten);
+    members.push({ id, uses });
+    for (const u of uses) {
+      const d = u.parent;
+      if (ts.isVariableDeclaration(d) && d.initializer === u && ts.isIdentifier(d.name) && !seenDecl.has(d)) {
+        seenDecl.add(d);
+        queue.push(d.name);
+      }
+    }
   }
-  const destructured = uses.some((u) =>
+  const allUses = members.flatMap((m) => m.uses);
+  const errorWrittenAt = Math.min(...allUses.map((u) => { const a = errorAccess(u); return a && isErrorWrite(a) ? u.pos : Infinity; }));
+  const uses = allUses.filter((u) => u.pos < errorWrittenAt);
+  const via = (u: ts.Identifier) => u.text === name ? "" : ` (through alias \`${u.text}\`)`;
+
+  const read = uses.find((u) => { const a = errorAccess(u); return a !== null && !isErrorWrite(a); });
+  if (read) return [site(ctx, at, "OK", `envelope in \`${name}\`, \`.error\` read later${via(read)}`)];
+  const destructured = uses.find((u) =>
     ts.isVariableDeclaration(u.parent) && u.parent.initializer === u &&
     ts.isObjectBindingPattern(u.parent.name) && bindsError(u.parent.name).verdict === "OK");
-  if (destructured) return [site(ctx, at, "OK", `envelope in \`${name}\`, \`error\` destructured later`)];
-  const passedOn = uses.some((u) => {
+  if (destructured) return [site(ctx, at, "OK", `envelope in \`${name}\`, \`error\` destructured later${via(destructured)}`)];
+  const passedOn = uses.find((u) => {
     const p = u.parent;
     return ts.isReturnStatement(p) || (ts.isArrowFunction(p) && p.body === u && !inlineCallback(p));
   });
-  if (passedOn) return [site(ctx, at, "PASSED_ON", `envelope in \`${name}\` handed to a caller whole`)];
+  if (passedOn) return [site(ctx, at, "PASSED_ON", `envelope in \`${name}\` handed to a caller whole${via(passedOn)}`)];
   // `console.log(r)` / `JSON.stringify(r)` / `helper(r)`: the gate cannot see
   // what the callee does with it, and a debug print beside `return r.data`
   // must not turn a discard into a pass (adversarial review on PR #92).
   const passedToCall = uses.find((u) => ts.isCallExpression(u.parent) && u.parent.arguments.includes(u));
   if (passedToCall) {
-    return [site(ctx, at, "UNCLASSIFIED", `envelope in \`${name}\` passed to a call — its consumer is not visible`)];
+    return [site(ctx, at, "UNCLASSIFIED", `envelope in \`${name}\` passed to a call — its consumer is not visible${via(passedToCall)}`)];
   }
   return [site(ctx, at, "DISCARDED", `envelope in \`${name}\` whose \`.error\` is never read in this function`)];
 }
@@ -970,6 +1010,59 @@ function g(db: any) { return db.from("clients").select("id"); }`, "fixture.ts");
   if (r.error) throw r.error;
   return r.data;
 }`).verdict).toBe("DISCARDED");
+  });
+
+  it("`var` loop bindings and `var` re-declarations are WRITES to the function binding (Codex, PR #92)", () => {
+    // Codex's exact case: `for (var r of rows)` re-assigns the same `r`.
+    expect(one(`async function f(db: any, rows: any[]) {
+  var r = await db.from("a").select("id").maybeSingle();
+  for (var r of rows) { if (r.error) throw r.error; }
+  return r.data;
+}`).verdict).toBe("DISCARDED");
+    // A `var` re-declaration in a nested block is the same variable, overwritten.
+    expect(one(`async function f(db: any, other: any) {
+  var r = await db.from("a").select("id").maybeSingle();
+  { var r = other; }
+  if (r.error) throw r.error;
+}`).verdict).toBe("DISCARDED");
+    // A bare loop target is a write too.
+    expect(one(`async function f(db: any, rows: any[]) {
+  let r = await db.from("a").select("id").maybeSingle();
+  for (r of rows) { if (r.error) throw r.error; }
+}`).verdict).toBe("DISCARDED");
+    // Read BEFORE the loop overwrites it: still a read.
+    expect(one(`async function f(db: any, rows: any[]) {
+  var r = await db.from("a").select("id").maybeSingle();
+  if (r.error) throw r.error;
+  for (var r of rows) { use(r); }
+}`).verdict).toBe("OK");
+  });
+
+  it("a `.error` write through one alias closes the window for every alias (Codex, PR #92)", () => {
+    expect(one(`async function f(db: any) {
+  const r = await db.from("a").select("id").maybeSingle();
+  const copy = r;
+  r.error = null;
+  if (copy.error) throw copy.error;
+  return copy.data;
+}`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) {
+  const r = await db.from("a").select("id").maybeSingle();
+  const copy = r;
+  copy.error = null;
+  if (r.error) throw r.error;
+  return r.data;
+}`).verdict).toBe("DISCARDED");
+    // Two hops, read through the second: the same object, OK.
+    const two = one(`async function f(db: any) {
+  const r = await db.from("a").select("id").maybeSingle();
+  const copy = r;
+  const again = copy;
+  if (again.error) throw again.error;
+  return r.data;
+}`);
+    expect(two.verdict).toBe("OK");
+    expect(two.reason).toMatch(/through alias `again`/);
   });
 
   it("an envelope variable passed to a call is UNCLASSIFIED, not passed on", () => {

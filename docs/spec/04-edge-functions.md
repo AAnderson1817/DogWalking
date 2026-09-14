@@ -58,8 +58,11 @@ only if it can see THIS envelope: not after the variable is overwritten by
 a later query, not after `.error` itself has been assigned or deleted (a
 write is not a read), not a same-named variable in a nested scope — a
 callback parameter, a block-local `const`, a loop variable, a catch
-binding — and, for a destructured `error`, not after the local has been
-reassigned; an alias (`const res = r`) is followed as the same envelope.
+binding — not after a `var` re-declaration or a `var` loop variable has
+overwritten a function-scoped binding, and, for a destructured `error`, not
+after the local has been reassigned; an alias (`const res = r`) is followed
+as the same envelope, transitively, and a `.error` write through any alias
+closes the window for all of them.
 What the gate cannot see it refuses loudly rather than passing: an envelope handed to
 a call (`console.log(r)`), an arrow body that is an inline callback
 (`ids.map((id) => db.from(…))`, whose array nothing reads), a `.then(`, a
