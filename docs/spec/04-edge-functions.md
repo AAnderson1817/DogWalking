@@ -81,12 +81,15 @@ from the closure's creation (or from the binding itself, for a hoisted
 function declaration, which can be called before any read), and a read
 inside a closure counts only when no write can follow the binding at all
 AND every closure around it is visibly invoked — an IIFE, or a named
-function called in the same body — because the closure runs whenever it is
-called, which can be after any later write (`const check = () => error;
-error = null; if (check()) …` reads the null) and can be never (`const check
-= () => error; return data;` reads nothing); a callback handed to a call or
-a closure returned on an object is execution the gate cannot see, refused
-rather than assumed. A deferred
+function called from straight-line code of the same body or from closures
+that are themselves visibly invoked, all the way out — because the closure
+runs whenever it is called, which can be after any later write (`const check
+= () => error; error = null; if (check()) …` reads the null) and can be never
+(`const check = () => error; return data;` reads nothing, and so does `const
+never = () => check();` beside it, a call that exists and never executes); a
+callback handed to a call, a closure returned on an object, or two closures
+that only call each other is execution the gate cannot see, refused rather
+than assumed. A deferred
 builder (`let q = db.from(…)`) is followed to the statement that consumes
 it: assignment to itself (`q = q.eq(…)`, through a conditional too) grows the
 same builder, while a write whose right side does not root at it — `q =

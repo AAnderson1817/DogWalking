@@ -38,9 +38,10 @@ import { describe, expect, it } from "vitest";
  *                 hoisted declaration) and a read inside a closure counts
  *                 only when no write can follow the binding at all AND
  *                 every closure around it is visibly invoked (an IIFE, or
- *                 a named function called in the same body), since the
- *                 closure runs whenever it is called, which may be never
- *                 — or `.error` is read straight off the
+ *                 a named function called from straight-line code of the
+ *                 same body or from closures that are themselves visibly
+ *                 invoked), since the closure runs whenever it is called,
+ *                 which may be never — or `.error` is read straight off the
  *                 awaited expression AND used (consumed in place, or bound
  *                 to a local that is read afterwards — `const e = (await
  *                 q).error; return data;` is the destructured discard with
@@ -496,13 +497,19 @@ function closuresAround(n: ts.Node, container: ts.Node): ts.Node[] {
 /**
  * Is this closure CALLED where the gate can see it — an IIFE, or a function
  * bound to a name (a variable's initializer, a function declaration) that is
- * invoked somewhere in `container`? A callback handed to a call, a closure
- * returned or stored on an object may never run, and a read inside a closure
- * that never runs is no read: `const check = () => error; return data;`
- * discards the error with the closure never invoked (Codex on PR #92, the
- * round after the closure's TIMING was fixed).
+ * invoked from straight-line code of `container`, or from closures that are
+ * themselves visibly invoked, all the way out? A callback handed to a call,
+ * a closure returned or stored on an object may never run, and a read inside
+ * a closure that never runs is no read: `const check = () => error; return
+ * data;` discards the error with the closure never invoked (Codex on PR #92,
+ * the round after the closure's TIMING was fixed) — and so does `const check
+ * = () => error; const never = () => check(); return data;`, where the call
+ * exists and never executes (Codex, one round later). `seen` breaks cycles:
+ * two closures that only call each other reach straight-line code nowhere.
  */
-function visiblyInvoked(fn: ts.Node, container: ts.Node, checker: ts.TypeChecker): boolean {
+function visiblyInvoked(fn: ts.Node, container: ts.Node, checker: ts.TypeChecker, seen: Set<ts.Node> = new Set()): boolean {
+  if (seen.has(fn)) return false;
+  seen.add(fn);
   let top: ts.Node = fn;
   while (top.parent && isTransparent(top.parent, top)) top = top.parent;
   const p = top.parent;
@@ -513,18 +520,18 @@ function visiblyInvoked(fn: ts.Node, container: ts.Node, checker: ts.TypeChecker
   if (!name) return false;
   const sym = symbolOf(checker, name);
   if (!sym) return false;
-  let called = false;
+  const callSites: ts.Node[] = [];
   const visit = (n: ts.Node) => {
-    if (called) return;
     if (ts.isIdentifier(n) && n !== name && symbolOf(checker, n) === sym) {
       let t: ts.Node = n;
       while (t.parent && isTransparent(t.parent, t)) t = t.parent;
-      if (ts.isCallExpression(t.parent) && t.parent.expression === t) called = true;
+      if (ts.isCallExpression(t.parent) && t.parent.expression === t) callSites.push(t.parent);
     }
     ts.forEachChild(n, visit);
   };
   visit(container);
-  return called;
+  // A call site executes only if every closure around IT executes.
+  return callSites.some((c) => closuresAround(c, container).every((f) => visiblyInvoked(f, container, checker, seen)));
 }
 
 /**
@@ -1772,6 +1779,26 @@ async function h({ db }: { db: unknown }, token: string) { const { data } = awai
   outer();
   return data;
 }`).verdict).toBe("DISCARDED");
+    // A call that never executes is no invocation: a reader called only from
+    // another uninvoked closure (Codex, one round later), two closures that
+    // only call each other, an IIFE inside an uninvoked closure.
+    expect(one(`async function mn(db: any) {
+  const { data, error } = await db.from("x").select("id");
+  const check = () => error;
+  const never = () => check();
+  return data;
+}`).verdict).toBe("DISCARDED");
+    expect(one(`async function mc(db: any) {
+  const { data, error } = await db.from("x").select("id");
+  const a = () => b();
+  const b = () => { a(); return error; };
+  return data;
+}`).verdict).toBe("DISCARDED");
+    expect(one(`async function mi(db: any) {
+  const { data, error } = await db.from("x").select("id");
+  const never = () => { (() => error)(); };
+  return data;
+}`).verdict).toBe("DISCARDED");
     // A named closure MENTIONED is not a named closure CALLED: handed to a
     // call, it is the callback case with a name.
     expect(one(`async function mm(db: any, rows: number[]) {
@@ -1807,6 +1834,21 @@ async function h({ db }: { db: unknown }, token: string) { const { data } = awai
   const { data, error } = await db.from("x").select("id");
   const outer = () => { const inner = () => error; return inner(); };
   if (outer()) throw new Error("failed");
+  return data;
+}`).verdict).toBe("OK");
+    // Invoked THROUGH an invoked closure, and a self-recursive closure with
+    // one call from straight-line code.
+    expect(one(`async function r(db: any) {
+  const { data, error } = await db.from("x").select("id");
+  const check = () => error;
+  const wrap = () => check();
+  if (wrap()) throw new Error("failed");
+  return data;
+}`).verdict).toBe("OK");
+    expect(one(`async function s(db: any, n: number) {
+  const { data, error } = await db.from("x").select("id");
+  const f = (i: number): unknown => (i > 0 ? f(i - 1) : error);
+  if (f(n)) throw new Error("failed");
   return data;
 }`).verdict).toBe("OK");
   });
