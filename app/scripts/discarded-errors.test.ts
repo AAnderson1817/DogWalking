@@ -194,31 +194,14 @@ function isReference(id: ts.Identifier): boolean {
   if (ts.isPropertyAssignment(p) && p.name === id) return false;
   if (ts.isBindingElement(p) && (p.name === id || p.propertyName === id)) return false;
   if ((ts.isVariableDeclaration(p) || ts.isParameter(p)) && p.name === id) return false;
-  if (ts.isBinaryExpression(p) && p.left === id && p.operatorToken.kind === ts.SyntaxKind.EqualsToken) return false;
+  if (ts.isBinaryExpression(p) && p.left === id && isAssignmentKind(p.operatorToken.kind)) return false;
   if (ts.isTypeNode(p) || ts.isQualifiedName(p)) return false;
   return true;
 }
 
-/**
- * Does this nested function declare its own `name` — as a parameter, or as a
- * local in its own body (not in a function nested deeper still)?
- *
- * A same-named inner variable is a DIFFERENT variable: `others.forEach((r) =>
- * { if (r.error) … })` reads the callback's `r`, not the outer envelope, and
- * counting it for the outer one is how a discarded error passes (adversarial
- * review on PR #92).
- */
-function redeclares(fn: ts.SignatureDeclaration, name: string): boolean {
-  if (fn.parameters.some((prm) => bindsName(prm.name, name))) return true;
-  let found = false;
-  const visit = (n: ts.Node) => {
-    if (found) return;
-    if (n !== fn && ts.isFunctionLike(n)) return;
-    if (ts.isVariableDeclaration(n) && bindsName(n.name, name)) { found = true; return; }
-    ts.forEachChild(n, visit);
-  };
-  visit(fn);
-  return found;
+/** `=` and every compound assignment (`??=`, `+=`, …) — all of them overwrite. */
+function isAssignmentKind(kind: ts.SyntaxKind): boolean {
+  return kind >= ts.SyntaxKind.FirstAssignment && kind <= ts.SyntaxKind.LastAssignment;
 }
 
 /** Does a binding name (identifier or destructuring pattern) introduce `name`? */
@@ -227,31 +210,113 @@ function bindsName(binding: ts.BindingName, name: string): boolean {
   return binding.elements.some((el) => !ts.isOmittedExpression(el) && bindsName(el.name, name));
 }
 
-/** Every reference to `name` inside `container`, skipping nested scopes that redeclare it. */
-function usesOf(name: string, container: ts.Node): ts.Identifier[] {
+/**
+ * A node that opens a LEXICAL SCOPE — somewhere a `let`/`const`, a parameter,
+ * a loop variable or a catch binding can live. A same-named variable in a
+ * nested one is a DIFFERENT variable: `others.forEach((r) => { if (r.error)
+ * … })` reads the callback's `r`, `{ const r = …; if (r.error) {} }` reads
+ * the block's, and counting either for the outer envelope is how a discarded
+ * error passes (adversarial review on PR #92, Codex on PR #92).
+ */
+function isScopeNode(n: ts.Node): boolean {
+  return ts.isBlock(n) || ts.isCaseClause(n) || ts.isDefaultClause(n) || ts.isForStatement(n) ||
+    ts.isForOfStatement(n) || ts.isForInStatement(n) || ts.isCatchClause(n) || ts.isFunctionLike(n) ||
+    ts.isSourceFile(n);
+}
+
+/** Does this scope declare `name` at its OWN level (not in a nested scope)? */
+function declaresHere(scope: ts.Node, name: string): boolean {
+  if (ts.isFunctionLike(scope)) {
+    // Parameters, plus `var`, which is function-scoped wherever it sits.
+    if (scope.parameters.some((prm) => bindsName(prm.name, name))) return true;
+    return varDeclaredIn(scope, name);
+  }
+  if (ts.isCatchClause(scope)) {
+    return scope.variableDeclaration !== undefined && bindsName(scope.variableDeclaration.name, name);
+  }
+  if (ts.isForStatement(scope) || ts.isForOfStatement(scope) || ts.isForInStatement(scope)) {
+    const init = scope.initializer;
+    return init !== undefined && ts.isVariableDeclarationList(init) &&
+      init.declarations.some((d) => bindsName(d.name, name));
+  }
+  const statements: ts.NodeArray<ts.Statement> = ts.isSourceFile(scope)
+    ? scope.statements
+    : (scope as ts.Block | ts.CaseClause | ts.DefaultClause).statements;
+  return statements.some((st) =>
+    (ts.isVariableStatement(st) &&
+      // `let`/`const` are block-scoped; a `var` here belongs to the function.
+      (st.declarationList.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) !== 0 &&
+      st.declarationList.declarations.some((d) => bindsName(d.name, name))) ||
+    ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) && st.name?.text === name)
+  );
+}
+
+/** Is there a `var name` anywhere in this function's body outside nested functions? */
+function varDeclaredIn(fn: ts.SignatureDeclaration, name: string): boolean {
+  let found = false;
+  const visit = (n: ts.Node) => {
+    if (found) return;
+    if (n !== fn && ts.isFunctionLike(n)) return;
+    if (
+      ts.isVariableStatement(n) && (n.declarationList.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) === 0 &&
+      n.declarationList.declarations.some((d) => bindsName(d.name, name))
+    ) { found = true; return; }
+    ts.forEachChild(n, visit);
+  };
+  visit(fn);
+  return found;
+}
+
+/**
+ * The scope that holds the variable this identifier refers to: the nearest
+ * enclosing scope that declares its name. An identifier declared nowhere in
+ * the file (an import, a global) falls back to the enclosing function, so it
+ * is still looked at rather than dropped.
+ */
+function declaringScope(id: ts.Identifier): ts.Node {
+  for (let n: ts.Node = id.parent; n; n = n.parent) {
+    if (isScopeNode(n) && declaresHere(n, id.text)) return n;
+    if (ts.isSourceFile(n)) break;
+  }
+  return scopeContainer(id);
+}
+
+/**
+ * Every reference to `name` inside `scope`, skipping nested scopes that
+ * redeclare it — a callback parameter, a block-local `const`, a loop
+ * variable, a catch binding — because those are other variables.
+ */
+function usesOf(name: string, scope: ts.Node): ts.Identifier[] {
   const out: ts.Identifier[] = [];
   const visit = (n: ts.Node) => {
-    if (n !== container && ts.isFunctionLike(n) && redeclares(n, name)) return;
+    if (n !== scope && isScopeNode(n) && declaresHere(n, name)) return;
     if (ts.isIdentifier(n) && n.text === name && isReference(n)) out.push(n);
     ts.forEachChild(n, visit);
   };
-  visit(container);
+  visit(scope);
   return out;
 }
 
-/** The position of the next plain assignment `name = …` after `after`, or Infinity. */
-function nextWriteTo(name: string, container: ts.Node, after: number): number {
+/** The position of the next assignment to `name` (any operator) after `after`, or Infinity. */
+function nextWriteTo(name: string, scope: ts.Node, after: number): number {
   let next = Infinity;
   const visit = (n: ts.Node) => {
-    if (n !== container && ts.isFunctionLike(n) && redeclares(n, name)) return;
+    if (n !== scope && isScopeNode(n) && declaresHere(n, name)) return;
     if (
-      ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isBinaryExpression(n) && isAssignmentKind(n.operatorToken.kind) &&
       ts.isIdentifier(n.left) && n.left.text === name && n.left.pos > after && n.left.pos < next
     ) next = n.left.pos;
     ts.forEachChild(n, visit);
   };
-  visit(container);
+  visit(scope);
   return next;
+}
+
+/** Is this `r.error` access being WRITTEN (`r.error = null`, `r.error ??= x`, `delete r.error`) rather than read? */
+function isErrorWrite(access: ts.PropertyAccessExpression): boolean {
+  const p = access.parent;
+  return (ts.isBinaryExpression(p) && p.left === access && isAssignmentKind(p.operatorToken.kind)) ||
+    ts.isDeleteExpression(p);
 }
 
 /** Is this arrow function an argument of a call — a callback whose consumer the gate cannot see? */
@@ -286,7 +351,11 @@ function bindsError(pattern: ts.ObjectBindingPattern): { verdict: Verdict; local
 
 /** Is this bound identifier referenced anywhere after its binding, in the same function? */
 function isReadAfter(bound: ts.Identifier): boolean {
-  return usesOf(bound.text, scopeContainer(bound)).some((u) => u.pos > bound.pos);
+  // Before the local is overwritten: `let { error } = await q; error = null;
+  // if (error) …` reads the null, not the query's error (Codex on PR #92).
+  const scope = declaringScope(bound);
+  const overwritten = nextWriteTo(bound.text, scope, bound.pos);
+  return usesOf(bound.text, scope).some((u) => u.pos > bound.pos && u.pos < overwritten);
 }
 
 interface Ctx {
@@ -311,14 +380,28 @@ function site(ctx: Ctx, at: ts.Node, verdict: Verdict, reason: string): Site {
 /** `const r = await q` or `r = await q`: is `r.error` read later in this function? */
 function followEnvelopeVar(ctx: Ctx, nameNode: ts.Identifier, at: ts.Node): Site[] {
   const name = nameNode.text;
-  const container = scopeContainer(nameNode);
+  const scope = declaringScope(nameNode);
   // Only the uses BEFORE the variable is overwritten can see this envelope:
   // `let r = await a; r = await b; if (r.error) …` reads b's error, and a's
-  // is discarded (adversarial review on PR #92).
-  const overwritten = nextWriteTo(name, container, nameNode.pos);
-  const uses = usesOf(name, container).filter((u) => u.pos > nameNode.pos && u.pos < overwritten);
-  const reads = uses.some((u) => ts.isPropertyAccessExpression(u.parent) && u.parent.expression === u && u.parent.name.text === "error");
+  // is discarded (adversarial review on PR #92). Writing the PROPERTY closes
+  // the window the same way: after `r.error = null` every later read sees
+  // the null (Codex on PR #92).
+  const overwritten = nextWriteTo(name, scope, nameNode.pos);
+  const all = usesOf(name, scope).filter((u) => u.pos > nameNode.pos && u.pos < overwritten);
+  const errorAccess = (u: ts.Identifier): ts.PropertyAccessExpression | null =>
+    ts.isPropertyAccessExpression(u.parent) && u.parent.expression === u && u.parent.name.text === "error" ? u.parent : null;
+  const errorWrittenAt = Math.min(...all.map((u) => { const a = errorAccess(u); return a && isErrorWrite(a) ? u.pos : Infinity; }));
+  const uses = all.filter((u) => u.pos <= errorWrittenAt);
+  const reads = uses.some((u) => { const a = errorAccess(u); return a !== null && !isErrorWrite(a); });
   if (reads) return [site(ctx, at, "OK", `envelope in \`${name}\`, \`.error\` read later`)];
+  // An ALIAS — `const res = r;` — is the same envelope under another name, so
+  // it is followed the same way (a copy nobody reads is still a discard).
+  const alias = uses.find((u) => ts.isVariableDeclaration(u.parent) && u.parent.initializer === u && ts.isIdentifier(u.parent.name));
+  if (alias && !ctx.followed.has(alias.parent)) {
+    ctx.followed.add(alias.parent);
+    const via = followEnvelopeVar(ctx, (alias.parent as ts.VariableDeclaration).name as ts.Identifier, at);
+    if (via.some((v) => v.verdict === "OK")) return [site(ctx, at, "OK", `envelope in \`${name}\`, read through alias \`${(alias.parent as ts.VariableDeclaration).name.getText()}\``)];
+  }
   const destructured = uses.some((u) =>
     ts.isVariableDeclaration(u.parent) && u.parent.initializer === u &&
     ts.isObjectBindingPattern(u.parent.name) && bindsError(u.parent.name).verdict === "OK");
@@ -395,7 +478,7 @@ function followBuilder(ctx: Ctx, nameNode: ts.Identifier, declaration: ts.Node):
   ctx.followed.add(declaration);
   const name = nameNode.text;
   const out: Site[] = [];
-  for (const use of usesOf(name, scopeContainer(nameNode))) {
+  for (const use of usesOf(name, declaringScope(nameNode))) {
     if (use.pos <= nameNode.pos) continue;
     const { top, thenable } = outermost(use);
     if (thenable) { out.push(site(ctx, top, "UNCLASSIFIED", `builder \`${name}\` consumed via .${thenable}()`)); continue; }
@@ -791,6 +874,102 @@ function g(db: any) { return db.from("clients").select("id"); }`, "fixture.ts");
   return r.data;
 }`, "f.ts");
     expect(inner.map((s) => [s.line, s.verdict])).toEqual([[2, "DISCARDED"], [4, "OK"]]);
+  });
+
+  it("a same-named variable in a nested BLOCK does not satisfy the outer envelope (Codex, PR #92)", () => {
+    // Codex's exact case: a block-local `const r` whose `.error` is read.
+    const block = one(`async function f(db: any) {
+  const r = await db.from("a").select("id").maybeSingle();
+  { const r = { error: null }; if (r.error) {} }
+  return r.data;
+}`);
+    expect(block.verdict).toBe("DISCARDED");
+    // The other block-scoped binders: a loop variable and a catch binding.
+    const loop = one(`async function f(db: any, rows: any[]) {
+  const r = await db.from("a").select("id").maybeSingle();
+  for (const r of rows) { if (r.error) throw r.error; }
+  return r.data;
+}`);
+    expect(loop.verdict).toBe("DISCARDED");
+    const caught = one(`async function f(db: any) {
+  const r = await db.from("a").select("id").maybeSingle();
+  try { risky(); } catch (r) { if (r.error) throw r.error; }
+  return r.data;
+}`);
+    expect(caught.verdict).toBe("DISCARDED");
+  });
+
+  it("healthy shapes the scope model must keep OK: a query declared inside a block, read in a nested block, or in a loop", () => {
+    // The declaration lives in a nested block and is read there (the scope
+    // rule must search from the DECLARING scope, not skip it).
+    expect(one(`async function f(db: any, c: boolean) {
+  if (c) {
+    const r = await db.from("a").select("id").maybeSingle();
+    if (r.error) throw r.error;
+    return r.data;
+  }
+  return null;
+}`).verdict).toBe("OK");
+    // Declared outside, read inside a block that does NOT redeclare it.
+    expect(one(`async function f(db: any, c: boolean) {
+  const r = await db.from("a").select("id").maybeSingle();
+  if (c) { if (r.error) throw r.error; }
+  return r.data;
+}`).verdict).toBe("OK");
+    // `var` is function-scoped: a var in a nested block is the SAME variable.
+    expect(one(`async function f(db: any) {
+  var r = await db.from("a").select("id").maybeSingle();
+  { var r2 = r; if (r2.error) throw r2.error; }
+  return r.data;
+}`).verdict).toBe("OK");
+    // A catch clause whose binding is a different name does not hide the read.
+    expect(one(`async function f(db: any) {
+  const r = await db.from("a").select("id").maybeSingle();
+  try { if (r.error) throw r.error; } catch (e) { report(e); }
+}`).verdict).toBe("OK");
+  });
+
+  it("a destructured `error` overwritten before it is read is DISCARDED (Codex, PR #92)", () => {
+    const s = one(`async function f(db: any) {
+  let { data, error } = await db.from("a").select("id").maybeSingle();
+  error = null;
+  if (error) throw error;
+  return data;
+}`);
+    expect(s.verdict).toBe("DISCARDED");
+    expect(s.reason).toMatch(/bound as `error` and never read/);
+    // Read BEFORE the write is still a read.
+    expect(one(`async function f(db: any) {
+  let { data, error } = await db.from("a").select("id").maybeSingle();
+  if (error) { error = normalise(error); throw error; }
+  return data;
+}`).verdict).toBe("OK");
+  });
+
+  it("writing `.error` is not reading it (Codex, PR #92)", () => {
+    const written = one(`async function f(db: any) {
+  const r = await db.from("a").select("id").maybeSingle();
+  r.error = null;
+  return r.data;
+}`);
+    expect(written.verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) {
+  const r = await db.from("a").select("id").maybeSingle();
+  delete r.error;
+  return r.data;
+}`).verdict).toBe("DISCARDED");
+    // A read before the write still counts; a read AFTER it does not.
+    expect(one(`async function f(db: any) {
+  const r = await db.from("a").select("id").maybeSingle();
+  if (r.error) { log(r.error); r.error = null; }
+  return r.data;
+}`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) {
+  const r = await db.from("a").select("id").maybeSingle();
+  r.error ??= null;
+  if (r.error) throw r.error;
+  return r.data;
+}`).verdict).toBe("DISCARDED");
   });
 
   it("an envelope variable passed to a call is UNCLASSIFIED, not passed on", () => {
