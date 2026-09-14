@@ -50,7 +50,12 @@ import { describe, expect, it } from "vitest";
  *                 and THAT is OK. A reference in a DISCARD position — a bare
  *                 statement, `void e`, the left side of a comma — is not a
  *                 read of anything, for a bound `error`, an envelope's
- *                 `.error` and the direct read alike.
+ *                 `.error` and the direct read alike; and a reference merely
+ *                 COPIED into a local (`const copy = error`, `copy = error`)
+ *                 is a read only if the copy is itself read, transitively,
+ *                 under the copy's own window. A closure's call site counts
+ *                 only while the binding still holds that closure — a call
+ *                 after `check = () => null` invokes the replacement.
  *   PASSED_ON     the whole envelope is returned, or is the expression body
  *                 of an arrow that is NOT a call's argument (a deps-object
  *                 property, say) — a caller reads it. Printed, not failed: a
@@ -520,6 +525,19 @@ function visiblyInvoked(fn: ts.Node, container: ts.Node, checker: ts.TypeChecker
   if (!name) return false;
   const sym = symbolOf(checker, name);
   if (!sym) return false;
+  // A call invokes whatever the NAME holds when it runs, which is this
+  // closure only until the binding's next write: `let check = () => error;
+  // check = () => null; if (check()) …` calls the replacement, and a call
+  // resolved by symbol alone counted it as this closure's (Codex on PR #92,
+  // round twelve). So the same window a read gets — a straight-line call
+  // before the first write that can execute after the binding (a hoisted
+  // declaration is live from the top, so every write bounds it), and a call
+  // inside a closure only when no write can follow the binding at all,
+  // since that closure runs after any later write.
+  const hoisted = ts.isFunctionDeclaration(fn);
+  const bound = name;
+  const writes = writesTo(checker, sym, container).map((w) => executesAt(w, container, bound));
+  const overwritten = Math.min(Infinity, ...writes.filter((w) => hoisted || w > bound.pos));
   const callSites: ts.Node[] = [];
   const visit = (n: ts.Node) => {
     if (ts.isIdentifier(n) && n !== name && symbolOf(checker, n) === sym) {
@@ -531,7 +549,12 @@ function visiblyInvoked(fn: ts.Node, container: ts.Node, checker: ts.TypeChecker
   };
   visit(container);
   // A call site executes only if every closure around IT executes.
-  return callSites.some((c) => closuresAround(c, container).every((f) => visiblyInvoked(f, container, checker, seen)));
+  return callSites.some((c) => {
+    if ((!hoisted && c.pos <= bound.pos) || c.pos >= overwritten) return false;
+    const around = closuresAround(c, container);
+    if (around.length === 0) return true;
+    return overwritten === Infinity && around.every((f) => visiblyInvoked(f, container, checker, seen));
+  });
 }
 
 /**
@@ -607,9 +630,39 @@ function discardedAt(holder: ts.Node): boolean {
     (ts.isBinaryExpression(h) && h.operatorToken.kind === ts.SyntaxKind.CommaToken && h.left === holder);
 }
 
-/** A reference that is consumed by something — not merely mentioned and thrown away. */
-function isConsumed(n: ts.Node): boolean {
-  return !discardedAt(forwardedTo(n));
+/** Assignment operators that make the target a COPY of the right side: the
+ * value lands in the target without being inspected on the way. */
+const ALIASING_KINDS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.EqualsToken,
+  ts.SyntaxKind.QuestionQuestionEqualsToken,
+  ts.SyntaxKind.BarBarEqualsToken,
+  ts.SyntaxKind.AmpersandAmpersandEqualsToken,
+]);
+
+/** The local an expression is COPIED into — `const copy = e`, `copy = e`, `copy ??= e` — or null. */
+function aliasTarget(holder: ts.Node): ts.Identifier | null {
+  const h = holder.parent;
+  if (ts.isVariableDeclaration(h) && h.initializer === holder && ts.isIdentifier(h.name)) return h.name;
+  if (ts.isBinaryExpression(h) && h.right === holder && ts.isIdentifier(h.left) && ALIASING_KINDS.has(h.operatorToken.kind)) {
+    return h.left;
+  }
+  return null;
+}
+
+/**
+ * A reference that is consumed by something — not merely mentioned and
+ * thrown away, and not merely COPIED into a local nothing reads. `const copy
+ * = error; void copy; return data;` names the error twice and inspects it
+ * never (Codex on PR #92, round twelve, after the discard positions were
+ * closed): a copy carries the value, so it is followed to a real consumer —
+ * transitively, and under the copy's own read window, so a copy that is
+ * overwritten or discarded before it is read consumes nothing.
+ */
+function consumes(ctx: Ctx, n: ts.Node, seen: Set<ts.Node> = new Set()): boolean {
+  const holder = forwardedTo(n);
+  if (discardedAt(holder)) return false;
+  const alias = aliasTarget(holder);
+  return alias ? isReadAfter(ctx, alias, seen) : true;
 }
 
 /**
@@ -638,14 +691,21 @@ function bindsError(ctx: Ctx, pattern: ts.ObjectBindingPattern): { verdict: Verd
 }
 
 /** Is this bound identifier read after its binding and before it is overwritten? */
-function isReadAfter(ctx: Ctx, bound: ts.Identifier): boolean {
+function isReadAfter(ctx: Ctx, bound: ts.Identifier, seen: Set<ts.Node> = new Set()): boolean {
   // Before the local is overwritten: `let { error } = await q; error = null;
   // if (error) …` reads the null, not the query's error (Codex on PR #92).
+  // `seen` guards the copy-following recursion in `consumes`: every hop lands
+  // on a later binding, so a cycle cannot form, and the guard makes that a
+  // property rather than a hope.
+  if (seen.has(bound)) return false;
+  seen.add(bound);
   const sym = symbolOf(ctx.checker, bound);
   if (!sym) return false;
   const container = scopeContainer(bound);
   const overwritten = nextWriteTo(ctx.checker, sym, container, bound);
-  return usesOf(ctx.checker, sym, container).some((u) => readsInWindow(u, bound, overwritten, container, ctx.checker) && isConsumed(u));
+  return usesOf(ctx.checker, sym, container).some((u) =>
+    readsInWindow(u, bound, overwritten, container, ctx.checker) && consumes(ctx, u, seen)
+  );
 }
 
 interface Ctx {
@@ -713,7 +773,7 @@ function followEnvelopeVar(ctx: Ctx, nameNode: ts.Identifier, at: ts.Node): Site
   const uses = allUses.filter((u) => u.pos < errorWrittenAt && (errorWrittenAt === Infinity || closureOf(u, container) === null));
   const via = (u: ts.Identifier) => u.text === name ? "" : ` (through alias \`${u.text}\`)`;
 
-  const read = uses.find((u) => { const a = errorAccess(u); return a !== null && !isErrorWrite(a) && isConsumed(a); });
+  const read = uses.find((u) => { const a = errorAccess(u); return a !== null && !isErrorWrite(a) && consumes(ctx, a); });
   if (read) return [site(ctx, at, "OK", `envelope in \`${name}\`, \`.error\` read later${via(read)}`)];
   const destructured = uses.find((u) =>
     ts.isVariableDeclaration(u.parent) && u.parent.initializer === u &&
@@ -1850,6 +1910,87 @@ async function h({ db }: { db: unknown }, token: string) { const { data } = awai
   const f = (i: number): unknown => (i > 0 ? f(i - 1) : error);
   if (f(n)) throw new Error("failed");
   return data;
+}`).verdict).toBe("OK");
+  });
+
+  it("a copy of the error is a read only if the copy is read (Codex, PR #92)", () => {
+    // Round twelve: the discard positions were closed one round earlier, and
+    // a COPY is the same discard with a name — `const copy = error` is an
+    // initializer, so the reference was "consumed", and the copy was never
+    // looked at. The value is followed to a real consumer, transitively and
+    // under the copy's own window.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const copy = error; void copy; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const r = await db.from("a").select("id"); const copy = r.error; void copy; return r.data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const a = error; const b = a; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); let copy; copy = error; void copy; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const e = (await db.from("a").select("id")).error; const c = e; void c; return 1; }`).verdict).toBe("DISCARDED");
+    // The copy's own window: overwritten before it is read, it carried nothing.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); let copy = error; copy = null; if (copy) throw copy; return data; }`).verdict).toBe("DISCARDED");
+    // A copy that IS read, one hop or two, is the read.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const copy = error; if (copy) throw copy; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const r = await db.from("a").select("id"); const a = r.error; const b = a; if (b) throw b; return r.data; }`).verdict).toBe("OK");
+  });
+
+  it("a closure's call site counts only while the binding still holds it (Codex, PR #92)", () => {
+    // Round twelve: a call resolved by SYMBOL alone was this closure's
+    // wherever it sat, and `check = () => null` between the binding and the
+    // call means the call runs the replacement. The call gets the window a
+    // read gets: straight-line before the next write, inside a closure only
+    // when no write can follow at all.
+    expect(one(`async function f(db: any) {
+  const { data, error } = await db.from("a").select("id");
+  let check = () => error;
+  check = () => null;
+  if (check()) throw new Error("failed");
+  return data;
+}`).verdict).toBe("DISCARDED");
+    expect(one(`async function g(db: any) {
+  const r = await db.from("a").select("id");
+  let check = () => r.error;
+  check = () => null;
+  if (check()) throw new Error("failed");
+  return r.data;
+}`).verdict).toBe("DISCARDED");
+    // Through an invoked wrapper that runs after the replacement.
+    expect(one(`async function h(db: any) {
+  const { data, error } = await db.from("a").select("id");
+  let check = () => error;
+  const wrap = () => check();
+  check = () => null;
+  if (wrap()) throw new Error("failed");
+  return data;
+}`).verdict).toBe("DISCARDED");
+    // A hoisted declaration is live from the top, so any write bounds it.
+    expect(one(`async function i(db: any) {
+  const { data, error } = await db.from("a").select("id");
+  check = () => null;
+  if (check()) throw new Error("failed");
+  return data;
+  function check(): unknown { return error; }
+}`).verdict).toBe("DISCARDED");
+    // The replacement inside a closure counts from that closure's creation.
+    expect(one(`async function j(db: any) {
+  const { data, error } = await db.from("a").select("id");
+  let check = () => error;
+  const reset = () => { check = () => null; };
+  reset();
+  if (check()) throw new Error("failed");
+  return data;
+}`).verdict).toBe("DISCARDED");
+    // A call BEFORE the replacement is this closure's, arrow or hoisted.
+    expect(one(`async function k(db: any) {
+  const { data, error } = await db.from("a").select("id");
+  let check = () => error;
+  if (check()) throw new Error("failed");
+  check = () => null;
+  return data;
+}`).verdict).toBe("OK");
+    expect(one(`async function l(db: any) {
+  const { data, error } = await db.from("a").select("id");
+  if (check()) throw new Error("failed");
+  check = () => null;
+  return data;
+  function check(): unknown { return error; }
 }`).verdict).toBe("OK");
   });
 
