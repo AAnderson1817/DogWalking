@@ -49,9 +49,13 @@ Every envelope is looked at, in one of three shapes:
 
 `app/scripts/discarded-errors.test.ts` is the gate: it parses every
 `.from(` / `.rpc(` / `.auth.<member>` chain in `supabase/functions/` (the
-`db["from"](…)` spelling too) and fails on an envelope that is awaited and
-not bound, bound without `error`, or bound with an `error` that is never
-referenced afterwards in the same function (`const { data, error } = await
+`db["from"](…)` spelling too), resolves every identifier through the
+TypeScript checker's SYMBOL rather than by name (so a same-named variable
+in a nested block, callback, loop or catch clause is a different binding by
+construction, and an `.auth` receiver is judged by the declaration its
+symbol reaches), and fails on an envelope that is awaited and not bound,
+bound without `error`, or bound with an `error` that is never referenced
+afterwards in the same function (`const { data, error } = await
 q; return data;` names the error and then treats the envelope as data — the
 defect wearing the fix's clothes; Codex review on PR #92). A read counts
 only if it can see THIS envelope: not after the variable is overwritten by
@@ -59,10 +63,14 @@ a later query, not after `.error` itself has been assigned or deleted (a
 write is not a read), not a same-named variable in a nested scope — a
 callback parameter, a block-local `const`, a loop variable, a catch
 binding — not after a `var` re-declaration or a `var` loop variable has
-overwritten a function-scoped binding, and, for a destructured `error`, not
-after the local has been reassigned; an alias (`const res = r`) is followed
-as the same envelope, transitively, and a `.error` write through any alias
-closes the window for all of them.
+overwritten a function-scoped binding, not after a destructuring
+assignment (`({ r } = other)`) has written it, and, for a destructured
+`error`, not after the local has been reassigned; an alias (`const res =
+r`) is followed as the same envelope, transitively, and a `.error` write
+through any alias — `r.error = …` or `r["error"] = …` — closes the window
+for all of them. `(await q).error`, `((await q) as T)` and `(await q)!` are
+read through the wrapper, and a chain ending in `.throwOnError()` has no
+envelope to discard.
 What the gate cannot see it refuses loudly rather than passing: an envelope handed to
 a call (`console.log(r)`), an arrow body that is an inline callback
 (`ids.map((id) => db.from(…))`, whose array nothing reads), a `.then(`, a
