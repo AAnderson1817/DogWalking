@@ -103,7 +103,10 @@ only on EVERY path: not inside a branch that excludes the binding — the body
 of an `if`, either arm of `?:`, the right side of `&&`/`||`/`??` and of a
 logical assignment (`copy ??= error` runs its right side only when `copy`
 is nullish, so it copies nothing), a `case`, a loop body, a `catch`, the
-arguments of an optional-chain call — and not after a conditional
+arguments of an optional-chain call, a default initializer (a parameter's
+`function check(x = error)`, a binding element's `const { e = error } =
+obj`, a destructuring assignment's `({ e = error } = obj)` — each runs only
+when the value it defaults is undefined) — and not after a conditional
 `return`/`continue`/`break` (`if (!data) return null; if (error) …`), the
 same for a read inside a closure relative to that closure and for the call
 site that would establish it (`if (data && check()) …`). supabase-js
@@ -115,7 +118,9 @@ guard that reads the error only on the right of `&&` before returning; write
 aborts the request rather than completing it as an absence. An error STORED
 in a literal (`{ error }`, `[error]`) is a read only if the literal is
 consumed by the same rules — `logHandledError({ cause: error })` is,
-`const box = { error }; return data;` is not. A deferred
+`const box = { error }; return data;` is not — and the direct read is held
+to the same rule (`const box = { cause: (await q).error }; void box;` reads
+nothing). A deferred
 builder (`let q = db.from(…)`) is followed to the statement that consumes
 it: assignment to itself (`q = q.eq(…)`, through a conditional too) grows the
 same builder, while a write whose right side does not root at it — `q =
