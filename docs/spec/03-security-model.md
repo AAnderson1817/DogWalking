@@ -637,6 +637,20 @@ definer functions only, which is the correct default.
 
 <!-- END GENERATED DEFINER CATALOG -->
 
+`fn_walk_cost` keeps its `authenticated` EXECUTE with ZERO browser callers,
+and that is a recorded decision rather than an oversight. `api.ts`'s
+`walkCost()` wrapper was deleted in `fix(walk-cost)` because the one screen
+that prices a persisted walk before completion (Booking's committed sum)
+already holds `walks.cost_credits` in the row it fetched, so a round trip per
+walk for a column already returned was strictly worse than reading it. The
+grant is not revoked to match: that is a migration on the money path (0004 and
+0043 both grant it), `supabase/tests/smoke.sql` calls the function AS
+`authenticated` to pin the snapshot-first rule and would have to be rewritten
+to keep doing so, and a grant with no caller is inert where a revoke is a wall
+the next caller walks into. `fn_debit_walk`, a definer, calls it as its owner
+and would notice neither. It stays until a migration on that path has its own
+reason to move it.
+
 Body-level tenancy check is mandatory in every definer fn (RLS does not apply inside definer context): assert the target row's `operator_id`/`client_id` matches the caller or that the caller is service role.
 
 ## Vault design (invariant 2)

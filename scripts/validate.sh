@@ -109,10 +109,18 @@ elif [ -n "${LOCAL_DB_URL:-}" ] && have psql; then
   # push-service allowlist exists in a migration AND in an edge library, and
   # no single test runner here can ask both of them the same question. They
   # disagreed on two inputs the day they were written.
+  # 8d is the same shape one money path over: the weekend-surcharge
+  # arithmetic exists in a TypeScript leaf (what Booking quotes), in
+  # `fn_walk_cost`'s live fallback (0043) and in the `fn_snapshot_walk_price`
+  # trigger (0044), and nothing tied the three together — the trigger and the
+  # function were two copies of one expression in two migrations. Same
+  # prerequisites, so it skips by name for the same reason 8c does.
   if have deno; then
     run "8c. push endpoint parity" scripts/check-push-endpoint-parity.sh
+    run "8d. walk cost parity" scripts/check-walk-cost-parity.sh
   else
     skip_gate "8c. push endpoint parity" "deno is not installed"
+    skip_gate "8d. walk cost parity" "deno is not installed"
   fi
 else
   skip_gate "7-8. database" "LOCAL_DB_URL is unset or psql is missing — docs/dev/local-stack.md"

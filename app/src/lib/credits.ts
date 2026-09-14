@@ -1,15 +1,30 @@
 // Client-side credit helpers (spec 06). The server (fn_walk_cost /
 // fn_debit_walk) is authoritative; these mirror its arithmetic for display.
+//
+// Two callers, two rules. Since 0043 a walk's credit cost is SNAPSHOTTED on
+// the row at creation (`walks.cost_credits`) and the server charges that
+// snapshot first — so the live arithmetic below is for exactly ONE thing: the
+// walk a client is still composing on the Booking screen, which has no row
+// yet and therefore no snapshot. A walk that already exists is priced from
+// its own `cost_credits`, live arithmetic only when that is null (rows
+// predating 0043), which is the coalesce `fn_walk_cost` performs. Booking's
+// committed sum used to run the live formula over persisted walks while the
+// snapshot sat unread in the same rows, and disagreed with the server on any
+// walk whose service had been re-priced since it was booked.
 import type { CreditLedger, ServiceTypes } from "./types";
+import { weekendWalkCost } from "./walk-cost";
 
-/** Effective cost: credit_cost + weekend surcharge when date is Sat/Sun. */
+/**
+ * Effective cost: credit_cost + weekend surcharge when date is Sat/Sun.
+ *
+ * For a walk that does not exist yet. The arithmetic lives in `walk-cost.ts`
+ * so gate 8d can read it from deno and check it against the two SQL copies.
+ */
 export function effectiveWalkCost(
   service: Pick<ServiceTypes, "credit_cost" | "weekend_surcharge_credits">,
   scheduledDate: string,
 ): number {
-  const day = new Date(`${scheduledDate}T12:00:00Z`).getUTCDay(); // 0=Sun, 6=Sat
-  const weekend = day === 0 || day === 6;
-  return service.credit_cost + (weekend ? service.weekend_surcharge_credits : 0);
+  return weekendWalkCost(service.credit_cost, service.weekend_surcharge_credits, scheduledDate);
 }
 
 /** Spec 02: low credit when balance ≤ the operator's threshold. */
@@ -63,10 +78,15 @@ export function formatLedgerEntry(entry: CreditLedger): LedgerLine {
  * debited or flagged overage by `fn_debit_walk`, so counting it again would
  * double-count and over-warn — and warning about a charge that will not happen
  * teaches people to dismiss the warning.
+ *
+ * Generic over the row so `costOf` sees the WHOLE walk it is pricing. The
+ * callback used to be typed `(walk: { status: string })`, which is why Booking
+ * cast its way to `service_type_id` and `scheduled_date` and never reached
+ * `cost_credits` at all — the type hid the snapshot that was already in hand.
  */
-export function committedCredits(
-  walks: Array<{ status: string; credits_debited?: number | null; is_overage?: boolean | null }>,
-  costOf: (walk: { status: string }) => number,
+export function committedCredits<W extends { status: string; is_overage?: boolean | null }>(
+  walks: W[],
+  costOf: (walk: W) => number,
 ): number {
   return walks
     .filter((w) => w.status === "scheduled" && !w.is_overage)

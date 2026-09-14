@@ -102,13 +102,23 @@ export default function Booking() {
    * then fired an off-session charge they had never been shown.
    *
    * Already-booked walks are a claim on the balance, so they are counted.
+   *
+   * Each at its SNAPSHOTTED cost. `walks.cost_credits` is stamped at creation
+   * (0043) and is what `fn_debit_walk` will charge, so it is the figure that
+   * belongs in this sum; the live arithmetic is the fallback for a row with
+   * no snapshot, the same coalesce `fn_walk_cost` performs. This used to run
+   * the live formula over every persisted walk while the snapshot sat unread
+   * in the same row, so a service re-priced after a walk was booked moved
+   * this number away from what the server would actually take — and this
+   * number decides whether the overage disclosure below is shown at all.
+   * Only the walk being composed (`cost`, above) has no row yet and is
+   * priced live on purpose.
    */
   const committed = useMemo(
     () =>
       committedCredits(upcoming, (w) => {
-        const svc = services.find((x) => x.id === (w as { service_type_id?: string }).service_type_id);
-        const when = (w as { scheduled_date?: string }).scheduled_date;
-        return svc && when ? effectiveWalkCost(svc, when) : 0;
+        const svc = services.find((x) => x.id === w.service_type_id);
+        return w.cost_credits ?? (svc ? effectiveWalkCost(svc, w.scheduled_date) : 0);
       }),
     [upcoming, services],
   );

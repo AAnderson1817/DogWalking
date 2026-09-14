@@ -557,12 +557,6 @@ export async function adjustCredits(
   return data as number;
 }
 
-export async function walkCost(walkId: string): Promise<number> {
-  const { data, error } = await supabase.rpc("fn_walk_cost", { p_walk: walkId });
-  if (error) throw new Error(error.message);
-  return data as number;
-}
-
 /**
  * Why the outcomes come back as data rather than as thrown errors (review H4).
  *

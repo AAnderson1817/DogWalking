@@ -670,6 +670,19 @@ jobs:
       - name: Push endpoint allowlist — both implementations agree
         run: ./scripts/check-push-endpoint-parity.sh
 
+      # Same shape, one money path over. The weekend-surcharge arithmetic
+      # exists three times — the TS leaf `app/src/lib/walk-cost.ts` (what
+      # Booking quotes), `fn_walk_cost`'s live fallback (0043, what
+      # fn_debit_walk charges a row with no snapshot) and the
+      # `fn_snapshot_walk_price` trigger (0044, what every new row is stamped
+      # with) — and the trigger and the function were two copies of one
+      # expression in two migrations that nothing tied together. One case
+      # list, every implementation asked, answers compared; the SQL side nulls
+      # the snapshot before asking the function, or its coalesce hands back
+      # the trigger's answer and the fourth comparison proves nothing.
+      - name: Walk cost parity — TS leaf, fn_walk_cost and the snapshot trigger agree
+        run: ./scripts/check-walk-cost-parity.sh
+
       # The reset above connects as the cluster's bootstrap SUPERUSER and
       # applies each file statement-at-a-time, so it answers a weaker question
       # than a deploy asks (review M5). This re-applies all of them from zero
