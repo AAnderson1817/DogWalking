@@ -60,6 +60,9 @@ import { describe, expect, it } from "vitest";
  *                 replacement. And a read counts only on EVERY path: not
  *                 inside a branch that excludes the binding (`if (data)
  *                 log(error)`, `copy ??= error`, a loop body, a `catch`),
+ *                 a default initializer — a parameter's, a binding
+ *                 element's, a destructuring assignment's — runs only
+ *                 when the value it defaults is undefined),
  *                 and not after a conditional `return`/`continue`/`break`
  *                 (`if (!data) return null; …`) — supabase-js supplies
  *                 `data: null` on failure, so a read the failure path skips
@@ -579,16 +582,45 @@ function contains(outer: ts.Node, inner: ts.Node): boolean {
   return false;
 }
 
+/** Is this `=` a DEFAULT inside a destructuring-assignment pattern — `({ e = error } = obj)`, `[e = error] = arr` — rather than an assignment? */
+function isPatternDefault(assignment: ts.BinaryExpression): boolean {
+  let cur: ts.Node = assignment;
+  for (;;) {
+    const p: ts.Node = cur.parent;
+    if (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p) || ts.isSpreadAssignment(p) || ts.isSpreadElement(p)) {
+      cur = p;
+      continue;
+    }
+    if (ts.isObjectLiteralExpression(p) || ts.isArrayLiteralExpression(p)) {
+      const holder = p.parent;
+      if (ts.isBinaryExpression(holder) && holder.left === p && holder.operatorToken.kind === ts.SyntaxKind.EqualsToken) return true;
+      if ((ts.isForOfStatement(holder) || ts.isForInStatement(holder)) && holder.initializer === p) return true;
+      cur = p;
+      continue;
+    }
+    return false;
+  }
+}
+
 /**
  * Is `child` a BRANCH of `parent` — a position that runs only when some
  * condition holds? The body of an `if`/`else`, either arm of `?:`, the right
  * side of `&&`/`||`/`??` and of the logical assignments `??=`/`||=`/`&&=`
  * (which evaluate their right side only conditionally — `copy ??= error`
  * never looks at the error when `copy` is set, Codex on PR #92), a `case`,
- * a loop body (a `do` body runs at least once), a `catch` clause, and the
- * arguments of an optional-chain call (`x?.log(error)`).
+ * a loop body (a `do` body runs at least once), a `catch` clause, the
+ * arguments of an optional-chain call (`x?.log(error)`), and a DEFAULT
+ * initializer — a parameter's (`function check(x = error)` skips it when
+ * the call supplies an argument, Codex on PR #92, round fourteen), a
+ * binding element's (`const { e = error } = obj`) and a destructuring
+ * assignment's (`({ e = error } = obj)`) — which runs only when the value
+ * it defaults is undefined.
  */
 function isBranchEdge(parent: ts.Node, child: ts.Node): boolean {
+  if ((ts.isParameter(parent) || ts.isBindingElement(parent)) && child === parent.initializer) return true;
+  if (ts.isShorthandPropertyAssignment(parent) && child === parent.objectAssignmentInitializer) return true;
+  if (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken && child === parent.right &&
+    isPatternDefault(parent)) return true;
   if (ts.isIfStatement(parent)) return child === parent.thenStatement || child === parent.elseStatement;
   if (ts.isConditionalExpression(parent)) return child === parent.whenTrue || child === parent.whenFalse;
   if (ts.isBinaryExpression(parent)) {
@@ -928,16 +960,21 @@ function classifyAwaited(ctx: Ctx, awaited: ts.AwaitExpression): Site[] {
     // expression statement, `void e`, the left side of a comma. `return void
     // (await q).error` is Codex's case on PR #92, and unlike a bare
     // statement it leaves nothing a linter would flag.
+    // The same `consumes` the bound local and the envelope go through — a
+    // discard position, a copy nothing reads, and (Codex on PR #92, round
+    // fourteen) a literal nothing consumes: `const box = { cause: (await
+    // q).error }; void box;` was OK because only a direct binding was
+    // followed. The reason names which of the three it was.
     const holder = forwardedTo(p);
-    const h = holder.parent;
     if (discardedAt(holder)) {
       return [site(ctx, p, "DISCARDED", "`.error` read off the awaited envelope and dropped — nothing consumes the value")];
     }
-    const bound = ts.isVariableDeclaration(h) && h.initializer === holder && ts.isIdentifier(h.name) ? h.name
-      : ts.isBinaryExpression(h) && h.operatorToken.kind === ts.SyntaxKind.EqualsToken && h.right === holder && ts.isIdentifier(h.left) ? h.left
-      : null;
+    const bound = aliasTarget(holder);
     if (bound && !isReadAfter(ctx, bound)) {
       return [site(ctx, p, "DISCARDED", `\`.error\` bound as \`${bound.text}\` and never read in this function`)];
+    }
+    if (!consumes(ctx, p)) {
+      return [site(ctx, p, "DISCARDED", "`.error` read off the awaited envelope into a literal nothing consumes")];
     }
     return [site(ctx, p, "OK", "`.error` read directly off the awaited envelope")];
   }
@@ -2168,6 +2205,34 @@ async function f(db: any) { const { data, error } = await db.from("a").select("i
 async function f(db: any) { const { data, error } = await db.from("a").select("id"); try { await other(); } catch (e) { throw e; } if (error) throw error; return data; }`).verdict).toBe("OK");
     // The binding inside the same branch as its read is not a branch relative to it.
     expect(one(`async function f(db: any, c: boolean) { if (c) { const { data, error } = await db.from("a").select("id"); if (error) throw error; return data; } return null; }`).verdict).toBe("OK");
+  });
+
+  it("a default initializer runs only when its value is undefined, so a read there establishes nothing (Codex, PR #92)", () => {
+    // Round fourteen: `function check(x = error)` skips its initializer when
+    // the call supplies an argument, and the branch rule did not know a
+    // default as a branch. A parameter's, a binding element's and a
+    // destructuring assignment's default are all branch edges now.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); if (check(null)) throw new Error("x"); return data; function check(x: unknown = error) { return x; } }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const check = (x: unknown = error) => x; if (check()) throw new Error("x"); return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const r = await db.from("a").select("id"); const check = (x: unknown = r.error) => x; if (check()) throw new Error("x"); return r.data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, obj: { e?: unknown }) { const { data, error } = await db.from("a").select("id"); const { e = error } = obj; if (e) throw e; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, obj: { e?: unknown }) { const { data, error } = await db.from("a").select("id"); let e: unknown; ({ e = error } = obj); if (e) throw e; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, arr: unknown[]) { const { data, error } = await db.from("a").select("id"); let e: unknown; [e = error] = arr; if (e) throw e; return data; }`).verdict).toBe("DISCARDED");
+    // A read in the BODY of a function with a defaulted parameter is a read.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); function check(x: number = 1) { return error; } if (check()) throw new Error("x"); return data; }`).verdict).toBe("OK");
+  });
+
+  it("a direct `.error` read stored in a literal is a read only if the literal is consumed (Codex, PR #92)", () => {
+    // Round fourteen: the direct read followed a local binding and nothing
+    // else, so `{ cause: (await q).error }` bound to a local nothing reads
+    // was OK. It goes through `consumes` now, like the bound local and the
+    // envelope.
+    expect(one(`async function f(db: any) { const box = { cause: (await db.from("a").select("id")).error }; void box; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const errs = [(await db.from("a").select("id")).error]; return 1; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const box = { cause: (await db.from("a").select("id")).error }; if (box.cause) throw box.cause; }`).verdict).toBe("OK");
+    expect(one(`declare function log(x: unknown): void;
+async function f(db: any) { log({ cause: (await db.from("a").select("id")).error }); }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { throw { cause: (await db.from("a").select("id")).error }; }`).verdict).toBe("OK");
   });
 
   it("a builder REPLACED before it is awaited never runs (Codex, PR #92)", () => {
