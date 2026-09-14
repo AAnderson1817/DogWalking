@@ -31,8 +31,11 @@ export interface BillingPortalDeps {
   getClientForUser(authUserId: string): Promise<PortalClientRow | null>;
   /** stripe.billingPortal.sessions.create on the operator's CONNECTED
    * account: the second argument is Stripe's per-request options and must
-   * carry the account, asserted over every recorded call by
-   * billing_portal_test.ts. */
+   * carry the account. Two pins, one per half: billing_portal_test.ts
+   * asserts over every recorded call that the HANDLER passes it, and
+   * billing_portal_deps_test.ts that the WIRING forwards it to the real
+   * `create` — drop it there and every session lands on the platform
+   * account with the handler suite green. */
   createPortalSession(
     params: { customer: string; return_url: string },
     opts: { stripeAccount: string },

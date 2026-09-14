@@ -200,8 +200,10 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   test imports it — and the whole reason to split a `deps.ts` out of an
   `index.ts` is that importing `index.ts` runs `serveFunction` and binds a
   port. Hoist every `Deno.env.get` into `index.ts` and pass a config object.
-  `push_deps.ts`, `deps.ts`, `billing-portal/handler.ts` and
-  `connect-onboarding/handler.ts` are the worked examples.
+  `send-notification/{deps,push_deps}.ts`, `billing-portal/deps.ts` and
+  `connect-onboarding/deps.ts` are the worked examples, each driven by its
+  own `*_deps_test.ts` against `_tests/scripted_db.ts`; a `handler.ts` is
+  the other seam (decisions behind a deps OBJECT) and reads no env either.
 - **A scan OVER edge code lives in vitest, not deno.** A gate that reads
   `supabase/functions/*.ts` as text — `select-columns.test.ts`,
   `discarded-errors.test.ts` — is a `scripts/**/*.test.ts` file in the node
@@ -214,15 +216,18 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
 - **`${#arr[@]}` on an EMPTY associative array is "unbound" under `set -u`
   in bash 5.2.** `scripts/check-walk-cost-parity.sh` died with `trg: unbound
   variable` on a dead database — exit non-zero, and the named count sentence
-  never printed. Count by hand, or read entries as `${arr[$k]-}`.
+  never printed. Count by hand (an `n=$((n+1))` beside each assignment);
+  separately, read a possibly-missing ENTRY as `${arr[$k]-}` — that form
+  fixes a different expression and does not make `${#arr[@]}` safe.
 - **A sabotage that goes red on TYPECHECK is red for the wrong reason.**
   Deleting a refusal from a handler leaves the row possibly null, and
   `deno check` fails before the test runs. Rewrite the sabotage so it
   compiles and the red is the test's own sentence; three of the handler-seam
   sabotages needed this.
-- **`assertEquals` on two Error objects cannot fail** — it compares `{}` to
-  `{}`. To pin that a raw error propagates un-wrapped, assert identity
-  (`err === boom`).
+- **The repository's `_tests/asserts.ts` `assertEquals` on two Error objects
+  cannot fail** — it is JSON-stringify equality, so it compares `{}` to `{}`
+  (`@std/assert`'s would fail; that is not the one the suite imports). To pin
+  that a raw error propagates un-wrapped, assert identity (`err === boom`).
 - **Two worktrees cannot share the e2e dev server.** `playwright.config.mjs`
   starts `npm run dev` on 5173 and REUSES an existing one outside CI, so a
   second validate run in another worktree either kills the first's server or
@@ -233,7 +238,13 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   shared cluster tears the other run's database out from under it; give each
   run a cluster on its own port (its own `PGDATA`) and point `LOCAL_DB_URL`
   at it.
-- **A gate that runs in the caller's zone pins nothing about zones.** CI runs
+- **A gate that runs in the caller's zone pins nothing about zones — and two
+  fixed offsets pin nothing about DST.** A leaf that shifts UTC midnight by
+  the offset in force NOW passes `Etc/GMT+12` and `Etc/GMT-14` (no DST) and
+  is a day out in America/Chicago on the DST-weekend cases; gate 8d runs the
+  business zone as well, and its answers script REQUIRES the zone argument,
+  because with it optional a shell edit that dropped it stayed green.
+  The rest of this bullet is the first pass: CI runs
   in UTC, where a leaf that reads the LOCAL day (`new Date(d).getDay()`)
   answers every date correctly; gate 8d runs its TypeScript side under
   `Etc/GMT+12` and `Etc/GMT-14` and has the answers script refuse a runtime

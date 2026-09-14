@@ -13,11 +13,13 @@
 // `send_notification_test.ts` injects a hand-built `SendDeps`, so it drives
 // the DECISIONS and structurally cannot see what the real wiring does with a
 // query's error. This file drives the real `makeSendDeps` against a scripted
-// database double, the `push_deps_test.ts` shape.
+// database double (`scripted_db.ts`, shared with the billing-portal and
+// connect-onboarding wiring tests).
 import { assert, assertEquals } from "./asserts.ts";
 import { HttpError } from "../_lib/http.ts";
 import { makeSendDeps } from "../send-notification/deps.ts";
 import { deliverNotification, type NotificationRow } from "../send-notification/handler.ts";
+import { PG_ERROR, type Query, rejection, type Result, scriptedDb } from "./scripted_db.ts";
 
 /** A claim token as the RPC returns one. */
 const STAMP = "3f2a1c4e-8b7d-4a19-9c52-6e0d1b8a7f34";
@@ -33,77 +35,6 @@ const ROW: NotificationRow = {
   email_attempts: 0,
 };
 
-/** The shape supabase-js resolves a failed PostgREST query with. */
-const PG_ERROR = {
-  code: "57014",
-  message: "canceling statement due to statement timeout",
-  details: null,
-  hint: null,
-};
-
-interface Result {
-  data: unknown;
-  error: unknown;
-}
-
-interface Query {
-  table: string;
-  op: string;
-  arg: unknown;
-  filters: Array<[string, string, unknown]>;
-}
-
-/**
- * A scripted PostgREST double. Each `from(table)` yields a thenable builder
- * that records the operation and its filters, and resolves with the result
- * scripted for `<table>.<op>` (or `{ data: null, error: null }` when nothing
- * is scripted, which is what supabase-js returns for an empty `maybeSingle`).
- * `rpc(fn)` resolves the result scripted for `rpc:<fn>`.
- */
-function scriptedDb(results: Record<string, Result>) {
-  const queries: Query[] = [];
-  const rpcs: Array<[string, Record<string, unknown>]> = [];
-  const resultFor = (key: string): Result => results[key] ?? { data: null, error: null };
-  function builder(table: string) {
-    const q: Query = { table, op: "", arg: undefined, filters: [] };
-    queries.push(q);
-    const chain = {
-      select(cols: string) {
-        q.op = q.op || "select";
-        q.arg = q.op === "select" ? cols : q.arg;
-        return chain;
-      },
-      update(patch: Record<string, unknown>) {
-        q.op = "update";
-        q.arg = patch;
-        return chain;
-      },
-      eq(col: string, val: unknown) {
-        q.filters.push(["eq", col, val]);
-        return chain;
-      },
-      is(col: string, val: unknown) {
-        q.filters.push(["is", col, val]);
-        return chain;
-      },
-      maybeSingle() {
-        return chain;
-      },
-      then<T>(onFulfilled: (r: Result) => T) {
-        return Promise.resolve(resultFor(`${table}.${q.op}`)).then(onFulfilled);
-      },
-    };
-    return chain;
-  }
-  const db = {
-    from: (table: string) => builder(table),
-    rpc(fn: string, args: Record<string, unknown>) {
-      rpcs.push([fn, args]);
-      return Promise.resolve(resultFor(`rpc:${fn}`));
-    },
-  };
-  return { db, queries, rpcs };
-}
 
 function depsOver(results: Record<string, Result>, opts: { operatorId?: string | null } = {}) {
   const fetches: string[] = [];
@@ -125,12 +56,6 @@ function depsOver(results: Record<string, Result>, opts: { operatorId?: string |
   return { deps, queries, rpcs, fetches };
 }
 
-/** Runs `fn`, returns what it rejected with, and fails if it resolved. */
-async function rejection(fn: () => Promise<unknown>): Promise<unknown> {
-  const err = await fn().then(() => null, (e: unknown) => e);
-  assert(err !== null, "expected a rejection, got a resolved value");
-  return err;
-}
 
 // ── getNotification / backlogIds ───────────────────────────────────────────
 //

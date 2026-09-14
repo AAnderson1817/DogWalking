@@ -98,9 +98,14 @@ Deno.test("every billingPortal call carries the CONNECTED account", async () => 
   const recorded: Recorded[] = [];
   await handleBillingPortal(USER, makeDeps(clientRow(), recorded));
   assert(recorded.length > 0, "no Stripe call was recorded");
-  // Asserted over every recorded call rather than the one that exists today
-  // (the overage_deps rule), so a call added later is covered on its own.
-  for (const r of recorded.filter((r) => r.call.startsWith("billingPortal."))) {
+  // Asserted over EVERY recorded call rather than the one that exists today
+  // (the overage_deps rule), so a call added later is covered on its own —
+  // and unfiltered, so the floor above and the loop see the same list: a
+  // filter by name would let a call recorded under another name (the
+  // `customers.retrieve` that shipped unrouted in fix(connect-routing)) slip
+  // past while the precondition still passed. The recorder holds only Stripe
+  // calls; `getClientForUser` is not pushed.
+  for (const r of recorded) {
     const opts = r.args[r.args.length - 1] as Record<string, unknown>;
     assertEquals(
       opts?.stripeAccount,

@@ -15,8 +15,10 @@
 // that hid two defects in send-notification's deps and one in overage_deps.
 // What connect_onboarding_test.ts pins: the order (account created, id
 // claimed, link minted), the race loser adopting the winner's id, a failed
-// claim minting NO link (the behavioural pin fix(send-lookups)'s re-read fix
-// could only name), no call carrying `stripeAccount`, and the `action` rule.
+// claim minting NO link, no call carrying `stripeAccount`, and the `action`
+// rule. The wiring — the conditional claim, the re-read whose answer wins,
+// and each query's throw (the re-read's is fix(send-lookups)'s fix for this
+// function) — lives in deps.ts and is driven by connect_onboarding_deps_test.ts.
 import { HttpError } from "../_lib/http.ts";
 
 export interface ConnectBody {
@@ -109,12 +111,15 @@ export async function handleConnectOnboarding(
   deps: ConnectOnboardingDeps,
 ): Promise<ConnectStatus | ConnectStart> {
   const action = body?.action ?? "status";
-  // Refused BEFORE any lookup, and the refusal is the behaviour change this
-  // seam ships with: the shipped code tested only `=== "status"`, so any
-  // other value — a typo, a stale client — fell through to `start` and
-  // MINTED a Stripe Connect account. A typo creating an account is worse
-  // than a 400; spec 04 names exactly two values and the frontend sends only
-  // those.
+  // Refused before the handler's own operator lookup (requireOperator has
+  // already read the row once, to authenticate the caller), and the refusal
+  // is the behaviour change this seam ships with: the shipped code tested
+  // only `=== "status"`, so any
+  // other value — a typo, a stale client — fell through to `start`, which
+  // for an operator not yet connected MINTS a Stripe Connect account (an
+  // already-connected operator's typo minted a single-use link). A typo
+  // creating an account is worse than a 400; spec 04 names exactly two
+  // values and the frontend sends only those.
   if (action !== "start" && action !== "status") {
     throw new HttpError(400, "bad_action", "action must be 'start' or 'status'");
   }

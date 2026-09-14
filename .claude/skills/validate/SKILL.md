@@ -127,18 +127,22 @@ fallback (0043, what `fn_debit_walk` charges a row with no snapshot) and the
 and the trigger and the function were two copies of one expression in two
 migrations that nothing tied together. One case list
 (`scripts/walk-cost-cases.txt`), every implementation asked, answers compared
-three ways — trigger against function, function against TypeScript, all
-against the expectation. The SQL side nulls the snapshot before asking
+three ways across implementations — trigger against function, function
+against TypeScript, all against the expectation — plus the TypeScript runs
+against each other. The SQL side nulls the snapshot before asking
 `fn_walk_cost`, because the function coalesces the snapshot first and its own
 expression would otherwise be tied to nothing (a trigger drift is caught by
 the TypeScript comparison regardless), and reads the function's answers
-through a join on the null having taken. The TypeScript side runs under
-`Etc/GMT+12` and `Etc/GMT-14`, either side of the day boundary, because in
-the caller's own zone a leaf that reads the LOCAL day answers every case
-correctly. Must end with `WALK COST PARITY PASS`. Same prerequisites as 8c and skipped by name
-without either — a gate that goes green by not running is this repository's
-most-recorded failure, so a SKIP here is a reason to install deno, not to
-move on.
+through a join on the null having taken. The TypeScript side runs three
+times — under `Etc/GMT+12` and `Etc/GMT-14`, either side of the day boundary,
+against a constant-offset local read (in the caller's own zone such a leaf
+answers every case correctly), and under `America/Chicago`, against a
+DST-dependent one, which passes both fixed offsets — and the answers script
+requires the zone it was told. Must end with `WALK COST PARITY PASS`. Same
+prerequisites as 8c: skipped by name when deno is missing, and inside the
+`7-8. database` skip when there is no database — a gate that goes green by
+not running is this repository's most-recorded failure, so a SKIP here is a
+reason to install deno, not to move on.
 
 ## 9. Migrations are append-only (invariant 6)
 ```

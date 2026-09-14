@@ -5,7 +5,8 @@
 // fix(send-lookups) re-read fix could only name), no Stripe call carrying
 // `stripeAccount` (the operator_billing_test rule — these are platform
 // objects), and the `action` rule: `status` by default, `400 bad_action` for
-// anything but the two values spec 04 names, before any lookup.
+// anything but the two values spec 04 names, before the handler's own lookup
+// (`requireOperator` in index.ts has already read the row to authenticate).
 import { assert, assertEquals, assertRejects } from "./asserts.ts";
 import { HttpError } from "../_lib/http.ts";
 import {
@@ -59,13 +60,14 @@ function makeStripeDouble(recorded: Recorded[]): PlatformConnectStripe {
 function makeDeps(
   row: ConnectOperatorRow | null,
   recorded: Recorded[],
-  opts: { claimWinner?: string; claimFails?: HttpError } = {},
+  opts: { claimWinner?: string; claimFails?: HttpError; lookupFails?: HttpError } = {},
 ): ConnectOnboardingDeps & { lookups: string[] } {
   const lookups: string[] = [];
   return {
     lookups,
     getOperator(id) {
       lookups.push(id);
+      if (opts.lookupFails) return Promise.reject(opts.lookupFails);
       return Promise.resolve(row);
     },
     claimAccountId(operatorId, accountId) {
@@ -94,7 +96,7 @@ function assertNothingRoutedToAnAccount(recorded: Recorded[]): void {
 async function refused(
   row: ConnectOperatorRow | null,
   body: ConnectBody | null,
-  opts: { claimFails?: HttpError } = {},
+  opts: { claimFails?: HttpError; lookupFails?: HttpError } = {},
 ): Promise<{ err: HttpError; recorded: Recorded[]; lookups: string[] }> {
   const recorded: Recorded[] = [];
   const deps = makeDeps(row, recorded, opts);
@@ -105,9 +107,13 @@ async function refused(
 
 Deno.test("status reports the four mirror fields and touches nothing", async () => {
   const recorded: Recorded[] = [];
+  // Connected but still under review — the real Stripe lifecycle (the
+  // account exists before charges are enabled), and the fixture in which
+  // `connected` and `charges_enabled` DIFFER, so a handler deriving one from
+  // the other's column goes red here rather than passing on a co-varying pair.
   const row = operatorRow({
     stripe_account_id: "acct_have",
-    stripe_charges_enabled: true,
+    stripe_charges_enabled: false,
     stripe_payouts_enabled: false,
     stripe_details_submitted: true,
   });
@@ -116,15 +122,17 @@ Deno.test("status reports the four mirror fields and touches nothing", async () 
   assert(recorded.length === 0, `status touched: ${recorded.map((r) => r.call).join(", ")}`);
   assertEquals(res as ConnectStatus, {
     connected: true,
-    charges_enabled: true,
+    charges_enabled: false,
     payouts_enabled: false,
     details_submitted: true,
   });
 });
 
 Deno.test("a null body means status, not start", async () => {
-  // The frontend always sends an action; a bare POST must not mint an
-  // account by falling into the other branch.
+  // A body of the JSON literal `null` (or `{}`) means status. A body with no
+  // JSON at all never reaches the handler: `readJson` refuses it as
+  // `400 bad_json` first. Either way, nothing here may fall into the other
+  // branch and mint an account.
   const recorded: Recorded[] = [];
   const res = await handleConnectOnboarding(OP_ID, null, makeDeps(operatorRow(), recorded));
   assert(recorded.length === 0, `a null body touched: ${recorded.map((r) => r.call).join(", ")}`);
@@ -140,6 +148,20 @@ Deno.test("a caller whose operator row is missing is refused 403 before any Stri
   const { err, recorded } = await refused(null, { action: "start" });
   assertEquals(err.status, 403);
   assertEquals(err.code, "not_operator");
+  assertEquals(recorded, []);
+});
+
+Deno.test("a failed operator lookup propagates as the 500 it is, not as an absence, and reaches no Stripe call", async () => {
+  // The billing-portal sibling's rule, pinned here too: the deps contract
+  // says a lookup throws on a database failure, and a handler that swallowed
+  // it into `403 not_operator` would satisfy every other test in this file.
+  const { err, recorded } = await refused(operatorRow(), { action: "start" }, {
+    lookupFails: new HttpError(500, "db_error", "operator lookup failed", new Error("connection reset")),
+  });
+  assertEquals(err.status, 500);
+  assertEquals(err.code, "db_error");
+  // Un-wrapped: the sentence the wiring chose is the one the operator reads.
+  assertEquals(err.message, "operator lookup failed");
   assertEquals(recorded, []);
 });
 
@@ -247,7 +269,7 @@ Deno.test("no Stripe call carries stripeAccount — these are platform objects",
   assertNothingRoutedToAnAccount(recorded);
 });
 
-Deno.test("an unknown action is refused 400 bad_action before any lookup — it used to mint an account", async () => {
+Deno.test("an unknown action is refused 400 bad_action before the handler's own lookup — it used to mint an account", async () => {
   // The shipped code tested only `=== "status"`, so `{ action: "foo" }` fell
   // through to start and created a Stripe Connect account. Spec 04 names two
   // values and the frontend sends only those (api.ts connectStatus /
