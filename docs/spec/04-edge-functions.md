@@ -331,10 +331,16 @@ Price per attempt. The Settings form gates its button on the same rule
 never leave the browser.
 
 ## connect-onboarding — POST, operator JWT (review B5)
-Body `{ action: 'start' | 'status' }`. `status` reports `{ connected,
+Body `{ action?: 'start' | 'status' }`. `status` reports `{ connected,
 charges_enabled, payouts_enabled, details_submitted }` from the local mirror;
 `start` creates the operator's **Standard** connected account if absent and
-returns a single-use `AccountLink` onboarding URL.
+returns a single-use `AccountLink` onboarding URL. A missing `action` means
+`status`; **any other value is `400 bad_action`**, refused before the
+operator row is even read. That is a behaviour change made with the seam:
+the shipped code tested only `=== 'status'`, so every other value — a typo,
+a stale client — fell through to `start` and MINTED a Stripe Connect
+account. A typo creating an account is worse than a 400; the frontend sends
+exactly the two values (`api.ts` `connectStatus` / `connectStart`).
 
 Standard, not Express or Custom, because **the operator is the merchant of
 record**: they own the Stripe account, their business is on the client's card
@@ -359,6 +365,15 @@ The platform account carries exactly one kind of money: the operator's own
 Sanpo subscription (`operator-billing` / `platform-webhook`, review H31),
 where Sanpo is the merchant and the operator is the customer. Client money
 never moves there.
+
+The rules live in `handler.ts` behind injected deps (`getOperator`,
+`claimAccountId`, a platform-Stripe slice, `base`); `index.ts` only wires the
+real client and database to them. `connect_onboarding_test.ts` asserts on a
+deps recorder: the order (account created, id claimed, link minted), the race
+loser adopting the winner's id, a failed claim — write OR re-read — minting
+**no** link (the behavioural pin the re-read fix above could only name in a
+census), no Stripe call carrying `stripeAccount` (these are platform
+objects), and the `action` rule.
 
 ## operator-billing — POST, operator JWT (review H31)
 
@@ -1271,6 +1286,15 @@ Uses `accountOf`, deliberately **not** `requireAccount`. This path does not take
 money, and blocking a client from updating a card or cancelling because Stripe
 has charges paused on their walker would strand them with a subscription they
 cannot stop. A client with no `stripe_customer_id` gets `409 no_billing`.
+
+The rules live in `handler.ts` behind injected deps (`getClientForUser`,
+`createPortalSession`, `base`); `index.ts` only wires the real client and
+database to them. Until the seam the `accountOf`-not-`requireAccount` rule was
+carried by a comment beside the call; `billing_portal_test.ts` now asserts it
+on a deps recorder — a client whose walker's charges are disabled still gets
+a session — and that every refusal (`not_client`, `no_billing`,
+`stripe_not_connected`) lands **before the first Stripe call**, and every
+Stripe call carries the connected account.
 
 ## vault-rekey — POST, service-role only (review B2)
 Body: `{ action: 'verify'|'status'|'rekey', batch? }`. **Never returns a
