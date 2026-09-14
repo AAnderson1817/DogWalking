@@ -519,6 +519,44 @@ Deno.test("the drain does not abort on one row, and stays loud by its backlog", 
   ]);
 });
 
+Deno.test("the drain line keeps the row id when a thrown context carries notification_id: null", async () => {
+  // Codex on PR #92: `isSuppressed`'s failure context carried
+  // `notification_id: null`, the drain spread the thrown context LAST, so the
+  // null overwrote the row id and `logHandledError` then dropped the field —
+  // a generic per-row line with no notification id, on the one path where a
+  // persistent failure recurs. The drain's own facts win now, and the thrown
+  // context's other fields still ride along.
+  const h = makeDeps({ backlog: ["n-1"] });
+  h.deps.getClient = () =>
+    Promise.reject(
+      new HttpError(500, "db_error", "client lookup failed", { code: "57014" }, {
+        notification_id: null,
+        client_id: "cl-1",
+      }),
+    );
+  const lines = await captureLines(async () => {
+    await drainBacklog(h.deps);
+  });
+  assertEquals(lines.length, 1);
+  assertEquals(JSON.parse(lines[0]).context, { notification_id: "n-1", channel: "email", client_id: "cl-1" });
+});
+
+Deno.test("the push arm's drain line keeps the row id the same way", async () => {
+  const h = makeDeps({ backlog: ["n-1"] });
+  const lines = await captureLines(async () => {
+    await drainBacklog(h.deps, () =>
+      Promise.reject(
+        new HttpError(500, "db_error", "could not read push subscriptions", { code: "57014" }, {
+          notification_id: null,
+          channel: "email",
+          operator_id: "op-1",
+        }),
+      ));
+  });
+  const push = lines.map((l) => JSON.parse(l)).find((p) => p.message === "drain: push delivery threw");
+  assertEquals(push?.context, { notification_id: "n-1", channel: "push", operator_id: "op-1" });
+});
+
 Deno.test("losing the claim race sends nothing and records nothing", async () => {
   // The email arm. `isSettled` is a READ: two invocations both pass it and
   // both deliver, which is reachable via the INSERT webhook racing the drain

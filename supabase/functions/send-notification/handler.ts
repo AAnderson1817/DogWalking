@@ -460,7 +460,8 @@ export async function drainBacklog(
           fn: "send-notification",
           message: "drain: push delivery threw",
           cause: e,
-          context: { notification_id: row.id, channel: "push", ...(e instanceof HttpError ? e.context : {}) },
+          // The drain's facts win over the thrown context — see the email arm.
+          context: { ...(e instanceof HttpError ? e.context : {}), notification_id: row.id, channel: "push" },
         });
       }
     }
@@ -491,7 +492,12 @@ export async function drainBacklog(
         fn: "send-notification",
         message: "drain: email delivery threw",
         cause: e,
-        context: { notification_id: row.id, channel: "email", ...(e instanceof HttpError ? e.context : {}) },
+        // The thrown context FIRST, the drain's own facts last: a lookup that
+        // throws with `notification_id: null` in its context would otherwise
+        // overwrite the row id this line exists to carry, and
+        // `logHandledError` drops null fields — a generic line with no id,
+        // on the one path where a persistent failure recurs (Codex, PR #92).
+        context: { ...(e instanceof HttpError ? e.context : {}), notification_id: row.id, channel: "email" },
       });
     }
   }

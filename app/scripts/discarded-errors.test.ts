@@ -33,7 +33,12 @@ import { describe, expect, it } from "vitest";
  *                 overwritten (by assignment, plain or through a pattern,
  *                 a `var` re-declaration or a `var` loop variable) and
  *                 before `.error` itself is written through any alias of
- *                 the same object — or `.error` is read straight off the
+ *                 the same object, where a write inside a closure counts
+ *                 from the closure's creation (or from the binding, for a
+ *                 hoisted declaration) and a read inside a closure counts
+ *                 only when no write can follow the binding at all, since
+ *                 the closure runs whenever it is called — or `.error` is
+ *                 read straight off the
  *                 awaited expression AND used (consumed in place, or bound
  *                 to a local that is read afterwards — `const e = (await
  *                 q).error; return data;` is the destructured discard with
@@ -418,20 +423,20 @@ function isDeclarationName(id: ts.Identifier): boolean {
  * same function-scoped binding, re-assigned), a `var` loop variable
  * (`for (var r of rows)`) and a bare loop target (`for (r of rows)`).
  */
-function writesTo(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node): number[] {
-  const out: number[] = [];
+function writesTo(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node): Write[] {
+  const out: Write[] = [];
   const target = (t: ts.Expression) => {
-    for (const id of assignmentTargets(t)) if (symbolOf(checker, id) === sym) out.push(id.pos);
+    for (const id of assignmentTargets(t)) if (symbolOf(checker, id) === sym) out.push({ pos: id.pos, node: id });
   };
   const visit = (n: ts.Node) => {
     if (ts.isBinaryExpression(n) && isAssignmentKind(n.operatorToken.kind)) target(n.left);
     if (ts.isVariableDeclaration(n) && n.initializer && ts.isVariableDeclarationList(n.parent) && !isBlockScoped(n.parent) &&
-      ts.isIdentifier(n.name) && symbolOf(checker, n.name) === sym) out.push(n.name.pos);
+      ts.isIdentifier(n.name) && symbolOf(checker, n.name) === sym) out.push({ pos: n.name.pos, node: n.name });
     if (ts.isForOfStatement(n) || ts.isForInStatement(n)) {
       const init = n.initializer;
       if (ts.isVariableDeclarationList(init)) {
         if (!isBlockScoped(init)) {
-          for (const d of init.declarations) if (ts.isIdentifier(d.name) && symbolOf(checker, d.name) === sym) out.push(d.name.pos);
+          for (const d of init.declarations) if (ts.isIdentifier(d.name) && symbolOf(checker, d.name) === sym) out.push({ pos: d.name.pos, node: d.name });
         }
       } else target(init);
     }
@@ -441,9 +446,52 @@ function writesTo(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node): 
   return out;
 }
 
-/** The first write to `sym` after `after`, or Infinity. */
-function nextWriteTo(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node, after: number): number {
-  return Math.min(Infinity, ...writesTo(checker, sym, container).filter((w) => w > after));
+/** A write to a binding: where its target sits in the source, and the target itself. */
+interface Write { pos: number; node: ts.Node }
+
+/**
+ * The outermost function nested inside `container` that encloses `n` — the
+ * closure `n` runs in — or null when `n` runs in `container`'s own body.
+ */
+function closureOf(n: ts.Node, container: ts.Node): ts.Node | null {
+  let outermost: ts.Node | null = null;
+  for (let cur: ts.Node | undefined = n.parent; cur && cur !== container; cur = cur.parent) {
+    if (ts.isFunctionLike(cur)) outermost = cur;
+  }
+  return outermost;
+}
+
+/**
+ * Where a write EXECUTES, as far as source order can say. Straight-line code
+ * writes where it sits. A write inside a closure runs whenever the closure
+ * is CALLED: an arrow or function expression cannot run before it exists,
+ * so its creation point is the earliest — and a hoisted function
+ * declaration can be called before any read at all, so its write sits at
+ * the binding itself and no later read survives it (Codex on PR #92: `const
+ * check = () => error; error = null; if (check()) …` reads the null, and a
+ * position-only window called the closure's reference an earlier read).
+ */
+function executesAt(w: Write, container: ts.Node, bound: ts.Identifier): number {
+  const fn = closureOf(w.node, container);
+  if (!fn) return w.pos;
+  return ts.isFunctionDeclaration(fn) ? bound.end : fn.pos;
+}
+
+/** The first write to `bound`'s binding that can execute after it, or Infinity. */
+function nextWriteTo(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node, bound: ts.Identifier): number {
+  return Math.min(Infinity, ...writesTo(checker, sym, container).map((w) => executesAt(w, container, bound)).filter((w) => w > bound.pos));
+}
+
+/**
+ * Is this reference a read that observes the binding's value BEFORE the
+ * window closes? A straight-line read must sit before the first write that
+ * can execute after the binding. A read inside a closure runs whenever the
+ * closure is called, which can be after ANY later write, so it counts only
+ * when no write can follow the binding at all (Codex on PR #92).
+ */
+function readsInWindow(u: ts.Identifier, bound: ts.Identifier, overwritten: number, container: ts.Node): boolean {
+  if (u.pos <= bound.pos || u.pos >= overwritten) return false;
+  return overwritten === Infinity || closureOf(u, container) === null;
 }
 
 /**
@@ -452,7 +500,7 @@ function nextWriteTo(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node
  * shadow has a different symbol and is never counted (the whole point).
  */
 function usesOf(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node): ts.Identifier[] {
-  const written = new Set<number>(writesTo(checker, sym, container));
+  const written = new Set<number>(writesTo(checker, sym, container).map((w) => w.pos));
   const out: ts.Identifier[] = [];
   const visit = (n: ts.Node) => {
     if (ts.isIdentifier(n) && !isDeclarationName(n) && !written.has(n.pos) && symbolOf(checker, n) === sym) out.push(n);
@@ -540,8 +588,8 @@ function isReadAfter(ctx: Ctx, bound: ts.Identifier): boolean {
   const sym = symbolOf(ctx.checker, bound);
   if (!sym) return false;
   const container = scopeContainer(bound);
-  const overwritten = nextWriteTo(ctx.checker, sym, container, bound.pos);
-  return usesOf(ctx.checker, sym, container).some((u) => u.pos > bound.pos && u.pos < overwritten && isConsumed(u));
+  const overwritten = nextWriteTo(ctx.checker, sym, container, bound);
+  return usesOf(ctx.checker, sym, container).some((u) => readsInWindow(u, bound, overwritten, container) && isConsumed(u));
 }
 
 interface Ctx {
@@ -584,8 +632,8 @@ function followEnvelopeVar(ctx: Ctx, nameNode: ts.Identifier, at: ts.Node): Site
     const sym = symbolOf(ctx.checker, id);
     if (!sym || seenSym.has(sym)) continue;
     seenSym.add(sym);
-    const overwritten = nextWriteTo(ctx.checker, sym, container, id.pos);
-    const uses = usesOf(ctx.checker, sym, container).filter((u) => u.pos > id.pos && u.pos < overwritten);
+    const overwritten = nextWriteTo(ctx.checker, sym, container, id);
+    const uses = usesOf(ctx.checker, sym, container).filter((u) => readsInWindow(u, id, overwritten, container));
     members.push({ id, uses });
     for (const u of uses) {
       const d = u.parent;
@@ -593,8 +641,15 @@ function followEnvelopeVar(ctx: Ctx, nameNode: ts.Identifier, at: ts.Node): Site
     }
   }
   const allUses = members.flatMap((m) => m.uses);
-  const errorWrittenAt = Math.min(...allUses.map((u) => { const a = errorAccess(u); return a && isErrorWrite(a) ? u.pos : Infinity; }));
-  const uses = allUses.filter((u) => u.pos < errorWrittenAt);
+  // A `.error` write inside a closure executes whenever the closure is
+  // called, so it closes the window from the closure's creation (or from
+  // the binding, for a hoisted declaration) — the same rule as a write to
+  // the binding itself.
+  const errorWrittenAt = Math.min(...allUses.map((u) => {
+    const a = errorAccess(u);
+    return a && isErrorWrite(a) ? executesAt({ pos: u.pos, node: u }, container, nameNode) : Infinity;
+  }));
+  const uses = allUses.filter((u) => u.pos < errorWrittenAt && (errorWrittenAt === Infinity || closureOf(u, container) === null));
   const via = (u: ts.Identifier) => u.text === name ? "" : ` (through alias \`${u.text}\`)`;
 
   const read = uses.find((u) => { const a = errorAccess(u); return a !== null && !isErrorWrite(a) && isConsumed(a); });
@@ -730,7 +785,7 @@ function followBuilder(ctx: Ctx, nameNode: ts.Identifier, declaration: ts.Node):
     };
     visit(container);
     refs.sort((a, b) => a.pos - b.pos);
-    const written = new Set<number>(writesTo(ctx.checker, sym, container));
+    const written = new Set<number>(writesTo(ctx.checker, sym, container).map((w) => w.pos));
     // Past this position `q` holds something else.
     let replacedAt = Infinity;
     for (const use of refs) {
@@ -1581,6 +1636,55 @@ async function h({ db }: { db: unknown }, token: string) { const { data } = awai
       .toMatch(/query: `\.select` is referenced and never called/);
     const viaBuilder = classifySource(`async function f(db: any) { let q = db.from("b").select("id"); const fn = q.eq; return fn; }`, "f.ts");
     expect(viaBuilder.map((s) => s.reason)).toEqual([expect.stringMatching(/builder `q`: `\.eq` is referenced and never called/)]);
+  });
+
+  it("a read inside a closure runs after any later write (Codex, PR #92)", () => {
+    // Codex's exact case: the closure's reference sits BEFORE the overwrite
+    // in the source and executes after it, and a position-only window
+    // counted it as an earlier read.
+    expect(one(`async function f(db: any) {
+  let { data, error } = await db.from("x").select("id");
+  const check = () => error;
+  error = null;
+  if (check()) throw check();
+  return data;
+}`).verdict).toBe("DISCARDED");
+    // The envelope form, and a `.error` write inside a closure that a later
+    // straight-line read may observe.
+    expect(one(`async function g(db: any, other: any) {
+  let r = await db.from("x").select("id");
+  const check = () => r.error;
+  r = other;
+  if (check()) throw check();
+  return r.data;
+}`).verdict).toBe("DISCARDED");
+    expect(one(`async function h(db: any) {
+  const r = await db.from("x").select("id");
+  const clear = () => { r.error = null; };
+  if (r.error) throw r.error;
+  return r.data;
+}`).verdict).toBe("DISCARDED");
+    // A write inside a HOISTED declaration can run before any read.
+    expect(one(`async function k(db: any) {
+  let { data, error } = await db.from("x").select("id");
+  clear();
+  if (error) throw error;
+  return data;
+  function clear() { error = null; }
+}`).verdict).toBe("DISCARDED");
+    // Healthy: a closure read with no later write at all, and a
+    // straight-line read before a closure that writes is created.
+    expect(one(`async function m(db: any) {
+  const { data, error } = await db.from("x").select("id");
+  const check = () => error;
+  if (check()) throw check();
+  return data;
+}`).verdict).toBe("OK");
+    expect(one(`async function n(db: any) {
+  let { data, error } = await db.from("x").select("id");
+  if (error) throw error;
+  return { data, reset: () => { error = null; } };
+}`).verdict).toBe("OK");
   });
 
   it("a builder REPLACED before it is awaited never runs (Codex, PR #92)", () => {

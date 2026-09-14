@@ -75,7 +75,13 @@ read through the wrapper — and the error value read that way must itself be
 USED: a local it is bound to must be read afterwards. A reference in a
 DISCARD position — a bare statement, `void e`, the left side of a comma —
 is not a read of anything, whether it is the direct read, a bound `error`
-(`void error;`) or an envelope's `.error` (`void r.error;`). A deferred
+(`void error;`) or an envelope's `.error` (`void r.error;`). Source order is
+execution order only in straight-line code: a write inside a closure counts
+from the closure's creation (or from the binding itself, for a hoisted
+function declaration, which can be called before any read), and a read
+inside a closure counts only when no write can follow the binding at all,
+because the closure runs whenever it is called — `const check = () => error;
+error = null; if (check()) …` reads the null. A deferred
 builder (`let q = db.from(…)`) is followed to the statement that consumes
 it: assignment to itself (`q = q.eq(…)`, through a conditional too) grows the
 same builder, while a write whose right side does not root at it — `q =
