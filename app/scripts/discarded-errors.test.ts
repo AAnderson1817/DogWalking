@@ -61,7 +61,10 @@ import { describe, expect, it } from "vitest";
  *                 three shapes, and a route around the CI check that every
  *                 `HttpError(5xx, …)` carries a cause and a context), a
  *                 builder method referenced and never called
- *                 (`.delete().throwOnError` — nothing runs), an
+ *                 (`.delete().throwOnError` — nothing runs), a deferred
+ *                 builder REPLACED before anything consumed it (`let q =
+ *                 db.from(…); q = other; await q` — the query never runs;
+ *                 `q = q.eq(…)` grows the same builder and is followed), an
  *                 unrecognised receiver, an unrecognised consumer. FAILS —
  *                 a check that cannot classify must say so rather than pass
  *                 by seeing nothing.
@@ -694,9 +697,17 @@ function classifyAwaited(ctx: Ctx, awaited: ts.AwaitExpression): Site[] {
 /**
  * `let q = db.from(…)…;` — follow `q` to the statement that consumes it.
  *
- * Reassignments (`q = q.eq(…)`, `q = c ? q.is(…) : q.eq(…)`) continue the
- * builder and classify nothing; an `await`, `return` or arrow body consumes
- * it. A builder nothing consumes is UNCLASSIFIED, not OK.
+ * A builder GROWS by assignment to itself (`q = q.eq(…)`, `q = c ? q.is(…) :
+ * q.eq(…)`) and that classifies nothing; an `await`, `return` or arrow body
+ * consumes it. A write whose right side does not root at `q` REPLACES it
+ * (`q = other`, `({ q } = other)`, `for (q of xs)`, `var q = other`), and
+ * from there every reference belongs to the replacement — the follow ends
+ * (Codex on PR #92: `q = replacement; await q` was OK for a builder that
+ * never ran, because assignment targets were skipped and the later await was
+ * read as the original's). A builder replaced before anything consumed it
+ * never runs, which is UNCLASSIFIED with a sentence saying so, as is one
+ * continued on one branch of a conditional and replaced on the other; a
+ * builder nothing consumes at all is UNCLASSIFIED, not OK.
  */
 function followBuilder(ctx: Ctx, nameNode: ts.Identifier, declaration: ts.Node): Site[] {
   if (ctx.followed.has(declaration)) return [];
@@ -707,22 +718,51 @@ function followBuilder(ctx: Ctx, nameNode: ts.Identifier, declaration: ts.Node):
   if (sym) {
     const container = scopeContainer(nameNode);
     // A builder is re-assigned to itself as it grows, so its writes are its
-    // uses here: look at every reference, reads and writes alike.
+    // uses here: look at every reference, reads and writes alike — a `var`
+    // re-declaration included, since that is a write to the same binding.
     const refs: ts.Identifier[] = [];
     const visit = (n: ts.Node) => {
-      if (ts.isIdentifier(n) && !isDeclarationName(n) && symbolOf(ctx.checker, n) === sym) refs.push(n);
+      if (ts.isIdentifier(n) && n !== nameNode && symbolOf(ctx.checker, n) === sym &&
+        (!isDeclarationName(n) || (ts.isVariableDeclaration(n.parent) && n.parent.name === n))) {
+        refs.push(n);
+      }
       ts.forEachChild(n, visit);
     };
     visit(container);
+    refs.sort((a, b) => a.pos - b.pos);
+    const written = new Set<number>(writesTo(ctx.checker, sym, container));
+    // Past this position `q` holds something else.
+    let replacedAt = Infinity;
     for (const use of refs) {
       if (use.pos <= nameNode.pos) continue;
+      if (use.pos >= replacedAt) break;
+      if (written.has(use.pos)) {
+        const w = writeOf(use);
+        const growth = continuesBuilder(ctx, w.rhs, sym);
+        if (growth === "all") continue;
+        replacedAt = w.end;
+        if (growth === "some") {
+          out.push(site(ctx, w.node, "UNCLASSIFIED",
+            `builder \`${name}\` (line ${lineOf(ctx.sf, declaration)}) is continued on one branch and replaced on another — whether the query runs is not visible`));
+          continue;
+        }
+        // The right side may still hand the builder somewhere (`q = wrap(q)`):
+        // that reference classifies itself below. A replacement that never
+        // mentions it, with nothing having consumed it, means it never ran.
+        const mentioned = refs.some((r) => r.pos > use.pos && r.pos < replacedAt);
+        if (!mentioned && out.length === 0) {
+          out.push(site(ctx, w.node, "UNCLASSIFIED",
+            `builder \`${name}\` (line ${lineOf(ctx.sf, declaration)}) is replaced before it is awaited, returned or passed on — the query never runs`));
+        }
+        continue;
+      }
       const chain = outermost(use);
       const { top } = chain;
       if (chain.thenable) { out.push(site(ctx, top, "UNCLASSIFIED", `builder \`${name}\` consumed via .${chain.thenable}()`)); continue; }
       if (chain.uncalled) { out.push(site(ctx, top, "UNCLASSIFIED", uncalledReason(`builder \`${name}\``, chain.uncalled))); continue; }
       const p = top.parent;
+      // The root of a growth assignment's right side: `q = q.eq(…)`.
       if (ts.isBinaryExpression(p) && p.right === top && ts.isIdentifier(p.left) && symbolOf(ctx.checker, p.left) === sym) continue;
-      if (ts.isBinaryExpression(p) && p.left === top && isAssignmentKind(p.operatorToken.kind)) continue;
       if (chain.rejects) { out.push(site(ctx, top, "UNCLASSIFIED", `builder \`${name}\` ${REJECTS_REASON}`)); continue; }
       out.push(...classifyTop(ctx, top, `builder \`${name}\` (line ${lineOf(ctx.sf, declaration)}) `));
     }
@@ -731,6 +771,59 @@ function followBuilder(ctx: Ctx, nameNode: ts.Identifier, declaration: ts.Node):
     out.push(site(ctx, declaration, "UNCLASSIFIED", `builder \`${name}\` is never awaited, returned or passed on in this function`));
   }
   return out;
+}
+
+/**
+ * The write a target identifier belongs to: the assignment, `var`
+ * re-declaration or loop that writes it, with its right side (the value the
+ * binding takes) and where that value's text ends — references before that
+ * point are still about the old value (`q = wrap(q)`).
+ */
+function writeOf(target: ts.Identifier): { node: ts.Node; rhs: ts.Expression | undefined; end: number } {
+  let n: ts.Node = target;
+  for (;;) {
+    const p: ts.Node = n.parent;
+    if (!p || ts.isSourceFile(p)) return { node: target, rhs: undefined, end: target.end };
+    if (ts.isBinaryExpression(p) && isAssignmentKind(p.operatorToken.kind) && p.left === n) return { node: p, rhs: p.right, end: p.end };
+    if (ts.isVariableDeclaration(p) && p.name === n) {
+      const stmt = p.parent.parent;
+      if (ts.isForOfStatement(stmt) || ts.isForInStatement(stmt)) return { node: stmt, rhs: stmt.expression, end: stmt.expression.end };
+      return { node: p, rhs: p.initializer, end: p.end };
+    }
+    if ((ts.isForOfStatement(p) || ts.isForInStatement(p)) && p.initializer === n) return { node: p, rhs: p.expression, end: p.expression.end };
+    n = p;
+  }
+}
+
+/** The branches a value can take: through wrappers and a conditional's two arms. */
+function leaves(e: ts.Expression): ts.Expression[] {
+  let n: ts.Expression = e;
+  while (ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isNonNullExpression(n) || ts.isSatisfiesExpression(n)) n = n.expression;
+  if (ts.isConditionalExpression(n)) return [...leaves(n.whenTrue), ...leaves(n.whenFalse)];
+  return [n];
+}
+
+/** The identifier a member/call chain grows from: `q` in `q.eq(1).is(2)`. */
+function chainRoot(e: ts.Node): ts.Node {
+  let n: ts.Node = e;
+  for (;;) {
+    if (ts.isCallExpression(n)) { n = n.expression; continue; }
+    const m = memberAccess(n);
+    if (m) { n = m.receiver; continue; }
+    if (ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isNonNullExpression(n) || ts.isSatisfiesExpression(n)) { n = n.expression; continue; }
+    return n;
+  }
+}
+
+/**
+ * Does a write's right side continue the builder — every branch a chain
+ * rooted at the builder itself ("all"), none of them ("none"), or some?
+ */
+function continuesBuilder(ctx: Ctx, rhs: ts.Expression | undefined, sym: ts.Symbol): "all" | "some" | "none" {
+  if (!rhs) return "none";
+  const branches = leaves(rhs);
+  const own = branches.filter((b) => { const r = chainRoot(b); return ts.isIdentifier(r) && symbolOf(ctx.checker, r) === sym; }).length;
+  return own === branches.length ? "all" : own === 0 ? "none" : "some";
 }
 
 /** Classify by what holds the top of the chain. `prefix` names a followed builder. */
@@ -1488,6 +1581,77 @@ async function h({ db }: { db: unknown }, token: string) { const { data } = awai
       .toMatch(/query: `\.select` is referenced and never called/);
     const viaBuilder = classifySource(`async function f(db: any) { let q = db.from("b").select("id"); const fn = q.eq; return fn; }`, "f.ts");
     expect(viaBuilder.map((s) => s.reason)).toEqual([expect.stringMatching(/builder `q`: `\.eq` is referenced and never called/)]);
+  });
+
+  it("a builder REPLACED before it is awaited never runs (Codex, PR #92)", () => {
+    // Codex's exact case: assignment targets were skipped, so the later
+    // `await q` was read as the original builder's consumer and the site
+    // was OK — for a query that was never executed.
+    const gone = classifySource(`async function f(db: any, replacement: any) {
+  let q = db.from("abandoned").select("id");
+  q = replacement;
+  const { error } = await q;
+  if (error) throw error;
+}`, "fixture.ts");
+    expect(gone.map((s) => s.verdict)).toEqual(["UNCLASSIFIED"]);
+    expect(gone[0]?.line).toBe(3);
+    expect(gone[0]?.reason).toMatch(/builder `q` \(line 2\) is replaced before it is awaited/);
+    // Growth is not replacement: plainly, and through a conditional.
+    expect(one(`async function g(db: any, c: boolean) {
+  let q = db.from("x").select("id");
+  q = q.eq("a", 1);
+  q = c ? q.is("b", null) : q.eq("b", 2);
+  const { data, error } = await q;
+  if (error) throw error;
+  return data;
+}`).verdict).toBe("OK");
+    // A replacement AFTER the await belongs to the replacement: the earlier
+    // query stays OK and the later `await q` is not attributed to it.
+    expect(classifySource(`async function h(db: any, other: any) {
+  let q = db.from("x").select("id");
+  const { error } = await q;
+  if (error) throw error;
+  q = other;
+  await q;
+}`, "fixture.ts").map((s) => s.verdict)).toEqual(["OK"]);
+    // Handed to a call inside its own replacement: the call is the consumer,
+    // refused loudly rather than reported as abandoned.
+    const wrapped = classifySource(`async function k(db: any, wrap: any) {
+  let q = db.from("x").select("id");
+  q = wrap(q);
+  const { error } = await q;
+  if (error) throw error;
+}`, "fixture.ts");
+    expect(wrapped.map((s) => s.verdict)).toEqual(["UNCLASSIFIED"]);
+    expect(wrapped[0]?.reason).toMatch(/CallExpression/);
+    // Pattern targets, a loop target and a `var` re-declaration are writes too.
+    for (const write of ["({ q } = other);", "[q] = other;", "for (q of other) {}"]) {
+      const s = one(`async function m(db: any, other: any) {
+  let q = db.from("x").select("id");
+  ${write}
+  const { error } = await q;
+  if (error) throw error;
+}`);
+      expect(s.verdict, write).toBe("UNCLASSIFIED");
+      expect(s.reason, write).toMatch(/replaced before/);
+    }
+    const redeclared = one(`async function v(db: any, other: any) {
+  var q = db.from("x").select("id");
+  var q = other;
+  const { error } = await q;
+  if (error) throw error;
+}`);
+    expect(redeclared.verdict).toBe("UNCLASSIFIED");
+    expect(redeclared.reason).toMatch(/replaced before/);
+    // Continued on one branch and replaced on the other: not visible, so loud.
+    const half = one(`async function n(db: any, c: boolean, other: any) {
+  let q = db.from("x").select("id");
+  q = c ? q.eq("a", 1) : other;
+  const { error } = await q;
+  if (error) throw error;
+}`);
+    expect(half.verdict).toBe("UNCLASSIFIED");
+    expect(half.reason).toMatch(/one branch/);
   });
 
   it("a factory initialiser is a client whatever its annotation says (Codex, PR #92)", () => {

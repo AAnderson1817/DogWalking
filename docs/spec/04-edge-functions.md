@@ -75,7 +75,14 @@ read through the wrapper — and the error value read that way must itself be
 USED: a local it is bound to must be read afterwards. A reference in a
 DISCARD position — a bare statement, `void e`, the left side of a comma —
 is not a read of anything, whether it is the direct read, a bound `error`
-(`void error;`) or an envelope's `.error` (`void r.error;`).
+(`void error;`) or an envelope's `.error` (`void r.error;`). A deferred
+builder (`let q = db.from(…)`) is followed to the statement that consumes
+it: assignment to itself (`q = q.eq(…)`, through a conditional too) grows the
+same builder, while a write whose right side does not root at it — `q =
+other`, `({ q } = other)`, `for (q of xs)`, `var q = other` — REPLACES it,
+so every later reference belongs to the replacement and a builder replaced
+before anything consumed it never ran, which the gate refuses by name rather
+than reading the replacement's await as the original's.
 A chain carrying `.throwOnError()` is REFUSED, not
 blessed: postgrest-js then rejects with a raw `PostgrestError` that nothing
 decides, which lands in `handleRequest`'s catch as an unhandled error with no
