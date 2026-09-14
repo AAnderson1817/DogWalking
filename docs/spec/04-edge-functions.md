@@ -55,8 +55,12 @@ referenced afterwards in the same function (`const { data, error } = await
 q; return data;` names the error and then treats the envelope as data — the
 defect wearing the fix's clothes; Codex review on PR #92). A read counts
 only if it can see THIS envelope: not after the variable is overwritten by
-a later query, and not a same-named variable in a nested callback. What the
-gate cannot see it refuses loudly rather than passing: an envelope handed to
+a later query, not after `.error` itself has been assigned or deleted (a
+write is not a read), not a same-named variable in a nested scope — a
+callback parameter, a block-local `const`, a loop variable, a catch
+binding — and, for a destructured `error`, not after the local has been
+reassigned; an alias (`const res = r`) is followed as the same envelope.
+What the gate cannot see it refuses loudly rather than passing: an envelope handed to
 a call (`console.log(r)`), an arrow body that is an inline callback
 (`ids.map((id) => db.from(…))`, whose array nothing reads), a `.then(`, a
 `Promise.all([…])`. `.auth` is also a plain field name in this tree, so a
