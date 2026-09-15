@@ -532,43 +532,36 @@ function memberChain(target: ts.Expression): { base: ts.Identifier; keys: Key[] 
 }
 
 /**
- * Every name for the SAME object as `sym` inside `container` — `const alias =
- * box` in either direction, transitively. A member write through any of them
- * replaces the member for all of them, because they are one object (Codex on
- * PR #92, round eighteen).
+ * Where a name comes FROM: the binding it was ultimately initialised from and
+ * the keys between them — `box` is itself, `const inner = box.nested` is
+ * `box` plus `["nested"]`, recursively. Two names denote the same object when
+ * they share a root and the keys agree, which is what lets a write through
+ * one be seen by a read through another (Codex on PR #92, round eighteen).
+ *
+ * A binding REASSIGNED between its declaration and `at` is not what it was
+ * initialised from any more, so it roots at itself: `let alias = box; alias =
+ * other; alias.error = null;` writes to another object entirely, and treating
+ * it as `box` forever rejected correct code (Codex, round nineteen — the
+ * worst shape a gate has, red on a healthy tree).
  */
-function aliasGroup(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node): Set<ts.Symbol> {
-  const group = new Set<ts.Symbol>([sym]);
-  const queue: ts.Symbol[] = [sym];
-  const add = (s: ts.Symbol | undefined) => { if (s && !group.has(s)) { group.add(s); queue.push(s); } };
-  const nameOf = (e: ts.Expression | undefined): ts.Identifier | null => {
-    if (!e) return null;
-    const u = unwrapped(e);
-    return ts.isIdentifier(u) ? u : null;
-  };
-  while (queue.length > 0) {
-    const cur = queue.pop()!;
-    for (const d of cur.declarations ?? []) {
-      if (ts.isVariableDeclaration(d) && d.initializer) {
-        const src = nameOf(d.initializer);
-        if (src) add(symbolOf(checker, src));
-      }
-    }
-    const visit = (n: ts.Node) => {
-      if (ts.isVariableDeclaration(n) && n.initializer && ts.isIdentifier(n.name)) {
-        const src = nameOf(n.initializer);
-        if (src && symbolOf(checker, src) === cur) add(symbolOf(checker, n.name));
-      }
-      if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
-        const lhs = nameOf(n.left);
-        const src = nameOf(n.right);
-        if (lhs && src && symbolOf(checker, src) === cur) add(symbolOf(checker, lhs));
-      }
-      ts.forEachChild(n, visit);
-    };
-    visit(container);
+function rootOf(checker: ts.TypeChecker, id: ts.Identifier, container: ts.Node, at: number, seen: Set<ts.Symbol> = new Set()): { sym: ts.Symbol; keys: Key[] } | null {
+  const sym = symbolOf(checker, id);
+  if (!sym || seen.has(sym)) return null;
+  seen.add(sym);
+  for (const d of sym.declarations ?? []) {
+    if (!ts.isVariableDeclaration(d) || !d.initializer) continue;
+    const init = unwrapped(d.initializer);
+    const from = ts.isIdentifier(init) ? { base: init, keys: [] as Key[] } : memberChain(init);
+    if (!from) break;
+    const reassigned = writesTo(checker, sym, container)
+      .map((w) => executesAt(w, container, id))
+      .some((pos) => pos > d.pos && pos < at);
+    if (reassigned) break;
+    const up = rootOf(checker, from.base, container, at, seen);
+    if (!up) break;
+    return { sym: up.sym, keys: [...up.keys, ...from.keys] };
   }
-  return group;
+  return { sym, keys: [] };
 }
 
 /**
@@ -584,20 +577,26 @@ function aliasGroup(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node)
  * the error and leaves the error itself where it is, and one that diverges at
  * any key touches another member entirely.
  */
-function nextPropertyWriteTo(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node, bound: ts.Identifier, path: Path): number {
+function nextPropertyWriteTo(checker: ts.TypeChecker, container: ts.Node, bound: ts.Identifier, path: Path): number {
   if (path.length === 0) return Infinity;
-  const group = aliasGroup(checker, sym, container);
+  const here = rootOf(checker, bound, container, bound.pos);
+  if (!here) return Infinity;
+  // Where the error sits, said from the root: the keys to this binding, then
+  // the path it carries.
+  const carriedFromRoot = [...here.keys, ...path];
   const out: Write[] = [];
   const hits = (target: ts.Expression) => {
     const chain = memberChain(target);
     if (!chain) return;
-    const base = symbolOf(checker, chain.base);
-    if (!base || !group.has(base) || chain.keys.length > path.length) return;
-    for (let i = 0; i < chain.keys.length; i += 1) {
-      const written = chain.keys[i]!;
-      const carried = path[i];
-      if (carried === undefined) break; // past the path: the length check above decides those
-      if (written !== UNKNOWN && carried !== UNKNOWN && String(written) !== String(carried)) return;
+    const from = rootOf(checker, chain.base, container, target.pos);
+    if (!from || from.sym !== here.sym) return;
+    const written = [...from.keys, ...chain.keys];
+    if (written.length > carriedFromRoot.length) return;
+    for (let i = 0; i < written.length; i += 1) {
+      const w = written[i]!;
+      const c = carriedFromRoot[i];
+      if (c === undefined) break; // past the path: the length check above decides those
+      if (w !== UNKNOWN && c !== UNKNOWN && String(w) !== String(c)) return;
     }
     out.push({ pos: target.pos, node: target });
   };
@@ -1116,7 +1115,7 @@ function isReadAfter(ctx: Ctx, bound: ts.Identifier, seen: Set<ts.Node> = new Se
   const container = scopeContainer(bound);
   const overwritten = Math.min(
     nextWriteTo(ctx.checker, sym, container, bound),
-    nextPropertyWriteTo(ctx.checker, sym, container, bound, path),
+    nextPropertyWriteTo(ctx.checker, container, bound, path),
   );
   return usesOf(ctx.checker, sym, container).some((u) =>
     readsInWindow(u, bound, overwritten, container, ctx.checker) && consumes(ctx, u, seen, path)
@@ -2650,6 +2649,25 @@ async function f(db: any) { const { data, error } = await db.from("a").select("i
     expect(one(`async function f(db: any, x: any) { const { data, error } = await db.from("a").select("id"); ${nested} box.nested.other = x; if (box.nested.cause) throw box.nested.cause; return data; }`).verdict).toBe("OK");
     expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; const other = { error: 1 }; other.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("OK");
     expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); ${nested} if (box.nested.cause) throw box.nested.cause; return data; }`).verdict).toBe("OK");
+  });
+
+  it("a name is the same object only while it still comes from it (Codex, PR #92)", () => {
+    // Round nineteen, both directions of one model. The alias GROUP was a set
+    // of names with no sense of time or depth: `const inner = box.nested`
+    // never joined it (a write through `inner` was missed), while `let alias =
+    // box; alias = other;` never left it, so a write through the REPLACEMENT
+    // closed the window on healthy code — a gate red on a healthy tree, the
+    // worst shape there is. A name roots at what it was initialised from,
+    // through member chains and transitively, and only while no write to it
+    // has executed in between.
+    const nested = `const box = { nested: { cause: error } };`;
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); ${nested} const inner = box.nested; inner.cause = fallback; if (box.nested.cause) throw box.nested.cause; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, other: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias = box; alias.error = fallback; alias = other; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
+    // Not the object any more, never the object, below the path, beside it.
+    expect(one(`async function f(db: any, other: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias = box; alias = other; alias.error = null; if (box.error) throw box.error; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); ${nested} const inner = box.nested; if (inner.cause) throw inner.cause; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); ${nested} const inner = box.nested; inner.cause.message = "x"; if (box.nested.cause) throw box.nested.cause; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any, x: any) { const { data, error } = await db.from("a").select("id"); ${nested} const inner = box.nested; inner.other = x; if (box.nested.cause) throw box.nested.cause; return data; }`).verdict).toBe("OK");
   });
 
   it("a builder REPLACED before it is awaited never runs (Codex, PR #92)", () => {

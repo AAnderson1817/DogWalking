@@ -138,8 +138,10 @@ the error once it is REDEFINED: a later element of the same object literal
 that may define it (the same name, a computed key, a spread) makes it
 unknown, and a later write to that member (`box.error = fallback`, `delete
 box.cause`) closes the read window exactly as a write to the binding does — a
-write whose key chain is a PREFIX of the carried path, through any name for
-the same object and through any transparent wrapper, while a write deeper
+write whose key chain is a PREFIX of the carried path, through any transparent
+wrapper and through any name for the same object — a name roots at what it
+was initialised from (`const inner = box.nested`, transitively) and is that
+object only while no write to it has executed since — while a write deeper
 than the path mutates a field of the error and leaves the error itself. A class field initializer, instance or static, is
 execution the gate does not follow and reads nothing; a static block runs
 with the class statement and is straight-line. A deferred
