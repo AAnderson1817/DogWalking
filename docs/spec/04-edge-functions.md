@@ -133,7 +133,11 @@ read nothing. Reaching the error is not reading it either: a member of it
 error?.message` discards and `if (error?.message) throw error` does not —
 and taking the error apart is a read only of the piece that is read, so
 `const { message } = error; void message;` inspects nothing while `const
-{ code } = error; if (code) throw error;` does. A class field initializer, instance or static, is
+{ code } = error; if (code) throw error;` does. A carried key stops carrying
+the error once it is REDEFINED: a later element of the same object literal
+that may define it (the same name, a computed key, a spread) makes it
+unknown, and a later write to that member (`box.error = fallback`, `delete
+box.cause`) closes the read window exactly as a write to the binding does. A class field initializer, instance or static, is
 execution the gate does not follow and reads nothing; a static block runs
 with the class statement and is straight-line. A deferred
 builder (`let q = db.from(…)`) is followed to the statement that consumes
