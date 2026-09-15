@@ -33,7 +33,11 @@
 #     list said "12 of the 13" and named one of them for three functions'
 #     worth of growth — do not state a count here; it is an enumeration
 #     connected to nothing, and `contract_for` is where the bespoke cases are
-#     actually held.)
+#     actually held.) Naming them in prose is not what makes that true:
+#     `verify-deployment.test.ts` parses this tree and FAILS if any function
+#     with its own `Deno.serve` has no `contract_for` case, so the read-only
+#     argument is derived rather than enumerated and a third bypasser cannot
+#     quietly take the default contract.
 #   * `unsubscribe` accepts GET by design, so it is probed with NO token —
 #     which returns the confirmation page without reaching the database.
 #     `unsubscribe_test.ts` pins that ("no token at all: the same page, and
@@ -45,6 +49,13 @@
 # and cannot be forgotten. It gets the DEFAULT contract (405 + our envelope +
 # x-request-id). If it legitimately answers something else, add a case to
 # `contract_for` — the failure is loud and forces that to be a decision.
+#
+# A function that calls `Deno.serve` itself MUST have a case, because the
+# default contract's read-only argument is `serveFunction`'s and there is no
+# `serveFunction` in front of it; `verify-deployment.test.ts` refuses without
+# one. Add the name to the `for special in …` loop in the same edit — the test
+# pins the two against each other, since that loop is what makes a stale case
+# fatal.
 #
 # Env:
 #   SUPABASE_PROJECT_REF    required
