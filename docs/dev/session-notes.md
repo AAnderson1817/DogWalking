@@ -94,15 +94,24 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   three a lockstep and the drift is invisible until CI disagrees with you.
 - **Fourteen gates still exist only in CI**, so a green local run is not a
   green CI run. They are listed by exact step name in `SKILL.md` §13 rather
-  than here, because a count written into prose is a count that rots: this
-  bullet said TWO, the spec-drift audit that found it said seven, and the
-  measured number is fifteen. `scripts/check-gate-lockstep.py` (gate 10g)
-  checks the list, the count and this sentence against `ci.yml`.
+  than here, because a count written into prose is a count that rots — and this
+  one has already rotted three times: the bullet said TWO, the spec-drift audit
+  that found it said seven, measuring gave fifteen, and moving the walk-channel
+  check into gate 3 one commit later made it fourteen.
+  `scripts/check-gate-lockstep.py` (gate 10g) checks the list, the count and
+  this sentence against `ci.yml`, which is why the number above is right rather
+  than merely written down.
 
 ## Traps this repository has already paid for
 
-- **Never `git restore` or `git checkout <file>` to recover uncommitted work.**
-  The status log records six separate times this destroyed work in progress.
+- **Never write the working tree from git to recover uncommitted work.** The
+  named offenders are `git restore` and `git checkout <file>`, but the rule is
+  about the CLASS, not those two spellings: the eighth instance was
+  `git checkout-index -f -a`, reached for reflexively, which overwrote every
+  unstaged file from the index — silently destroying two finished edits and
+  their red-first proof. Anything that writes the tree from git, the index or a
+  commit is the same hazard, including `git stash`, `git clean` and
+  `git read-tree -u`. The status log records seven earlier times.
   For red-first sabotages: copy the **fixed** file to a scratch directory,
   apply the sabotage, verify the diff is non-empty, run, then restore from
   that copy. Restoring from a snapshot taken *before* the fix silently reverts

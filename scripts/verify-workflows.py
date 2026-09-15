@@ -112,6 +112,31 @@ def check(path: pathlib.Path) -> None:
                     "rejected as a non-fast-forward even when it is one",
                 )
 
+        # ── Rule 4: every ci.yml job carries a ceiling ───────────────────────
+        # A wedged job is indistinguishable from a slow one until a timeout
+        # says so, and GitHub's default is SIX HOURS. `ci(concurrency)` put a
+        # ceiling on `e2e-today` because that was the job that had wedged, and
+        # left the other four on the default — the per-site fix this log keeps
+        # recording, and it came back on PR #94 when the `frontend` job hung in
+        # a step that completes in seconds locally. On `main` a six-hour job
+        # holds the deploy gate and produces the misleading red that
+        # `ops(gate-noise)` is about, and this session cannot clear one: the
+        # token 403s on Actions writes.
+        #
+        # Scoped to ci.yml ON PURPOSE. The deploy workflows are deliberately
+        # unbounded for the same reason `ci(concurrency)` refused
+        # `cancel-in-progress` on them: killing `supabase db push` halfway
+        # leaves an environment nobody can describe, which is worse than a job
+        # that runs long. A gate that cannot tell those two apart would make
+        # this rule the hazard.
+        if path.name == "ci.yml" and "timeout-minutes" not in job:
+            fail(
+                path.name,
+                name,
+                "has no `timeout-minutes`, so a wedged step runs to GitHub's six-hour default — "
+                "bound it with headroom over its measured runtime",
+            )
+
 
 def main() -> int:
     files = sorted(WORKFLOWS.glob("*.yml"))

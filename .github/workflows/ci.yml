@@ -27,6 +27,20 @@ jobs:
   frontend:
     name: Frontend — tsc, vitest, build
     runs-on: ubuntu-latest
+    # Bounded, like every other job here. `ci(concurrency)` put a ceiling on
+    # `e2e-today` because that was the job that had wedged, and left the other
+    # four on GitHub's six-hour default — the per-site fix this log keeps
+    # recording. It came back on PR #94: the `frontend` job hung in
+    # `Behavioural tests still execute` (an `npx vitest run --project dom` that
+    # completes in seconds locally and had completed on the commit before) and
+    # sat in-progress for the better part of an hour with five more to go. A
+    # wedged job is indistinguishable from a slow one until the ceiling says
+    # so, this session cannot clear one (the token 403s on Actions writes), and
+    # on `main` a six-hour job holds the deploy gate and produces the
+    # misleading red `ops(gate-noise)` is about. Measured on the last fully
+    # green run (35004363610): frontend 60s, e2e 87s, database 73s, edge 17s,
+    # migrations 5s — so these are ~8x headroom, not a target.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
 
@@ -526,6 +540,8 @@ jobs:
   edge-functions:
     name: Edge functions — deno check + test
     runs-on: ubuntu-latest
+    # Bounded for the reason on the `frontend` job above.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
 
@@ -623,6 +639,8 @@ jobs:
           --health-retries 10
     env:
       LOCAL_DB_URL: postgresql://postgres:postgres@localhost:54322/postgres
+    # Bounded for the reason on the `frontend` job above.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
 
@@ -836,6 +854,8 @@ jobs:
     name: Migrations — append-only
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # Bounded for the reason on the `frontend` job above.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
         with:
