@@ -71,28 +71,57 @@ interface Site {
   why: string;
 }
 
-/** The text of a string-valued JSX attribute, or null when it is an expression. */
+/** The text of a statically readable string, or null for a dynamic one. */
+function literalText(e: ts.Expression): string | null {
+  if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) return e.text;
+  return null;
+}
+
+/**
+ * The text of a string-valued JSX attribute, or null when it is an expression.
+ *
+ * Reads three spellings, and each was added after the previous one let the
+ * forbidden shape through:
+ *
+ *   role="alert"                 the plain attribute
+ *   role={"alert"}               the same attribute with braces round it
+ *   {...{ role: "alert" }}       an object spread of a literal
+ *
+ * All three are the same element to React and to a screen reader, and the
+ * last two each measured green against the version of this gate before them —
+ * `<span className={"signin__error"} role={"alert"}>` passed the first, and
+ * `<span {...{ className: "signin__error", role: "alert" }}>` passed the
+ * second. LATER WINS, exactly as JSX does it, so a spread after an attribute
+ * overrides it and an attribute after a spread overrides the spread.
+ *
+ * `className={cx(...)}`, `role={role}` and `{...props}` are genuinely dynamic:
+ * not this gate's business, because the compiler cannot say what they hold and
+ * a guess in either direction is worse than the silence.
+ */
 function literalAttribute(attributes: ts.JsxAttributes, name: string): string | null {
+  let value: string | null = null;
   for (const attr of attributes.properties) {
+    if (ts.isJsxSpreadAttribute(attr)) {
+      // Only an object literal written in place can be read. Anything else —
+      // `{...props}`, a call, an identifier — leaves the answer where it was,
+      // which is this gate's standing rule that it does not guess.
+      const spread = attr.expression;
+      if (!ts.isObjectLiteralExpression(spread)) continue;
+      for (const prop of spread.properties) {
+        if (!ts.isPropertyAssignment(prop)) continue;
+        const key = ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) ? prop.name.text : null;
+        if (key === name) value = literalText(prop.initializer);
+      }
+      continue;
+    }
     if (!ts.isJsxAttribute(attr) || attr.name.getText() !== name) continue;
     const init = attr.initializer;
-    if (!init) return null;
-    if (ts.isStringLiteral(init)) return init.text;
-    // `role={"alert"}` is the same attribute with braces round it, and JSX
-    // accepts both — so the braced spelling wrote the forbidden shape straight
-    // past the first version of this rule. Measured: a `<span
-    // className={"signin__error"} role={"alert"}>` passed. A braced value the
-    // compiler can read is read; a template with a substitution is not one.
-    if (ts.isJsxExpression(init) && init.expression) {
-      const e = init.expression;
-      if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) return e.text;
-    }
-    // `className={cx(...)}` and `role={role}` are genuinely dynamic: not this
-    // gate's business, because the compiler cannot say what they hold and a
-    // guess in either direction is worse than the silence.
-    return null;
+    if (!init) { value = null; continue; }
+    if (ts.isStringLiteral(init)) { value = init.text; continue; }
+    if (ts.isJsxExpression(init) && init.expression) { value = literalText(init.expression); continue; }
+    value = null;
   }
-  return null;
+  return value;
 }
 
 function scan(files: string[]): Site[] {
@@ -141,6 +170,41 @@ function scan(files: string[]): Site[] {
 describe("every error message renders through FormError or StateField", () => {
   const files = tsxFiles(APP_SRC);
   const sites = scan(files);
+
+  // The attribute reader, pinned on fixtures rather than only on the tree.
+  // Every spelling below was added after the previous version of this rule let
+  // the forbidden shape through, and each is the same element to React and to
+  // a screen reader. Both directions matter: a reader that answered "alert" to
+  // everything would pass every sabotage of these rules for the wrong reason.
+  it("reads a JSX attribute in every static spelling, and guesses at none", () => {
+    const role = (jsx: string): string | null => {
+      const sf = ts.createSourceFile("f.tsx", `const e = ${jsx};`, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+      let out: string | null = null;
+      const visit = (n: ts.Node): void => {
+        if (ts.isJsxSelfClosingElement(n)) out = literalAttribute(n.attributes, "role");
+        ts.forEachChild(n, visit);
+      };
+      visit(sf);
+      return out;
+    };
+
+    expect(role('<span role="alert" />')).toBe("alert");
+    expect(role('<span role={"alert"} />')).toBe("alert");
+    expect(role("<span role={`alert`} />")).toBe("alert");
+    expect(role('<span {...{ role: "alert" }} />')).toBe("alert");
+    expect(role('<span {...{ "role": "alert" }} />')).toBe("alert");
+    // Later wins, exactly as JSX does it — in both directions.
+    expect(role('<span role="status" {...{ role: "alert" }} />')).toBe("alert");
+    expect(role('<span {...{ role: "alert" }} role="status" />')).toBe("status");
+    // Genuinely dynamic: no answer, and no guess.
+    expect(role("<span role={role} />")).toBeNull();
+    expect(role("<span {...rest} />")).toBeNull();
+    expect(role("<span {...{ role: computeRole() }} />")).toBeNull();
+    // An unreadable spread does not ERASE evidence already found: refusing to
+    // un-flag is the safe direction for a question about a live region.
+    expect(role('<span role="alert" {...rest} />')).toBe("alert");
+    expect(role("<span />")).toBeNull();
+  });
 
   // Preconditions. An assertion that only forbids is satisfied by a scanner
   // that sees nothing, so the scan is proven live before it is believed.

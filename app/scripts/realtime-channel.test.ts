@@ -85,25 +85,6 @@ function property(obj: ts.ObjectLiteralExpression, name: string): ts.Expression 
   return null;
 }
 
-/**
- * Whether `name` is written in the literal at all, shorthand included.
- *
- * Separate from `property` on purpose, and the separation is load-bearing:
- * `broadcast.ts` writes `{ topic, event, payload, private: true }`, where
- * three of the four are SHORTHAND and carry no initializer. Asking `property`
- * for `topic` there answers null, and the first version of this file did
- * exactly that — so it could not find the message literal at all and its own
- * precondition said so. A shorthand `private` would likewise be a reference
- * this check cannot resolve, which is why the VALUE still comes from
- * `property` and only the PRESENCE question accepts shorthand.
- */
-function has(obj: ts.ObjectLiteralExpression, name: string): boolean {
-  return obj.properties.some((p) => {
-    if (!ts.isPropertyAssignment(p) && !ts.isShorthandPropertyAssignment(p)) return false;
-    return (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) && p.name.text === name;
-  });
-}
-
 interface ChannelCall {
   file: string;
   line: number;
@@ -241,6 +222,96 @@ function channelCalls(files: string[]): ChannelCall[] {
 }
 
 /**
+ * The object literals in `file`, indexed by the name they are declared under,
+ * so a spread of one can be resolved where it is used.
+ *
+ * One hop by name is all this needs and all it claims: `const message = {…}`
+ * spread into a message literal. A spread of anything else is reported as
+ * unresolvable by the caller rather than assumed harmless.
+ */
+function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteralExpression> {
+  const out = new Map<string, ts.ObjectLiteralExpression>();
+  const visit = (n: ts.Node): void => {
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer
+      && ts.isObjectLiteralExpression(n.initializer)) {
+      out.set(n.name.text, n.initializer);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return out;
+}
+
+/**
+ * The properties an object literal EFFECTIVELY carries, spreads resolved in
+ * source order — later wins, exactly as the language does it.
+ *
+ * Returns a map of name to the value's source text, or to a marker this check
+ * cannot read. A spread it cannot follow marks the two names this file asks
+ * about, so the literal fails rather than passing by omission.
+ *
+ * SHORTHAND is why this returns a map rather than a set of names, and the
+ * distinction is one this file has already paid for: `broadcast.ts` writes
+ * `{ topic, event, payload, private: true }`, where three of the four carry no
+ * initializer at all, so a reader asking only for initializers could not find
+ * the message literal and the precondition said so. Presence is enough for
+ * `topic`; a shorthand `private` is a REFERENCE this check cannot resolve, and
+ * is recorded as unreadable rather than as true.
+ *
+ * This is the fix for the round after the multiple-literal one, and it is the
+ * same defect a level down: the scan keyed on a DIRECT `topic` property, so
+ * `const message = { topic, event, payload, private: true }` spread into
+ * `messages: [{ ...message, private: false }]` left the public literal with no
+ * direct `topic`, invisible, while the base literal supplied a reassuring
+ * `true` from a line that is not what gets sent. Measured: 6 of 6 green while
+ * `broadcast.ts` published a public message.
+ */
+function effectiveProps(
+  obj: ts.ObjectLiteralExpression,
+  declared: Map<string, ts.ObjectLiteralExpression>,
+  depth = 0,
+): Map<string, string> {
+  const props = new Map<string, string>();
+  for (const p of obj.properties) {
+    if (ts.isSpreadAssignment(p)) {
+      const from = ts.isIdentifier(p.expression) ? declared.get(p.expression.text) : undefined;
+      if (from && depth < 4) {
+        for (const [k, v] of effectiveProps(from, declared, depth + 1)) props.set(k, v);
+      } else {
+        // Cannot follow it, so cannot say what it carries — and ORDER is why
+        // this has to overwrite rather than merely add a note: a spread AFTER
+        // `private: true` can replace it, so leaving the `true` standing would
+        // let `{ private: true, ...unknown }` pass on a value that may not
+        // survive. It marks the keys this file asks about, and a later direct
+        // assignment overwrites the mark exactly as the language would.
+        const mark = `<unresolvable spread \`${p.expression.getText()}\`>`;
+        props.set("topic", mark);
+        props.set("private", mark);
+      }
+      continue;
+    }
+    if (ts.isPropertyAssignment(p)) {
+      const key = ts.isIdentifier(p.name) || ts.isStringLiteral(p.name) ? p.name.text : null;
+      if (key !== null) props.set(key, p.initializer.getText());
+      // A computed key could be either of the two names this file asks about,
+      // and there is no way to tell which, so both are marked unreadable.
+      else {
+        props.set("topic", "<computed key, unreadable>");
+        props.set("private", "<computed key, unreadable>");
+      }
+      continue;
+    }
+    if (ts.isShorthandPropertyAssignment(p)) {
+      // A shorthand carries a REFERENCE this check cannot resolve. Fine for
+      // `topic`, where presence is the question; not fine for `private`, which
+      // is why the value is recorded as unreadable rather than as true.
+      props.set(p.name.text, "<shorthand, unreadable>");
+    }
+  }
+  return props;
+}
+
+/**
  * `private` in EVERY message literal in the broadcast body, not the last one.
  *
  * The first version kept a single result and each match overwrote it, so a
@@ -250,6 +321,7 @@ function channelCalls(files: string[]): ChannelCall[] {
  */
 function serverPrivate(): { found: boolean; values: string[] } {
   const source = parse(BROADCAST);
+  const declared = declaredObjects(source);
   const values: string[] = [];
   const visit = (node: ts.Node): void => {
     if (ts.isObjectLiteralExpression(node)) {
@@ -262,17 +334,12 @@ function serverPrivate(): { found: boolean; values: string[] } {
       // than writing `false`, it is the same one — so an omitted `private` is
       // recorded as `<absent>` and fails like any other non-`true` value.
       //
-      // Presence is still asked with `has` because `topic` is SHORTHAND here;
-      // the VALUE of `private` has to be a real assignment, since a shorthand
-      // one is a reference this check cannot resolve and "cannot say" is not
-      // "is private".
-      if (has(node, "topic")) {
-        if (!has(node, "private")) values.push("<absent>");
-        else {
-          const priv = property(node, "private");
-          values.push(priv ? priv.getText() : "<shorthand, unreadable>");
-        }
-      }
+      // Read through SPREADS, in source order, because a literal's direct
+      // properties are not what it carries: `{ ...message, private: false }`
+      // has no direct `topic` and was skipped entirely while its base supplied
+      // a `true` from a line that is not what gets sent.
+      const props = effectiveProps(node, declared);
+      if (props.has("topic")) values.push(props.get("private") ?? "<absent>");
     }
     ts.forEachChild(node, visit);
   };
@@ -306,6 +373,53 @@ describe("the walk channel is the only channel, and it is private on both sides"
     expect(names('import { createClient } from "./supabase";')).toEqual([]);
     expect(names('import { supabase } from "./not-supabase-module";')).toEqual([]);
     expect(names('import { supabase } from "./supabase";\nconst c = makeThing(supabase);')).toEqual(["supabase"]);
+  });
+
+  // The message reader, pinned on fixtures. `serverPrivate()` reads one real
+  // file, so every rule about spreads and ordering would otherwise be proven
+  // only under sabotage and by nothing in the committed suite.
+  it("reads a message literal through spreads, in source order", () => {
+    const read = (src: string): string[] => {
+      const sf = ts.createSourceFile("b.ts", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+      const declared = declaredObjects(sf);
+      const out: string[] = [];
+      const visit = (n: ts.Node): void => {
+        if (ts.isObjectLiteralExpression(n)) {
+          const props = effectiveProps(n, declared);
+          if (props.has("topic")) out.push(props.get("private") ?? "<absent>");
+        }
+        ts.forEachChild(n, visit);
+      };
+      visit(sf);
+      return out;
+    };
+
+    expect(read("send({ topic, event, private: true });")).toEqual(["true"]);
+    expect(read("send({ topic, event });")).toEqual(["<absent>"]);
+    expect(read("send({ topic, event, private: false });")).toEqual(["false"]);
+    // Codex's case: a base literal supplies `topic` and a reassuring `true`
+    // from a line that is not what gets sent, while the override goes public.
+    // Both literals are read; the sent one reads `false`.
+    expect(read("const m = { topic, private: true };\nsend({ ...m, private: false });"))
+      .toEqual(["true", "false"]);
+    // Later wins the other way too.
+    expect(read("const m = { topic, private: false };\nsend({ ...m, private: true });"))
+      .toEqual(["false", "true"]);
+    // A spread this file cannot follow marks both names, so a `true` written
+    // BEFORE it does not stand — the spread could replace it.
+    expect(read("send({ topic, private: true, ...extra });"))
+      .toEqual(["<unresolvable spread `extra`>"]);
+    // …and a direct assignment AFTER such a spread does stand, as JSX's
+    // sibling rule does: the language says later wins, and so does this.
+    expect(read("send({ topic, ...extra, private: true });")).toEqual(["true"]);
+    // A shorthand `private` is a reference this file cannot resolve, and
+    // "cannot say" is not "is private".
+    expect(read("send({ topic, private });")).toEqual(["<shorthand, unreadable>"]);
+
+    // And the precondition on the reader itself: a literal with no `topic` at
+    // all is not a message and contributes nothing, so a reader that answered
+    // for every object literal would be reporting on code that sends nothing.
+    expect(read("const opts = { retries: 3 };")).toEqual([]);
   });
 
   // Preconditions. "No channel is public" is satisfied by a scanner that finds

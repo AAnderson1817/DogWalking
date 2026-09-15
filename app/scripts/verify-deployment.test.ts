@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import ts from "typescript";
@@ -379,15 +379,28 @@ function sourceFiles(dir: string): string[] {
 }
 
 /**
- * The lines where a file CALLS `serveFunction`, imported from `_lib/http.ts`.
+ * The lines where a file CALLS `serveFunction`, imported from `_lib/http.ts`,
+ * at a point that RUNS when the module is evaluated.
  *
- * Two conditions, and each is load-bearing. A CALL, because a mention in a
- * comment or a string is not a wrapper in front of a request — and four
- * `deps.ts` files in this tree name `serveFunction` in prose for exactly the
- * reason that makes this worth guarding (importing an `index.ts` runs it and
- * binds a port). Imported from `_lib/http.ts`, because a local function of
- * the same name would answer a question nobody asked: what is in front of the
- * request is the house wrapper or it is not.
+ * Three conditions, and each is load-bearing.
+ *
+ * A CALL, because a mention in a comment or a string is not a wrapper in
+ * front of a request — and four `deps.ts` files in this tree name
+ * `serveFunction` in prose for exactly the reason that makes this worth
+ * guarding (importing an `index.ts` runs it and binds a port).
+ *
+ * Imported from `_lib/http.ts`, because a local function of the same name
+ * would answer a question nobody asked: what is in front of the request is
+ * the house wrapper or it is not.
+ *
+ * And OUTSIDE any function body, which is the third and came from the round
+ * after this rule was inverted: a call that never executes serves nothing.
+ * Codex planted an `index.ts` serving itself through an imported `serve(…)`
+ * beside an `unused.ts` calling `serveFunction` inside a function nobody
+ * invokes, and the whole directory read as housed — 14 of 14 green, measured.
+ * A call at module scope inside an `if` or a `try` still runs on evaluation
+ * and still counts; only a function body defers it. Refusing those too would
+ * be red on a healthy tree, which is the worse shape.
  */
 function serveFunctionLines(file: string): number[] {
   const text = readFileSync(file, "utf8");
@@ -409,6 +422,12 @@ function serveFunctionLines(file: string): number[] {
 
   const lines: number[] = [];
   const visit = (n: ts.Node) => {
+    // A function body is where execution is deferred to a caller this check
+    // cannot see, so stop descending rather than counting what is inside it.
+    if (ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n)
+      || ts.isMethodDeclaration(n) || ts.isConstructorDeclaration(n)
+      || ts.isGetAccessorDeclaration(n) || ts.isSetAccessorDeclaration(n)
+      || ts.isClassDeclaration(n) || ts.isClassExpression(n)) return;
     if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && bound.has(n.expression.text)) {
       lines.push(sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1);
     }
@@ -418,15 +437,31 @@ function serveFunctionLines(file: string): number[] {
   return lines;
 }
 
-/** Whether each shipped function is behind the house wrapper, and where. */
+/**
+ * Whether each shipped function is behind the house wrapper, and where.
+ *
+ * The ENTRYPOINT only — `index.ts`, which is what Supabase deploys and
+ * evaluates. The first version accepted a call anywhere in the directory, and
+ * a directory is not a request path: an unused helper beside a self-serving
+ * `index.ts` made the whole function read as housed (measured). Green on the
+ * healthy tree, checked rather than assumed: all fourteen real calls are
+ * top-level statements in an `index.ts`, and the two functions with none are
+ * the webhooks that already carry a `contract_for` case.
+ *
+ * A function directory with no `index.ts` is not housed, which is the safe
+ * answer: Supabase has nothing to deploy for it, and the sibling assertion
+ * that every directory yields a readable source file fails first and by name.
+ */
 function housed(
   functionsDir = join(REPO, "supabase", "functions"),
 ): { name: string; where: string[] }[] {
-  return shippedFunctions(functionsDir).map((name) => ({
-    name,
-    where: sourceFiles(join(functionsDir, name))
-      .flatMap((f) => serveFunctionLines(f).map((line) => `${relative(functionsDir, f)}:${line}`)),
-  }));
+  return shippedFunctions(functionsDir).map((name) => {
+    const entry = join(functionsDir, name, "index.ts");
+    const where = existsSync(entry)
+      ? serveFunctionLines(entry).map((line) => `${relative(functionsDir, entry)}:${line}`)
+      : [];
+    return { name, where };
+  });
 }
 
 /**
@@ -485,6 +520,32 @@ describe("verify-deployment: the read-only argument", () => {
     put("epsilon", "index.ts", '// importing index.ts executes `serveFunction` and binds a port\nconst doc = "serveFunction(handle)";\nDeno.serve(handle);\n');
     // NOT housed: a local function of the same name is not the house wrapper.
     put("zeta", "index.ts", 'const serveFunction = (h: unknown) => Deno.serve(h as never);\nserveFunction(handle);\n');
+    // NOT housed: the entrypoint serves itself, and the only `serveFunction`
+    // call in the directory sits in an unused helper inside a function nobody
+    // invokes. A call that never runs serves nothing — Codex's case, which
+    // read as housed while the wrapper was not in front of the request.
+    put("eta", "index.ts", 'import { serve } from "https://deno.land/std/http/server.ts";\nserve(handle);\n');
+    writeFileSync(
+      join(dir, "eta", "unused.ts"),
+      'import { serveFunction } from "../_lib/http.ts";\nexport function neverRuns() {\n  serveFunction(handle);\n}\n',
+    );
+    // NOT housed for the same reason WITHIN the entrypoint: deferred to a
+    // caller this check cannot see.
+    put("theta", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nexport function boot() {\n  serveFunction(handle);\n}\nDeno.serve(handle);\n');
+    // Housed: a call at module scope inside an `if` still runs on evaluation.
+    // Refusing this would be red on a healthy tree, the worse shape.
+    put("iota", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nif (Deno.env.get("MODE")) {\n  serveFunction(handle);\n}\n');
+    // NOT housed, and this one isolates the ENTRYPOINT rule from the
+    // module-scope rule: a sibling file calls `serveFunction` at top level,
+    // and nothing imports it. Written because the first version of `eta`
+    // wrapped its call in a function, so the module-scope rule caught it too
+    // and a sabotage of the entrypoint scoping stayed green — a broken proof,
+    // not a passing one.
+    put("kappa", "index.ts", 'import { serve } from "https://deno.land/std/http/server.ts";\nserve(handle);\n');
+    writeFileSync(
+      join(dir, "kappa", "orphan.ts"),
+      'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle);\n',
+    );
 
     const byName = Object.fromEntries(housed(dir).map((f) => [f.name, f.where.length > 0]));
     expect(byName).toEqual({
@@ -494,6 +555,10 @@ describe("verify-deployment: the read-only argument", () => {
       delta: false,
       epsilon: false,
       zeta: false,
+      eta: false,
+      theta: false,
+      iota: true,
+      kappa: false,
     });
   });
 
