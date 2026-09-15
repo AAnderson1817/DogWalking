@@ -30,7 +30,7 @@
 # the trigger (review of PR 2: the first version guarded the null with
 # nothing, and deleting it left a sabotaged fn_walk_cost green).
 #
-# The TypeScript side runs THREE times and the runs must agree with each
+# The TypeScript side runs FOUR times and the runs must agree with each
 # other and with SQL. Under Etc/GMT+12 and Etc/GMT-14 — fixed offsets, so no
 # tzdata dependency; the POSIX sign is inverted, so those are twelve hours
 # WEST and fourteen hours EAST of Greenwich, either side of the day boundary
@@ -40,15 +40,30 @@
 # while in the caller's own zone — UTC in CI — such a leaf answers every
 # case correctly, which is exactly what the first version of this gate ran
 # (review of PR 2). And under America/Chicago, the business zone (spec 00),
-# because a fixed offset has no DST: a leaf whose error is DST-DEPENDENT —
-# UTC midnight shifted by the offset in force NOW, the natural "make it
-# right for my zone" mistake — passes both fixed-offset runs and is wrong in
-# the product's own zone on the DST-weekend cases already in the file
-# (review of PR 2, second pass; those rows are what makes the third run
-# load-bearing). deno carries its own zone data, so the Chicago run needs no
-# host tzdata. The answers script REQUIRES the zone it was told and refuses
-# a runtime that did not honour TZ, so an environment that ignores it, or a
-# shell edit that drops the argument, cannot pass silently either.
+# AND Australia/Sydney, because a fixed offset has no DST: a leaf whose
+# error is DST-DEPENDENT — UTC midnight shifted by the offset in force NOW,
+# the natural "make it right for my zone" mistake — passes both fixed-offset
+# runs, and is wrong in a DST zone exactly when that zone is on DAYLIGHT
+# time today and the row is dated in its STANDARD time: the shift is then an
+# hour short of that day's local midnight, so the read lands on the day
+# before, while the other way round it lands an hour into the same day. One
+# DST zone therefore pins that leaf only during its own daylight season —
+# the second pass of the review claimed the Chicago run alone did it, and
+# for the five months Chicago is on standard time it pinned nothing (third
+# pass). Measured with deno's own zone data: at Chicago's daylight offset the
+# leaf misreads 2026-03-07 and 2027-01-02 and at its standard offset
+# nothing; at Sydney's daylight offset it misreads 2026-07-04 and 2026-07-06
+# and at its standard offset nothing (a Sunday read as Saturday is still a
+# weekend, so only a Saturday or a Monday dated in standard time can show
+# it). Sydney's daylight season is the complement of Chicago's — no day of
+# 2026–2028 has both zones on standard time — so the pair pins the leaf on
+# every day of the year, and the run ASSERTS that precondition instead of
+# assuming it: if neither zone is on daylight time today it refuses by name,
+# because a run that pins nothing must not print PASS. deno carries its own
+# zone data, so neither run needs host tzdata. The answers script REQUIRES
+# the zone it was told and refuses a runtime that did not honour TZ, so an
+# environment that ignores it, or a shell edit that drops the argument,
+# cannot pass silently either.
 #
 # Runs as the cluster's postgres role inside one `begin; … rollback;`: a
 # scratch tenant, a service type and a walk per case, all gone at the end and
@@ -104,10 +119,12 @@ WALK="('8d000000-0000-4000-8002-' || lpad(n::text, 12, '0'))::uuid"
 cat > "$sql_file" <<SQL
 begin;
 -- Refused by name before anything else: the walks update guard below admits
--- only a service session, and its own refusal would blame the walk's status.
+-- only a service session or the walk's own operator via auth.uid(), a psql
+-- connection is neither, and the guard's own refusal would blame the walk's
+-- status.
 do \$\$ begin
   if not fn_is_service_session() then
-    raise exception 'FAIL: gate 8d must connect as the postgres role (session_user is %) — the walks update guard refuses every other persona', session_user;
+    raise exception 'FAIL: gate 8d must connect as the postgres role (session_user is %) — the walks update guard refuses a psql connection that is neither a service session nor the walk''s operator', session_user;
   end if;
 end \$\$;
 insert into auth.users (id, email) values ('$OP', 'walk-cost-parity@sanpo.test');
@@ -161,16 +178,41 @@ while IFS='|' read -r tag n answer; do
   esac
 done < <(psql "$LOCAL_DB_URL" -Atq -v ON_ERROR_STOP=1 -f "$sql_file")
 
+# ── the daylight-season precondition ─────────────────────────────────────
+# A DST-dependent leaf is caught by a DST zone only while that zone is on
+# daylight time (see the header), so the run first reads which of its two
+# zones is — today's offset against the larger of this year's January and
+# July offsets; daylight time is the SMALLER `getTimezoneOffset()`, and a
+# zone with no DST answers 0. Read, never assumed, and anything but a 0 or a
+# 1 is the probe failing, reported as that rather than as a season.
+daylight_today() {
+  TZ="$1" deno eval 'const o = (d) => new Date(d).getTimezoneOffset(); const y = new Date().getUTCFullYear(); const std = Math.max(o(`${y}-01-15T12:00:00Z`), o(`${y}-07-15T12:00:00Z`)); console.log(o(Date.now()) < std ? 1 : 0);' 2>&1 || true
+}
+season=""
+for zone in America/Chicago Australia/Sydney; do
+  dl="$(daylight_today "$zone")"
+  case "$dl" in
+    0|1) season+="${season:+ }$zone=$dl" ;;
+    *) echo "FAIL: could not read whether $zone is on daylight time today (the probe printed '${dl}')" >&2; exit 2 ;;
+  esac
+done
+if [[ "$season" != *"=1"* ]]; then
+  echo "FAIL: neither zone is on daylight time today ($season) — a DST-dependent leaf passes every run in this state, so this run would pin nothing about it; the two seasons were complementary when this was written, so read the zone data before believing either side" >&2
+  exit 2
+fi
+
 # ── the TypeScript side ───────────────────────────────────────────────────
-# Three times: either side of the day boundary at a fixed offset, and in the
-# business zone across a DST transition (see the header). The zone is passed
-# as an argument as well as in TZ, so the script refuses a runtime that
-# ignored it — and refuses to run with no zone at all, so dropping the
-# argument here goes red by name; deno honours TZ without --allow-env.
+# Four times: either side of the day boundary at a fixed offset, and in two
+# DST zones whose daylight seasons are complementary (see the header). The
+# zone is passed as an argument as well as in TZ, so the script refuses a
+# runtime that ignored it — and refuses to run with no zone at all, so
+# dropping the argument here goes red by name; deno honours TZ without
+# --allow-env.
 ts_run() { TZ="$1" deno run --allow-read=. scripts/walk-cost-answers.ts "$CASES" "$1"; }
 mapfile -t ts_west < <(ts_run Etc/GMT+12)
 mapfile -t ts_east < <(ts_run Etc/GMT-14)
 mapfile -t ts_chi < <(ts_run America/Chicago)
+mapfile -t ts_syd < <(ts_run Australia/Sydney)
 
 # ── compare ───────────────────────────────────────────────────────────────
 # Four ways to be wrong, and all four are reported: the TypeScript runs
@@ -181,8 +223,8 @@ mapfile -t ts_chi < <(ts_run America/Chicago)
 # away from EVERY implementation would otherwise pass the first three.
 if [ "$n_trg" -ne "${#rows[@]}" ] || [ "$n_fn" -ne "${#rows[@]}" ] \
    || [ "${#ts_west[@]}" -ne "${#rows[@]}" ] || [ "${#ts_east[@]}" -ne "${#rows[@]}" ] \
-   || [ "${#ts_chi[@]}" -ne "${#rows[@]}" ]; then
-  echo "FAIL: ${#rows[@]} cases, $n_trg trigger answers, $n_fn function answers, ${#ts_west[@]} TS answers west of Greenwich, ${#ts_east[@]} east, ${#ts_chi[@]} in America/Chicago" >&2
+   || [ "${#ts_chi[@]}" -ne "${#rows[@]}" ] || [ "${#ts_syd[@]}" -ne "${#rows[@]}" ]; then
+  echo "FAIL: ${#rows[@]} cases, $n_trg trigger answers, $n_fn function answers, ${#ts_west[@]} TS answers west of Greenwich, ${#ts_east[@]} east, ${#ts_chi[@]} in America/Chicago, ${#ts_syd[@]} in Australia/Sydney" >&2
   exit 2
 fi
 
@@ -191,10 +233,10 @@ for i in "${!rows[@]}"; do
   n=$((i + 1))
   IFS=$'\t' read -r expected cost surcharge date <<< "${rows[$i]}"
   label="cost=$cost surcharge=$surcharge $date"
-  g="${trg[$n]:-}"; f="${fn[$n]:-}"; t="${ts_west[$i]}"; te="${ts_east[$i]}"; tc="${ts_chi[$i]}"
+  g="${trg[$n]:-}"; f="${fn[$n]:-}"; t="${ts_west[$i]}"; te="${ts_east[$i]}"; tc="${ts_chi[$i]}"; ty="${ts_syd[$i]}"
   wrong=0
-  if [ "$t" != "$te" ] || [ "$t" != "$tc" ]; then
-    echo "TZ-DEPENDENT ts(UTC-12)=$t ts(UTC+14)=$te ts(Chicago)=$tc  $label" >&2
+  if [ "$t" != "$te" ] || [ "$t" != "$tc" ] || [ "$t" != "$ty" ]; then
+    echo "TZ-DEPENDENT ts(UTC-12)=$t ts(UTC+14)=$te ts(Chicago)=$tc ts(Sydney)=$ty  $label" >&2
     wrong=1
   fi
   if [ "$g" != "$f" ]; then
@@ -217,4 +259,4 @@ if [ "$bad" -gt 0 ]; then
   echo "FAIL: $bad of ${#rows[@]} walk cost cases" >&2
   exit 1
 fi
-echo "WALK COST PARITY PASS — ${#rows[@]} cases, three implementations agree, either side of the day boundary and across a DST transition"
+echo "WALK COST PARITY PASS — ${#rows[@]} cases, three implementations agree, either side of the day boundary and in two DST zones ($season, daylight time is 1)"

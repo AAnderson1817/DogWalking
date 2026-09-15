@@ -25,29 +25,14 @@ before you hit them.
 
 ## Open
 
-### 1. Small batch (one PR)
-- `fn_walk_cost` is LOAD-BEARING (`fn_debit_walk` calls it, smoke pins it) —
-  do NOT touch it. The dead code is `api.ts`'s `walkCost()` wrapper, itself
-  with zero importers: delete it, or wire it where a persisted walk's display
-  cost is shown. `credits.ts`'s client-side mirror is deliberate (Booking
-  prices walks that do not exist yet). The residual worth a test: `0043` made
-  server pricing snapshot-first while `effectiveWalkCost` computes live
-  service arithmetic, and nothing ties the two together.
-- Two edge functions are `index.ts`-only with no handler seam and no test:
-  `billing-portal` and `connect-onboarding`. Extract and test per the house
-  dependency-injection pattern (`create-plan` got its seam in the
-  `money(create-plan)` PR). `materialize-walks` is the deliberate
-  thin-wrapper exception (its logic is SQL-side); `charge-overage` is already
-  covered through `_lib/overage*.ts`.
-
-### 2. Tell the operator when an edited address is already suppressed
+### 1. Tell the operator when an edited address is already suppressed
 Also recorded in spec 04. Editing a client's address to one already in
 `email_suppressions` makes every future client-facing email skip
 permanently and terminally, with no signal in the UI. Whether to surface it
 — and how, without exposing one operator's suppression list to another — is
 a product question.
 
-### 3. The pinned Supabase CLI is behind, and `db push` warns every deploy
+### 2. The pinned Supabase CLI is behind, and `db push` warns every deploy
 Read off the `24c74bd` staging deploy (run 33537033230, `Apply migrations`),
 not recalled:
 
@@ -82,7 +67,7 @@ Not urgent: nothing is broken, and the cost of being wrong here is a deploy
 that fails at `link` or `push`, which is exactly the failure 2.109.1 was
 pinned to avoid.
 
-### 4. Spec-drift audit follow-ups (two PRs left, in this order)
+### 3. Spec-drift audit follow-ups (two PRs left, in this order)
 Found by the audit recorded as `docs(spec-drift)`; each was verified against
 HEAD and none is fixed by that PR, which corrected documents only.
 

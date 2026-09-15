@@ -133,12 +133,16 @@ against each other. The SQL side nulls the snapshot before asking
 `fn_walk_cost`, because the function coalesces the snapshot first and its own
 expression would otherwise be tied to nothing (a trigger drift is caught by
 the TypeScript comparison regardless), and reads the function's answers
-through a join on the null having taken. The TypeScript side runs three
+through a join on the null having taken. The TypeScript side runs four
 times — under `Etc/GMT+12` and `Etc/GMT-14`, either side of the day boundary,
 against a constant-offset local read (in the caller's own zone such a leaf
-answers every case correctly), and under `America/Chicago`, against a
-DST-dependent one, which passes both fixed offsets — and the answers script
-requires the zone it was told. Must end with `WALK COST PARITY PASS`. Same
+answers every case correctly), and under `America/Chicago` and
+`Australia/Sydney`, two DST zones with complementary daylight seasons,
+against a DST-dependent one, which passes both fixed offsets and is a day out
+only in a zone currently on daylight time (so one zone alone pins it for half
+the year; the run refuses by name if neither is on daylight time today) — and
+the answers script requires the zone it was told. Must end with
+`WALK COST PARITY PASS`. Same
 prerequisites as 8c: skipped by name when deno is missing, and inside the
 `7-8. database` skip when there is no database — a gate that goes green by
 not running is this repository's most-recorded failure, so a SKIP here is a

@@ -7,9 +7,10 @@
 //
 //   deno run --allow-read=. scripts/walk-cost-answers.ts <cases-file> <expected-zone>
 //
-// The shell script runs this three times — under two fixed offsets either
-// side of the day boundary and under America/Chicago across a DST transition
-// — and passes the zone in as well as in TZ, so a runtime that did not honour
+// The shell script runs this four times — under two fixed offsets either
+// side of the day boundary, and under America/Chicago and Australia/Sydney,
+// two DST zones whose daylight seasons are complementary — and passes the
+// zone in as well as in TZ, so a runtime that did not honour
 // TZ is REFUSED here rather than answering in whatever zone it woke up in.
 // The zone is REQUIRED, not optional: with it optional, a shell edit that
 // dropped the argument kept the gate green with the refusal inert, pinning

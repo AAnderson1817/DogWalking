@@ -245,7 +245,7 @@ Deno.test("the link is an onboarding link whose refresh and return urls sit on A
   assertEquals((res as ConnectStart).url, "https://connect.stripe.com/setup/acct_fresh");
 });
 
-Deno.test("a failed claim (write or re-read) propagates as its 500 and mints NO link", async () => {
+Deno.test("a failed claim, whichever half failed, propagates as its 500 and mints NO link", async () => {
   // The behavioural pin behind fix(send-lookups): "we do not know which
   // account is real" must not fall through to an onboarding link for the
   // account we just created — an operator finishing Stripe's forms on an
@@ -269,9 +269,10 @@ Deno.test("no Stripe call carries stripeAccount — these are platform objects",
   assertNothingRoutedToAnAccount(recorded);
 });
 
-Deno.test("an unknown action is refused 400 bad_action before the handler's own lookup — it used to mint an account", async () => {
+Deno.test("an unknown action is refused 400 bad_action before the handler's own lookup — it used to mint an account for an operator not yet connected", async () => {
   // The shipped code tested only `=== "status"`, so `{ action: "foo" }` fell
-  // through to start and created a Stripe Connect account. Spec 04 names two
+  // through to start, which created a Stripe Connect account for an operator
+  // not yet connected (a single-use link for a connected one). Spec 04 names two
   // values and the frontend sends only those (api.ts connectStatus /
   // connectStart).
   const { err, recorded, lookups } = await refused(

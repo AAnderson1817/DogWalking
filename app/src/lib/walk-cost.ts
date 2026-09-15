@@ -20,8 +20,10 @@
 // `format.ts` convention) and is immaterial under a UTC read. Postgres reads
 // `isodow` off the DATE and has no such trap. Gate 8d pins this by running
 // the TypeScript side under two fixed offsets either side of the day boundary
-// (against a constant-offset local read) and under America/Chicago (against
-// a DST-dependent one, on the DST-weekend cases) — the cases in
+// (against a constant-offset local read) and under America/Chicago and
+// Australia/Sydney (against a DST-dependent one, which a DST zone catches
+// only while on daylight time, on rows dated in its standard time — the two
+// seasons are complementary, so one of the pair always is) — the cases in
 // `scripts/walk-cost-cases.txt` cannot see a zone themselves.
 
 /** Effective credit cost: `creditCost`, plus `surcharge` when `isoDate` (YYYY-MM-DD) is a Saturday or Sunday. */

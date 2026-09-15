@@ -683,11 +683,14 @@ jobs:
       # side nulls the snapshot before asking the function — or its coalesce
       # hands back the trigger's answer and the function's own expression is
       # tied to nothing — and reads the function's answers through a join on
-      # the null having taken. The TypeScript side runs three times: two fixed
+      # the null having taken. The TypeScript side runs four times: two fixed
       # offsets either side of the day boundary (in the runner's own zone, UTC,
-      # a leaf that reads the LOCAL day answers every case correctly) and
-      # America/Chicago, where a DST-dependent local read that passes both
-      # fixed offsets answers the DST-weekend cases a day out.
+      # a leaf that reads the LOCAL day answers every case correctly) and two
+      # DST zones with complementary daylight seasons, America/Chicago and
+      # Australia/Sydney, because a DST-dependent local read that passes both
+      # fixed offsets is a day out only in a zone currently on daylight time,
+      # on rows dated in its standard time — one zone alone pins it for half
+      # the year, and the run refuses by name if neither is on daylight time.
       - name: Walk cost parity — TS leaf, fn_walk_cost and the snapshot trigger agree
         run: ./scripts/check-walk-cost-parity.sh
 
