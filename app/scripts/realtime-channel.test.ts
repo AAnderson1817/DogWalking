@@ -6,6 +6,7 @@ import {
   declaredObjects,
   isAssignmentOperator,
   isObjectAssignCall,
+  propertyKey,
   unwrapTransparent,
 } from "./lib/static-object.js";
 import { describe, expect, it } from "vitest";
@@ -405,7 +406,10 @@ function messageElements(sf: ts.SourceFile): { found: boolean; values: string[] 
   const values: string[] = [];
   let found = false;
   const visit = (n: ts.Node): void => {
-    if (ts.isPropertyAssignment(n) && ts.isIdentifier(n.name) && n.name.text === "messages") {
+    // `propertyKey`, not `isIdentifier`: `{ "messages": [...] }` is the same
+    // object, and reading only the bare spelling made the precondition fail on
+    // a behaviour-preserving refactor — red on a healthy tree (Codex, PR #94).
+    if (ts.isPropertyAssignment(n) && propertyKey(n.name) === "messages") {
       found = true;
       const arr = n.initializer;
       if (!ts.isArrayLiteralExpression(arr)) {
@@ -635,6 +639,12 @@ describe("the walk channel is the only channel, and it is private on both sides"
     expect(read("const c = { private: true };\nlet a;\n[a] = [c];\na.private = false;\nsend({ topic, ...c });"))
       .toEqual(["<unresolvable spread `c`>"]);
     expect(read("const c = { private: true };\nlet a;\n({ a } = { a: c });\na.private = false;\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    // A destructuring DECLARATION forms an alias exactly as the assignment
+    // form does — the same rule, one binding form later.
+    expect(read("const c = { private: true };\nconst [a] = [c];\na.private = false;\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read("const c = { private: true };\nconst { x: a } = { x: c };\na.private = false;\nsend({ topic, ...c });"))
       .toEqual(["<unresolvable spread `c`>"]);
     // PINNED REFUSAL, not an accident: an alias rebound BEFORE it is mutated
     // still invalidates the original. Dropping the stale edge needs to know

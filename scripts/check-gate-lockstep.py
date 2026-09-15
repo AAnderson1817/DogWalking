@@ -187,8 +187,8 @@ def skill_ci_only() -> list[str]:
     return re.findall(r"^- `([^`]+)`", m.group(1), re.M)
 
 
-def validate_labels() -> tuple[set[str], set[str], list[str]]:
-    """Gate labels declared in validate.sh: RUNNABLE, skipped, and DUPLICATE.
+def validate_labels() -> tuple[set[str], set[str], list[str], list[str]]:
+    """Gate labels in validate.sh: RUNNABLE, skipped, DUPLICATE, UNREADABLE.
 
     Two sets, not one, and the split is the fix for a real hole: several gates
     have both a `run` and a `skip_gate` fallback (4, 5, 8c, 8d, 10b), so a
@@ -229,11 +229,29 @@ def validate_labels() -> tuple[set[str], set[str], list[str]]:
     # for a real local gate, and reported lockstep (measured, Codex on
     # PR #94). Same defect as `gen-enum-catalog.py`'s round twenty-five, in a
     # different language.
+    #
+    # Line continuations are JOINED first. `run \` + newline + `"13. new
+    # check" …` is one command to the shell and was invisible to a
+    # same-line regex, so a real local gate could be absent from CI while
+    # the reverse check reported lockstep (measured, Codex on PR #94).
+    joined = re.sub(r'\\\n[ \t]*', ' ', text)
     quoted = r'^[ \t]*%s +(["\'])(.+?)\1'
-    found = [m[1] for m in re.findall(quoted % 'run', text, re.M)]
+    found = [m[1] for m in re.findall(quoted % 'run', joined, re.M)]
     duplicate = sorted({lbl for lbl in found if found.count(lbl) > 1})
     runnable = set(found)
-    skipped = {m[1] for m in re.findall(quoted % 'skip_gate', text, re.M)}
+    skipped = {m[1] for m in re.findall(quoted % 'skip_gate', joined, re.M)}
+
+    # And a `run`/`skip_gate` whose label this cannot read is REFUSED by
+    # name rather than skipped, because a parser that sees nothing reports
+    # agreement — the rule `gen-enum-catalog.py` needed forty-three rounds
+    # to arrive at, in a third language. A DEFINITION (`run() {`) is not an
+    # invocation and is excluded by the `(`, which the first version of this
+    # rule missed and went red on the healthy tree immediately.
+    unreadable = [
+        m.group(0).strip()
+        for m in re.finditer(r'^[ \t]*(?:run|skip_gate)(?![(\w])[^\n]*', joined, re.M)
+        if not re.match(r'^[ \t]*(?:run|skip_gate) +(["\']).+?\1', m.group(0))
+    ]
     # `finditer`, not `search`. There is one such loop today; a `search` would
     # expand only the FIRST, and a ci.yml step mapped to a label from a second
     # one would then be reported as claiming a gate validate.sh does not
@@ -246,7 +264,7 @@ def validate_labels() -> tuple[set[str], set[str], list[str]]:
         runnable.discard(prefix + '$(basename ')
         for f in sorted(ROOT.glob(m.group(2))):
             runnable.add(prefix + f.name)
-    return runnable, skipped, duplicate
+    return runnable, skipped, duplicate, unreadable
 
 
 def main() -> int:
@@ -285,7 +303,12 @@ def main() -> int:
 
     # 2. A mapped validate.sh label must exist there, or renaming a gate
     #    locally leaves this map pointing at nothing.
-    labels, skipped, dupe_labels = validate_labels()
+    labels, skipped, dupe_labels, unreadable_gates = validate_labels()
+    for line in unreadable_gates:
+        failures.append(
+            f"validate.sh has a gate this check cannot read: {line!r} — its label "
+            "must be a quoted string on the command, or nothing mirrors it"
+        )
     for lbl in dupe_labels:
         failures.append(
             f"validate.sh declares gate {lbl!r} twice — rename one. A label is a "

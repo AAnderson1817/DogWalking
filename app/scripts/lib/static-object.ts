@@ -172,7 +172,23 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
         const init = n.initializer ? unwrapTransparent(n.initializer) : undefined;
         bind(n.name.text, init && ts.isObjectLiteralExpression(init) ? init : null);
         if (init && ts.isIdentifier(init)) link(n.name.text, init.text);
-      } else bindPattern(n.name);
+      } else {
+        bindPattern(n.name);
+        // A destructuring DECLARATION forms an alias exactly as a destructuring
+        // ASSIGNMENT does — `const [alias] = [config]` — and the first version
+        // of that rule covered only the assignment, which is the same
+        // one-form-short shape three rounds running (Codex, PR #94). Linked
+        // conservatively for the same reason: the initializer can be any
+        // expression, so every name it binds is linked to every identifier the
+        // initializer mentions.
+        if (n.initializer) {
+          const targets = new Set<string>();
+          bindPatternNames(n.name, targets);
+          const sources = new Set<string>();
+          collectIdentifiers(n.initializer, sources);
+          for (const target of targets) for (const source of sources) link(target, source);
+        }
+      }
     } else if (ts.isParameter(n) || ts.isBindingElement(n)) {
       bindPattern(n.name);
     } else if ((ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n)) && n.name) {
@@ -255,6 +271,15 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
     if (lit && !rebound.has(name) && !mutated.has(name)) out.set(name, lit);
   }
   return out;
+}
+
+/** The names a binding pattern introduces. */
+function bindPatternNames(nm: ts.BindingName, into: Set<string>): void {
+  if (ts.isIdentifier(nm)) {
+    into.add(nm.text);
+    return;
+  }
+  for (const el of nm.elements) if (ts.isBindingElement(el)) bindPatternNames(el.name, into);
 }
 
 /** Every identifier an expression mentions, however deeply. */
