@@ -123,10 +123,14 @@ to the same rule (`const box = { cause: (await q).error }; void box;` reads
 nothing). The key the error sits under travels with the literal: a later
 read of it counts only through THAT member (`box.error`, `box.meta.error`,
 `errs[1]`, `const { error } = box`, a rest element carrying it on, an
-object spread carrying the keys through) or when the whole value is handed
-on — a call, a return, a throw — while `box.data`, `const { data } = box`,
-`if (box)`, `errs.length`, a computed key and an index behind an array
-spread read nothing. A class field initializer, instance or static, is
+object spread carrying a CARRIER's keys through) or when the whole value is
+handed on — a call, a return, a throw — while `box.data`, `const { data } =
+box`, `if (box)`, `errs.length`, a computed key, an index behind an array
+spread and every member of a literal the error ITSELF was spread into
+(`{ ...error }` scatters its fields under names the gate cannot enumerate)
+read nothing. Reaching the error is not reading it either: a member of it
+(`error?.message`) is followed by these same rules, so `void
+error?.message` discards and `if (error?.message) throw error` does not. A class field initializer, instance or static, is
 execution the gate does not follow and reads nothing; a static block runs
 with the class statement and is straight-line. A deferred
 builder (`let q = db.from(…)`) is followed to the statement that consumes
