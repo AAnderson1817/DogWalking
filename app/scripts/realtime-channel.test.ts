@@ -70,21 +70,6 @@ function parse(file: string): ts.SourceFile {
   );
 }
 
-/**
- * The value of `name` in an object literal, or null when the property is
- * absent, computed, or spread in. Null is "this check cannot say", and every
- * caller treats it as NOT private — refusing is the safe direction for a
- * question about whether a topic is authorized.
- */
-function property(obj: ts.ObjectLiteralExpression, name: string): ts.Expression | null {
-  for (const p of obj.properties) {
-    if (!ts.isPropertyAssignment(p)) continue;
-    const key = ts.isIdentifier(p.name) || ts.isStringLiteral(p.name) ? p.name.text : null;
-    if (key === name) return p.initializer;
-  }
-  return null;
-}
-
 interface ChannelCall {
   file: string;
   line: number;
@@ -159,6 +144,7 @@ function channelCalls(files: string[]): ChannelCall[] {
   for (const file of files) {
     const source = parse(file);
     const clients = clientNames(source);
+    const declared = declaredObjects(source);
     const rel = relative(APP_SRC, file).split("\\").join("/");
     const visit = (node: ts.Node): void => {
       // Every `.channel(…)` call is looked at, and its receiver is then
@@ -199,17 +185,25 @@ function channelCalls(files: string[]): ChannelCall[] {
         } else if (!ts.isObjectLiteralExpression(opts)) {
           why = "options are not an object literal, so this check cannot read them";
         } else {
-          const config = property(opts, "config");
-          if (!config) why = "options carry no `config`";
+          // Through the SAME reader the server side uses, spreads and all.
+          // The first version read this side with a direct-property helper
+          // while the message side resolved spreads, so
+          // `config: { private: true, ...{ private: false } }` reported
+          // private on a client that joins a PUBLIC topic — one rule, two
+          // scopes, which is the disagreement this repository keeps paying
+          // for. There is one reader now, so there is no sibling to forget.
+          const config = effectiveProps(opts, declared).get("config");
+          if (config === undefined) why = "options carry no `config`";
+          else if (typeof config === "string") why = `\`config\` is ${config}`;
           else if (!ts.isObjectLiteralExpression(config))
             why = "`config` is not an object literal, so this check cannot read it";
           else {
-            const priv = property(config, "private");
-            if (!priv) why = "`config` carries no `private`";
-            else if (priv.kind === ts.SyntaxKind.TrueKeyword) {
+            const priv = effectiveProps(config, declared).get("private");
+            if (priv === undefined) why = "`config` carries no `private`";
+            else if (isLiteralTrue(priv)) {
               isPrivate = true;
               why = "config.private is true";
-            } else why = `config.private is \`${priv.getText()}\`, not the literal true`;
+            } else why = `config.private is \`${shownAs(priv)}\`, not the literal true`;
           }
         }
         found.push({ file: rel, line, private: isPrivate, why });
@@ -270,35 +264,38 @@ function effectiveProps(
   obj: ts.ObjectLiteralExpression,
   declared: Map<string, ts.ObjectLiteralExpression>,
   depth = 0,
-): Map<string, string> {
-  const props = new Map<string, string>();
+): Map<string, ts.Expression | string> {
+  // The names this file asks about, at any depth: an unreadable spread has to
+  // invalidate each of them, since it could carry any of them.
+  const ASKED = ["topic", "private", "config"];
+  const props = new Map<string, ts.Expression | string>();
+  const markAll = (mark: string) => { for (const k of ASKED) props.set(k, mark); };
+
   for (const p of obj.properties) {
     if (ts.isSpreadAssignment(p)) {
-      const from = ts.isIdentifier(p.expression) ? declared.get(p.expression.text) : undefined;
-      if (from && depth < 4) {
+      // A spread of a literal written in place, or of one declared by name.
+      const inline = ts.isObjectLiteralExpression(p.expression) ? p.expression : undefined;
+      const named = ts.isIdentifier(p.expression) ? declared.get(p.expression.text) : undefined;
+      const from = inline ?? named;
+      if (from && depth < 8) {
         for (const [k, v] of effectiveProps(from, declared, depth + 1)) props.set(k, v);
       } else {
         // Cannot follow it, so cannot say what it carries — and ORDER is why
         // this has to overwrite rather than merely add a note: a spread AFTER
         // `private: true` can replace it, so leaving the `true` standing would
         // let `{ private: true, ...unknown }` pass on a value that may not
-        // survive. It marks the keys this file asks about, and a later direct
-        // assignment overwrites the mark exactly as the language would.
-        const mark = `<unresolvable spread \`${p.expression.getText()}\`>`;
-        props.set("topic", mark);
-        props.set("private", mark);
+        // survive. A later direct assignment overwrites the mark in turn,
+        // exactly as the language would.
+        markAll(`<unresolvable spread \`${p.expression.getText()}\`>`);
       }
       continue;
     }
     if (ts.isPropertyAssignment(p)) {
       const key = ts.isIdentifier(p.name) || ts.isStringLiteral(p.name) ? p.name.text : null;
-      if (key !== null) props.set(key, p.initializer.getText());
-      // A computed key could be either of the two names this file asks about,
-      // and there is no way to tell which, so both are marked unreadable.
-      else {
-        props.set("topic", "<computed key, unreadable>");
-        props.set("private", "<computed key, unreadable>");
-      }
+      if (key !== null) props.set(key, p.initializer);
+      // A computed key could be any of the names this file asks about, and
+      // there is no way to tell which, so all of them are marked unreadable.
+      else markAll("<computed key, unreadable>");
       continue;
     }
     if (ts.isShorthandPropertyAssignment(p)) {
@@ -309,6 +306,17 @@ function effectiveProps(
     }
   }
   return props;
+}
+
+/** The text a reader should print for a resolved property. */
+function shownAs(v: ts.Expression | string | undefined): string {
+  if (v === undefined) return "<absent>";
+  return typeof v === "string" ? v : v.getText();
+}
+
+/** Whether a resolved property is the literal `true` and not a marker. */
+function isLiteralTrue(v: ts.Expression | string | undefined): boolean {
+  return typeof v === "object" && v.kind === ts.SyntaxKind.TrueKeyword;
 }
 
 /**
@@ -339,7 +347,7 @@ function serverPrivate(): { found: boolean; values: string[] } {
       // has no direct `topic` and was skipped entirely while its base supplied
       // a `true` from a line that is not what gets sent.
       const props = effectiveProps(node, declared);
-      if (props.has("topic")) values.push(props.get("private") ?? "<absent>");
+      if (props.has("topic")) values.push(shownAs(props.get("private")));
     }
     ts.forEachChild(node, visit);
   };
@@ -386,7 +394,7 @@ describe("the walk channel is the only channel, and it is private on both sides"
       const visit = (n: ts.Node): void => {
         if (ts.isObjectLiteralExpression(n)) {
           const props = effectiveProps(n, declared);
-          if (props.has("topic")) out.push(props.get("private") ?? "<absent>");
+          if (props.has("topic")) out.push(shownAs(props.get("private")));
         }
         ts.forEachChild(n, visit);
       };
@@ -415,6 +423,17 @@ describe("the walk channel is the only channel, and it is private on both sides"
     // A shorthand `private` is a reference this file cannot resolve, and
     // "cannot say" is not "is private".
     expect(read("send({ topic, private });")).toEqual(["<shorthand, unreadable>"]);
+    // A spread written in place, and nested — the same reader now serves the
+    // CLIENT's `config` object, where Codex found the sibling hole. Note that
+    // EVERY object literal in the file is read, so a composed message reports
+    // once for the composition and once for each nested literal carrying a
+    // `topic` of its own. That is the conservative direction and it is what
+    // makes the `const m = …` case above report two values: every literal
+    // that could be sent has to clear the bar, not just the outermost.
+    expect(read("send({ ...{ topic, private: true } });")).toEqual(["true", "true"]);
+    expect(read("send({ topic, private: true, ...{ private: false } });")).toEqual(["false"]);
+    expect(read("send({ ...{ ...{ topic, private: false } } });"))
+      .toEqual(["false", "false", "false"]);
 
     // And the precondition on the reader itself: a literal with no `topic` at
     // all is not a message and contributes nothing, so a reader that answered

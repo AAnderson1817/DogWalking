@@ -393,14 +393,19 @@ function sourceFiles(dir: string): string[] {
  * would answer a question nobody asked: what is in front of the request is
  * the house wrapper or it is not.
  *
- * And OUTSIDE any function body, which is the third and came from the round
- * after this rule was inverted: a call that never executes serves nothing.
- * Codex planted an `index.ts` serving itself through an imported `serve(…)`
- * beside an `unused.ts` calling `serveFunction` inside a function nobody
- * invokes, and the whole directory read as housed — 14 of 14 green, measured.
- * A call at module scope inside an `if` or a `try` still runs on evaluation
- * and still counts; only a function body defers it. Refusing those too would
- * be red on a healthy tree, which is the worse shape.
+ * And UNCONDITIONAL at module scope — a statement of the module itself, not
+ * something nested in control flow or in a function body. This came in two
+ * rounds and the second corrected the first. A call inside a function nobody
+ * invokes serves nothing (Codex planted an `index.ts` serving itself through
+ * an imported `serve(…)` beside an `unused.ts` calling the wrapper, and the
+ * whole directory read as housed — 14 of 14 green). I then allowed a call
+ * inside a module-scope `if`, arguing that refusing it would be red on a
+ * healthy tree — an argument I had NOT measured, and `if (false)
+ * serveFunction(handle); serve(handle);` reads as housed under it. Measured
+ * since: all fourteen real calls are plain expression statements, so
+ * requiring that is green on this tree, and a function that genuinely needs
+ * a conditional wrapper is exactly a function somebody should read and record
+ * a `contract_for` case for. "It is at module scope" is not "it runs".
  */
 function serveFunctionLines(file: string): number[] {
   const text = readFileSync(file, "utf8");
@@ -420,20 +425,33 @@ function serveFunctionLines(file: string): number[] {
   }
   if (bound.size === 0) return [];
 
-  const lines: number[] = [];
-  const visit = (n: ts.Node) => {
-    // A function body is where execution is deferred to a caller this check
-    // cannot see, so stop descending rather than counting what is inside it.
-    if (ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n)
-      || ts.isMethodDeclaration(n) || ts.isConstructorDeclaration(n)
-      || ts.isGetAccessorDeclaration(n) || ts.isSetAccessorDeclaration(n)
-      || ts.isClassDeclaration(n) || ts.isClassExpression(n)) return;
-    if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && bound.has(n.expression.text)) {
-      lines.push(sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1);
+  // `await x`, `(x)`, `x as T` and `x!` all hand the same call through.
+  const unwrap = (e: ts.Expression): ts.Expression => {
+    let cur = e;
+    for (;;) {
+      if (ts.isAwaitExpression(cur) || ts.isParenthesizedExpression(cur)
+        || ts.isAsExpression(cur) || ts.isNonNullExpression(cur)) cur = cur.expression;
+      else return cur;
     }
-    ts.forEachChild(n, visit);
   };
-  visit(sf);
+  const isWrapperCall = (e: ts.Expression | undefined): boolean => {
+    if (!e) return false;
+    const c = unwrap(e);
+    return ts.isCallExpression(c) && ts.isIdentifier(c.expression) && bound.has(c.expression.text);
+  };
+
+  const lines: number[] = [];
+  const at = (n: ts.Node) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+  // Only the module's OWN statements. Nothing recursive: a call one level in
+  // is a call whose execution depends on something this check cannot evaluate.
+  for (const st of sf.statements) {
+    if (ts.isExpressionStatement(st) && isWrapperCall(st.expression)) lines.push(at(st));
+    else if (ts.isVariableStatement(st)) {
+      for (const d of st.declarationList.declarations) {
+        if (isWrapperCall(d.initializer)) lines.push(at(st));
+      }
+    } else if (ts.isExportAssignment(st) && isWrapperCall(st.expression)) lines.push(at(st));
+  }
   return lines;
 }
 
@@ -532,9 +550,16 @@ describe("verify-deployment: the read-only argument", () => {
     // NOT housed for the same reason WITHIN the entrypoint: deferred to a
     // caller this check cannot see.
     put("theta", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nexport function boot() {\n  serveFunction(handle);\n}\nDeno.serve(handle);\n');
-    // Housed: a call at module scope inside an `if` still runs on evaluation.
-    // Refusing this would be red on a healthy tree, the worse shape.
-    put("iota", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nif (Deno.env.get("MODE")) {\n  serveFunction(handle);\n}\n');
+    // NOT housed: at module scope, but CONDITIONAL. An earlier version of
+    // this rule counted it, on an argument about healthy trees I had not
+    // measured — and `if (false) serveFunction(handle)` reads identically.
+    put("iota", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nif (Deno.env.get("MODE")) {\n  serveFunction(handle);\n}\nDeno.serve(handle);\n');
+    // Codex's case, the same rule at its plainest.
+    put("mu", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nimport { serve } from "https://deno.land/std/http/server.ts";\nif (false) serveFunction(handle);\nserve(handle);\n');
+    // Housed: the wrapper's result kept in a module-scope binding, and the
+    // awaited spelling. Both are unconditional statements of the module.
+    put("nu", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nconst server = serveFunction(handle);\n');
+    put("xi", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nawait serveFunction(handle);\n');
     // NOT housed, and this one isolates the ENTRYPOINT rule from the
     // module-scope rule: a sibling file calls `serveFunction` at top level,
     // and nothing imports it. Written because the first version of `eta`
@@ -557,8 +582,11 @@ describe("verify-deployment: the read-only argument", () => {
       zeta: false,
       eta: false,
       theta: false,
-      iota: true,
+      iota: false,
       kappa: false,
+      mu: false,
+      nu: true,
+      xi: true,
     });
   });
 

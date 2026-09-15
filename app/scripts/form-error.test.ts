@@ -78,6 +78,47 @@ function literalText(e: ts.Expression): string | null {
 }
 
 /**
+ * `name`'s value in an object literal, spreads of object literals resolved
+ * RECURSIVELY and in source order — or `undefined` when the literal does not
+ * mention it at all, which is different from mentioning it dynamically.
+ *
+ * Recursive because one more layer of composition is still the same element:
+ * `{...{ ...{ role: "alert" } }}` wrote the forbidden shape straight past the
+ * version of this rule that opened only the outer spread and then looked for
+ * direct property assignments (measured, 4 of 4 green). Depth-capped, since a
+ * literal nested eight deep is not a spelling anybody reaches for by accident
+ * and this gate catches the mistake rather than the adversary.
+ *
+ * `undefined` vs `null` is the distinction that makes ordering work: a
+ * property that is absent leaves an earlier answer standing, while one that
+ * is present but dynamic replaces it with "no answer".
+ */
+function objectLiteralProperty(
+  obj: ts.ObjectLiteralExpression,
+  name: string,
+  depth = 0,
+): string | null | undefined {
+  let value: string | null | undefined;
+  for (const prop of obj.properties) {
+    if (ts.isSpreadAssignment(prop)) {
+      if (!ts.isObjectLiteralExpression(prop.expression) || depth >= 8) continue;
+      const nested = objectLiteralProperty(prop.expression, name, depth + 1);
+      if (nested !== undefined) value = nested;
+      continue;
+    }
+    if (ts.isShorthandPropertyAssignment(prop)) {
+      // `{ role }` carries a reference this gate cannot resolve.
+      if (prop.name.text === name) value = null;
+      continue;
+    }
+    if (!ts.isPropertyAssignment(prop)) continue;
+    const key = ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) ? prop.name.text : null;
+    if (key === name) value = literalText(prop.initializer);
+  }
+  return value;
+}
+
+/**
  * The text of a string-valued JSX attribute, or null when it is an expression.
  *
  * Reads three spellings, and each was added after the previous one let the
@@ -107,11 +148,8 @@ function literalAttribute(attributes: ts.JsxAttributes, name: string): string | 
       // which is this gate's standing rule that it does not guess.
       const spread = attr.expression;
       if (!ts.isObjectLiteralExpression(spread)) continue;
-      for (const prop of spread.properties) {
-        if (!ts.isPropertyAssignment(prop)) continue;
-        const key = ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) ? prop.name.text : null;
-        if (key === name) value = literalText(prop.initializer);
-      }
+      const found = objectLiteralProperty(spread, name);
+      if (found !== undefined) value = found;
       continue;
     }
     if (!ts.isJsxAttribute(attr) || attr.name.getText() !== name) continue;
@@ -204,6 +242,15 @@ describe("every error message renders through FormError or StateField", () => {
     // un-flag is the safe direction for a question about a live region.
     expect(role('<span role="alert" {...rest} />')).toBe("alert");
     expect(role("<span />")).toBeNull();
+    // Nested spreads: one more layer of composition is the same element.
+    expect(role('<span {...{ ...{ role: "alert" } }} />')).toBe("alert");
+    expect(role('<span {...{ ...{ role: "alert" }, role: "status" }} />')).toBe("status");
+    expect(role('<span {...{ role: "status", ...{ role: "alert" } }} />')).toBe("alert");
+    // A shorthand inside a spread is a reference, not an answer — and it
+    // REPLACES an earlier one, since it could hold anything.
+    expect(role('<span {...{ ...{ role: "alert" }, role }} />')).toBeNull();
+    // A nested spread that mentions nothing leaves the earlier answer alone.
+    expect(role('<span role="alert" {...{ ...{ className: "x" } }} />')).toBe("alert");
   });
 
   // Preconditions. An assertion that only forbids is satisfied by a scanner
