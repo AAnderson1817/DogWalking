@@ -130,7 +130,10 @@ spread and every member of a literal the error ITSELF was spread into
 (`{ ...error }` scatters its fields under names the gate cannot enumerate)
 read nothing. Reaching the error is not reading it either: a member of it
 (`error?.message`) is followed by these same rules, so `void
-error?.message` discards and `if (error?.message) throw error` does not. A class field initializer, instance or static, is
+error?.message` discards and `if (error?.message) throw error` does not —
+and taking the error apart is a read only of the piece that is read, so
+`const { message } = error; void message;` inspects nothing while `const
+{ code } = error; if (code) throw error;` does. A class field initializer, instance or static, is
 execution the gate does not follow and reads nothing; a static block runs
 with the class statement and is straight-line. A deferred
 builder (`let q = db.from(…)`) is followed to the statement that consumes
