@@ -181,7 +181,14 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
       // config)` and `const { a = config } = o` both let `alias` hold the same
       // object, so a mutation through it reaches `config`.
       linkBinding(n.name, n.initializer);
-    } else if ((ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n)) && n.name) {
+    } else if (
+      (ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n) ||
+        ts.isEnumDeclaration(n) || ts.isModuleDeclaration(n)) &&
+      n.name && ts.isIdentifier(n.name)
+    ) {
+      // An enum and a namespace introduce a VALUE binding, so either can
+      // shadow an outer object and make this map answer confidently and
+      // wrongly — the hazard the shadow rule exists for.
       bind(n.name.text, null);
     } else if (ts.isImportSpecifier(n) || ts.isImportClause(n) || ts.isNamespaceImport(n)) {
       if (n.name && ts.isIdentifier(n.name)) bind(n.name.text, null);
@@ -201,7 +208,14 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
       // identifier the right side mentions. That OVER-links, which is the
       // conservative direction Codex offered as the alternative: it can refuse
       // a name nothing touched, never miss one that was mutated.
-      if (n.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      //
+      // A LOGICAL assignment (`a ??= config`, `||=`, `&&=`) assigns the right
+      // side when it runs, so it forms the same alias. It is linked here and
+      // deliberately NOT treated as a definite rebinding above, which is the
+      // same asymmetry for the same reason: linking is the conservative
+      // direction, and claiming the name definitely holds the new value is
+      // not.
+      if (isAliasFormingAssignment(n.operatorToken.kind)) {
         const targets = new Set<string>();
         collectAssignmentTargets(n.left, targets);
         const sources = new Set<string>();
@@ -338,6 +352,22 @@ function collectIdentifiers(e: ts.Expression, into: Set<string>): void {
     ts.forEachChild(n, visit);
   };
   visit(e);
+}
+
+/**
+ * The assignments that make two names one object: `=` and the LOGICAL forms.
+ *
+ * `a ??= config` assigns `config` when it runs, so it forms an alias exactly as
+ * `a = config` does. It is not, however, a definite REBINDING — it may not run
+ * at all — which is why the two questions have different predicates.
+ */
+function isAliasFormingAssignment(kind: ts.SyntaxKind): boolean {
+  return (
+    kind === ts.SyntaxKind.EqualsToken ||
+    kind === ts.SyntaxKind.QuestionQuestionEqualsToken ||
+    kind === ts.SyntaxKind.BarBarEqualsToken ||
+    kind === ts.SyntaxKind.AmpersandAmpersandEqualsToken
+  );
 }
 
 /** Every assignment operator, `=` and the compound ones alike. */

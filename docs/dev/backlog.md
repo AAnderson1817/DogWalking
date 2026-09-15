@@ -25,14 +25,41 @@ before you hit them.
 
 ## Open
 
-### 1. Tell the operator when an edited address is already suppressed
+### 1. `validate.sh` should list its own gates, instead of being parsed
+`scripts/check-gate-lockstep.py` reads `validate.sh` with regexes to learn
+which gates it declares, and PR #94 spent four review rounds on that reader:
+line continuations, single quotes, control prefixes (`if run "…"`), shell
+reserved words, assignment and redirection prefixes (`MODE=ci run "…"`). Each
+was real and each was fixed, but the class does not close, because telling an
+INVOCATION from an ARGUMENT needs command position and `npm --prefix app run
+lint` legitimately contains the word `run`. The `unreadable` refusal — which
+is what makes the rest of the reader honest — therefore cannot be widened to
+every occurrence of the word.
+
+The robust answer is to let the shell parse the shell:
+
+  * `scripts/validate.sh --list-gates` sets a flag; `run` and `skip_gate`
+    print `run\t<label>` / `skip\t<label>` and return without executing;
+  * `check-gate-lockstep.py` invokes that instead of reading the file.
+
+The one hard part is that the prerequisite branches (`have deno`,
+`LOCAL_DB_URL`, the Playwright path) decide whether a gate reaches `run` or
+`skip_gate`, and the lockstep check wants the DECLARED set rather than the set
+this machine would run. So list mode has to force those branches — stub
+`have()` to true and give the environment checks a list-mode short circuit —
+and that has to be done in a way that cannot change what a real run does. Do
+it in its own PR, with the four-round spelling matrix in
+`check-gate-lockstep.py` kept as a test of the lister's output rather than
+deleted.
+
+### 2. Tell the operator when an edited address is already suppressed
 Also recorded in spec 04. Editing a client's address to one already in
 `email_suppressions` makes every future client-facing email skip
 permanently and terminally, with no signal in the UI. Whether to surface it
 — and how, without exposing one operator's suppression list to another — is
 a product question.
 
-### 2. The pinned Supabase CLI is behind, and `db push` warns every deploy
+### 3. The pinned Supabase CLI is behind, and `db push` warns every deploy
 Read off the `24c74bd` staging deploy (run 33537033230, `Apply migrations`),
 not recalled:
 
@@ -67,7 +94,7 @@ Not urgent: nothing is broken, and the cost of being wrong here is a deploy
 that fails at `link` or `push`, which is exactly the failure 2.109.1 was
 pinned to avoid.
 
-### 3. Spec-drift audit follow-up — the last PR
+### 4. Spec-drift audit follow-up — the last PR
 Found by the audit recorded as `docs(spec-drift)`. PR A — eight gates that
 passed for the wrong reason — has landed; see Done. This is what is left.
 
@@ -84,7 +111,7 @@ smoke block asserting no `prosecdef` function in `public` grants EXECUTE to
 `scripts/gen-definer-catalog.py` read `revoke` too and render an unrevoked
 function as `PUBLIC` rather than **none**.
 
-### 4. Two grant forms the definer catalogue does not read
+### 5. Two grant forms the definer catalogue does not read
 Both measured against the generator as it now stands (a scratch copy of the
 real migrations plus one probe function), not recalled:
 

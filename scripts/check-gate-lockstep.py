@@ -201,17 +201,23 @@ SHELL_RESERVED = (
 def _command(body: str) -> str:
     """`body` matched only where a COMMAND can start, captured as `cmd`.
 
-    That is: the beginning of the text, after a newline, after one of the shell
-    separators `; & | ( ) { }`, or after a reserved word. Anything else — the
-    middle of a word, an argument position, a variable's value — is not an
-    invocation and must not be read as one. The prefix is outside the `cmd`
-    group so a caller reads the command and not the keyword in front of it.
+    A command word begins at the start of the text, after a newline, after one
+    of the shell separators `; & | ( ) { }`, or after a reserved word — and may
+    be preceded by any number of ASSIGNMENT or REDIRECTION prefixes, which bash
+    allows before the command word (`MODE=ci run "…"`, `>/dev/null run "…"`).
+    Anything else — the middle of a word, an argument position, a variable's
+    value — is not an invocation and must not be read as one.
+
+    The prefix is outside the `cmd` group, so a caller reads the command and
+    not the keyword in front of it. Getting that wrong made eighteen real gates
+    read as unreadable on this rule's first run.
     """
     words = "|".join(re.escape(w) for w in SHELL_RESERVED if w.isalpha())
-    return (
-        r'(?:(?<=^)|(?<=\n)|(?<=[;&|(){}])|(?<=\s!)|(?:(?<=\s)(?:%s)\s+))[ \t]*(?P<cmd>%s)'
-        % (words, body)
-    )
+    boundary = r'(?:^|(?<=\n)|(?<=[;&|(){}])|(?<=\s!)|(?:(?:^|(?<=\n)|(?<=\s))(?:%s)\s+))' % words
+    # `VAR=value` and `>file` / `2>&1` / `<in`, repeated, with the spacing bash
+    # allows. Nothing here is captured; the command word follows.
+    prefixes = r'(?:[ \t]*(?:[A-Za-z_][A-Za-z0-9_]*=(?:[^\s;&|]*)|[0-9]*[<>]{1,2}&?[^\s;&|]*)[ \t]+)*'
+    return r'%s[ \t]*%s(?P<cmd>%s)' % (boundary, prefixes, body)
 
 
 def _strip_shell_comments(text: str) -> str:

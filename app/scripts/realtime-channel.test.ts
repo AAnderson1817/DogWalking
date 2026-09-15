@@ -662,6 +662,17 @@ describe("the walk channel is the only channel, and it is private on both sides"
       .toEqual(["true"]);
     expect(read("const c = { private: true };\nfunction m(a = c) { use(a); }\nsend({ topic, ...c });"))
       .toEqual(["true"]);
+    // A LOGICAL assignment assigns the right side when it runs, so it forms
+    // the same alias — while deliberately not counting as a definite
+    // rebinding, which is a different question about the same statement.
+    expect(read("const c = { private: true };\nlet a;\na ??= c;\na.private = false;\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read("const c = { private: true };\nlet a;\na ||= c;\na.private = false;\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    // An enum and a namespace introduce a VALUE binding, so either shadows an
+    // outer object — the confident-wrong-answer hazard the shadow rule is for.
+    expect(read("const c = { private: true };\nfunction f() { enum c { x } ; return c; }\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
     // PINNED REFUSAL, not an accident: an alias rebound BEFORE it is mutated
     // still invalidates the original. Dropping the stale edge needs to know
     // which assignment ran first — flow sensitivity — and the mirror of this
