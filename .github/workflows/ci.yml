@@ -721,14 +721,31 @@ jobs:
             join pg_namespace n on n.oid = p.pronamespace
             where n.nspname = 'public'
               and p.proname <> 'fn_ledger_apply'
-              -- The schema qualifier and the alias are BOTH optional, and the
-              -- spec-drift audit found that the previous pattern allowed
-              -- neither: `update public.clients set …` and `update clients c
-              -- set …` were both silent against it (probed on a live database,
-              -- with the widened pattern catching five spellings — plain,
-              -- qualified, alias, `as` alias, quoted — and still saying nothing
-              -- about the real schema or about a write to another table).
-              and p.prosrc ~* 'update[[:space:]]+("?public"?\.)?"?clients"?([[:space:]]+(as[[:space:]]+)?[a-z_][a-z0-9_$]*)?[[:space:]]+set[^;]*credit_balance';
+              -- The schema qualifier, ONLY and the alias are all optional, and
+              -- the spec-drift audit found that the previous pattern allowed
+              -- none of them: `update public.clients set …` and `update
+              -- clients c set …` were both silent against it. Probed on a live
+              -- database across eleven spellings; this one reads ten — plain,
+              -- qualified, quoted, quoted-schema, alias, `as` alias, ONLY,
+              -- mixed case, newline and tab before SET.
+              --
+              -- The eleventh it MISSES, stated rather than chased: a comment
+              -- between the table and SET (`update clients /* x */ set …`).
+              -- Reading that needs a SQL comment lexer, and PostgreSQL's block
+              -- comments NEST — `gen-enum-catalog.py` needed a state machine
+              -- and forty-three review rounds for exactly this, which is more
+              -- than a psql heredoc can carry. Widening the pattern to bridge
+              -- arbitrary text between the table and SET was measured and
+              -- rejected: it would also match `update walks set … where
+              -- client_id in (select id from clients where credit_balance > 0)`,
+              -- which is a red on healthy code — the worse failure.
+              --
+              -- This is a backstop, not the enforcement. The enforcement is the
+              -- grant: `has_column_privilege` says `anon` and `authenticated`
+              -- hold NO update on clients.credit_balance (measured), so only a
+              -- SECURITY DEFINER function can write it at all, and those are
+              -- what this reads. It catches the mistake, not the adversary.
+              and p.prosrc ~* 'update[[:space:]]+(only[[:space:]]+)?("?public"?\.)?"?clients"?([[:space:]]+(as[[:space:]]+)?[a-z_][a-z0-9_$]*)?[[:space:]]+set[^;]*credit_balance';
             if offenders is not null then
               raise exception 'INVARIANT 1 FAIL: credit_balance written outside fn_ledger_apply by: %', offenders;
             end if;

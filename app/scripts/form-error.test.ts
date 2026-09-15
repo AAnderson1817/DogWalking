@@ -94,10 +94,20 @@ function scan(files: string[]): Site[] {
 
     const visit = (node: ts.Node): void => {
       if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
-        const tag = node.tagName.getText();
-        // A lowercase tag is an intrinsic DOM element; a capitalised one is a
-        // component, and `role`/`className` on it are props it decides about.
-        if (/^[a-z]/.test(tag)) {
+        const name = node.tagName;
+        const tag = name.getText();
+        // JSX resolves a tag three ways, and only two of them are raw DOM
+        // elements. A lowercase IDENTIFIER (`span`) is intrinsic, and so is a
+        // namespaced name (`svg:circle`). A property access is NOT, whatever
+        // its case — `<ui.FormError role="alert" />` after
+        // `import * as ui from "./fields"` is the approved component reached
+        // through a namespace import, and the first version of this rule asked
+        // `/^[a-z]/` of the whole tag text and called it a raw element:
+        // measured, a gate red on healthy code, which is the shape the rest of
+        // this file is about.
+        const intrinsic =
+          (ts.isIdentifier(name) && /^[a-z]/.test(tag)) || ts.isJsxNamespacedName(name);
+        if (intrinsic) {
           const role = literalAttribute(node.attributes, "role");
           const cls = literalAttribute(node.attributes, "className");
           const errorClass = cls !== null && /(^|\s)[a-z0-9-]*__error(\s|$)/.test(cls);

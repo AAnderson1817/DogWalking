@@ -144,10 +144,14 @@ def validate_labels() -> set[str]:
     """
     text = VALIDATE.read_text()
     labels = set(re.findall(r'(?:run|skip_gate) +"([^"]+)"', text))
-    m = re.search(
+    # `finditer`, not `search`. There is one such loop today; a `search` would
+    # expand only the FIRST, and a ci.yml step mapped to a label from a second
+    # one would then be reported as claiming a gate validate.sh does not
+    # declare — a legible red, but on a healthy tree, and this repository's log
+    # calls that the worst shape available. One loop or five costs the same.
+    for m in re.finditer(
         r'for (\w+) in (\S+); do\n\s*run "([^"$]*)\$\(basename "\$\1"\)"', text
-    )
-    if m:
+    ):
         prefix = m.group(3)
         labels.discard(prefix + '$(basename ')
         for f in sorted(ROOT.glob(m.group(2))):
