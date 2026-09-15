@@ -616,6 +616,18 @@ describe("the walk channel is the only channel, and it is private on both sides"
     // itself is not a refusal.
     expect(read("const c = { private: true };\nconst a = c;\nuse(a);\nsend({ topic, ...c });"))
       .toEqual(["true"]);
+    // An alias formed by an ASSIGNMENT is an alias too — a declaration is not
+    // the only way to make two names one object.
+    expect(read("const c = { private: true };\nlet a;\na = c;\na.private = false;\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    // REBINDING a name is not mutating the object it held, so it costs that
+    // name its literal and leaves every other name for the object alone.
+    // Closing rebinding over the alias graph would refuse `c` here, which
+    // nothing has touched.
+    expect(read("const c = { private: true };\nlet a = c;\na = other;\nsend({ topic, ...c });"))
+      .toEqual(["true"]);
+    expect(read("let a = { private: true };\na = other;\nsend({ topic, ...a });"))
+      .toEqual(["<unresolvable spread `a`>"]);
     // A loop variable is assigned on every iteration and produces no
     // assignment expression at all.
     expect(read("let c = { private: true };\nfor (c of xs) {}\nsend({ topic, ...c });"))

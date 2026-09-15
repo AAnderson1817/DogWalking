@@ -105,7 +105,16 @@ export function propertyKey(name: ts.PropertyName): string | null {
  *    and a mutation through an ALIAS is a mutation of the same object, so
  *    `const alias = config; alias.private = false;` invalidates `config` too.
  *    Without that the rule read the name it was written through rather than
- *    the object it reached, which is one indirection short of the point.
+ *    the object it reached, which is one indirection short of the point. An
+ *    alias is formed by a declaration OR an assignment (`let a; a = config;`),
+ *    which the first version of the graph missed — the same one-binding-form
+ *    -short shape as the shadow rule two rounds earlier.
+ *
+ * REBINDING and MUTATING are tracked separately, and that separation is what
+ * keeps the graph from over-refusing: `let a = config; a = other;` rebinds the
+ * NAME `a` and leaves `config`'s object untouched, so only `a` loses its
+ * literal, while `a.private = false` reaches the object every alias names and
+ * invalidates all of them.
  *
  * Both are refusals rather than analyses, which is the stopping rule this
  * repository settled on: an ambiguous name never gets a confident answer, and
@@ -114,7 +123,12 @@ export function propertyKey(name: ts.PropertyName): string | null {
  */
 export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteralExpression> {
   const seen = new Map<string, ts.ObjectLiteralExpression | null>();
-  const assigned = new Set<string>();
+  // Rebinding a NAME costs that name its literal; MUTATING an object costs it
+  // to every name for that object. Two sets, because closing the first over
+  // the alias graph would make `let a = config; a = other;` refuse `config`,
+  // which nothing has touched.
+  const rebound = new Set<string>();
+  const mutated = new Set<string>();
   // `const b = a` makes the two names one object, so a mutation of either is a
   // mutation of both. Undirected, and closed transitively below.
   const aliases = new Map<string, Set<string>>();
@@ -157,21 +171,30 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
     // Rebinding the NAME: `x = …`, every compound form, and `x++`. A
     // destructuring assignment target counts too.
     if (ts.isBinaryExpression(n) && isAssignmentOperator(n.operatorToken.kind)) {
-      collectAssignmentTargets(n.left, assigned);
+      collectAssignmentTargets(n.left, rebound);
+      // `a = config` also makes the two names one object from here on.
+      const rhs = unwrapTransparent(n.right);
+      const lhs = unwrapTransparent(n.left);
+      if (
+        n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isIdentifier(lhs) && ts.isIdentifier(rhs)
+      ) {
+        link(lhs.text, rhs.text);
+      }
     }
     if (
       (ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) &&
       (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken) &&
       ts.isIdentifier(n.operand)
     ) {
-      assigned.add(n.operand.text);
+      rebound.add(n.operand.text);
     }
     // A loop variable is assigned on every iteration and produces no
     // BinaryExpression at all, so `for (x of […])` slipped past the rule above.
     // Only the bare-identifier form matters: `for (const x of …)` declares a
     // fresh binding, which the declaration branch already sees.
     if ((ts.isForOfStatement(n) || ts.isForInStatement(n)) && !ts.isVariableDeclarationList(n.initializer)) {
-      collectAssignmentTargets(n.initializer, assigned);
+      collectAssignmentTargets(n.initializer, rebound);
     }
     // And MUTATING what the name holds. The caller reads the object, so
     // `channelConfig.private = false` changes the answer exactly as rebinding
@@ -179,34 +202,37 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
     // rebinding, which is the same half-a-rule the property-mutation check in
     // the channel gate had before it (Codex, PR #94).
     if (ts.isBinaryExpression(n) && isAssignmentOperator(n.operatorToken.kind)) {
-      collectMutatedRoots(n.left, assigned);
+      collectMutatedRoots(n.left, mutated);
     }
-    if (ts.isDeleteExpression(n)) collectMutatedRoots(n.expression, assigned);
+    if (ts.isDeleteExpression(n)) collectMutatedRoots(n.expression, mutated);
     if (isObjectAssignCall(n)) {
       // `Object.assign(target, …)` writes into its FIRST argument.
       const target = n.arguments[0];
-      if (target) collectMutatedRoots(target, assigned, true);
+      if (target) collectMutatedRoots(target, mutated, true);
     }
 
     ts.forEachChild(n, visit);
   };
   visit(sf);
 
-  // Close the invalidation over the alias graph: whichever name a mutation was
-  // written through, every name for the same object loses its literal.
-  const queue = [...assigned];
+  // Close MUTATION over the alias graph: whichever name it was written
+  // through, every name for the same object loses its literal. Rebinding is
+  // deliberately not closed — see the note above.
+  const queue = [...mutated];
   while (queue.length) {
     const name = queue.pop() as string;
     for (const other of aliases.get(name) ?? []) {
-      if (!assigned.has(other)) {
-        assigned.add(other);
+      if (!mutated.has(other)) {
+        mutated.add(other);
         queue.push(other);
       }
     }
   }
 
   const out = new Map<string, ts.ObjectLiteralExpression>();
-  for (const [name, lit] of seen) if (lit && !assigned.has(name)) out.set(name, lit);
+  for (const [name, lit] of seen) {
+    if (lit && !rebound.has(name) && !mutated.has(name)) out.set(name, lit);
+  }
   return out;
 }
 
