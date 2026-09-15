@@ -76,10 +76,20 @@ function literalAttribute(attributes: ts.JsxAttributes, name: string): string | 
   for (const attr of attributes.properties) {
     if (!ts.isJsxAttribute(attr) || attr.name.getText() !== name) continue;
     const init = attr.initializer;
-    if (init && ts.isStringLiteral(init)) return init.text;
-    // `className={cx(...)}` and `role={role}` are expressions: not a literal,
-    // and not this gate's business — the compiler cannot say what they hold,
-    // and a guess in either direction is worse than the silence.
+    if (!init) return null;
+    if (ts.isStringLiteral(init)) return init.text;
+    // `role={"alert"}` is the same attribute with braces round it, and JSX
+    // accepts both — so the braced spelling wrote the forbidden shape straight
+    // past the first version of this rule. Measured: a `<span
+    // className={"signin__error"} role={"alert"}>` passed. A braced value the
+    // compiler can read is read; a template with a substitution is not one.
+    if (ts.isJsxExpression(init) && init.expression) {
+      const e = init.expression;
+      if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) return e.text;
+    }
+    // `className={cx(...)}` and `role={role}` are genuinely dynamic: not this
+    // gate's business, because the compiler cannot say what they hold and a
+    // guess in either direction is worse than the silence.
     return null;
   }
   return null;

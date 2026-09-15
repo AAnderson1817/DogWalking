@@ -157,10 +157,17 @@ function channelCalls(files: string[]): ChannelCall[] {
   return found;
 }
 
-/** `private` inside the broadcast body's `messages` array element. */
-function serverPrivate(): { found: boolean; value: string } {
+/**
+ * `private` in EVERY message literal in the broadcast body, not the last one.
+ *
+ * The first version kept a single result and each match overwrote it, so a
+ * `broadcast.ts` that published a public message and then a private one read
+ * as private — measured, green while the server published to the public topic.
+ * Every match is collected now and every one has to be the literal `true`.
+ */
+function serverPrivate(): { found: boolean; values: string[] } {
   const source = parse(BROADCAST);
-  let result = { found: false, value: "" };
+  const values: string[] = [];
   const visit = (node: ts.Node): void => {
     if (ts.isObjectLiteralExpression(node)) {
       // `topic` is what makes this the message object rather than some other
@@ -170,13 +177,13 @@ function serverPrivate(): { found: boolean; value: string } {
       // check cannot resolve and "cannot say" is not "is private".
       if (has(node, "private") && has(node, "topic")) {
         const priv = property(node, "private");
-        result = { found: true, value: priv ? priv.getText() : "<shorthand, unreadable>" };
+        values.push(priv ? priv.getText() : "<shorthand, unreadable>");
       }
     }
     ts.forEachChild(node, visit);
   };
   visit(source);
-  return result;
+  return { found: values.length > 0, values };
 }
 
 describe("the walk channel is the only channel, and it is private on both sides", () => {
@@ -226,6 +233,10 @@ describe("the walk channel is the only channel, and it is private on both sides"
     expect(server.found, "no `{ topic, …, private }` message literal in broadcast.ts").toBe(
       true,
     );
-    expect(server.value, "broadcast.ts must publish to the private topic").toBe("true");
+    expect(
+      server.values.filter((v) => v !== "true"),
+      "every message broadcast.ts publishes must go to the private topic — one public " +
+        "message is enough to put a walk's live position on a topic anyone can join",
+    ).toEqual([]);
   });
 });

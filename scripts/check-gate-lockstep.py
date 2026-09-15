@@ -55,6 +55,17 @@ SESSION_NOTES = ROOT / "docs/dev/session-notes.md"
 SETUP = "SETUP"
 CI_ONLY = "CI_ONLY"
 
+# validate.sh labels that legitimately have no ci.yml step. Both are UMBRELLA
+# skip labels: `validate.sh` prints one of these when a whole family's
+# prerequisite is missing locally, and then never prints the individual gates
+# at all. CI always has deno and a database, so there is nothing for them to
+# mirror. Named, never pattern-matched, so the exception is editable only here
+# and only in the same commit as the thing it excuses.
+LOCAL_ONLY: set[str] = {
+    "6. edge functions",   # printed instead of 6a/6b when deno is absent
+    "7-8. database",       # printed instead of 7/7b/8/8b/8c/8d with no LOCAL_DB_URL
+}
+
 # ci.yml step name -> SETUP, CI_ONLY, or the validate.sh gate label that runs
 # the same check locally.
 COVERAGE: dict[str, str] = {
@@ -143,7 +154,14 @@ def validate_labels() -> set[str]:
     third suite makes its gate label appear on its own.
     """
     text = VALIDATE.read_text()
-    labels = set(re.findall(r'(?:run|skip_gate) +"([^"]+)"', text))
+    # Anchored to a COMMAND position — start of line, optional indent — because
+    # the unanchored version read prose. It was not a latent defect: the first
+    # version swallowed `the same gates in the same order` out of the sentence
+    # in `validate.sh`'s own gate-7b comment and carried it as a gate label.
+    # Inert, since nothing mapped to it, and exactly the mention-versus-use
+    # distinction this repository has paid for before — a commented-out
+    # `# run "10f. …"` would likewise have read as a gate that still runs.
+    labels = set(re.findall(r'^[ \t]*(?:run|skip_gate) +"([^"]+)"', text, re.M))
     # `finditer`, not `search`. There is one such loop today; a `search` would
     # expand only the FIRST, and a ci.yml step mapped to a label from a second
     # one would then be reported as claiming a gate validate.sh does not
@@ -188,6 +206,26 @@ def main() -> int:
             failures.append(
                 f"{name!r} claims validate.sh gate {target!r}, which validate.sh does not declare"
             )
+
+    # 2b. And the OTHER direction, which the first version did not ask: a gate
+    #     added to validate.sh with no ci.yml step behind it. Codex found it on
+    #     PR #94 — the check only ever iterated COVERAGE into labels, so a new
+    #     local gate that CI does not run reported the three lists in lockstep,
+    #     which is the invariant inverted. LOCAL_ONLY is the allowlist.
+    for label in sorted(labels - LOCAL_ONLY):
+        if label not in COVERAGE.values():
+            failures.append(
+                f"validate.sh declares gate {label!r}, which no ci.yml step runs — "
+                "add the step, or add the label to LOCAL_ONLY with a reason"
+            )
+
+    # 2c. A stale LOCAL_ONLY entry excuses a gate that no longer exists, the
+    #     same failure as a stale map entry one rule down.
+    for label in sorted(LOCAL_ONLY - labels):
+        failures.append(
+            f"scripts/check-gate-lockstep.py excuses {label!r} as local-only, "
+            "which validate.sh does not declare"
+        )
 
     # 3. A map entry naming a step ci.yml no longer has is stale, and a stale
     #    exception excuses a real check forever.
