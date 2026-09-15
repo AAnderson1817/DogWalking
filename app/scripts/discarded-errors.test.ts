@@ -538,30 +538,49 @@ function memberChain(target: ts.Expression): { base: ts.Identifier; keys: Key[] 
  * they share a root and the keys agree, which is what lets a write through
  * one be seen by a read through another (Codex on PR #92, round eighteen).
  *
- * A binding REASSIGNED between its declaration and `at` is not what it was
- * initialised from any more, so it roots at itself: `let alias = box; alias =
- * other; alias.error = null;` writes to another object entirely, and treating
- * it as `box` forever rejected correct code (Codex, round nineteen — the
- * worst shape a gate has, red on a healthy tree).
+ * What a name refers to is decided by the LAST write before `at`, so a
+ * binding reassigned in between is not what it was initialised from any
+ * more and roots at itself: `let alias = box; alias = other; alias.error =
+ * null;` writes to another object entirely, and treating it as `box` forever
+ * rejected correct code (Codex, round nineteen — the worst shape a gate has,
+ * red on a healthy tree). Assignment is provenance as much as initialisation
+ * (round twenty), and an assignment back restores it.
  */
 function rootOf(checker: ts.TypeChecker, id: ts.Identifier, container: ts.Node, at: number, seen: Set<ts.Symbol> = new Set()): { sym: ts.Symbol; keys: Key[] } | null {
   const sym = symbolOf(checker, id);
   if (!sym || seen.has(sym)) return null;
   seen.add(sym);
-  for (const d of sym.declarations ?? []) {
-    if (!ts.isVariableDeclaration(d) || !d.initializer) continue;
-    const init = unwrapped(d.initializer);
-    const from = ts.isIdentifier(init) ? { base: init, keys: [] as Key[] } : memberChain(init);
-    if (!from) break;
-    const reassigned = writesTo(checker, sym, container)
-      .map((w) => executesAt(w, container, id))
-      .some((pos) => pos > d.pos && pos < at);
-    if (reassigned) break;
-    const up = rootOf(checker, from.base, container, at, seen);
-    if (!up) break;
-    return { sym: up.sym, keys: [...up.keys, ...from.keys] };
+  const self = { sym, keys: [] as Key[] };
+  // The LAST place this binding was given a value before `at` decides what it
+  // refers to there — a plain assignment as much as a declaration's
+  // initialiser (Codex on PR #92, round twenty: `let alias: T; alias = box;`
+  // is provenance too), and a write of any other shape leaves it unknown.
+  const writes = writesTo(checker, sym, container)
+    .map((w) => ({ pos: executesAt(w, container, id), node: w.node }))
+    .filter((w) => w.pos < at)
+    .sort((a, b) => b.pos - a.pos);
+  const last = writes[0];
+  let source: { pos: number; expr: ts.Expression } | null = null;
+  if (last) {
+    const p = last.node.parent;
+    if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && p.left === last.node) {
+      source = { pos: last.pos, expr: p.right };
+    } else if (ts.isVariableDeclaration(p) && p.name === last.node && p.initializer) {
+      source = { pos: last.pos, expr: p.initializer };
+    }
+  } else {
+    const d = (sym.declarations ?? []).find((x) => ts.isVariableDeclaration(x) && x.initializer !== undefined);
+    if (d && ts.isVariableDeclaration(d) && d.initializer) source = { pos: d.pos, expr: d.initializer };
   }
-  return { sym, keys: [] };
+  if (!source) return self;
+  const init = unwrapped(source.expr);
+  const from = ts.isIdentifier(init) ? { base: init, keys: [] as Key[] } : memberChain(init);
+  if (!from) return self;
+  // Resolved AS OF the copy: a name that took the reference before the name it
+  // copied moved on still holds the object it copied.
+  const up = rootOf(checker, from.base, container, source.pos, seen);
+  if (!up) return self;
+  return { sym: up.sym, keys: [...up.keys, ...from.keys] };
 }
 
 /**
@@ -872,7 +891,17 @@ function forwardedTo(n: ts.Node): ts.Node {
 function discardedAt(holder: ts.Node): boolean {
   const h = holder.parent;
   return ts.isExpressionStatement(h) || ts.isVoidExpression(h) ||
-    (ts.isBinaryExpression(h) && h.operatorToken.kind === ts.SyntaxKind.CommaToken && h.left === holder);
+    (ts.isBinaryExpression(h) && h.operatorToken.kind === ts.SyntaxKind.CommaToken && h.left === holder) ||
+    // An assignment TARGET is written, not read: `box.error = fallback`
+    // replaces the member and inspects nothing, and `delete box.cause`
+    // removes it (Codex on PR #92, round twenty — the finding named missing
+    // provenance, and this is what its case was actually passing on). Every
+    // assignment kind, the compound ones included: `box.error ??= fallback`
+    // does read the member first, but the write window closes at that same
+    // position, so calling it a read decides nothing — a distinction no test
+    // could hold, which is a rule with nothing behind it.
+    (ts.isBinaryExpression(h) && isAssignmentKind(h.operatorToken.kind) && h.left === holder) ||
+    (ts.isDeleteExpression(h) && h.expression === holder);
 }
 
 /** The local an expression is COPIED into — `const copy = e`, `copy = e` — or null.
@@ -2668,6 +2697,24 @@ async function f(db: any) { const { data, error } = await db.from("a").select("i
     expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); ${nested} const inner = box.nested; if (inner.cause) throw inner.cause; return data; }`).verdict).toBe("OK");
     expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); ${nested} const inner = box.nested; inner.cause.message = "x"; if (box.nested.cause) throw box.nested.cause; return data; }`).verdict).toBe("OK");
     expect(one(`async function f(db: any, x: any) { const { data, error } = await db.from("a").select("id"); ${nested} const inner = box.nested; inner.other = x; if (box.nested.cause) throw box.nested.cause; return data; }`).verdict).toBe("OK");
+  });
+
+  it("a name takes its provenance from the last write, and a write target is not a read (Codex, PR #92)", () => {
+    // Round twenty. The finding named provenance — `let alias: T; alias =
+    // box;` establishes it as much as an initialiser does, so what a name
+    // refers to is decided by the LAST write before the point in question,
+    // and an assignment back restores it. But the case was passing for a
+    // second reason the finding did not name: `alias.error = fallback` was
+    // counted as a READ of the error, because a member on the carried path is
+    // consumed by whatever holds it and nothing asked which SIDE of the
+    // assignment it sat on. A target is written, not read.
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias: any; alias = box; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { nested: { cause: error } }; let inner: any; inner = box.nested; inner.cause = fallback; if (box.nested.cause) throw box.nested.cause; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, other: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias = box; alias = other; alias = box; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, other: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; let mid = box; const held = mid; mid = other; held.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; box.error = fallback; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; delete box.error; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, other: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias = box; alias = other; alias.error = null; if (box.error) throw box.error; return data; }`).verdict).toBe("OK");
   });
 
   it("a builder REPLACED before it is awaited never runs (Codex, PR #92)", () => {
