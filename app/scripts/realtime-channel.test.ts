@@ -224,12 +224,70 @@ function channelCalls(files: string[]): ChannelCall[] {
  * unresolvable by the caller rather than assumed harmless.
  */
 function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteralExpression> {
-  const out = new Map<string, ts.ObjectLiteralExpression>();
+  // Every declaration of the name ANYWHERE in the file, not just the one this
+  // map would end up holding. A file-global name map does not merely miss a
+  // shadowed binding — it can resolve to the WRONG literal, which is worse
+  // than resolving to none: Codex planted an outer `const channelConfig =
+  // { private: false }` and an unused nested function redeclaring it as
+  // `{ private: true }`, and the last writer won, so a client joining a public
+  // topic read as private (7 of 7 green, measured).
+  //
+  // Refusing a shadowed name rather than resolving it by symbol is the
+  // stopping rule this repository writes down: the file this reads is 30 lines
+  // long, a shadowed name in it is not a spelling anybody reaches for, and the
+  // remedy — rename one — is cheaper than a Program over the whole app for one
+  // question. What matters is that an ambiguous name is never given a
+  // confident answer. Measured green on the tree: no name is declared twice in
+  // either file this reads.
+  const seen = new Map<string, ts.ObjectLiteralExpression | null>();
   const visit = (n: ts.Node): void => {
-    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer
-      && ts.isObjectLiteralExpression(n.initializer)) {
-      out.set(n.name.text, n.initializer);
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name)) {
+      const name = n.name.text;
+      const init = n.initializer && ts.isObjectLiteralExpression(n.initializer) ? n.initializer : null;
+      // A second declaration of the same name makes it unresolvable, whichever
+      // of the two carries an object literal.
+      seen.set(name, seen.has(name) ? null : init);
     }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  const out = new Map<string, ts.ObjectLiteralExpression>();
+  for (const [name, lit] of seen) if (lit) out.set(name, lit);
+  return out;
+}
+
+/**
+ * The property mutations in a file — `x.y = …`, `x["y"] = …`, `Object.assign`.
+ *
+ * A reader of object LITERALS is sound only while the literal it read is what
+ * gets sent. `const message = { …, private: true }; message.private = false;
+ * messages: [message]` passed 7 of 7 (Codex, PR #94): the scan saw a stale
+ * `true` on a line that had been overwritten by the time the POST was built.
+ *
+ * Modelling mutation is a dataflow analysis; refusing it is a precondition,
+ * which is what the enum-catalogue generator settled on for the same class of
+ * question. `broadcast.ts` contains no mutation today (measured), so the
+ * precondition costs nothing and the day somebody writes one the gate says so
+ * rather than reading a value that no longer exists.
+ */
+function mutations(sf: ts.SourceFile): string[] {
+  const out: string[] = [];
+  const at = (n: ts.Node) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+  const visit = (n: ts.Node): void => {
+    if (ts.isBinaryExpression(n)
+      && (ts.isPropertyAccessExpression(n.left) || ts.isElementAccessExpression(n.left))) {
+      // Every assignment operator, `=` and the compound ones alike.
+      const op = n.operatorToken.kind;
+      if (op === ts.SyntaxKind.EqualsToken || (op >= ts.SyntaxKind.FirstCompoundAssignment
+        && op <= ts.SyntaxKind.LastCompoundAssignment)) {
+        out.push(`${n.getText().split("\n")[0]} (line ${at(n)})`);
+      }
+    }
+    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)
+      && n.expression.name.text === "assign") {
+      out.push(`${n.getText().split("\n")[0]} (line ${at(n)})`);
+    }
+    if (ts.isDeleteExpression(n)) out.push(`${n.getText()} (line ${at(n)})`);
     ts.forEachChild(n, visit);
   };
   visit(sf);
@@ -327,7 +385,7 @@ function isLiteralTrue(v: ts.Expression | string | undefined): boolean {
  * as private — measured, green while the server published to the public topic.
  * Every match is collected now and every one has to be the literal `true`.
  */
-function serverPrivate(): { found: boolean; values: string[] } {
+function serverPrivate(): { found: boolean; values: string[]; mutations: string[] } {
   const source = parse(BROADCAST);
   const declared = declaredObjects(source);
   const values: string[] = [];
@@ -352,7 +410,7 @@ function serverPrivate(): { found: boolean; values: string[] } {
     ts.forEachChild(node, visit);
   };
   visit(source);
-  return { found: values.length > 0, values };
+  return { found: values.length > 0, values, mutations: mutations(source) };
 }
 
 describe("the walk channel is the only channel, and it is private on both sides", () => {
@@ -439,6 +497,27 @@ describe("the walk channel is the only channel, and it is private on both sides"
     // all is not a message and contributes nothing, so a reader that answered
     // for every object literal would be reporting on code that sends nothing.
     expect(read("const opts = { retries: 3 };")).toEqual([]);
+
+    // A name declared twice is UNRESOLVABLE, not "whichever the walk saw
+    // last" — resolving it to the wrong literal is worse than resolving it to
+    // none, since it answers confidently and wrongly.
+    expect(read("const c = { private: true };\nfunction f() { const c = { private: false }; return c; }\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    // …while a name declared once still resolves.
+    expect(read("const c = { private: true };\nsend({ topic, ...c });")).toEqual(["true"]);
+  });
+
+  it("sees a mutation that would make reading literals unsound", () => {
+    const muts = (src: string): string[] =>
+      mutations(ts.createSourceFile("b.ts", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS));
+
+    expect(muts("const m = { private: true };\nm.private = false;")).toHaveLength(1);
+    expect(muts('const m = { private: true };\nm["private"] = false;')).toHaveLength(1);
+    expect(muts("const m = { private: true };\nObject.assign(m, { private: false });")).toHaveLength(1);
+    expect(muts("const m = { private: true };\ndelete m.private;")).toHaveLength(1);
+    expect(muts("let n = 0;\nn += 1;\nconst m = { private: true };\nm.count += 1;")).toHaveLength(1);
+    // A read is not a mutation, and neither is declaring one.
+    expect(muts("const m = { private: true };\nif (m.private) send(m);")).toEqual([]);
   });
 
   // Preconditions. "No channel is public" is satisfied by a scanner that finds
@@ -484,6 +563,17 @@ describe("the walk channel is the only channel, and it is private on both sides"
     expect(server.found, "no `{ topic, …, private }` message literal in broadcast.ts").toBe(
       true,
     );
+    // Reading a LITERAL is sound only while the literal is what gets sent.
+    // `const message = { …, private: true }; message.private = false;` left a
+    // stale `true` on a line the POST no longer used, and this read it (7 of 7
+    // green, measured). Refused rather than modelled: a dataflow analysis is
+    // more than one 30-line file earns, and a mutation here should be a
+    // deliberate act somebody argues for, not a silent one.
+    expect(
+      server.mutations,
+      "broadcast.ts mutates an object after it is written, so reading its literals no longer says "
+        + "what is published — rebuild the message rather than mutating it, or teach this check to follow it",
+    ).toEqual([]);
     expect(
       server.values.filter((v) => v !== "true"),
       "every message broadcast.ts publishes must go to the private topic — one public " +

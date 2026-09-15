@@ -72,10 +72,14 @@ admin() {
 # nothing — the green-but-empty class this repository's log records four times.
 # Warnings go to stderr because stdout is the captured return value.
 user_id_for() {
-  local page=1 code lbody id first seen=""
+  local page=1 code lbody id first seen="" rc
   lbody=$(mktemp)
   while [ "$page" -le 50 ]; do
-    code=$(admin -o "$lbody" -w '%{http_code}' "$STAGING_BASE/auth/v1/admin/users?page=$page&per_page=100")
+    rc=0
+    code=$(admin_status -o "$lbody" -w '%{http_code}' "$STAGING_BASE/auth/v1/admin/users?page=$page&per_page=100") || rc=$?
+    # A transport failure is a FAILED LOOKUP, never an absence — that is the
+    # distinction the two security assertions in the claim replay rest on.
+    [ "$rc" -ne 0 ] && { echo "auth user lookup failed: GET admin/users page $page did not complete (curl exit $rc)" >&2; return 9; }
     case "$code" in
       2*) ;;
       *) echo "auth user lookup failed: GET admin/users page $page -> HTTP $code" >&2; return 9 ;;
@@ -93,14 +97,40 @@ user_id_for() {
   return 0
 }
 
+# Run `admin`, and NEVER die on a transport failure.
+#
+# Prints the HTTP status on stdout — empty when the request did not complete —
+# and returns curl's exit status, so a caller can tell "the server said 500"
+# from "there was no server". Under `bash -e` (which is what a GitHub Actions
+# `run:` step uses) a bare `code=$(admin …)` exits the whole step AT THE
+# ASSIGNMENT, before the `case` that would have explained it: the documented
+# non-fatal cleanup was fatal, and the create's `::error` annotation — the
+# whole point of the H14 fix in this file — could never be printed.
+# Reproduced against an unreachable origin: exit 7, no warning, and the
+# deletes after it never ran (Codex, PR #94).
+#
+# All three capture sites go through this, rather than the one that was named:
+# they had the identical shape, and fixing one and not its siblings is the
+# defect this repository's log records more than any other.
+admin_status() {
+  local code rc=0
+  code=$(admin "$@") || rc=$?
+  printf '%s' "$code"
+  return "$rc"
+}
+
 # Delete, and REPORT a refusal instead of swallowing it. Every `|| true` this
 # replaces used to hide one, which is how leftovers accumulated silently until a
 # run could no longer start. Non-fatal on purpose — cleanup is housekeeping now
 # that the fixture addresses are run-scoped, not a precondition — but a warning
 # makes the accumulation visible while it is still cheap to fix.
 del() {
-  local code
-  code=$(admin -o /dev/null -w '%{http_code}' -X DELETE "$1")
+  local code rc=0
+  code=$(admin_status -o /dev/null -w '%{http_code}' -X DELETE "$1") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "::warning title=Fixture cleanup could not be sent::DELETE $2 did not complete (curl exit $rc). Cleanup is housekeeping, so this run continues — but rows accumulate in staging until it works."
+    return 0
+  fi
   case "$code" in
     2*) return 0 ;;
     *) echo "::warning title=Fixture cleanup left something behind::DELETE $2 -> HTTP $code. Rows accumulate in staging until this is fixed." ;;
@@ -117,11 +147,15 @@ del() {
 # "service key rejected" were one indistinguishable red. Same defect as review
 # H14, in the workflow that exists to say when staging is wrong.
 create_fixture_user() {
-  local email="$1" password="$2" body code msg stale
+  local email="$1" password="$2" body code msg stale rc=0
   body=$(mktemp)
-  code=$(admin -o "$body" -w '%{http_code}' -X POST "$STAGING_BASE/auth/v1/admin/users" \
+  code=$(admin_status -o "$body" -w '%{http_code}' -X POST "$STAGING_BASE/auth/v1/admin/users" \
     -H "Content-Type: application/json" \
-    -d "{\"email\":\"$email\",\"password\":\"$password\",\"email_confirm\":true}")
+    -d "{\"email\":\"$email\",\"password\":\"$password\",\"email_confirm\":true}") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "::error title=Could not create the fixture user $email::The request did not complete (curl exit $rc) — staging was unreachable, not refusing."
+    return 1
+  fi
   FIXTURE_UID=$(jq -r '.id // empty' "$body")
   if [ -n "$FIXTURE_UID" ]; then return 0; fi
 

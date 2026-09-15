@@ -289,6 +289,53 @@ describe("scripts/staging-fixtures.sh", () => {
     expect(s.pages).toEqual([1, 2, 3, 4]);
   });
 
+  // ── the transport failure, at all three capture sites ────────────────────
+  //
+  // `bash -e` — which is what a GitHub Actions `run:` step uses — exits at the
+  // ASSIGNMENT when a command substitution's command fails, so
+  // `code=$(admin …)` used to kill the whole step before the `case` or the
+  // `::error` beneath it could say anything. Reproduced against an unreachable
+  // origin: exit 7, no annotation, and the deletes after it never ran. These
+  // three cases are one per capture site rather than one for the site Codex
+  // named, because they had the identical shape.
+  //
+  // Port 9 is the discard service and nothing listens on it here, so the
+  // connection is refused immediately — a real transport failure, not a
+  // timeout the suite would have to wait out.
+  const DEAD = "http://127.0.0.1:9";
+
+  it("cleanup survives a transport failure, warns, and keeps deleting", async () => {
+    const { code, out } = await runLib(
+      DEAD,
+      `del "${DEAD}/rest/v1/clients?id=eq.1" "first"\ndel "${DEAD}/rest/v1/clients?id=eq.2" "second"\necho REACHED-THE-END`,
+    );
+    expect(code).toBe(0);
+    // BOTH deletes ran: the point of the fix is that one failure does not take
+    // the rest of cleanup, and the step, with it.
+    expect(out).toContain("DELETE first did not complete");
+    expect(out).toContain("DELETE second did not complete");
+    expect(out).toContain("REACHED-THE-END");
+    expect(out).toContain("::warning");
+  });
+
+  it("a lookup that cannot be sent is a failed lookup, never an absence", async () => {
+    const { code, out } = await runLib(DEAD, `user_id_for "${ONBOARD_EMAIL}"`);
+    // 9, not 0-with-empty-stdout. The dead-token security assertion in the
+    // claim replay reads this return value.
+    expect(code).toBe(9);
+    expect(out).toContain("did not complete");
+  });
+
+  it("a create that cannot be sent says so, rather than dying unexplained", async () => {
+    const { code, out } = await runLib(DEAD, `create_fixture_user "${ONBOARD_EMAIL}" "pw-Aa123456789"`);
+    expect(code).not.toBe(0);
+    expect(out).toContain("::error");
+    expect(out).toContain("did not complete");
+    // The distinction that makes the annotation worth printing: unreachable is
+    // not the same as refused, and the old code could say neither.
+    expect(out).toContain("staging was unreachable, not refusing");
+  });
+
   it("exits 9 on a failed lookup rather than answering 'absent'", async () => {
     // The distinction two security assertions in the claim replay depend on: a
     // 401 read as "no such account" passes the dead-token check while checking

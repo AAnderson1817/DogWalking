@@ -71,9 +71,26 @@ interface Site {
   why: string;
 }
 
-/** The text of a statically readable string, or null for a dynamic one. */
+/**
+ * The text of a statically readable string, or null for a dynamic one.
+ *
+ * `as const`, `as string`, `satisfies`, parentheses and `!` are TRANSPARENT:
+ * React receives the same literal through every one of them, and a reader that
+ * stops at the wrapper calls the attribute dynamic and looks away. Measured:
+ * `<span role={"alert" as const} />` passed 4 of 4 (Codex, PR #94).
+ */
 function literalText(e: ts.Expression): string | null {
-  if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) return e.text;
+  let cur = e;
+  for (let i = 0; i < 8; i += 1) {
+    if (ts.isStringLiteral(cur) || ts.isNoSubstitutionTemplateLiteral(cur)) return cur.text;
+    if (ts.isAsExpression(cur) || ts.isSatisfiesExpression(cur)
+      || ts.isParenthesizedExpression(cur) || ts.isNonNullExpression(cur)
+      || ts.isTypeAssertionExpression(cur)) {
+      cur = cur.expression;
+      continue;
+    }
+    return null;
+  }
   return null;
 }
 
@@ -242,6 +259,12 @@ describe("every error message renders through FormError or StateField", () => {
     // un-flag is the safe direction for a question about a live region.
     expect(role('<span role="alert" {...rest} />')).toBe("alert");
     expect(role("<span />")).toBeNull();
+    // Transparent TypeScript wrappers: React gets the same literal.
+    expect(role('<span role={"alert" as const} />')).toBe("alert");
+    expect(role('<span role={("alert") as string} />')).toBe("alert");
+    expect(role('<span role={"alert" satisfies string} />')).toBe("alert");
+    expect(role('<span role={("alert")!} />')).toBe("alert");
+    expect(role('<span {...{ role: "alert" as const }} />')).toBe("alert");
     // Nested spreads: one more layer of composition is the same element.
     expect(role('<span {...{ ...{ role: "alert" } }} />')).toBe("alert");
     expect(role('<span {...{ ...{ role: "alert" }, role: "status" }} />')).toBe("status");
