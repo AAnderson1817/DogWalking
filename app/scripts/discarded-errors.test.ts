@@ -587,6 +587,15 @@ function rootOf(checker: ts.TypeChecker, id: ts.Identifier, container: ts.Node, 
   // says what a name is (Codex on PR #92, round twenty-four): it passes
   // `established` — the statement is on every path — while the ASSIGNMENT
   // inside it is not.
+  //
+  // Whether the condition is STATICALLY settled (`let a: any = {}; a ||= {}`
+  // cannot assign, because the initialiser is truthy) is deliberately not
+  // asked: that is a constant evaluator inside a gate about supabase
+  // envelopes, for a shape that occurs nowhere in the code this scans — zero
+  // logical assignments under `supabase/functions` — so the gate refuses it
+  // instead, as it refuses every other state it cannot establish (Codex,
+  // round twenty-five, declined with the reasoning on the thread). The
+  // remedy, as everywhere else here, is `if (error) throw error;` first.
   const conditional = (w: { node: ts.Node }) => {
     const target = forwardedTo(w.node);
     const p = target.parent;
@@ -2830,6 +2839,12 @@ async function f(db: any) { const { data, error } = await db.from("a").select("i
     // provenance and as a supersession, so the name is unknown either way.
     expect(one(`async function f(db: any, other: any, other2: any, fallback: any, c: boolean) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias = box; if (c) alias = other; alias ||= other2; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
     expect(one(`async function f(db: any, other2: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias: any = box; alias ??= other2; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
+    // Declined, and pinned so it stays a decision: a logical assignment whose
+    // condition is statically settled is still uncertain here, so this
+    // healthy function is refused. Closing it means evaluating constant
+    // truthiness, and no logical assignment exists in the code this gate
+    // scans (Codex, PR #92, round twenty-five).
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias: any = {}; alias ||= {}; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
     // A plain assignment settles it, and so does a compound one that is not
     // logical: `alias += ""` always assigns, and what it assigns is not the
     // carrier, so the member write cannot reach the error.
