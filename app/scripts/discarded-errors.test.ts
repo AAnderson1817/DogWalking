@@ -555,17 +555,27 @@ function rootOf(checker: ts.TypeChecker, id: ts.Identifier, container: ts.Node, 
   // refers to there — a plain assignment as much as a declaration's
   // initialiser (Codex on PR #92, round twenty: `let alias: T; alias = box;`
   // is provenance too), and a write of any other shape leaves it unknown.
+  // Only a write whose execution is CERTAIN can say what a name refers to: an
+  // assignment inside a closure may never run, and `executesAt` puts it at the
+  // closure's creation, which is right for "this may have happened by now" and
+  // wrong for "this decided what the name is" — it reported a genuine read
+  // DISCARDED (Codex on PR #92, round twenty-one). A write the gate cannot
+  // place leaves the name rooted at itself: unknown, not assumed.
   const writes = writesTo(checker, sym, container)
+    .filter((w) => closureOf(w.node, container) === null && established(w.node, id, container))
     .map((w) => ({ pos: executesAt(w, container, id), node: w.node }))
     .filter((w) => w.pos < at)
     .sort((a, b) => b.pos - a.pos);
   const last = writes[0];
   let source: { pos: number; expr: ts.Expression } | null = null;
   if (last) {
-    const p = last.node.parent;
-    if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && p.left === last.node) {
+    // `(alias) = box` is the same assignment: the target wears the wrappers
+    // `memberChain` already climbs on the other side (Codex, round twenty-one).
+    const target = forwardedTo(last.node);
+    const p = target.parent;
+    if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && p.left === target) {
       source = { pos: last.pos, expr: p.right };
-    } else if (ts.isVariableDeclaration(p) && p.name === last.node && p.initializer) {
+    } else if (ts.isVariableDeclaration(p) && p.name === target && p.initializer) {
       source = { pos: last.pos, expr: p.initializer };
     }
   } else {
@@ -2715,6 +2725,22 @@ async function f(db: any) { const { data, error } = await db.from("a").select("i
     expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; box.error = fallback; return data; }`).verdict).toBe("DISCARDED");
     expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; delete box.error; return data; }`).verdict).toBe("DISCARDED");
     expect(one(`async function f(db: any, other: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias = box; alias = other; alias.error = null; if (box.error) throw box.error; return data; }`).verdict).toBe("OK");
+  });
+
+  it("only a write that is certain to have run says what a name refers to (Codex, PR #92)", () => {
+    // Round twenty-one. `(alias) = box` is the same assignment wearing the
+    // wrappers `memberChain` already climbs on the other side — the per-site
+    // disease again. And a write inside a closure was taken as definite
+    // provenance, because `executesAt` puts such a write at the closure's
+    // CREATION: right for "this may have happened by now", wrong for "this
+    // decided what the name is", and it reported a genuine read DISCARDED.
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias: any; (alias) = box; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias: any = { error: null }; const set = () => { alias = box; }; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("OK");
+    // Where the write COULD have moved the name away, the gate cannot say
+    // whether the member write landed on the error, and refuses — the stated
+    // conservative direction, a false red rather than a miss.
+    expect(one(`async function f(db: any, other: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias = box; const set = () => { alias = other; }; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, other: any, fallback: any, c: boolean) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias = box; if (c) { alias = other; } alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
   });
 
   it("a builder REPLACED before it is awaited never runs (Codex, PR #92)", () => {

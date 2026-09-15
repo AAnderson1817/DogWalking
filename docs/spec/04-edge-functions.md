@@ -141,8 +141,10 @@ unknown, and a later write to that member (`box.error = fallback`, `delete
 box.cause`) closes the read window exactly as a write to the binding does — a
 write whose key chain is a PREFIX of the carried path, through any transparent
 wrapper and through any name for the same object — a name roots at what it
-was last given (a declaration's initialiser or a plain assignment;
-`const inner = box.nested`, transitively, resolved as of that copy) — while a write deeper
+was last given by a write certain to have run (a declaration's initialiser or
+a plain assignment in straight-line code; `const inner = box.nested`,
+transitively, resolved as of that copy), and a name a closure or a branch
+could have moved is unknown rather than assumed — while a write deeper
 than the path mutates a field of the error and leaves the error itself. A class field initializer, instance or static, is
 execution the gate does not follow and reads nothing; a static block runs
 with the class statement and is straight-line. A deferred
