@@ -25,8 +25,10 @@ import { describe, expect, it } from "vitest";
  *    repository's log calls the worst shape available:
  *    `<FormError message={error} className="claim-invite__error" />` is
  *    CORRECT usage, and so is every `role="alert"` in `app/src` outside
- *    `fields.tsx` — all eight are props handed to `StateField`, never
- *    attributes on a raw element.
+ *    `fields.tsx` — all NINE are props handed to `StateField`, never
+ *    attributes on a raw element (counted: LoadError, ErrorBoundary,
+ *    NotificationInbox, SignIn, Onboard, WalkMode, ResetPassword, Signup,
+ *    ClaimInvite).
  *
  * So the rule is about the TAG, which a grep cannot see and a parser can: a
  * lowercase JSX tag is a raw DOM element, a capitalised one is a component
