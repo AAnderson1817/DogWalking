@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""The proof set for scripts/gen-enum-catalog.py — validate gate 10f.
+"""The proof set for the SQL lexer in scripts/gen-enum-catalog.py and the two
+catalogue generators that read migrations through it — validate gate 10f.
 
 Forty-three Codex review rounds on PR #88 each fixed one way the enum
 catalogue generator could bless a wrong catalogue (a parser reading less than
@@ -18,6 +19,15 @@ What this file asserts, in the generator's own terms:
   generator either RENDERS the expected catalogue (a healthy migration,
   `unchanged(...)` or a value list), or REFUSES with the sentence the rule
   names (`refuses(d, needle)`) — never a bare exit, never a pass by accident.
+
+`scripts/gen-definer-catalog.py` is the lexer's second caller, so its probes
+are at the end of this file rather than in a gate of their own. It carried a
+comment stripper of its own until that section landed — the block-comment
+regex and `--` to end of line that the rounds below replaced — and against it
+every one of its catalogue probes measured wrong: a SECURITY DEFINER function
+missing from spec 03's grant-audit checklist, a grant that does not exist
+listed on it, a real grant dropped from it, a function that does not exist
+added to it, and a healthy migration failing the anon check.
 
 Only the fixed-behaviour half of each round's proof is here. The other half
 — "the shipped generator passed this" — compared against the previous
@@ -1298,9 +1308,217 @@ check("ALTER ROLE upper-case, role named SET, refused", lambda: refuses(scratch(
 check("alter role set set \"search_path\" (quoted setting) refused", lambda: refuses(scratch("t43ac", 'alter role set set "search_path" = private;\n'), SP))
 check("alter role set set search_path.custom = 'v' (a custom setting) allowed", lambda: unchanged(scratch("t43ad", "alter role set set search_path.custom = 'v';\n")))
 
+# ── The definer catalogue: the lexer's second caller ──────────────────────
+# `scripts/gen-definer-catalog.py` reads the migrations through the same
+# `strip_sql` every probe above exercises, so its proofs live here. It used to
+# carry a comment stripper of its own — a block-comment regex and then `--` to
+# end of line, the pair the rounds above replaced — and each probe below is a
+# shape where that pair and PostgreSQL disagree, measured on this repository's
+# own Postgres first: block comments NEST (the grant inside one does not run),
+# while a `--`, a `/*` or a `*/` inside a string literal is DATA (the SQL
+# around it does run). Against that stripper every catalogue probe below was
+# wrong — a SECURITY DEFINER function missing from the grant-audit checklist,
+# a grant that does not exist listed on it, a real grant dropped from it, a
+# function that does not exist added to it, and a healthy migration failing
+# the anon check, which is a gate red on a healthy tree.
+dgen = load(ROOT / "scripts" / "gen-definer-catalog.py")
+definer_committed = re.search(
+    re.escape(dgen.BEGIN) + r".*?" + re.escape(dgen.END),
+    (ROOT / "docs" / "spec" / "03-security-model.md").read_text(),
+    re.S,
+).group(0)
+DEFINER_SPEC = S / "definer-spec.md"
+
+
+def definer_catalogue(d):
+    """(block, rows, exit code, stderr) for the migrations in `d`, through the
+    definer generator's own `main()` — the anon/PUBLIC refusal lives there and
+    not in `collect()`, so a probe that must NOT fire it has to go through
+    main. `SystemExit` is caught here rather than left to `check()`, which
+    catches `Exception` and would let one kill the suite."""
+    dgen.MIGRATIONS = pathlib.Path(d)
+    dgen.ROOT, dgen.SPEC = S, DEFINER_SPEC
+    DEFINER_SPEC.write_text(f"{dgen.BEGIN}\nstale\n{dgen.END}\n")
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+        try:
+            code = dgen.main()
+        except SystemExit as e:
+            code = e.code
+    block = DEFINER_SPEC.read_text().strip()
+    rows = {}
+    for line in block.splitlines():
+        if line.startswith("| `"):
+            fn, shown = line.strip("| ").split("` | ")
+            rows[fn.strip("`")] = shown.strip(" |")
+    return block, rows, code, " ".join(err.getvalue().split())
+
+
+def definer_probe(name, sql):
+    """A migration set holding `sql` and NOTHING else, so a probe's expectation
+    is the whole table rather than one row somewhere in it — which is what
+    stops it passing by seeing nothing."""
+    d = S / name
+    shutil.rmtree(d, ignore_errors=True)
+    d.mkdir()
+    (d / f"{PROBE}_probe.sql").write_text(sql)
+    return d
+
+
+def definer_rows(name, sql):
+    """(rows, exit code, stderr) for a one-file migration set."""
+    return definer_catalogue(definer_probe(name, sql))[1:]
+
+
+def definer_beside_real(name, sql):
+    """The REAL migrations plus one probe file — what the negative control
+    needs: a one-file set differs from the committed block trivially, where
+    this differs by exactly the row the probe adds."""
+    d = S / name
+    shutil.rmtree(d, ignore_errors=True)
+    shutil.copytree(MIGRATIONS, d)
+    (d / f"{PROBE}_probe.sql").write_text(sql)
+    return d
+
+
+# Read off the committed block rather than written down: a count in a probe
+# goes stale the day a migration adds a definer function, which is a gate red
+# on a healthy tree.
+committed_definer_count = int(definer_committed.splitlines()[2].split()[0])
+definer_committed_rows = {
+    line.strip("| ").split("` | ")[0].strip("`"): line.strip("| ").split("` | ")[1].strip(" |")
+    for line in definer_committed.splitlines() if line.startswith("| `")
+}
+
+
+DEFINER_HEAD = (
+    "create or replace function {name}() returns void\n"
+    "  language sql\n"
+    "  security definer\n"
+    "  set search_path = public\n"
+    "as $$ select 1 $$;\n"
+)
+ANON_FAIL = "grants EXECUTE to anon or PUBLIC"
+
+# Both halves: every name the definer generator declares it needs is exported
+# here, AND the four this file knows about are still declared — an emptied
+# seam satisfies the first half by having nothing to check, which is the
+# vacuous-floor shape.
+check("definer: the lexer seam gen-definer-catalog.py declares is exported here",
+      lambda: [n for n in dgen.LEXER_SEAM if not hasattr(gen, n)] == []
+      and set(dgen.LEXER_SEAM) >= {"strip_sql", "sql_re", "HiddenDDL", "UnreadableIdentifier"})
+# The stripper is SHARED, not copied: a second implementation living in
+# gen-definer-catalog.py would be a second set of rounds to pay for, and the
+# probes below would pin only one of them. Behaviour cannot see the
+# difference — a copy that delegates passes every probe — so this is the only
+# check that can.
+check(
+    "definer: the SQL it reads migrations with is this generator's strip_sql, not a copy",
+    lambda: pathlib.Path(dgen.LEX.strip_sql.__code__.co_filename).resolve() == GENERATOR.resolve(),
+)
+# The control, and its three preconditions. Most probes below expect an empty
+# table or a **none** row, which a harness that can produce neither a row nor
+# a grant would satisfy while checking nothing.
+check("definer control: the real migrations render the committed spec 03 block",
+      lambda: definer_catalogue(MIGRATIONS)[0] == definer_committed)
+check("definer control: one more definer function beside the real set changes that block",
+      lambda: definer_catalogue(definer_beside_real("dg0", DEFINER_HEAD.format(name="fn_probe_extra")))
+      [:2] == ((definer_committed
+                .replace(f"\n{committed_definer_count} `SECURITY DEFINER` functions",
+                         f"\n{committed_definer_count + 1} `SECURITY DEFINER` functions")
+                .replace("\n\n<!-- END GENERATED DEFINER CATALOG -->",
+                         "\n| `fn_probe_extra` | **none** |\n\n<!-- END GENERATED DEFINER CATALOG -->")),
+               {**definer_committed_rows, "fn_probe_extra": "**none**"}))
+check("definer precondition: a definer function with a real grant shows the role",
+      lambda: definer_rows("dg-pre1", DEFINER_HEAD.format(name="fn_probe_plain")
+                           + "grant execute on function fn_probe_plain() to authenticated;\n")
+      == ({"fn_probe_plain": "`authenticated`"}, 0, ""))
+check("definer precondition: a SECURITY INVOKER function is catalogued by nobody",
+      lambda: definer_rows("dg-pre2", "create or replace function fn_probe_invoker() returns void\n"
+                           "  language sql\nas $$ select 1 $$;\n") == ({}, 0, ""))
+check("definer precondition: a real grant to anon fails the run by name",
+      lambda: definer_rows("dg-pre3", DEFINER_HEAD.format(name="fn_probe_open")
+                           + "grant execute on function fn_probe_open() to anon;\n")
+      == ({"fn_probe_open": "`anon`"}, 1, "FAIL: a definer function " + ANON_FAIL))
+# Block comments NEST, so the grant inside one does not run
+# (measured). A non-greedy block-comment regex closes at the INNER marker and
+# reads the rest as live SQL: the grant was resurrected, and with `anon` as
+# its role it failed a healthy migration on the check that exists to catch a
+# real one.
+check("definer: a grant to anon inside a NESTED block comment is not a grant",
+      lambda: definer_rows("dg1", DEFINER_HEAD.format(name="fn_probe_nested_anon")
+                           + "\n/* fn_probe_nested_anon is service-role only.\n"
+                             "   /* an earlier draft reached it from the unsubscribe link: */\n"
+                             "   grant execute on function fn_probe_nested_anon() to anon;\n*/\n")
+      == ({"fn_probe_nested_anon": "**none**"}, 0, ""))
+check("definer: a grant to authenticated inside a NESTED block comment is not a grant",
+      lambda: definer_rows("dg2", DEFINER_HEAD.format(name="fn_probe_nested_auth")
+                           + "\n/* fn_probe_nested_auth is service-role only.\n"
+                             "   /* an earlier draft granted it to the portal: */\n"
+                             "   grant execute on function fn_probe_nested_auth() to authenticated;\n*/\n")
+      == ({"fn_probe_nested_auth": "**none**"}, 0, ""))
+# A `--` inside a string literal is data, so the rest of the line runs
+# (measured: the function IS security definer). Stripping to end of line took
+# the clause with it and the function left the catalogue entirely — the H21
+# defect the catalogue exists to prevent, arriving through its own reader.
+check("definer: a -- inside a parameter default does not eat the SECURITY DEFINER clause",
+      lambda: definer_rows("dg3", "create or replace function fn_probe_dashes"
+                           "(p_note text default 'code -- redacted') returns void language sql "
+                           "security definer set search_path = public as $$ select 1 $$;\n")
+      == ({"fn_probe_dashes": "**none**"}, 0, ""))
+# A `/*` inside a string literal opens no comment (measured: the grant
+# between two such literals runs), so deleting from one to the next `*/`
+# deleted a real grant and the checklist read **none** for a function
+# `authenticated` can call.
+check("definer: a /* inside a string literal does not swallow the grant after it",
+      lambda: definer_rows("dg4", DEFINER_HEAD.format(name="fn_probe_block")
+                           + "\ncomment on function fn_probe_block() is 'the marker /* opens a block comment';\n"
+                             "grant execute on function fn_probe_block() to authenticated;\n"
+                             "comment on function fn_probe_block() is 'and the marker */ closes one';\n")
+      == ({"fn_probe_block": "`authenticated`"}, 0, ""))
+# The scans run on the SKELETON, where the contents of a literal and
+# of a dollar-quoted body are masked: a sentence QUOTING a grant is prose, and
+# a `raise exception` quoting a create-function is not a function.
+check("definer: a grant quoted inside a comment-on sentence is prose, not a grant",
+      lambda: definer_rows("dg5", DEFINER_HEAD.format(name="fn_probe_quoted")
+                           + "\ncomment on function fn_probe_quoted() is\n"
+                             "  'service-role only. Never write grant execute on function "
+                             "fn_probe_quoted() to anon;'\n"
+                             "  ' — the unsubscribe link is the only public endpoint here.';\n")
+      == ({"fn_probe_quoted": "**none**"}, 0, ""))
+check("definer: a comment saying `security definer` does not make a function one",
+      lambda: definer_rows("dg5b", "create or replace function fn_probe_says() returns void\n"
+                           "  language sql\nas $$ select 1 $$;\n"
+                           "comment on function fn_probe_says() is\n"
+                           "  'deliberately not security definer: it reads nothing the caller could not';\n")
+      == ({}, 0, ""))
+check("definer: a create-function quoted inside a body is not a function",
+      lambda: definer_rows("dg6", "create or replace function fn_probe_body() returns void\n"
+                           "  language plpgsql\n  security definer\n  set search_path = public\n"
+                           "as $$\nbegin\n  raise exception 'do not write create or replace function "
+                           "fn_probe_phantom() ... security definer here';\nend $$;\n")
+      == ({"fn_probe_body": "**none**"}, 0, ""))
+# The lexer refuses what it cannot read, and those refusals are
+# inherited: a body it cannot read can hide a `grant execute` behind an
+# EXECUTE as easily as it can hide enum DDL. Refused by NAME, and the name is
+# built from PROBE rather than written out, because a hard-coded version in a
+# probe is the defect Codex found in the first round on this file.
+HIDDEN = "do $$ begin execute 'create type ghost as enum (''x'');'; end $$;\n"
+check("definer: a body the shared lexer cannot read is refused by name",
+      lambda: definer_rows("dg7", HIDDEN)
+      == ({}, 1, f"FAIL: {PROBE}_probe.sql: the shared SQL lexer cannot read this file — "
+                 "`$$ begin execute 'create type ghost as enum (''x'');'; end $$`; lift it to a "
+                 "top-level statement or teach gen-enum-catalog.py the form (gate 10e says the same)"))
+check('definer: a U&"…" identifier is refused by name',
+      lambda: definer_rows("dg8", 'select 1 as U&"alias";\n')
+      == ({}, 1, f'FAIL: {PROBE}_probe.sql: `select 1 as U&"…"` carries a U&"…" Unicode-escaped '
+                 "identifier, which the shared SQL lexer does not read — spelled by code point it "
+                 "can name anything, a function or a role included; write the name plainly (gate "
+                 "10e says the same)"))
+
 TMP.cleanup()
 failed = [n for n, ok in checks if not ok]
 for n, ok in checks:
     print(("ok   " if ok else "FAIL ") + n)
-print(f"{len(checks) - len(failed)} of {len(checks)} enum-catalogue proofs hold")
+print(f"{len(checks) - len(failed)} of {len(checks)} catalogue-generator proofs hold")
 sys.exit(1 if failed else 0)

@@ -52,7 +52,7 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   only the case where the generator produced a change. If they are the only
   red, commit and re-run before diagnosing. A dirty tree elsewhere does not
   trip them.
-- **Gate 10f is the enum-catalogue generator's proof set**
+- **Gate 10f is the catalogue generators' proof set**
   (`scripts/gen-enum-catalog-proofs.py`: the probes from the forty-three review
   rounds on PR #88 plus the controls; its footer reports how many hold, and no
   count is written here because a count in prose goes stale the day a control
@@ -74,6 +74,16 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   baseline renders the committed block before any probe runs. Prove it red
   by reinstating the defect on a snapshot of the generator, then `cp` the
   snapshot back and `cmp` before believing the next green run.
+- **Gate 10f also carries the DEFINER catalogue's probes**, at the end of the
+  same file, because `gen-definer-catalog.py` reads migrations through the
+  same `strip_sql` (it carried its own regex comment stripper until then, and
+  every catalogue probe there made spec 03's grant-audit checklist wrong
+  against it). A definer probe is `definer_rows(name, sql)` against a migration set
+  holding that SQL and NOTHING else, and it asserts the WHOLE table plus the
+  exit code and stderr — an expectation naming one row is satisfied by a
+  harness that produces no rows, which is why three preconditions sit above
+  them (a grant shows its role, an invoker function is catalogued by nobody, a
+  real grant to `anon` fails the run by name).
 - **A missing tool makes a gate PASS by not running.** `validate.sh` skips its
   deno gate when deno is absent. Install it first; a gate that goes green by
   not running is this repository's most-recorded failure.
