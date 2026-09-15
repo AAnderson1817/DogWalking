@@ -145,8 +145,9 @@ was last given by a write certain to have run (a declaration's initialiser or
 a plain assignment in straight-line code; `const inner = box.nested`,
 transitively, resolved as of that copy), while a closure the gate cannot see
 invoked cannot run and is ignored, and a name a branch or an invoked closure
-could have moved is UNKNOWN — a write through an unknown name is treated as
-possibly landing on the error rather than assumed away — while a write deeper
+could have moved since the last definite write is UNKNOWN — a write through an
+unknown name is treated as possibly landing on the error, at any depth along
+the path, rather than assumed away — while a write deeper
 than the path mutates a field of the error and leaves the error itself. A class field initializer, instance or static, is
 execution the gate does not follow and reads nothing; a static block runs
 with the class statement and is straight-line. A deferred
