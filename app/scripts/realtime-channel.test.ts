@@ -646,6 +646,22 @@ describe("the walk channel is the only channel, and it is private on both sides"
       .toEqual(["<unresolvable spread `c`>"]);
     expect(read("const c = { private: true };\nconst { x: a } = { x: c };\na.private = false;\nsend({ topic, ...c });"))
       .toEqual(["<unresolvable spread `c`>"]);
+    // The rest of the binding forms that carry a SOURCE expression. These are
+    // enumerated from the language rather than from the cases in front of me,
+    // after four rounds of "one more form": a parameter default, a binding
+    // element's default, and a `for…of` that declares its own variable (a
+    // fresh binding, so it shadows nothing — but it holds the same object).
+    expect(read("const c = { private: true };\nfunction m(a = c) { a.private = false; }\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read("const c = { private: true };\nconst { x: a = c } = o;\na.private = false;\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read("const c = { private: true };\nfor (const a of [c]) a.private = false;\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    // …and none of them refuses anything on its own: only a mutation does.
+    expect(read("const c = { private: true };\nfor (const a of [c]) use(a);\nsend({ topic, ...c });"))
+      .toEqual(["true"]);
+    expect(read("const c = { private: true };\nfunction m(a = c) { use(a); }\nsend({ topic, ...c });"))
+      .toEqual(["true"]);
     // PINNED REFUSAL, not an accident: an alias rebound BEFORE it is mutated
     // still invalidates the original. Dropping the stale edge needs to know
     // which assignment ran first — flow sensitivity — and the mirror of this

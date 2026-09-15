@@ -187,6 +187,69 @@ def skill_ci_only() -> list[str]:
     return re.findall(r"^- `([^`]+)`", m.group(1), re.M)
 
 
+# Bash's reserved words, from its own grammar. A command word can follow any of
+# them as well as a separator, so `if run "13. x" cmd; then …` is an invocation
+# and a line-anchored reader could not see it (Codex, PR #94). Enumerated from
+# the specification rather than from the cases in front of me, which is what
+# four consecutive rounds of "one more form" argued for.
+SHELL_RESERVED = (
+    "if", "then", "elif", "else", "fi", "while", "until", "for", "do", "done",
+    "case", "esac", "select", "function", "in", "time", "coproc", "!", "{", "}",
+)
+
+
+def _command(body: str) -> str:
+    """`body` matched only where a COMMAND can start, captured as `cmd`.
+
+    That is: the beginning of the text, after a newline, after one of the shell
+    separators `; & | ( ) { }`, or after a reserved word. Anything else — the
+    middle of a word, an argument position, a variable's value — is not an
+    invocation and must not be read as one. The prefix is outside the `cmd`
+    group so a caller reads the command and not the keyword in front of it.
+    """
+    words = "|".join(re.escape(w) for w in SHELL_RESERVED if w.isalpha())
+    return (
+        r'(?:(?<=^)|(?<=\n)|(?<=[;&|(){}])|(?<=\s!)|(?:(?<=\s)(?:%s)\s+))[ \t]*(?P<cmd>%s)'
+        % (words, body)
+    )
+
+
+def _strip_shell_comments(text: str) -> str:
+    """Blank out `#` comments, respecting single and double quotes.
+
+    A command-position reader that did not do this would read `# run "x"` as a
+    gate — the mention-versus-use distinction this repository has paid for
+    before. Lengths are preserved so every offset still lines up.
+    """
+    out = []
+    quote = None
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < len(text):
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+            out.append(ch)
+        elif ch == "#":
+            # To the end of the line, replaced by spaces.
+            end = text.find("\n", i)
+            end = len(text) if end == -1 else end
+            out.append(" " * (end - i))
+            i = end
+            continue
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def validate_labels() -> tuple[set[str], set[str], list[str], list[str]]:
     """Gate labels in validate.sh: RUNNABLE, skipped, DUPLICATE, UNREADABLE.
 
@@ -235,23 +298,23 @@ def validate_labels() -> tuple[set[str], set[str], list[str], list[str]]:
     # same-line regex, so a real local gate could be absent from CI while
     # the reverse check reported lockstep (measured, Codex on PR #94).
     joined = re.sub(r'\\\n[ \t]*', ' ', text)
-    quoted = r'^[ \t]*%s +(["\'])(.+?)\1'
-    found = [m[1] for m in re.findall(quoted % 'run', joined, re.M)]
+    code = _strip_shell_comments(joined)
+    quoted = r'%s +(?P<q>["\'])(?P<label>.+?)(?P=q)'
+    found = [m.group("label") for m in re.finditer(_command(quoted % 'run'), code)]
     duplicate = sorted({lbl for lbl in found if found.count(lbl) > 1})
     runnable = set(found)
-    skipped = {m[1] for m in re.findall(quoted % 'skip_gate', joined, re.M)}
+    skipped = {m.group("label") for m in re.finditer(_command(quoted % 'skip_gate'), code)}
 
-    # And a `run`/`skip_gate` whose label this cannot read is REFUSED by
-    # name rather than skipped, because a parser that sees nothing reports
-    # agreement — the rule `gen-enum-catalog.py` needed forty-three rounds
-    # to arrive at, in a third language. A DEFINITION (`run() {`) is not an
-    # invocation and is excluded by the `(`, which the first version of this
-    # rule missed and went red on the healthy tree immediately.
-    unreadable = [
-        m.group(0).strip()
-        for m in re.finditer(r'^[ \t]*(?:run|skip_gate)(?![(\w])[^\n]*', joined, re.M)
-        if not re.match(r'^[ \t]*(?:run|skip_gate) +(["\']).+?\1', m.group(0))
-    ]
+    # And an invocation whose label this cannot read is REFUSED by name rather
+    # than skipped, because a parser that sees nothing reports agreement — the
+    # rule `gen-enum-catalog.py` needed forty-three rounds to arrive at, in a
+    # third language. A DEFINITION (`run() {`) is not an invocation and is
+    # excluded by the `(`, which the first version of this went red on.
+    unreadable = []
+    for m in re.finditer(_command(r'(?:run|skip_gate)(?![(\w])[^\n;&|]*'), code):
+        call = m.group("cmd").strip()
+        if not re.match(r'^(?:run|skip_gate) +(["\']).+?\1', call):
+            unreadable.append(call)
     # `finditer`, not `search`. There is one such loop today; a `search` would
     # expand only the FIRST, and a ci.yml step mapped to a label from a second
     # one would then be reported as claiming a gate validate.sh does not

@@ -154,6 +154,7 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
     aliases.get(a)!.add(b);
     aliases.get(b)!.add(a);
   };
+  const { linkBinding, linkNames } = makeLinkBinding(link);
 
   const bind = (name: string, lit: ts.ObjectLiteralExpression | null) => {
     seen.set(name, seen.has(name) ? null : lit);
@@ -172,25 +173,14 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
         const init = n.initializer ? unwrapTransparent(n.initializer) : undefined;
         bind(n.name.text, init && ts.isObjectLiteralExpression(init) ? init : null);
         if (init && ts.isIdentifier(init)) link(n.name.text, init.text);
-      } else {
-        bindPattern(n.name);
-        // A destructuring DECLARATION forms an alias exactly as a destructuring
-        // ASSIGNMENT does — `const [alias] = [config]` — and the first version
-        // of that rule covered only the assignment, which is the same
-        // one-form-short shape three rounds running (Codex, PR #94). Linked
-        // conservatively for the same reason: the initializer can be any
-        // expression, so every name it binds is linked to every identifier the
-        // initializer mentions.
-        if (n.initializer) {
-          const targets = new Set<string>();
-          bindPatternNames(n.name, targets);
-          const sources = new Set<string>();
-          collectIdentifiers(n.initializer, sources);
-          for (const target of targets) for (const source of sources) link(target, source);
-        }
-      }
+      } else bindPattern(n.name);
+      linkBinding(n.name, n.initializer);
     } else if (ts.isParameter(n) || ts.isBindingElement(n)) {
       bindPattern(n.name);
+      // A DEFAULT is a source expression like any other: `function m(alias =
+      // config)` and `const { a = config } = o` both let `alias` hold the same
+      // object, so a mutation through it reaches `config`.
+      linkBinding(n.name, n.initializer);
     } else if ((ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n)) && n.name) {
       bind(n.name.text, null);
     } else if (ts.isImportSpecifier(n) || ts.isImportClause(n) || ts.isNamespaceImport(n)) {
@@ -230,8 +220,21 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
     // BinaryExpression at all, so `for (x of […])` slipped past the rule above.
     // Only the bare-identifier form matters: `for (const x of …)` declares a
     // fresh binding, which the declaration branch already sees.
-    if ((ts.isForOfStatement(n) || ts.isForInStatement(n)) && !ts.isVariableDeclarationList(n.initializer)) {
-      collectAssignmentTargets(n.initializer, rebound);
+    if (ts.isForOfStatement(n) || ts.isForInStatement(n)) {
+      if (!ts.isVariableDeclarationList(n.initializer)) {
+        collectAssignmentTargets(n.initializer, rebound);
+        const targets = new Set<string>();
+        collectAssignmentTargets(n.initializer, targets);
+        linkNames(targets, n.expression);
+      } else {
+        // `for (const alias of [config])` declares a FRESH binding — so it
+        // does not shadow-invalidate `config`, which the declaration branch
+        // already handles — but `alias` holds the same object, so a mutation
+        // through it must still reach `config`.
+        const targets = new Set<string>();
+        for (const d of n.initializer.declarations) bindPatternNames(d.name, targets);
+        linkNames(targets, n.expression);
+      }
     }
     // And MUTATING what the name holds. The caller reads the object, so
     // `channelConfig.private = false` changes the answer exactly as rebinding
@@ -273,6 +276,28 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
   return out;
 }
 
+/**
+ * Link every name a binding introduces to every identifier its SOURCE mentions.
+ *
+ * This is the one place that answers "what can this name come to hold?", and
+ * it is deliberately the COMPLETE set of TypeScript constructs that bind a
+ * name together with a value expression, because four consecutive review
+ * rounds found this rule one form short — a parameter, then an assignment,
+ * then a destructuring declaration, then a parameter DEFAULT. The set is:
+ *
+ *   VariableDeclaration   `const a = …`         initializer
+ *   Parameter             `(a = …)`             initializer (the default)
+ *   BindingElement        `{ a = … }`           initializer (the default)
+ *   ForOf / ForIn         `for (a of …)`        the iterable
+ *   assignment `=`        `a = …`               the right-hand side
+ *
+ * Nothing else in the language introduces a binding with an in-file source
+ * expression: a class field, a catch clause and an import bind a name with
+ * nothing here to link it to. Conservative by construction — every target to
+ * every identifier the source mentions, not a positional match — so it can
+ * refuse a name nothing touched and can never miss one that was mutated.
+ */
+
 /** The names a binding pattern introduces. */
 function bindPatternNames(nm: ts.BindingName, into: Set<string>): void {
   if (ts.isIdentifier(nm)) {
@@ -280,6 +305,30 @@ function bindPatternNames(nm: ts.BindingName, into: Set<string>): void {
     return;
   }
   for (const el of nm.elements) if (ts.isBindingElement(el)) bindPatternNames(el.name, into);
+}
+
+/** Link a binding's names to the identifiers its source expression mentions. */
+function makeLinkBinding(
+  link: (a: string, b: string) => void,
+): {
+  linkBinding: (name: ts.BindingName, source: ts.Expression | undefined) => void;
+  linkNames: (targets: Set<string>, source: ts.Expression) => void;
+} {
+  const linkNames = (targets: Set<string>, source: ts.Expression) => {
+    if (targets.size === 0) return;
+    const sources = new Set<string>();
+    collectIdentifiers(source, sources);
+    for (const target of targets) for (const s of sources) link(target, s);
+  };
+  return {
+    linkNames,
+    linkBinding: (name, source) => {
+      if (!source) return;
+      const targets = new Set<string>();
+      bindPatternNames(name, targets);
+      linkNames(targets, source);
+    },
+  };
 }
 
 /** Every identifier an expression mentions, however deeply. */
