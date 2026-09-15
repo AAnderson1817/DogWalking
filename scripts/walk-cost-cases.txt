@@ -13,13 +13,20 @@
 # gate does that by running the TypeScript side under two fixed offsets
 # either side of the day boundary — where a leaf reading the LOCAL day at a
 # constant offset answers a day out on one side or the other — and under
-# America/Chicago, where a leaf whose error is DST-dependent answers the
-# DST-weekend rows below a day out while passing both fixed offsets.
+# America/Chicago and Australia/Sydney, two DST zones whose daylight seasons
+# are complementary, where a leaf whose error is DST-dependent passes both
+# fixed offsets and answers a day out in whichever zone is on daylight time
+# today, on the rows dated in that zone's STANDARD time (each block below
+# names its rows). A Sunday read as Saturday is still a weekend, so only a
+# Saturday or a Monday can show it.
 
 # ── the week itself ───────────────────────────────────────────────────────
 # A Friday is deliberate: `isodow in (5, 6)` — the off-by-one that reads
 # "Fri/Sat" for "Sat/Sun" — surcharges it and lets Sunday through, so the
-# Friday and the Sunday go red in opposite directions.
+# Friday and the Sunday go red in opposite directions. July is Sydney's
+# standard time, so 2026-07-04 (Sat) and 2026-07-06 (Mon) are the two rows
+# the Australia/Sydney run answers a day out for a DST-dependent leaf while
+# Sydney is on daylight time (October to April; measured, third pass).
 1	1	1	2026-07-01
 1	1	1	2026-07-03
 2	1	1	2026-07-04
@@ -29,14 +36,19 @@
 # ── US daylight-saving transition Sundays (America/Chicago), each with the
 # Saturday before it. A DATE has no zone, so DST cannot move its weekday and
 # these rows pin nothing on their own (the first version of this file said
-# they did — review of PR 2); under the gate's America/Chicago run they are
-# the rows a DST-dependent local read answers a day out (second pass) ──────
+# they did — review of PR 2). Of the four, only 2026-03-07 — a Saturday
+# dated in Chicago's standard time — is a row the America/Chicago run
+# answers a day out for a DST-dependent leaf, and only while Chicago is on
+# daylight time (March to November); the Sundays are invisible to that leaf
+# and 2026-10-31 is dated in daylight time (the second pass said all four
+# were caught; measured otherwise in the third) ─────────────────────────────
 2	1	1	2026-03-07
 2	1	1	2026-03-08
 2	1	1	2026-10-31
 2	1	1	2026-11-01
 
-# ── calendar edges: leap day, year boundary (Thu, Fri, Sat) ───────────────
+# ── calendar edges: leap day, year boundary (Thu, Fri, Sat). 2027-01-02 is
+# the other row the America/Chicago run catches a DST-dependent leaf on ────
 1	1	1	2028-02-29
 1	1	1	2026-12-31
 1	1	1	2027-01-01

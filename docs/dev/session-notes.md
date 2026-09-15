@@ -238,12 +238,18 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   shared cluster tears the other run's database out from under it; give each
   run a cluster on its own port (its own `PGDATA`) and point `LOCAL_DB_URL`
   at it.
-- **A gate that runs in the caller's zone pins nothing about zones — and two
-  fixed offsets pin nothing about DST.** A leaf that shifts UTC midnight by
-  the offset in force NOW passes `Etc/GMT+12` and `Etc/GMT-14` (no DST) and
-  is a day out in America/Chicago on the DST-weekend cases; gate 8d runs the
-  business zone as well, and its answers script REQUIRES the zone argument,
-  because with it optional a shell edit that dropped it stayed green.
+- **A gate that runs in the caller's zone pins nothing about zones — two
+  fixed offsets pin nothing about DST — and one DST zone pins a
+  DST-dependent leaf only in its own daylight season.** A leaf that shifts
+  UTC midnight by the offset in force NOW passes `Etc/GMT+12` and
+  `Etc/GMT-14` (no DST) and is a day out in a DST zone only while that zone
+  is on daylight time, on rows dated in its standard time (measured:
+  America/Chicago catches `2026-03-07` and `2027-01-02` at its daylight
+  offset and nothing at its standard one). Gate 8d runs America/Chicago AND
+  Australia/Sydney, whose daylight seasons are complementary, and asserts
+  each run that one of them is on daylight time today; its answers script
+  REQUIRES the zone argument, because with it optional a shell edit that
+  dropped it stayed green.
   The rest of this bullet is the first pass: CI runs
   in UTC, where a leaf that reads the LOCAL day (`new Date(d).getDay()`)
   answers every date correctly; gate 8d runs its TypeScript side under
