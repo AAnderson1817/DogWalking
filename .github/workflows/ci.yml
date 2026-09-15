@@ -30,16 +30,22 @@ jobs:
     # Bounded, like every other job here. `ci(concurrency)` put a ceiling on
     # `e2e-today` because that was the job that had wedged, and left the other
     # four on GitHub's six-hour default — the per-site fix this log keeps
-    # recording. It came back on PR #94: the `frontend` job hung in
-    # `Behavioural tests still execute` (an `npx vitest run --project dom` that
-    # completes in seconds locally and had completed on the commit before) and
-    # sat in-progress for the better part of an hour with five more to go. A
-    # wedged job is indistinguishable from a slow one until the ceiling says
-    # so, this session cannot clear one (the token 403s on Actions writes), and
+    # recording, and the reason this is a class fix rather than a sixth site.
+    #
+    # A wedged job is indistinguishable from a slow one until a ceiling says
+    # so; this session cannot clear one (the token 403s on Actions writes); and
     # on `main` a six-hour job holds the deploy gate and produces the
-    # misleading red `ops(gate-noise)` is about. Measured on the last fully
-    # green run (35004363610): frontend 60s, e2e 87s, database 73s, edge 17s,
-    # migrations 5s — so these are ~8x headroom, not a target.
+    # misleading red `ops(gate-noise)` is about. That argument stands on its
+    # own — which matters, because the incident I first wrote here as its
+    # motivation did not happen: I read `in_progress` off a STALE check-runs
+    # snapshot and asserted an elapsed time I had not computed, while the job
+    # record says that run finished in 76 seconds, green, with the step I
+    # called hung taking 18. The bound is right; the story was not.
+    #
+    # Measured on run 35004363610, which was fully green: frontend 60s, e2e
+    # 87s, database 73s, edge 17s, migrations 5s. These are ~8x headroom, not a
+    # target — a ceiling that trips on an ordinary slow day is a gate red on a
+    # healthy tree.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)

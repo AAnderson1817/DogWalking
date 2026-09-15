@@ -116,6 +116,16 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   apply the sabotage, verify the diff is non-empty, run, then restore from
   that copy. Restoring from a snapshot taken *before* the fix silently reverts
   it — that is how the sixth one happened.
+- **A GitHub check-runs snapshot goes stale; the JOB record does not.** Polling
+  `pull_request_read(get_check_runs)` kept returning `in_progress` for a
+  `frontend` job that had in fact finished green 76 seconds after it started —
+  and reading elapsed time off a sense of how long the session had been going,
+  rather than off the timestamps, turned that into a "wedged for the better
+  part of an hour" that reached a commit message, two code comments, `CLAUDE.md`
+  and a PR comment before `date -u` refuted it. Ask
+  `actions_get(get_workflow_job)` or `get_workflow_run`, subtract
+  `started_at` from `completed_at`, and compare against `date -u` in the
+  container. `ci(apt)` records the same mistake; this is its third instance.
 - **Then check the restore actually happened.** The seventh instance was not a
   wrong snapshot but a restore that never ran: the sabotage was one link of a
   `cd app && SNAP=… && cp …` chain, the `cd` failed because the shell was

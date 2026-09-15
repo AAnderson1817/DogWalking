@@ -117,11 +117,9 @@ def check(path: pathlib.Path) -> None:
         # says so, and GitHub's default is SIX HOURS. `ci(concurrency)` put a
         # ceiling on `e2e-today` because that was the job that had wedged, and
         # left the other four on the default — the per-site fix this log keeps
-        # recording, and it came back on PR #94 when the `frontend` job hung in
-        # a step that completes in seconds locally. On `main` a six-hour job
-        # holds the deploy gate and produces the misleading red that
-        # `ops(gate-noise)` is about, and this session cannot clear one: the
-        # token 403s on Actions writes.
+        # recording. On `main` a six-hour job holds the deploy gate and
+        # produces the misleading red that `ops(gate-noise)` is about, and this
+        # session cannot clear one: the token 403s on Actions writes.
         #
         # Scoped to ci.yml ON PURPOSE. The deploy workflows are deliberately
         # unbounded for the same reason `ci(concurrency)` refused
