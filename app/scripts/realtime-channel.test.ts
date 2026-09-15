@@ -5,6 +5,7 @@ import ts from "typescript";
 import {
   declaredObjects,
   isAssignmentOperator,
+  isObjectAssignCall,
   unwrapTransparent,
 } from "./lib/static-object.js";
 import { describe, expect, it } from "vitest";
@@ -248,8 +249,12 @@ function mutations(sf: ts.SourceFile): string[] {
         out.push(`${n.getText().split("\n")[0]} (line ${at(n)})`);
       }
     }
-    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)
-      && n.expression.name.text === "assign") {
+    // The BUILT-IN `Object.assign` only. Matching any `.assign(…)` made this
+    // reject an unrelated `metrics.assign({ topic })` — red on healthy code,
+    // and the same defect as the sibling rule in `static-object.ts`, so they
+    // share one predicate rather than each carrying a copy of the receiver
+    // test (Codex, PR #94).
+    if (isObjectAssignCall(n)) {
       out.push(`${n.getText().split("\n")[0]} (line ${at(n)})`);
     }
     if (ts.isDeleteExpression(n)) out.push(`${n.getText()} (line ${at(n)})`);
@@ -593,6 +598,12 @@ describe("the walk channel is the only channel, and it is private on both sides"
       .toEqual(["<unresolvable spread `c`>"]);
     expect(read("const c = { private: true };\nObject.assign(c, { private: false });\nsend({ topic, ...c });"))
       .toEqual(["<unresolvable spread `c`>"]);
+    expect(read("const c = { private: true };\nglobalThis.Object.assign(c, {});\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    // …but an unrelated method that happens to be called `assign` is not
+    // `Object.assign`, and reading it as one was red on healthy code.
+    expect(read("const c = { private: true };\nregistry.assign(c);\nsend({ topic, ...c });"))
+      .toEqual(["true"]);
     // A loop variable is assigned on every iteration and produces no
     // assignment expression at all.
     expect(read("let c = { private: true };\nfor (c of xs) {}\nsend({ topic, ...c });"))
@@ -641,6 +652,8 @@ describe("the walk channel is the only channel, and it is private on both sides"
     expect(muts("const m = { private: true };\nm.private = false;")).toHaveLength(1);
     expect(muts('const m = { private: true };\nm["private"] = false;')).toHaveLength(1);
     expect(muts("const m = { private: true };\nObject.assign(m, { private: false });")).toHaveLength(1);
+    // The receiver decides. `metrics.assign({…})` is somebody else's method.
+    expect(muts("const m = { private: true };\nmetrics.assign({ topic });")).toEqual([]);
     expect(muts("const m = { private: true };\ndelete m.private;")).toHaveLength(1);
     expect(muts("let n = 0;\nn += 1;\nconst m = { private: true };\nm.count += 1;")).toHaveLength(1);
     // A read is not a mutation, and neither is declaring one.

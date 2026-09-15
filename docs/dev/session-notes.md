@@ -111,11 +111,19 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   unstaged file from the index — silently destroying two finished edits and
   their red-first proof. Anything that writes the tree from git, the index or a
   commit is the same hazard, including `git stash`, `git clean` and
-  `git read-tree -u`. The status log records seven earlier times.
+  `git read-tree -u`. The status log records eight earlier times.
   For red-first sabotages: copy the **fixed** file to a scratch directory,
   apply the sabotage, verify the diff is non-empty, run, then restore from
   that copy. Restoring from a snapshot taken *before* the fix silently reverts
-  it — that is how the sixth one happened.
+  it — that is how the sixth one happened, and the NINTH, which is worth its
+  own sentence because the command was right and the FILE was wrong: a
+  review round's snapshots were all taken at the top of the round, before that
+  round's fix existed, under names ending `.FIXED.ts`. The sabotage restore
+  then quietly un-fixed the file, and three later "proofs" ran against pre-fix
+  code — one of them reporting a pass that meant nothing. **Name a snapshot
+  for when it was taken, re-take it after every fix and before every
+  sabotage**, and confirm the fix is still there (`grep -c` for a symbol the
+  fix introduced) rather than trusting the name.
 - **A GitHub check-runs snapshot goes stale; the JOB record does not.** Polling
   `pull_request_read(get_check_runs)` kept returning `in_progress` for a
   `frontend` job that had in fact finished green 76 seconds after it started —

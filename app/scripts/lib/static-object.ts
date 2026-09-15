@@ -167,11 +167,7 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
       collectMutatedRoots(n.left, assigned);
     }
     if (ts.isDeleteExpression(n)) collectMutatedRoots(n.expression, assigned);
-    if (
-      ts.isCallExpression(n) &&
-      ts.isPropertyAccessExpression(n.expression) &&
-      n.expression.name.text === "assign"
-    ) {
+    if (isObjectAssignCall(n)) {
       // `Object.assign(target, …)` writes into its FIRST argument.
       const target = n.arguments[0];
       if (target) collectMutatedRoots(target, assigned, true);
@@ -191,6 +187,29 @@ export function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
   return (
     kind === ts.SyntaxKind.EqualsToken ||
     (kind >= ts.SyntaxKind.FirstCompoundAssignment && kind <= ts.SyntaxKind.LastCompoundAssignment)
+  );
+}
+
+/**
+ * A call to the BUILT-IN `Object.assign`, which writes into its first argument.
+ *
+ * The receiver matters, and the first version of this rule ignored it: any
+ * `.assign(…)` counted, so an unrelated `registry.assign(channelConfig)` made
+ * an immutable literal unresolvable and the gate red on healthy code (Codex,
+ * PR #94). `Object` and `globalThis.Object` only — and, deliberately, not a
+ * local shadow of the name, because a file that shadows `Object` is beyond
+ * what this catches and refusing on the name alone is the defect being fixed.
+ */
+export function isObjectAssignCall(n: ts.Node): n is ts.CallExpression {
+  if (!ts.isCallExpression(n) || !ts.isPropertyAccessExpression(n.expression)) return false;
+  if (n.expression.name.text !== "assign") return false;
+  const receiver = unwrapTransparent(n.expression.expression);
+  if (ts.isIdentifier(receiver)) return receiver.text === "Object";
+  return (
+    ts.isPropertyAccessExpression(receiver) &&
+    receiver.name.text === "Object" &&
+    ts.isIdentifier(receiver.expression) &&
+    receiver.expression.text === "globalThis"
   );
 }
 

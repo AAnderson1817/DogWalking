@@ -346,7 +346,14 @@ describe("scripts/staging-fixtures.sh", () => {
     expect(code).toBe(9);
     expect(out).toContain("did not finish");
     expect(s.pages).toHaveLength(50);
-  });
+    // Fifty SEQUENTIAL requests, each with a `jq` process or three behind it.
+    // Measured at 1.1 s on this container, which is comfortable against
+    // vitest's 5 s default — and Codex measured ~5.04 s on a slower one, i.e.
+    // a gate that fails for machine speed rather than for a regression. The
+    // ceiling is stated rather than left implicit; the work is inherent to
+    // what the case proves (that the bound is REACHED), so it cannot be made
+    // smaller without testing something else.
+  }, 30_000);
 
   it("exits 9 on a failed lookup rather than answering 'absent'", async () => {
     // The distinction two security assertions in the claim replay depend on: a
