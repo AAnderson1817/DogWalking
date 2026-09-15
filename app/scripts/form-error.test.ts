@@ -95,6 +95,24 @@ function literalText(e: ts.Expression): string | null {
 }
 
 /**
+ * A property's name when the compiler can read it, or null when it cannot.
+ *
+ * A COMPUTED key whose expression is a string literal is fully static and
+ * names exactly one property: `{ ["role"]: "alert" }` is the same object as
+ * `{ role: "alert" }`, and treating it as unreadable let the forbidden shape
+ * through (measured, 4 of 4 green — Codex, PR #94). A computed key that is
+ * genuinely an expression stays null, which the caller reads as "could be this
+ * name" and therefore as no answer.
+ */
+function propertyKey(name: ts.PropertyName): string | null {
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNoSubstitutionTemplateLiteral(name)) {
+    return name.text;
+  }
+  if (ts.isComputedPropertyName(name)) return literalText(name.expression);
+  return null;
+}
+
+/**
  * `name`'s value in an object literal, spreads of object literals resolved
  * RECURSIVELY and in source order — or `undefined` when the literal does not
  * mention it at all, which is different from mentioning it dynamically.
@@ -129,8 +147,11 @@ function objectLiteralProperty(
       continue;
     }
     if (!ts.isPropertyAssignment(prop)) continue;
-    const key = ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) ? prop.name.text : null;
+    const key = propertyKey(prop.name);
     if (key === name) value = literalText(prop.initializer);
+    // A key the reader cannot resolve could be THIS name, so it replaces the
+    // answer with "no answer" rather than being passed over.
+    else if (key === null) value = null;
   }
   return value;
 }
@@ -248,6 +269,13 @@ describe("every error message renders through FormError or StateField", () => {
     expect(role("<span role={`alert`} />")).toBe("alert");
     expect(role('<span {...{ role: "alert" }} />')).toBe("alert");
     expect(role('<span {...{ "role": "alert" }} />')).toBe("alert");
+    // A computed key that is a string literal names exactly one property.
+    expect(role('<span {...{ ["role"]: "alert" }} />')).toBe("alert");
+    expect(role('<span {...{ [`role`]: "alert" }} />')).toBe("alert");
+    // One the reader cannot resolve COULD be this name, so it replaces an
+    // earlier answer with "no answer" rather than being passed over.
+    expect(role('<span {...{ role: "alert", [k]: "x" }} />')).toBeNull();
+    expect(role('<span {...{ [k]: "x" }} role="alert" />')).toBe("alert");
     // Later wins, exactly as JSX does it — in both directions.
     expect(role('<span role="status" {...{ role: "alert" }} />')).toBe("alert");
     expect(role('<span {...{ role: "alert" }} role="status" />')).toBe("status");

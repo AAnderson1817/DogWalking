@@ -94,7 +94,13 @@ user_id_for() {
     seen=$first
     page=$((page + 1))
   done
-  return 0
+  # Exhausting the bound is an INCOMPLETE lookup, not an absence. Returning 0
+  # with empty stdout here said "no such account" about a project with more
+  # than 5,000 auth users, which is the one answer the claim replay's
+  # dead-token assertion must never be given wrongly — it would pass while
+  # checking nothing, the green-but-empty class again (Codex, PR #94).
+  echo "auth user lookup did not finish: stopped at the $((page - 1))-page bound without reaching an empty page" >&2
+  return 9
 }
 
 # Run `admin`, and NEVER die on a transport failure.

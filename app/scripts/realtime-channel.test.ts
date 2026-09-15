@@ -349,10 +349,19 @@ function effectiveProps(
       continue;
     }
     if (ts.isPropertyAssignment(p)) {
-      const key = ts.isIdentifier(p.name) || ts.isStringLiteral(p.name) ? p.name.text : null;
+      // A computed key whose expression is a string literal names exactly one
+      // property: `{ ["private"]: true }` is `{ private: true }`. Only a key
+      // the reader genuinely cannot resolve marks everything unreadable, since
+      // it could be any of the names this file asks about.
+      const name = p.name;
+      let key: string | null = null;
+      if (ts.isIdentifier(name) || ts.isStringLiteral(name)
+        || ts.isNoSubstitutionTemplateLiteral(name)) key = name.text;
+      else if (ts.isComputedPropertyName(name)
+        && (ts.isStringLiteral(name.expression) || ts.isNoSubstitutionTemplateLiteral(name.expression))) {
+        key = name.expression.text;
+      }
       if (key !== null) props.set(key, p.initializer);
-      // A computed key could be any of the names this file asks about, and
-      // there is no way to tell which, so all of them are marked unreadable.
       else markAll("<computed key, unreadable>");
       continue;
     }
@@ -385,6 +394,55 @@ function isLiteralTrue(v: ts.Expression | string | undefined): boolean {
  * as private — measured, green while the server published to the public topic.
  * Every match is collected now and every one has to be the literal `true`.
  */
+/**
+ * Every element of the `messages:` array, as something this file can read —
+ * or a marker naming what it could not.
+ *
+ * The literal scan below is a BACKSTOP and not the rule: it answers "is any
+ * `{ topic, … }` literal in this file public?", which says nothing about an
+ * element that is not a literal at all. `messages: [{ …, private: true },
+ * publicMessage(topic, event, payload)]` passed 8 of 8 while the second
+ * message went to a public topic (Codex, PR #94) — the scan found the one
+ * literal, it was `true`, and the call was simply not looked at.
+ *
+ * So the array is read directly and every element must resolve: an object
+ * literal written in place, or an identifier naming a module-scope one. A call,
+ * a conditional, a spread of an array — anything else is REFUSED by name. That
+ * is not a dataflow analysis; it is reading the expression that is actually
+ * sent, which is what the rest of this file already does one level in.
+ */
+function messageElements(sf: ts.SourceFile): { found: boolean; values: string[] } {
+  const declared = declaredObjects(sf);
+  const values: string[] = [];
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (ts.isPropertyAssignment(n) && ts.isIdentifier(n.name) && n.name.text === "messages") {
+      found = true;
+      const arr = n.initializer;
+      if (!ts.isArrayLiteralExpression(arr)) {
+        values.push(`<\`messages\` is not an array literal: ${arr.getText().split("\n")[0]}>`);
+      } else {
+        for (const el of arr.elements) {
+          const lit = ts.isObjectLiteralExpression(el)
+            ? el
+            : ts.isIdentifier(el)
+              ? declared.get(el.text)
+              : undefined;
+          if (!lit) {
+            values.push(`<unreadable message element: ${el.getText().split("\n")[0]}>`);
+            continue;
+          }
+          values.push(shownAs(effectiveProps(lit, declared).get("private")));
+        }
+        if (arr.elements.length === 0) values.push("<`messages` is empty>");
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return { found, values };
+}
+
 function serverPrivate(): { found: boolean; values: string[]; mutations: string[] } {
   const source = parse(BROADCAST);
   const declared = declaredObjects(source);
@@ -410,7 +468,15 @@ function serverPrivate(): { found: boolean; values: string[]; mutations: string[
     ts.forEachChild(node, visit);
   };
   visit(source);
-  return { found: values.length > 0, values, mutations: mutations(source) };
+  // Both readings, unioned. The array is the RULE — it is what gets posted —
+  // and the literal scan is the backstop that still catches a public message
+  // built somewhere this array reader does not look.
+  const sent = messageElements(source);
+  return {
+    found: values.length > 0 && sent.found,
+    values: [...values, ...sent.values],
+    mutations: mutations(source),
+  };
 }
 
 describe("the walk channel is the only channel, and it is private on both sides", () => {
@@ -507,6 +573,32 @@ describe("the walk channel is the only channel, and it is private on both sides"
     expect(read("const c = { private: true };\nsend({ topic, ...c });")).toEqual(["true"]);
   });
 
+  it("reads every element of the messages array, and refuses what it cannot", () => {
+    const sent = (src: string) =>
+      messageElements(ts.createSourceFile("b.ts", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS));
+
+    expect(sent("post({ messages: [{ topic, private: true }] });").values).toEqual(["true"]);
+    expect(sent("post({ messages: [{ topic, private: false }] });").values).toEqual(["false"]);
+    // An identifier naming a module-scope literal resolves.
+    expect(sent("const m = { topic, private: true };\npost({ messages: [m] });").values).toEqual(["true"]);
+    // Codex's case: a literal that clears the bar, beside a call that does not
+    // get looked at. The element is refused by name rather than passed over.
+    expect(sent("post({ messages: [{ topic, private: true }, publicMessage(topic)] });").values)
+      .toEqual(["true", "<unreadable message element: publicMessage(topic)>"]);
+    // A conditional, a spread of an array, and an identifier naming nothing.
+    expect(sent("post({ messages: [flag ? a : b] });").values).toHaveLength(1);
+    expect(sent("post({ messages: [...others] });").values).toHaveLength(1);
+    expect(sent("post({ messages: [nowhere] });").values).toEqual(["<unreadable message element: nowhere>"]);
+    // `messages` that is not an array literal at all.
+    expect(sent("post({ messages: buildMessages(topic) });").values).toHaveLength(1);
+    expect(sent("post({ messages: buildMessages(topic) });").values[0]).toContain("not an array literal");
+    // An EMPTY array is reported rather than passing by having nothing to fail.
+    expect(sent("post({ messages: [] });").values).toEqual(["<`messages` is empty>"]);
+    // And the precondition: a file with no `messages:` at all is not read, so
+    // `found` is false and the caller fails rather than reporting agreement.
+    expect(sent("post({ other: 1 });").found).toBe(false);
+  });
+
   it("sees a mutation that would make reading literals unsound", () => {
     const muts = (src: string): string[] =>
       mutations(ts.createSourceFile("b.ts", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS));
@@ -560,9 +652,11 @@ describe("the walk channel is the only channel, and it is private on both sides"
   // a security one: the client's "walk ended" signal stops arriving.
   it("publishes privately from the server", () => {
     const server = serverPrivate();
-    expect(server.found, "no `{ topic, …, private }` message literal in broadcast.ts").toBe(
-      true,
-    );
+    expect(
+      server.found,
+      "broadcast.ts must carry both a `{ topic, …, private }` message literal and a `messages:` array "
+        + "for this check to have read anything — a reader that finds neither reports agreement",
+    ).toBe(true);
     // Reading a LITERAL is sound only while the literal is what gets sent.
     // `const message = { …, private: true }; message.private = false;` left a
     // stale `true` on a line the POST no longer used, and this read it (7 of 7

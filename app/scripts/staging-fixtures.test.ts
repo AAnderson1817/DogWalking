@@ -336,6 +336,18 @@ describe("scripts/staging-fixtures.sh", () => {
     expect(out).toContain("staging was unreachable, not refusing");
   });
 
+  it("exits 9 when the page bound is exhausted, rather than answering 'absent'", async () => {
+    // A project past the 50-page bound: the loop stops having never reached an
+    // empty page, so it does not KNOW the address is absent. Reporting absence
+    // there would pass the claim replay's dead-token assertion while checking
+    // nothing — the distinction this function's whole contract rests on.
+    const s = await stub({ fill: 5200 });
+    const { code, out } = await runLib(s.base, `user_id_for "nobody@sanpo.test"`);
+    expect(code).toBe(9);
+    expect(out).toContain("did not finish");
+    expect(s.pages).toHaveLength(50);
+  });
+
   it("exits 9 on a failed lookup rather than answering 'absent'", async () => {
     // The distinction two security assertions in the claim replay depend on: a
     // 401 read as "no such account" passes the dead-token check while checking
