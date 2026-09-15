@@ -78,7 +78,6 @@ COVERAGE: dict[str, str] = {
     "Every CSS token used is a token that exists": "12. css tokens defined",
     "Behavioural tests still execute": CI_ONLY,
     "Exactly one <main>, owned by AppMain": CI_ONLY,
-    "The walk channel is private, and is the only channel": CI_ONLY,
     # ── e2e ───────────────────────────────────────────────────────────────
     "Resolve the Playwright version": SETUP,
     "Chromium browser": SETUP,

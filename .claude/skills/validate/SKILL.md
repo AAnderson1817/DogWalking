@@ -310,7 +310,6 @@ actually does.
 - `DEV fixtures absent from the production bundle`
 - `Behavioural tests still execute`
 - `Exactly one <main>, owned by AppMain`
-- `The walk channel is private, and is the only channel`
 - `Every e2e spec is actually run by this workflow`
 - `Every 5xx throw carries its cause`
 - `No secret logging grep (phase 01 gate)`

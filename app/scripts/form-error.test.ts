@@ -129,10 +129,14 @@ describe("every error message renders through FormError or StateField", () => {
   });
 
   it("finds the raw live region in the file that owns it", () => {
+    // The file and the shape, never the line: a precondition pinned to a line
+    // number goes red the first time somebody edits a comment above it, which
+    // is a gate red on a healthy tree. The line is in the failure message,
+    // which is where a reader wants it.
     expect(
-      sites.map((s) => `${s.file}:${s.line} <${s.tag}> ${s.why}`),
+      sites.map((s) => `${s.file} <${s.tag}> ${s.why}`),
       "the parser found no raw live region at all — it is not reading tags or attributes",
-    ).toContain('components/fields.tsx:37 <span> role="alert"');
+    ).toContain('components/fields.tsx <span> role="alert"');
   });
 
   it("has no bare error element outside that file", () => {

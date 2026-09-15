@@ -92,7 +92,7 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   run that CI refused, one PR apart. If you add a gate to `ci.yml`, add it to
   `validate.sh` and `SKILL.md` in the same commit — `CLAUDE.md` calls the
   three a lockstep and the drift is invisible until CI disagrees with you.
-- **Fifteen gates still exist only in CI**, so a green local run is not a
+- **Fourteen gates still exist only in CI**, so a green local run is not a
   green CI run. They are listed by exact step name in `SKILL.md` §13 rather
   than here, because a count written into prose is a count that rots: this
   bullet said TWO, the spec-drift audit that found it said seven, and the
