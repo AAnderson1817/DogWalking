@@ -822,7 +822,9 @@ function aggregateHolding(holder: ts.Node): { literal: ts.Node; key: Key | null 
   const h = holder.parent;
   if (ts.isPropertyAssignment(h) && h.initializer === holder) return { literal: h.parent, key: keyOf(h.name) };
   if (ts.isShorthandPropertyAssignment(h)) return { literal: h.parent, key: h.name.text };
-  // A spread copies the keys through unchanged; an array spread scatters them.
+  // An object spread copies the keys of its operand through unchanged (`key:
+  // null`, resolved against the path at the call site); an array spread
+  // scatters them.
   if (ts.isSpreadAssignment(h)) return { literal: h.parent, key: null };
   if (ts.isArrayLiteralExpression(h)) return { literal: h, key: indexOf(h.elements, holder) };
   if (ts.isSpreadElement(h) && ts.isArrayLiteralExpression(h.parent)) return { literal: h.parent, key: UNKNOWN };
@@ -884,7 +886,12 @@ function consumes(ctx: Ctx, n: ts.Node, seen: Set<ts.Node> = new Set(), path: Pa
   // that), never for another member (`box.data`) or a key the gate cannot
   // read (Codex on PR #92, round fifteen).
   if ((ts.isPropertyAccessExpression(h) || ts.isElementAccessExpression(h)) && h.expression === holder) {
-    if (path.length === 0) return true;
+    // Reaching the error is not reading it: `void error?.message` names a
+    // field and throws the answer away, so the ACCESS is followed by the
+    // same rules as anything else (Codex on PR #92, round sixteen — the
+    // round-seven discard positions, one hop in). A value derived from the
+    // error is the error for this question, so the hop resets the path.
+    if (path.length === 0) return consumes(ctx, h, seen, []);
     const key = ts.isPropertyAccessExpression(h) ? h.name.text : keyOf(h.argumentExpression);
     return key !== UNKNOWN && key === path[0] && consumes(ctx, h, seen, path.slice(1));
   }
@@ -895,7 +902,18 @@ function consumes(ctx: Ctx, n: ts.Node, seen: Set<ts.Node> = new Set(), path: Pa
   // round thirteen): passed to a call or thrown it is, bound to a local
   // nothing reads it is not — and the key it sits under travels with it.
   const aggregate = aggregateHolding(holder);
-  if (aggregate) return consumes(ctx, aggregate.literal, seen, aggregate.key === null ? path : [aggregate.key, ...path]);
+  if (aggregate) {
+    // An object spread copies its operand's keys through, so a path INTO a
+    // carrier survives it — but spreading the ERROR itself scatters that
+    // error's own fields under names the gate cannot enumerate, so no later
+    // member read can be held to them and only handing the literal on whole
+    // counts (Codex on PR #92, round sixteen: `const box = { ...error, data
+    // }; return box.data;`).
+    const carried: Path = aggregate.key === null
+      ? (path.length === 0 ? [UNKNOWN] : path)
+      : [aggregate.key, ...path];
+    return consumes(ctx, aggregate.literal, seen, carried);
+  }
   // Taken apart by a pattern: `const { error: e } = box`.
   if (ts.isVariableDeclaration(h) && h.initializer === holder && !ts.isIdentifier(h.name)) {
     return patternReads(ctx, h.name, path, seen);
@@ -2374,6 +2392,45 @@ async function f(db: any) { const { data, error } = await db.from("a").select("i
     expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; const outer = { ...box }; if (outer.error) throw outer.error; return data; }`).verdict).toBe("OK");
     expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { error, data }; const { data: d, ...rest } = box; if (rest.error) throw rest.error; return d; }`).verdict).toBe("OK");
     expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { error, data }; return box; }`).verdict).toBe("OK");
+  });
+
+  it("spreading the error scatters its keys; a member read of that literal reads nothing (Codex, PR #92)", () => {
+    // Round sixteen: `{ ...error }` copies the ERROR's own fields under names
+    // the gate cannot enumerate, and round fifteen passed the path through
+    // unchanged — which left `box` holding the error at the empty path, so
+    // any member of it counted. The keys are UNKNOWN now, so only handing
+    // the literal on whole reads it. A spread of a CARRIER is unchanged:
+    // there the operand's keys, the error's among them, do pass through.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { ...error, data }; return box.data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { ...error }; if (box.message) return null; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { ...error, data }; const { message } = box; if (message) return null; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { ...error, data }; throw box; }`).verdict).toBe("OK");
+    expect(one(`declare function log(x: unknown): void;
+async function f(db: any) { const { data, error } = await db.from("a").select("id"); log({ ...error }); return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const outer = { error, data }; const box = { ...outer }; if (box.error) throw box.error; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const outer = { error, data }; const box = { ...outer }; return box.data; }`).verdict).toBe("DISCARDED");
+  });
+
+  it("a member of the error must itself be consumed (Codex, PR #92)", () => {
+    // Round sixteen: reaching the error is not reading it. `void
+    // error?.message` names a field and throws the answer away, and the
+    // member branch returned OK the moment the access existed — the
+    // round-seven discard positions, one hop in. The access is followed by
+    // the same rules now, for a bound local, an envelope variable and a
+    // direct read alike.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); void error?.message; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const r = await db.from("a").select("id"); void r.error?.message; return r.data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { void (await db.from("a").select("id")).error?.message; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); error?.message; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const m = error?.message; void m; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, k: string) { const { data, error } = await db.from("a").select("id"); void error?.[k]; return data; }`).verdict).toBe("DISCARDED");
+    // Consumed, one hop in: a condition, a copy that is read, an argument,
+    // and a comparison on an envelope's own member.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); if (error?.message) throw error; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const m = error?.message; if (m) throw new Error(m); return data; }`).verdict).toBe("OK");
+    expect(one(`declare function log(x: unknown): void;
+async function f(db: any) { const { data, error } = await db.from("a").select("id"); log(error?.message); return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const r = await db.from("a").select("id"); if (r.error.code === "PGRST116") return null; return r.data; }`).verdict).toBe("OK");
   });
 
   it("a builder REPLACED before it is awaited never runs (Codex, PR #92)", () => {
