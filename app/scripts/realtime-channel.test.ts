@@ -2,6 +2,11 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
+import {
+  declaredObjects,
+  isAssignmentOperator,
+  unwrapTransparent,
+} from "./lib/static-object.js";
 import { describe, expect, it } from "vitest";
 
 /**
@@ -182,7 +187,7 @@ function channelCalls(files: string[]): ChannelCall[] {
           // `supabase.channel(topic)` is the exact H1 defect: `private`
           // defaults to false, so an omitted option is a PUBLIC topic.
           why = "called with no options — `private` defaults to false (H1)";
-        } else if (!ts.isObjectLiteralExpression(opts)) {
+        } else if (!ts.isObjectLiteralExpression(unwrapTransparent(opts))) {
           why = "options are not an object literal, so this check cannot read them";
         } else {
           // Through the SAME reader the server side uses, spreads and all.
@@ -192,13 +197,17 @@ function channelCalls(files: string[]): ChannelCall[] {
           // private on a client that joins a PUBLIC topic — one rule, two
           // scopes, which is the disagreement this repository keeps paying
           // for. There is one reader now, so there is no sibling to forget.
-          const config = effectiveProps(opts, declared).get("config");
+          const config = effectiveProps(
+            unwrapTransparent(opts) as ts.ObjectLiteralExpression,
+            declared,
+          ).get("config");
+          const configLit = typeof config === "object" ? unwrapTransparent(config) : undefined;
           if (config === undefined) why = "options carry no `config`";
           else if (typeof config === "string") why = `\`config\` is ${config}`;
-          else if (!ts.isObjectLiteralExpression(config))
+          else if (!configLit || !ts.isObjectLiteralExpression(configLit))
             why = "`config` is not an object literal, so this check cannot read it";
           else {
-            const priv = effectiveProps(config, declared).get("private");
+            const priv = effectiveProps(configLit, declared).get("private");
             if (priv === undefined) why = "`config` carries no `private`";
             else if (isLiteralTrue(priv)) {
               isPrivate = true;
@@ -213,73 +222,6 @@ function channelCalls(files: string[]): ChannelCall[] {
     visit(source);
   }
   return found;
-}
-
-/**
- * The object literals in `file`, indexed by the name they are declared under,
- * so a spread of one can be resolved where it is used.
- *
- * One hop by name is all this needs and all it claims: `const message = {…}`
- * spread into a message literal. A spread of anything else is reported as
- * unresolvable by the caller rather than assumed harmless.
- */
-function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteralExpression> {
-  // Every declaration of the name ANYWHERE in the file, not just the one this
-  // map would end up holding. A file-global name map does not merely miss a
-  // shadowed binding — it can resolve to the WRONG literal, which is worse
-  // than resolving to none: Codex planted an outer `const channelConfig =
-  // { private: false }` and an unused nested function redeclaring it as
-  // `{ private: true }`, and the last writer won, so a client joining a public
-  // topic read as private (7 of 7 green, measured).
-  //
-  // Refusing a shadowed name rather than resolving it by symbol is the
-  // stopping rule this repository writes down: the file this reads is 30 lines
-  // long, a shadowed name in it is not a spelling anybody reaches for, and the
-  // remedy — rename one — is cheaper than a Program over the whole app for one
-  // question. What matters is that an ambiguous name is never given a
-  // confident answer. Measured green on the tree: no name is declared twice in
-  // either file this reads.
-  const seen = new Map<string, ts.ObjectLiteralExpression | null>();
-  // Every way a name can be BOUND, not only `const x = {…}`. The first version
-  // of this rule counted variable declarations alone, so a function PARAMETER
-  // named `message` did not shadow a module-scope `const message` and the
-  // reader resolved an array element to the wrong object — the same defect the
-  // rule was written to close, one binding form over (Codex, PR #94). A
-  // parameter, a `function f()`, a `class C`, an import, a catch clause and a
-  // destructured element all bind a name; only a variable declaration can
-  // CARRY a literal, so everything else binds `null` and makes the name
-  // unresolvable if it collides.
-  const bind = (name: string, lit: ts.ObjectLiteralExpression | null) => {
-    seen.set(name, seen.has(name) ? null : lit);
-  };
-  const bindPattern = (nm: ts.BindingName): void => {
-    if (ts.isIdentifier(nm)) { bind(nm.text, null); return; }
-    for (const el of nm.elements) {
-      if (ts.isBindingElement(el)) bindPattern(el.name);
-    }
-  };
-  const visit = (n: ts.Node): void => {
-    if (ts.isVariableDeclaration(n)) {
-      if (ts.isIdentifier(n.name)) {
-        const init = n.initializer && ts.isObjectLiteralExpression(n.initializer) ? n.initializer : null;
-        bind(n.name.text, init);
-      } else bindPattern(n.name);
-    } else if (ts.isParameter(n) || ts.isBindingElement(n)) {
-      bindPattern(n.name);
-    } else if ((ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n)) && n.name) {
-      bind(n.name.text, null);
-    } else if (ts.isImportSpecifier(n) || ts.isImportClause(n) || ts.isNamespaceImport(n)) {
-      const nm = ts.isImportClause(n) ? n.name : n.name;
-      if (nm && ts.isIdentifier(nm)) bind(nm.text, null);
-    } else if (ts.isCatchClause(n) && n.variableDeclaration) {
-      bindPattern(n.variableDeclaration.name);
-    }
-    ts.forEachChild(n, visit);
-  };
-  visit(sf);
-  const out = new Map<string, ts.ObjectLiteralExpression>();
-  for (const [name, lit] of seen) if (lit) out.set(name, lit);
-  return out;
 }
 
 /**
@@ -302,10 +244,7 @@ function mutations(sf: ts.SourceFile): string[] {
   const visit = (n: ts.Node): void => {
     if (ts.isBinaryExpression(n)
       && (ts.isPropertyAccessExpression(n.left) || ts.isElementAccessExpression(n.left))) {
-      // Every assignment operator, `=` and the compound ones alike.
-      const op = n.operatorToken.kind;
-      if (op === ts.SyntaxKind.EqualsToken || (op >= ts.SyntaxKind.FirstCompoundAssignment
-        && op <= ts.SyntaxKind.LastCompoundAssignment)) {
+      if (isAssignmentOperator(n.operatorToken.kind)) {
         out.push(`${n.getText().split("\n")[0]} (line ${at(n)})`);
       }
     }
@@ -357,9 +296,15 @@ function effectiveProps(
 
   for (const p of obj.properties) {
     if (ts.isSpreadAssignment(p)) {
-      // A spread of a literal written in place, or of one declared by name.
-      const inline = ts.isObjectLiteralExpression(p.expression) ? p.expression : undefined;
-      const named = ts.isIdentifier(p.expression) ? declared.get(p.expression.text) : undefined;
+      // A spread of a literal written in place, or of one declared by name —
+      // UNWRAPPED first, because `...({ private: true } as const)` is the same
+      // object and reading the wrapper made this gate red on healthy code
+      // (Codex, PR #94). The form-error reader had unwrapped here since the
+      // round before; the primitives live in one module now so the two cannot
+      // disagree about it again.
+      const spread = unwrapTransparent(p.expression);
+      const inline = ts.isObjectLiteralExpression(spread) ? spread : undefined;
+      const named = ts.isIdentifier(spread) ? declared.get(spread.text) : undefined;
       const from = inline ?? named;
       if (from && depth < 8) {
         for (const [k, v] of effectiveProps(from, declared, depth + 1)) props.set(k, v);
@@ -420,30 +365,6 @@ function shownAs(v: ts.Expression | string | undefined): string {
   return typeof v === "string" ? v : v.getText();
 }
 
-/**
- * `as`, `satisfies`, parentheses and `!` hand the same value through.
- *
- * Both readers in this repository need this and only one had it: the
- * form-error gate unwrapped them from round seven, and here an exact-kind
- * check called `private: true as const` — the ordinary way to preserve a
- * literal type — NOT private, which is a gate red on a healthy tree and this
- * repository's log calls that the worse of the two failure shapes (Codex,
- * PR #94).
- */
-function unwrapTransparent(e: ts.Expression): ts.Expression {
-  let cur = e;
-  for (let i = 0; i < 8; i += 1) {
-    if (ts.isAsExpression(cur) || ts.isSatisfiesExpression(cur)
-      || ts.isParenthesizedExpression(cur) || ts.isNonNullExpression(cur)
-      || ts.isTypeAssertionExpression(cur)) {
-      cur = cur.expression;
-      continue;
-    }
-    return cur;
-  }
-  return cur;
-}
-
 /** Whether a resolved property is the literal `true` and not a marker. */
 function isLiteralTrue(v: ts.Expression | string | undefined): boolean {
   return typeof v === "object" && unwrapTransparent(v).kind === ts.SyntaxKind.TrueKeyword;
@@ -486,10 +407,11 @@ function messageElements(sf: ts.SourceFile): { found: boolean; values: string[] 
         values.push(`<\`messages\` is not an array literal: ${arr.getText().split("\n")[0]}>`);
       } else {
         for (const el of arr.elements) {
-          const lit = ts.isObjectLiteralExpression(el)
-            ? el
-            : ts.isIdentifier(el)
-              ? declared.get(el.text)
+          const e = unwrapTransparent(el);
+          const lit = ts.isObjectLiteralExpression(e)
+            ? e
+            : ts.isIdentifier(e)
+              ? declared.get(e.text)
               : undefined;
           if (!lit) {
             values.push(`<unreadable message element: ${el.getText().split("\n")[0]}>`);
@@ -652,6 +574,18 @@ describe("the walk channel is the only channel, and it is private on both sides"
       .toEqual(["<unresolvable spread `c`>"]);
     expect(read("const c = { private: true };\nconst { c: renamed } = o;\nsend({ topic, ...renamed });"))
       .toEqual(["<unresolvable spread `renamed`>"]);
+    // A name that is ASSIGNED anywhere is unresolvable whatever it started as:
+    // a stale initializer is the same defect as a mutated literal.
+    expect(read("let c = { private: true };\nc = buildPublic();\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read("let c = { private: true };\n({ c } = o);\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    // …while a `let` nothing assigns to still resolves, so the rule is about
+    // the assignment and not about the keyword.
+    expect(read("let c = { private: true };\nsend({ topic, ...c });")).toEqual(["true"]);
+    // A spread of a WRAPPED literal is the same object. Reading the wrapper
+    // made this gate red on healthy code.
+    expect(read("send({ topic, ...({ private: true } as const) });")).toEqual(["true"]);
   });
 
   it("reads every element of the messages array, and refuses what it cannot", () => {

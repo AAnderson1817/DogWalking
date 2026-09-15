@@ -2,6 +2,12 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
+import {
+  declaredObjects,
+  literalText,
+  propertyKey,
+  unwrapTransparent,
+} from "./lib/static-object.js";
 import { describe, expect, it } from "vitest";
 
 /**
@@ -69,93 +75,6 @@ interface Site {
   line: number;
   tag: string;
   why: string;
-}
-
-/**
- * The text of a statically readable string, or null for a dynamic one.
- *
- * `as const`, `as string`, `satisfies`, parentheses and `!` are TRANSPARENT:
- * React receives the same literal through every one of them, and a reader that
- * stops at the wrapper calls the attribute dynamic and looks away. Measured:
- * `<span role={"alert" as const} />` passed 4 of 4 (Codex, PR #94).
- */
-function literalText(e: ts.Expression): string | null {
-  const cur = unwrapTransparent(e);
-  if (ts.isStringLiteral(cur) || ts.isNoSubstitutionTemplateLiteral(cur)) return cur.text;
-  return null;
-}
-
-/** `as`, `satisfies`, parentheses and `!` hand the same value through. */
-function unwrapTransparent(e: ts.Expression): ts.Expression {
-  let cur = e;
-  for (let i = 0; i < 8; i += 1) {
-    if (ts.isAsExpression(cur) || ts.isSatisfiesExpression(cur)
-      || ts.isParenthesizedExpression(cur) || ts.isNonNullExpression(cur)
-      || ts.isTypeAssertionExpression(cur)) {
-      cur = cur.expression;
-      continue;
-    }
-    return cur;
-  }
-  return cur;
-}
-
-/**
- * Object literals bound to a name in this file, for a spread to resolve.
- *
- * A name bound more than once — anywhere, by any binding form — is
- * UNRESOLVABLE rather than resolved to the last one seen. That is the channel
- * gate's rule, arrived at there over two rounds: a name map that answers
- * confidently and wrongly is worse than one that answers nothing.
- */
-function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteralExpression> {
-  const seen = new Map<string, ts.ObjectLiteralExpression | null>();
-  const bind = (n: string, lit: ts.ObjectLiteralExpression | null) => {
-    seen.set(n, seen.has(n) ? null : lit);
-  };
-  const bindPattern = (nm: ts.BindingName): void => {
-    if (ts.isIdentifier(nm)) { bind(nm.text, null); return; }
-    for (const el of nm.elements) if (ts.isBindingElement(el)) bindPattern(el.name);
-  };
-  const visit = (n: ts.Node): void => {
-    if (ts.isVariableDeclaration(n)) {
-      if (ts.isIdentifier(n.name)) {
-        const init = n.initializer ? unwrapTransparent(n.initializer) : undefined;
-        bind(n.name.text, init && ts.isObjectLiteralExpression(init) ? init : null);
-      } else bindPattern(n.name);
-    } else if (ts.isParameter(n) || ts.isBindingElement(n)) {
-      bindPattern(n.name);
-    } else if ((ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n)) && n.name) {
-      bind(n.name.text, null);
-    } else if (ts.isImportSpecifier(n) || ts.isImportClause(n) || ts.isNamespaceImport(n)) {
-      if (n.name && ts.isIdentifier(n.name)) bind(n.name.text, null);
-    } else if (ts.isCatchClause(n) && n.variableDeclaration) {
-      bindPattern(n.variableDeclaration.name);
-    }
-    ts.forEachChild(n, visit);
-  };
-  visit(sf);
-  const out = new Map<string, ts.ObjectLiteralExpression>();
-  for (const [name, lit] of seen) if (lit) out.set(name, lit);
-  return out;
-}
-
-/**
- * A property's name when the compiler can read it, or null when it cannot.
- *
- * A COMPUTED key whose expression is a string literal is fully static and
- * names exactly one property: `{ ["role"]: "alert" }` is the same object as
- * `{ role: "alert" }`, and treating it as unreadable let the forbidden shape
- * through (measured, 4 of 4 green — Codex, PR #94). A computed key that is
- * genuinely an expression stays null, which the caller reads as "could be this
- * name" and therefore as no answer.
- */
-function propertyKey(name: ts.PropertyName): string | null {
-  if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNoSubstitutionTemplateLiteral(name)) {
-    return name.text;
-  }
-  if (ts.isComputedPropertyName(name)) return literalText(name.expression);
-  return null;
 }
 
 /**
@@ -377,6 +296,15 @@ describe("every error message renders through FormError or StateField", () => {
     // A name bound twice is unresolvable, whichever binding carries the
     // literal — the channel gate's rule, for the reason it arrived at there.
     expect(role('const a = { role: "alert" };\nfunction f(a) { return <span {...a} />; }')).toBeNull();
+    // A name that is ASSIGNED anywhere is unresolvable whatever it started
+    // as: `let attrs = { role: "status" }; attrs = { role: "alert" }` is a
+    // stale initializer, and a reader trusting it renders one thing and
+    // reports another.
+    expect(role('let a = { role: "alert" };\na = other;\n<span {...a} />')).toBeNull();
+    expect(role('let a = { role: "status" };\na = { role: "alert" };\n<span {...a} />')).toBeNull();
+    // …while a `let` nothing assigns to still resolves, so the rule is about
+    // the assignment and not about the keyword.
+    expect(role('let a = { role: "alert" };\n<span {...a} />')).toBe("alert");
     // A name that is not bound to a literal here resolves to nothing, and
     // leaves an earlier answer alone.
     expect(role('<span role="alert" {...imported} />')).toBe("alert");
