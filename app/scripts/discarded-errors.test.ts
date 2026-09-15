@@ -507,24 +507,99 @@ function nextWriteTo(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node
   return Math.min(Infinity, ...writesTo(checker, sym, container).map((w) => executesAt(w, container, bound)).filter((w) => w > bound.pos));
 }
 
+/** An expression with its transparent wrappers stripped: `(x)`, `x as T`, `x!`, `x satisfies T`. */
+function unwrapped(e: ts.Expression): ts.Expression {
+  let r = e;
+  while (ts.isParenthesizedExpression(r) || ts.isAsExpression(r) || ts.isNonNullExpression(r) || ts.isSatisfiesExpression(r)) r = r.expression;
+  return r;
+}
+
 /**
- * The next write to `<sym>.<key>` — `box.error = fallback`, `box["error"] ??=
- * …`, `delete box.error`, or a write through a key the gate cannot read. A
- * value that CARRIES the error at `key` stops carrying it there once that
- * member is replaced, which is the in-literal override (round seventeen) one
- * statement later; a write to any OTHER member leaves it alone.
+ * `box.nested.cause` — the plain name at the base and the keys from it
+ * outward, either spelling, unwrapping a transparent node at EVERY level
+ * (`(box).error` is the same member as `box.error`; Codex on PR #92, round
+ * eighteen). Null when the base is not a plain name.
  */
-function nextPropertyWriteTo(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node, bound: ts.Identifier, key: Key): number {
-  if (key === UNKNOWN) return Infinity;
+function memberChain(target: ts.Expression): { base: ts.Identifier; keys: Key[] } | null {
+  const keys: Key[] = [];
+  let cur = unwrapped(target);
+  for (;;) {
+    if (ts.isPropertyAccessExpression(cur)) { keys.unshift(cur.name.text); cur = unwrapped(cur.expression); continue; }
+    if (ts.isElementAccessExpression(cur)) { keys.unshift(keyOfIndex(cur.argumentExpression)); cur = unwrapped(cur.expression); continue; }
+    break;
+  }
+  return ts.isIdentifier(cur) && keys.length > 0 ? { base: cur, keys } : null;
+}
+
+/**
+ * Every name for the SAME object as `sym` inside `container` — `const alias =
+ * box` in either direction, transitively. A member write through any of them
+ * replaces the member for all of them, because they are one object (Codex on
+ * PR #92, round eighteen).
+ */
+function aliasGroup(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node): Set<ts.Symbol> {
+  const group = new Set<ts.Symbol>([sym]);
+  const queue: ts.Symbol[] = [sym];
+  const add = (s: ts.Symbol | undefined) => { if (s && !group.has(s)) { group.add(s); queue.push(s); } };
+  const nameOf = (e: ts.Expression | undefined): ts.Identifier | null => {
+    if (!e) return null;
+    const u = unwrapped(e);
+    return ts.isIdentifier(u) ? u : null;
+  };
+  while (queue.length > 0) {
+    const cur = queue.pop()!;
+    for (const d of cur.declarations ?? []) {
+      if (ts.isVariableDeclaration(d) && d.initializer) {
+        const src = nameOf(d.initializer);
+        if (src) add(symbolOf(checker, src));
+      }
+    }
+    const visit = (n: ts.Node) => {
+      if (ts.isVariableDeclaration(n) && n.initializer && ts.isIdentifier(n.name)) {
+        const src = nameOf(n.initializer);
+        if (src && symbolOf(checker, src) === cur) add(symbolOf(checker, n.name));
+      }
+      if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+        const lhs = nameOf(n.left);
+        const src = nameOf(n.right);
+        if (lhs && src && symbolOf(checker, src) === cur) add(symbolOf(checker, lhs));
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(container);
+  }
+  return group;
+}
+
+/**
+ * The next write that REPLACES the error at `path` — `box.error = fallback`,
+ * `box["error"] ??= …`, `box.nested.cause = fallback`, `delete box.cause`, a
+ * write through a key the gate cannot read, or any of those through another
+ * name for the same object. A value that CARRIES the error stops carrying it
+ * once the member the path names is replaced, which is the in-literal
+ * override (round seventeen) one statement later.
+ *
+ * A write is a replacement when its key chain is a PREFIX of the carried path
+ * (the whole of it included): a write DEEPER than the path mutates a field of
+ * the error and leaves the error itself where it is, and one that diverges at
+ * any key touches another member entirely.
+ */
+function nextPropertyWriteTo(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node, bound: ts.Identifier, path: Path): number {
+  if (path.length === 0) return Infinity;
+  const group = aliasGroup(checker, sym, container);
   const out: Write[] = [];
-  const hits = (target: ts.Node) => {
-    const m = target.kind === ts.SyntaxKind.PropertyAccessExpression || target.kind === ts.SyntaxKind.ElementAccessExpression
-      ? target as ts.PropertyAccessExpression | ts.ElementAccessExpression : null;
-    if (!m) return;
-    const receiver = m.expression;
-    if (!ts.isIdentifier(receiver) || symbolOf(checker, receiver) !== sym) return;
-    const k = ts.isPropertyAccessExpression(m) ? m.name.text : keyOf(m.argumentExpression);
-    if (k === UNKNOWN || k === key || String(k) === String(key)) out.push({ pos: m.pos, node: m });
+  const hits = (target: ts.Expression) => {
+    const chain = memberChain(target);
+    if (!chain) return;
+    const base = symbolOf(checker, chain.base);
+    if (!base || !group.has(base) || chain.keys.length > path.length) return;
+    for (let i = 0; i < chain.keys.length; i += 1) {
+      const written = chain.keys[i]!;
+      const carried = path[i];
+      if (carried === undefined) break; // past the path: the length check above decides those
+      if (written !== UNKNOWN && carried !== UNKNOWN && String(written) !== String(carried)) return;
+    }
+    out.push({ pos: target.pos, node: target });
   };
   const visit = (n: ts.Node) => {
     if (ts.isBinaryExpression(n) && isAssignmentKind(n.operatorToken.kind)) hits(n.left);
@@ -820,6 +895,20 @@ type Key = string | number | typeof UNKNOWN;
 /** Where the error sits inside the value at hand, outermost key first; empty means the value IS the error. */
 type Path = readonly Key[];
 
+/**
+ * The key an INDEX expression names — `box["error"]`, `errs[1]` — or UNKNOWN.
+ * Not `keyOf`: there an identifier IS the literal name (`{ error: … }`),
+ * while here it is a variable whose value the gate cannot know, so reading
+ * `box[k]` as the key "k" both missed a computed WRITE that may replace the
+ * carried member and answered a computed read for the wrong reason (found by
+ * the round-eighteen test, in round fifteen's code).
+ */
+function keyOfIndex(e: ts.Expression): Key {
+  if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) return e.text;
+  if (ts.isNumericLiteral(e)) return Number(e.text);
+  return UNKNOWN;
+}
+
 /** The literal name of a property key, or UNKNOWN for a computed one. */
 function keyOf(name: ts.PropertyName | ts.Expression): Key {
   if (ts.isIdentifier(name) || ts.isPrivateIdentifier(name)) return name.text;
@@ -951,7 +1040,7 @@ function consumes(ctx: Ctx, n: ts.Node, seen: Set<ts.Node> = new Set(), path: Pa
     // round-seven discard positions, one hop in). A value derived from the
     // error is the error for this question, so the hop resets the path.
     if (path.length === 0) return consumes(ctx, h, seen, []);
-    const key = ts.isPropertyAccessExpression(h) ? h.name.text : keyOf(h.argumentExpression);
+    const key = ts.isPropertyAccessExpression(h) ? h.name.text : keyOfIndex(h.argumentExpression);
     return key !== UNKNOWN && key === path[0] && consumes(ctx, h, seen, path.slice(1));
   }
   const alias = aliasTarget(holder);
@@ -1027,7 +1116,7 @@ function isReadAfter(ctx: Ctx, bound: ts.Identifier, seen: Set<ts.Node> = new Se
   const container = scopeContainer(bound);
   const overwritten = Math.min(
     nextWriteTo(ctx.checker, sym, container, bound),
-    path.length > 0 ? nextPropertyWriteTo(ctx.checker, sym, container, bound, path[0]!) : Infinity,
+    nextPropertyWriteTo(ctx.checker, sym, container, bound, path),
   );
   return usesOf(ctx.checker, sym, container).some((u) =>
     readsInWindow(u, bound, overwritten, container, ctx.checker) && consumes(ctx, u, seen, path)
@@ -2535,6 +2624,32 @@ async function f(db: any) { const { data, error } = await db.from("a").select("i
     expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { error, data }; if (box.error) throw box.error; return box.data; }`).verdict).toBe("OK");
     expect(one(`async function f(db: any, more: any[]) { const { data, error } = await db.from("a").select("id"); const errs = [error, ...more]; if (errs[0]) throw errs[0]; return data; }`).verdict).toBe("OK");
     expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; if (box.error) throw box.error; box.error = fallback; return data; }`).verdict).toBe("OK");
+  });
+
+  it("a write that replaces the carried member is found through any name for the object (Codex, PR #92)", () => {
+    // Round eighteen, three ways the round-seventeen write rule saw less than
+    // it claimed: it compared `path[0]` only, so a write BELOW the head
+    // (`box.nested.cause = fallback`) was missed; it required a plain
+    // identifier receiver, so `(box).error = …` and `(box as any).error = …`
+    // were invisible; and it computed the window per binding, so a write
+    // through one name for the object left another name's window open.
+    // A write replaces the error when its key chain is a PREFIX of the
+    // carried path — deeper mutates a field of the error and leaves the error
+    // itself, divergent touches another member.
+    const nested = `const box = { nested: { cause: error } };`;
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); ${nested} box.nested.cause = fallback; if (box.nested.cause) throw box.nested.cause; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, other: any) { const { data, error } = await db.from("a").select("id"); ${nested} box.nested = other; if (box.nested.cause) throw box.nested.cause; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; const alias = box; box.error = fallback; if (alias.error) throw alias.error; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; const alias = box; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; (box).error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; (box as any).error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, k: string, fallback: any) { const { data, error } = await db.from("a").select("id"); ${nested} box.nested[k] = fallback; if (box.nested.cause) throw box.nested.cause; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; (box.error) = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
+    // Deeper than the path, diverging from it, and another object entirely.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); ${nested} box.nested.cause.message = "x"; if (box.nested.cause) throw box.nested.cause; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any, x: any) { const { data, error } = await db.from("a").select("id"); ${nested} box.nested.other = x; if (box.nested.cause) throw box.nested.cause; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; const other = { error: 1 }; other.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); ${nested} if (box.nested.cause) throw box.nested.cause; return data; }`).verdict).toBe("OK");
   });
 
   it("a builder REPLACED before it is awaited never runs (Codex, PR #92)", () => {
