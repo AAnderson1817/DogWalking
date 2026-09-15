@@ -111,19 +111,102 @@ interface ChannelCall {
   why: string;
 }
 
+/**
+ * The local names in `file` that hold the Supabase client.
+ *
+ * The first version of this file asked whether the receiver was the
+ * IDENTIFIER `supabase`, which is a spelling and not an identity: Codex
+ * planted `const realtime = supabase; realtime.channel(\`walk:${walkId}\`)` —
+ * a second, PUBLIC topic — and all five tests stayed green, because the real
+ * call still satisfied the precondition and `calls.length` never moved. The
+ * import may be renamed too (`import { supabase as db }`), which is ordinary
+ * TypeScript and would have been equally invisible.
+ *
+ * So: seed from the IMPORT of `supabase` (whatever it is bound to locally),
+ * then take the fixpoint over plain aliases — `const x = <client>`, and the
+ * same through a cast or parentheses, which are transparent. That is the same
+ * receiver-resolution `discarded-errors.test.ts` had to build for supabase-js
+ * query chains, and for the same reason: a receiver is a value, not a word.
+ *
+ * Deliberately NOT the compiler's symbol resolution here, which would need a
+ * Program over the whole app for one question; a per-file scan sees every
+ * alias reachable without a module hop, and a client that crosses a module
+ * boundary under a new name arrives through an import this seeds from.
+ */
+function clientNames(sf: ts.SourceFile): Set<string> {
+  const names = new Set<string>();
+  for (const st of sf.statements) {
+    if (!ts.isImportDeclaration(st) || !ts.isStringLiteralLike(st.moduleSpecifier)) continue;
+    if (!/(^|\/)supabase$/.test(st.moduleSpecifier.text)) continue;
+    const named = st.importClause?.namedBindings;
+    if (!named || !ts.isNamedImports(named)) continue;
+    for (const el of named.elements) {
+      if ((el.propertyName ?? el.name).text === "supabase") names.add(el.name.text);
+    }
+  }
+
+  // Parentheses, `as`, `satisfies` and `!` all hand the same value through.
+  const unwrap = (e: ts.Expression): ts.Expression => {
+    let cur = e;
+    for (;;) {
+      if (ts.isParenthesizedExpression(cur) || ts.isAsExpression(cur)
+        || ts.isSatisfiesExpression(cur) || ts.isNonNullExpression(cur)) cur = cur.expression;
+      else return cur;
+    }
+  };
+
+  // Fixpoint: an alias of an alias is still the client.
+  for (let grew = true; grew;) {
+    grew = false;
+    const visit = (n: ts.Node): void => {
+      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) {
+        const init = unwrap(n.initializer);
+        if (ts.isIdentifier(init) && names.has(init.text) && !names.has(n.name.text)) {
+          names.add(n.name.text);
+          grew = true;
+        }
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+  }
+  return names;
+}
+
 function channelCalls(files: string[]): ChannelCall[] {
   const found: ChannelCall[] = [];
   for (const file of files) {
     const source = parse(file);
+    const clients = clientNames(source);
     const rel = relative(APP_SRC, file).split("\\").join("/");
     const visit = (node: ts.Node): void => {
+      // Every `.channel(…)` call is looked at, and its receiver is then
+      // CLASSIFIED — a receiver this file cannot resolve to the client is
+      // reported rather than skipped, because "cannot say" is not "not a
+      // channel". Measured on the healthy tree: one `.channel(` in app/src,
+      // on the client, so refusing the unresolvable is not a red on healthy
+      // code. The day something unrelated grows a `.channel` method, somebody
+      // decides here rather than the gate quietly stopping looking.
       if (
         ts.isCallExpression(node) &&
-        ts.isPropertyAccessExpression(node.expression) &&
-        node.expression.name.text === "channel" &&
-        ts.isIdentifier(node.expression.expression) &&
-        node.expression.expression.text === "supabase"
+        ((ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "channel") ||
+          (ts.isElementAccessExpression(node.expression) &&
+            ts.isStringLiteralLike(node.expression.argumentExpression) &&
+            node.expression.argumentExpression.text === "channel"))
       ) {
+        const receiver = node.expression.expression;
+        const onClient = ts.isIdentifier(receiver) && clients.has(receiver.text);
+        if (!onClient) {
+          found.push({
+            file: rel,
+            line: source.getLineAndCharacterOfPosition(node.getStart()).line + 1,
+            private: false,
+            why: `\`${receiver.getText()}.channel(…)\` — this check cannot resolve that receiver to the `
+              + `Supabase client, so it cannot say the topic is private. Classify it here.`,
+          });
+          ts.forEachChild(node, visit);
+          return;
+        }
         const line = source.getLineAndCharacterOfPosition(node.getStart()).line + 1;
         const opts = node.arguments[1];
         let isPrivate = false;
@@ -200,6 +283,30 @@ function serverPrivate(): { found: boolean; values: string[] } {
 describe("the walk channel is the only channel, and it is private on both sides", () => {
   const files = sourceFiles(APP_SRC);
   const calls = channelCalls(files);
+
+  // The receiver resolver, pinned on fixtures rather than only on the one real
+  // call. Both directions matter and they are not the same rule: a resolver
+  // that admitted nothing would report every call unresolvable and pass every
+  // sabotage of the alias rule for the wrong reason, while one that admitted
+  // anything would be back to reading a spelling. So: the client arrives
+  // through its import under whatever local name, aliases of it are the same
+  // value, and a name that is not the client is not admitted.
+  it("resolves the Supabase client through imports and aliases, and nothing else", () => {
+    const names = (src: string): string[] =>
+      [...clientNames(ts.createSourceFile("f.ts", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS))].sort();
+
+    expect(names('import { supabase } from "@/lib/supabase";')).toEqual(["supabase"]);
+    expect(names('import { supabase as db } from "./supabase";')).toEqual(["db"]);
+    expect(names('import { supabase } from "./supabase";\nconst realtime = supabase;'))
+      .toEqual(["realtime", "supabase"]);
+    expect(names('import { supabase } from "./supabase";\nconst a = supabase;\nconst b = (a as never);'))
+      .toEqual(["a", "b", "supabase"]);
+    // Not the client: a different export, a different module, and a value
+    // built by a call rather than handed through.
+    expect(names('import { createClient } from "./supabase";')).toEqual([]);
+    expect(names('import { supabase } from "./not-supabase-module";')).toEqual([]);
+    expect(names('import { supabase } from "./supabase";\nconst c = makeThing(supabase);')).toEqual(["supabase"]);
+  });
 
   // Preconditions. "No channel is public" is satisfied by a scanner that finds
   // no channels, so the scan is proven live before it is believed.

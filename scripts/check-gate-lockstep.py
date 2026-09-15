@@ -126,8 +126,8 @@ COVERAGE: dict[tuple[str, str], str] = {
 }
 
 
-def ci_steps() -> tuple[list[tuple[str, str]], list[str]]:
-    """The named `run:` steps in ci.yml as (job, name), and the UNNAMED ones.
+def ci_steps() -> tuple[list[tuple[str, str]], list[str], list[str]]:
+    """The named `run:` steps in ci.yml as (job, name), the UNNAMED, the DUPLICATE.
 
     (job, name), not name — a display name does NOT identify a step, and this
     workflow already proves it: `Install` appears in both `frontend` and
@@ -137,6 +137,17 @@ def ci_steps() -> tuple[list[tuple[str, str]], list[str]]:
     PR #94: `PASS: 47 ci.yml run-steps classified`). Rejecting duplicate names
     outright was the other option offered and would be RED ON A HEALTHY TREE,
     since the two `Install` steps are both legitimate and both SETUP.
+
+    That fix left the same hole one scope in, and the next round found it: two
+    steps named `Tests` in the SAME job produce the same tuple, so the new one
+    satisfied `s in COVERAGE`, satisfied the stale-map check, inherited
+    `6b. deno test`, and the gate reported `PASS: 47` again (measured). There
+    is no further discriminator worth having — a POSITIONAL one silently
+    re-points at a different step the moment somebody inserts a step above it,
+    which is the stale-exception shape this file guards against twice — so a
+    duplicate tuple is REFUSED and the remedy is to rename one. Unlike a name
+    reused across jobs, that is not red on a healthy tree: measured, this
+    workflow has no duplicate (job, name) pair at all.
 
     A `uses:` step runs an action, not a check of ours, and has nothing to
     mirror. An unnamed `run:` step is a different matter: `- run: python3
@@ -149,15 +160,22 @@ def ci_steps() -> tuple[list[tuple[str, str]], list[str]]:
     workflow = yaml.safe_load(CI.read_text())
     names: list[tuple[str, str]] = []
     unnamed: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    duplicate: list[str] = []
     for job_name, job in workflow["jobs"].items():
         for i, step in enumerate(job.get("steps", [])):
             if "run" not in step:
                 continue
-            if "name" in step:
-                names.append((job_name, step["name"]))
-            else:
+            if "name" not in step:
                 unnamed.append(f"{job_name} step {i + 1}")
-    return names, unnamed
+                continue
+            key = (job_name, step["name"])
+            if key in seen:
+                duplicate.append(f"{job_name} / {step['name']}")
+            else:
+                seen.add(key)
+                names.append(key)
+    return names, unnamed, duplicate
 
 
 def skill_ci_only() -> list[str]:
@@ -213,7 +231,7 @@ def validate_labels() -> tuple[set[str], set[str]]:
 
 
 def main() -> int:
-    steps, unnamed = ci_steps()
+    steps, unnamed, duplicate = ci_steps()
     if not steps:
         print("FAIL: read no named run-steps out of ci.yml — this check is blind")
         return 2
@@ -225,6 +243,15 @@ def main() -> int:
         failures.append(
             f"ci.yml has an unnamed `run:` step ({where}) — give it a `name:`, "
             "or it is a CI check this file cannot classify and nobody mirrors"
+        )
+
+    # 0b. And a name reused inside ONE job is no identity either: the second
+    #     step inherits the first's classification and is mirrored by nobody.
+    for where in duplicate:
+        failures.append(
+            f"ci.yml has two `run:` steps named {where!r} — rename one. A step "
+            "is identified by (job, name) here, so the second silently "
+            "inherits the first's mapping and is classified by nobody"
         )
 
     # 1. Every ci.yml check is classified. A new step is in neither the map nor

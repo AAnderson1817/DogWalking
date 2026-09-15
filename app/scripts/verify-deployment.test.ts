@@ -330,26 +330,43 @@ describe("verify-deployment", () => {
 //     GET reaches nothing. `contract_for` is where that reading is recorded.
 //
 // The script's header carried the second half as a sentence naming the two
-// functions it applies to. A sentence is not a gate: a third function with
-// its own `Deno.serve` silently gets the DEFAULT contract, nobody is asked
+// functions it applies to. A sentence is not a gate: a function that is not
+// behind the wrapper silently gets the DEFAULT contract, nobody is asked
 // whether a GET is safe against it, and the probe finds out by making the
-// request. So the requirement is DERIVED here — every self-serving function
-// must have a bespoke case — and it is a test rather than a runtime check in
-// the script because CI runs this on every push while the deploy that runs
-// the script is gated on CI being green, so a bypasser with no case cannot
-// reach a deploy without going red first.
+// request. So the requirement is DERIVED here, and it is a test rather than a
+// runtime check in the script because CI runs this on every push while the
+// deploy that runs the script is gated on CI being green — so a function with
+// no case cannot reach a deploy without going red first.
+//
+// The rule is stated POSITIVELY, and that is a correction. The first version
+// asked the opposite question — does this function have its own `Deno.serve`?
+// — which enumerates the ways of bypassing the wrapper instead of requiring
+// the wrapper, and Codex showed what that costs: a function that serves
+// itself by another perfectly ordinary spelling (an imported `serve(…)`
+// helper, `addEventListener("fetch", …)`, a framework's own listener) is
+// invisible to the bypass detector, so it takes the default contract and
+// nobody ever establishes that a GET against it is read-only. Measured on the
+// shipped gate with a planted `probe-serve/index.ts` importing std's `serve`:
+// 14 of 14 green. Enumerating the ways something can be wrong is how the next
+// one is missed — `verify-photo-integrity.sh` took three rounds to learn it —
+// so the question is now "is this function behind the house wrapper?", which
+// has one answer and no list. A function that is not must carry a
+// `contract_for` case, whatever the reason it is not.
 //
 // PARSED, not grepped, and the reason is measurable: `platform-webhook`'s own
 // header says "Same bare Deno.serve shape as stripe-webhook", so a grep over
-// that file counts a COMMENT. Today it counts the right function anyway; the
-// day a function that does NOT serve itself mentions the name in prose, a
-// grep makes this gate red on a healthy tree, which this repository records
-// as the worst shape a gate can take. A comment is not an AST node.
+// that file counts a COMMENT — and the inverted rule has the mirror-image
+// exposure, where a function that does NOT call `serveFunction` mentions the
+// name in a comment (four `deps.ts` files in this tree do, explaining why
+// importing an `index.ts` binds a port) and a grep would call it housed. A
+// comment is not an AST node, and the call has to be a CALL of the name
+// imported from `_lib/http.ts` — a local function of the same name proves
+// nothing about which wrapper is in front of the request.
 //
 // Stated rather than chased, on the stopping rule the enum-catalogue
-// generator writes down: this catches the mistake, not the adversary.
-// `globalThis["De" + "no"].serve(…)` is not detected, and nothing in this
-// tree writes anything of the kind.
+// generator writes down: this catches the mistake, not the adversary. A call
+// assembled at run time, or `serveFunction` re-exported through a chain of
+// modules, is not followed; nothing in this tree writes anything of the kind.
 
 /** Every non-test `.ts` under `dir`, recursively — a function is the whole
  * directory, not just its `index.ts`. */
@@ -362,37 +379,54 @@ function sourceFiles(dir: string): string[] {
 }
 
 /**
- * The lines where a file's CODE names `Deno.serve` (either spelling).
+ * The lines where a file CALLS `serveFunction`, imported from `_lib/http.ts`.
  *
- * A REFERENCE, not only a call: `const s = Deno.serve; s(handler)` serves
- * exactly as much, and naming it is the only reason to write it.
+ * Two conditions, and each is load-bearing. A CALL, because a mention in a
+ * comment or a string is not a wrapper in front of a request — and four
+ * `deps.ts` files in this tree name `serveFunction` in prose for exactly the
+ * reason that makes this worth guarding (importing an `index.ts` runs it and
+ * binds a port). Imported from `_lib/http.ts`, because a local function of
+ * the same name would answer a question nobody asked: what is in front of the
+ * request is the house wrapper or it is not.
  */
-function denoServeLines(file: string): number[] {
+function serveFunctionLines(file: string): number[] {
   const text = readFileSync(file, "utf8");
   const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+
+  // The local names bound to `_lib/http.ts`'s `serveFunction`. A named import
+  // may be renamed (`serveFunction as serve`), and that is still the wrapper.
+  const bound = new Set<string>();
+  for (const st of sf.statements) {
+    if (!ts.isImportDeclaration(st) || !ts.isStringLiteralLike(st.moduleSpecifier)) continue;
+    if (!/(^|\/)_lib\/http\.ts$/.test(st.moduleSpecifier.text)) continue;
+    const named = st.importClause?.namedBindings;
+    if (!named || !ts.isNamedImports(named)) continue;
+    for (const el of named.elements) {
+      if ((el.propertyName ?? el.name).text === "serveFunction") bound.add(el.name.text);
+    }
+  }
+  if (bound.size === 0) return [];
+
   const lines: number[] = [];
-  const isDeno = (e: ts.Expression) => ts.isIdentifier(e) && e.text === "Deno";
   const visit = (n: ts.Node) => {
-    const hit = (ts.isPropertyAccessExpression(n) && n.name.text === "serve" && isDeno(n.expression))
-      || (ts.isElementAccessExpression(n) && isDeno(n.expression)
-        && ts.isStringLiteralLike(n.argumentExpression)
-        && n.argumentExpression.text === "serve");
-    if (hit) lines.push(sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1);
+    if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && bound.has(n.expression.text)) {
+      lines.push(sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1);
+    }
     ts.forEachChild(n, visit);
   };
   visit(sf);
   return lines;
 }
 
-/** The functions that serve themselves, and where each says so. */
-function selfServing(
+/** Whether each shipped function is behind the house wrapper, and where. */
+function housed(
   functionsDir = join(REPO, "supabase", "functions"),
 ): { name: string; where: string[] }[] {
-  return shippedFunctions(functionsDir).flatMap((name) => {
-    const where = sourceFiles(join(functionsDir, name))
-      .flatMap((f) => denoServeLines(f).map((line) => `${relative(functionsDir, f)}:${line}`));
-    return where.length > 0 ? [{ name, where }] : [];
-  });
+  return shippedFunctions(functionsDir).map((name) => ({
+    name,
+    where: sourceFiles(join(functionsDir, name))
+      .flatMap((f) => serveFunctionLines(f).map((line) => `${relative(functionsDir, f)}:${line}`)),
+  }));
 }
 
 /**
@@ -426,29 +460,44 @@ function staleExceptionNames(): string[] {
 }
 
 describe("verify-deployment: the read-only argument", () => {
-  it("sees a bypass written in code, and not one written in prose", () => {
-    // The precondition, and it is a FIXTURE rather than a floor over the real
-    // tree on purpose: "at least one function serves itself" would go red the
-    // day both webhooks move onto `serveFunction`, which is a healthy change.
-    // This says the detector can see a bypass at all, whatever the tree holds.
+  it("counts a call to the house wrapper, and not a mention of it", () => {
+    // A FIXTURE rather than a floor over the real tree on purpose, in both
+    // directions: "at least one function is housed" and "at least one is not"
+    // are each red on a healthy change (the whole tree moving onto the wrapper
+    // is exactly the change this gate should welcome). This says the detector
+    // can tell the two apart at all, whatever the tree holds.
     const dir = mkdtempSync(join(tmpdir(), "serve-"));
     const put = (name: string, file: string, body: string) => {
       mkdirSync(join(dir, name), { recursive: true });
       writeFileSync(join(dir, name, file), body);
     };
-    put("alpha", "index.ts", 'Deno.serve((req) => new Response("ok"));\n');
-    put("beta", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction((req) => handle(req));\n');
-    // Prose only: a comment in the shape `platform-webhook/index.ts:6` really
-    // carries, and a string. Neither runs anything.
-    put("gamma", "index.ts", '// Same bare Deno.serve shape as stripe-webhook.\nconst doc = "Deno.serve";\nserveFunction(handle);\n');
-    // Not the entrypoint, and not a call — a reference handed to a variable.
-    put("delta", "index.ts", 'import { boot } from "./boot.ts";\nboot();\n');
-    writeFileSync(join(dir, "delta", "boot.ts"), 'export const boot = () => {\n  const s = Deno["serve"];\n  s(handle);\n};\n');
+    // Housed, the ordinary spelling.
+    put("alpha", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction((req) => handle(req));\n');
+    // Housed under a renamed import — still the house wrapper.
+    put("beta", "index.ts", 'import { serveFunction as serve } from "../_lib/http.ts";\nserve(handle);\n');
+    // NOT housed: its own Deno.serve, the original bypass.
+    put("gamma", "index.ts", 'Deno.serve((req) => new Response("ok"));\n');
+    // NOT housed, and the finding that inverted this rule: an imported helper
+    // serves just as much, and carries no `Deno.serve` anywhere.
+    put("delta", "index.ts", 'import { serve } from "https://deno.land/std/http/server.ts";\nserve((req) => new Response("ok"));\n');
+    // NOT housed: prose only. A comment in the shape four `deps.ts` files in
+    // this tree really carry, plus a string. Neither runs anything.
+    put("epsilon", "index.ts", '// importing index.ts executes `serveFunction` and binds a port\nconst doc = "serveFunction(handle)";\nDeno.serve(handle);\n');
+    // NOT housed: a local function of the same name is not the house wrapper.
+    put("zeta", "index.ts", 'const serveFunction = (h: unknown) => Deno.serve(h as never);\nserveFunction(handle);\n');
 
-    expect(selfServing(dir).map((f) => f.name)).toEqual(["alpha", "delta"]);
+    const byName = Object.fromEntries(housed(dir).map((f) => [f.name, f.where.length > 0]));
+    expect(byName).toEqual({
+      alpha: true,
+      beta: true,
+      gamma: false,
+      delta: false,
+      epsilon: false,
+      zeta: false,
+    });
   });
 
-  it("every function with its own Deno.serve has a bespoke contract_for case", () => {
+  it("every function not behind serveFunction has a bespoke contract_for case", () => {
     const shipped = shippedFunctions();
     expect(shipped.length, "scripts/repo-functions.sh found no function directory").toBeGreaterThan(0);
 
@@ -458,13 +507,14 @@ describe("verify-deployment: the read-only argument", () => {
     expect(unread, "function directories with no scanned source file").toEqual([]);
 
     const bespoke = bespokeContracts();
-    const uncovered = selfServing()
-      .filter((f) => !bespoke.includes(f.name))
-      .map((f) => `${f.name} (${f.where.join(", ")})`);
+    const uncovered = housed()
+      .filter((f) => f.where.length === 0 && !bespoke.includes(f.name))
+      .map((f) => f.name);
     expect(
       uncovered,
-      "functions with their own `Deno.serve` and no `contract_for` case — they take the DEFAULT contract, "
-        + "so verify-deployment.sh fires a GET at production against a function nobody has established is read-only",
+      "functions that do not call `_lib/http.ts`'s `serveFunction` and have no `contract_for` case — they take the "
+        + "DEFAULT contract, so verify-deployment.sh fires a GET at production against a function nobody has "
+        + "established is read-only. Either put it behind the wrapper, or read it and record the contract.",
     ).toEqual([]);
   });
 
