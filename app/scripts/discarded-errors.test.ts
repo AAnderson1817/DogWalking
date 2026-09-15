@@ -723,6 +723,15 @@ function closuresAround(n: ts.Node, container: ts.Node): ts.Node[] {
 function visiblyInvoked(fn: ts.Node, container: ts.Node, checker: ts.TypeChecker, anchor: ts.Node, seen: Set<ts.Node> = new Set()): boolean {
   if (seen.has(fn)) return false;
   seen.add(fn);
+  // Calling a GENERATOR returns an iterator and runs nothing: `function*
+  // check() { return error; } check();` reads the error never (Codex on PR
+  // #92, round twenty-six). Establishing that it is iterated instead — a
+  // spread, a `for…of`, a `.next()`, a `yield*` — is machinery for a shape
+  // that occurs nowhere under `supabase/functions` (zero generators,
+  // measured), so a generator is simply never established here and a read
+  // inside one is refused, as every other unestablished read is. An ASYNC
+  // function is not affected: calling it runs its body to the first await.
+  if ((fn as ts.FunctionLikeDeclaration).asteriskToken !== undefined) return false;
   let top: ts.Node = fn;
   while (top.parent && isTransparent(top.parent, top)) top = top.parent;
   const p = top.parent;
@@ -2850,6 +2859,21 @@ async function f(db: any) { const { data, error } = await db.from("a").select("i
     // carrier, so the member write cannot reach the error.
     expect(one(`async function f(db: any, other: any, other2: any, fallback: any, c: boolean) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias = box; if (c) alias = other; alias = other2; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("OK");
     expect(one(`async function f(db: any, other: any, fallback: any, c: boolean) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias: any = box; if (c) alias = other; alias += ""; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("OK");
+  });
+
+  it("calling a generator runs nothing (Codex, PR #92)", () => {
+    // Round twenty-six: a call to a generator returns an iterator, so the
+    // body never runs and a read inside it reads nothing — `visiblyInvoked`
+    // claimed otherwise. A generator is never established here; recognising
+    // that one is ITERATED (a spread, a `for…of`, a `.next()`) is machinery
+    // for a shape that occurs nowhere under `supabase/functions`, so the
+    // second case is a documented conservative refusal, not an oversight.
+    // An async function is unaffected: calling it runs its body to the first
+    // await.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); function* check() { return error; } check(); return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); function* check() { return error; } if ([...check()].length) return null; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); function check() { return error; } if (check()) throw error; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const check = async () => error; check(); return data; }`).verdict).toBe("OK");
   });
 
   it("a builder REPLACED before it is awaited never runs (Codex, PR #92)", () => {
