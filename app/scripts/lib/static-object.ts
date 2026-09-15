@@ -116,6 +116,21 @@ export function propertyKey(name: ts.PropertyName): string | null {
  * literal, while `a.private = false` reaches the object every alias names and
  * invalidates all of them.
  *
+ * ALIAS EDGES ARE PERMANENT, and that is a decision rather than an oversight.
+ * An alias that is rebound and THEN mutated — `let a = config; a = other;
+ * a.private = false;` — still invalidates `config`, which nothing touched.
+ * Codex reported that as a false red on PR #94 and it is one. Removing the
+ * stale edge requires knowing which assignment happened first, i.e. flow
+ * sensitivity, and the trade is not free in either direction: the mirror,
+ * `let a = config; a.private = false; a = other;`, is a real mutation of
+ * `config` that a lifetime-aware graph would MISS. For a gate that decides
+ * whether a walk's live position goes to a public topic, an over-refusal is
+ * legible and its remedy is obvious (rename, or use `const`), while a miss is
+ * silent. The refusal is therefore deliberate and PINNED as a test, so that
+ * changing it is a decision somebody makes rather than a regression. Neither
+ * file these gates read aliases anything today (measured), so the cost is
+ * currently zero.
+ *
  * Both are refusals rather than analyses, which is the stopping rule this
  * repository settled on: an ambiguous name never gets a confident answer, and
  * the remedy — rename one, or use `const` — is cheaper than a Program over
@@ -172,14 +187,20 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
     // destructuring assignment target counts too.
     if (ts.isBinaryExpression(n) && isAssignmentOperator(n.operatorToken.kind)) {
       collectAssignmentTargets(n.left, rebound);
-      // `a = config` also makes the two names one object from here on.
-      const rhs = unwrapTransparent(n.right);
-      const lhs = unwrapTransparent(n.left);
-      if (
-        n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-        ts.isIdentifier(lhs) && ts.isIdentifier(rhs)
-      ) {
-        link(lhs.text, rhs.text);
+      // `a = config` also makes the two names one object from here on — and so
+      // does `[a] = [config]` or `({ a } = { a: config })`, which the first
+      // version of this edge did not see. Rather than match a destructuring
+      // pattern positionally (the right side can be any expression, so the
+      // matching is not always possible), every target is linked to every
+      // identifier the right side mentions. That OVER-links, which is the
+      // conservative direction Codex offered as the alternative: it can refuse
+      // a name nothing touched, never miss one that was mutated.
+      if (n.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+        const targets = new Set<string>();
+        collectAssignmentTargets(n.left, targets);
+        const sources = new Set<string>();
+        collectIdentifiers(n.right, sources);
+        for (const target of targets) for (const source of sources) link(target, source);
       }
     }
     if (
@@ -234,6 +255,15 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
     if (lit && !rebound.has(name) && !mutated.has(name)) out.set(name, lit);
   }
   return out;
+}
+
+/** Every identifier an expression mentions, however deeply. */
+function collectIdentifiers(e: ts.Expression, into: Set<string>): void {
+  const visit = (n: ts.Node): void => {
+    if (ts.isIdentifier(n)) into.add(n.text);
+    ts.forEachChild(n, visit);
+  };
+  visit(e);
 }
 
 /** Every assignment operator, `=` and the compound ones alike. */

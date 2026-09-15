@@ -628,6 +628,22 @@ describe("the walk channel is the only channel, and it is private on both sides"
       .toEqual(["true"]);
     expect(read("let a = { private: true };\na = other;\nsend({ topic, ...a });"))
       .toEqual(["<unresolvable spread `a`>"]);
+    // A destructuring assignment forms an alias too, and the link is made
+    // conservatively (every target to every identifier the right side
+    // mentions) rather than by matching positions, because the right side can
+    // be any expression.
+    expect(read("const c = { private: true };\nlet a;\n[a] = [c];\na.private = false;\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read("const c = { private: true };\nlet a;\n({ a } = { a: c });\na.private = false;\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    // PINNED REFUSAL, not an accident: an alias rebound BEFORE it is mutated
+    // still invalidates the original. Dropping the stale edge needs to know
+    // which assignment ran first — flow sensitivity — and the mirror of this
+    // case (`a.private = false;` then `a = other;`) is a real mutation a
+    // lifetime-aware graph would MISS. Over-refusing is legible and its remedy
+    // is obvious; missing is silent. Changing this should be a decision.
+    expect(read("const c = { private: true };\nlet a = c;\na = other;\na.private = false;\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
     // A loop variable is assigned on every iteration and produces no
     // assignment expression at all.
     expect(read("let c = { private: true };\nfor (c of xs) {}\nsend({ topic, ...c });"))
