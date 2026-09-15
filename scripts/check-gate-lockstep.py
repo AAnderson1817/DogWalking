@@ -71,62 +71,72 @@ LOCAL_ONLY: set[str] = set()
 
 # ci.yml step name -> SETUP, CI_ONLY, or the validate.sh gate label that runs
 # the same check locally.
-COVERAGE: dict[str, str] = {
+COVERAGE: dict[tuple[str, str], str] = {
     # ── frontend ──────────────────────────────────────────────────────────
-    "Install": SETUP,
-    "Typecheck": "1. typecheck",
-    "Lint (warnings fail)": "2. lint",
-    "Unit tests": "3. unit tests",
-    "Build": "4. build",
-    "The built service worker is stamped, and precaches a usable shell": CI_ONLY,
-    "A production build without Supabase config is refused": CI_ONLY,
-    "Every test file is claimed by a vitest project": CI_ONLY,
-    "The deployed frontend sets its security headers": CI_ONLY,
-    "Deploy workflow gating": "10c. workflow gating",
-    "The three gate lists are in lockstep": "10g. gate lockstep",
-    "CLAUDE.md's counts match the tree": "10d. status counters",
-    "Secret-leak grep (validate gate 11)": "11. no secret literals",
-    "The build stamps the commit it was built from": CI_ONLY,
-    "version.json is excluded from the SPA rewrite": CI_ONLY,
-    "DEV fixtures absent from the production bundle": CI_ONLY,
-    "Every CSS token used is a token that exists": "12. css tokens defined",
-    "Behavioural tests still execute": CI_ONLY,
-    "Exactly one <main>, owned by AppMain": CI_ONLY,
+    ("frontend", "Install"): SETUP,
+    ("e2e-today", "Install"): SETUP,
+    ("frontend", "Typecheck"): "1. typecheck",
+    ("frontend", "Lint (warnings fail)"): "2. lint",
+    ("frontend", "Unit tests"): "3. unit tests",
+    ("frontend", "Build"): "4. build",
+    ("frontend", "The built service worker is stamped, and precaches a usable shell"): CI_ONLY,
+    ("frontend", "A production build without Supabase config is refused"): CI_ONLY,
+    ("frontend", "Every test file is claimed by a vitest project"): CI_ONLY,
+    ("frontend", "The deployed frontend sets its security headers"): CI_ONLY,
+    ("frontend", "Deploy workflow gating"): "10c. workflow gating",
+    ("frontend", "The three gate lists are in lockstep"): "10g. gate lockstep",
+    ("frontend", "CLAUDE.md's counts match the tree"): "10d. status counters",
+    ("frontend", "Secret-leak grep (validate gate 11)"): "11. no secret literals",
+    ("frontend", "The build stamps the commit it was built from"): CI_ONLY,
+    ("frontend", "version.json is excluded from the SPA rewrite"): CI_ONLY,
+    ("frontend", "DEV fixtures absent from the production bundle"): CI_ONLY,
+    ("frontend", "Every CSS token used is a token that exists"): "12. css tokens defined",
+    ("frontend", "Behavioural tests still execute"): CI_ONLY,
+    ("frontend", "Exactly one <main>, owned by AppMain"): CI_ONLY,
     # ── e2e ───────────────────────────────────────────────────────────────
-    "Resolve the Playwright version": SETUP,
-    "Chromium browser": SETUP,
-    "Today composition (4 viewports)": "5. e2e",
-    "Today contrast (sampled from the artwork)": "5. e2e",
-    "Tint contrast (rendered component gallery)": "5. e2e",
-    "Today plate responsive candidates": "5. e2e",
-    "Calendar week geometry": "5. e2e",
-    "Every e2e spec is actually run by this workflow": CI_ONLY,
+    ("e2e-today", "Resolve the Playwright version"): SETUP,
+    ("e2e-today", "Chromium browser"): SETUP,
+    ("e2e-today", "Today composition (4 viewports)"): "5. e2e",
+    ("e2e-today", "Today contrast (sampled from the artwork)"): "5. e2e",
+    ("e2e-today", "Tint contrast (rendered component gallery)"): "5. e2e",
+    ("e2e-today", "Today plate responsive candidates"): "5. e2e",
+    ("e2e-today", "Calendar week geometry"): "5. e2e",
+    ("e2e-today", "Every e2e spec is actually run by this workflow"): CI_ONLY,
     # ── edge functions ────────────────────────────────────────────────────
-    "Typecheck entrypoints": "6a. deno check",
-    "Tests": "6b. deno test",
-    "Every 5xx throw carries its cause": CI_ONLY,
-    "No secret logging grep (phase 01 gate)": CI_ONLY,
+    ("edge-functions", "Typecheck entrypoints"): "6a. deno check",
+    ("edge-functions", "Tests"): "6b. deno test",
+    ("edge-functions", "Every 5xx throw carries its cause"): CI_ONLY,
+    ("edge-functions", "No secret logging grep (phase 01 gate)"): CI_ONLY,
     # ── database ──────────────────────────────────────────────────────────
-    "Reset — shim + migrations 0001..NNNN + seed": "7. db reset",
-    "Push endpoint allowlist — both implementations agree": "8c. push endpoint parity",
-    "Walk cost parity — TS leaf, fn_walk_cost and the snapshot trigger agree": "8d. walk cost parity",
-    "Would `supabase db push` apply this?": "7b. db push check",
-    "Smoke suite (credit engine + full spec-03 security matrix)": "8. smoke.sql",
-    "Materializer suite (idempotency, skips, no resurrection)": "8. materializer.sql",
-    "Concurrency suite (the row lock behind invariant 1)": "8b. concurrency suite",
-    "Invariant 1 — credit_balance written only by fn_ledger_apply": CI_ONLY,
-    "The nightly schedule is in a migration": CI_ONLY,
-    "Generated types match the schema": "10b. generated types",
-    "Spec 03's definer catalogue matches the migrations": "10a. definer catalogue",
-    "Spec 01's enum catalogue matches the migrations": "10e. enum catalogue",
-    "The catalogue generators' proof set holds": "10f. catalogue generator proofs",
+    ("database", "Reset — shim + migrations 0001..NNNN + seed"): "7. db reset",
+    ("database", "Push endpoint allowlist — both implementations agree"): "8c. push endpoint parity",
+    ("database", "Walk cost parity — TS leaf, fn_walk_cost and the snapshot trigger agree"): "8d. walk cost parity",
+    ("database", "Would `supabase db push` apply this?"): "7b. db push check",
+    ("database", "Smoke suite (credit engine + full spec-03 security matrix)"): "8. smoke.sql",
+    ("database", "Materializer suite (idempotency, skips, no resurrection)"): "8. materializer.sql",
+    ("database", "Concurrency suite (the row lock behind invariant 1)"): "8b. concurrency suite",
+    ("database", "Invariant 1 — credit_balance written only by fn_ledger_apply"): CI_ONLY,
+    ("database", "The nightly schedule is in a migration"): CI_ONLY,
+    ("database", "Generated types match the schema"): "10b. generated types",
+    ("database", "Spec 03's definer catalogue matches the migrations"): "10a. definer catalogue",
+    ("database", "Spec 01's enum catalogue matches the migrations"): "10e. enum catalogue",
+    ("database", "The catalogue generators' proof set holds"): "10f. catalogue generator proofs",
     # ── migrations ────────────────────────────────────────────────────────
-    "No edits to migrations that already exist on the base branch": "9. append-only migrations",
+    ("migrations-append-only", "No edits to migrations that already exist on the base branch"): "9. append-only migrations",
 }
 
 
-def ci_steps() -> tuple[list[str], list[str]]:
-    """The named `run:` steps in ci.yml, and where the UNNAMED ones are.
+def ci_steps() -> tuple[list[tuple[str, str]], list[str]]:
+    """The named `run:` steps in ci.yml as (job, name), and the UNNAMED ones.
+
+    (job, name), not name — a display name does NOT identify a step, and this
+    workflow already proves it: `Install` appears in both `frontend` and
+    `e2e-today`. Keyed by name alone, a genuinely new check called `Tests` in
+    the `database` job silently inherited `edge-functions`' mapping and the
+    lockstep reported PASS having classified nothing (measured, Codex on
+    PR #94: `PASS: 47 ci.yml run-steps classified`). Rejecting duplicate names
+    outright was the other option offered and would be RED ON A HEALTHY TREE,
+    since the two `Install` steps are both legitimate and both SETUP.
 
     A `uses:` step runs an action, not a check of ours, and has nothing to
     mirror. An unnamed `run:` step is a different matter: `- run: python3
@@ -137,21 +147,21 @@ def ci_steps() -> tuple[list[str], list[str]]:
     unnamed one is returned as a location and fails by name.
     """
     workflow = yaml.safe_load(CI.read_text())
-    names: list[str] = []
+    names: list[tuple[str, str]] = []
     unnamed: list[str] = []
     for job_name, job in workflow["jobs"].items():
         for i, step in enumerate(job.get("steps", [])):
             if "run" not in step:
                 continue
             if "name" in step:
-                names.append(step["name"])
+                names.append((job_name, step["name"]))
             else:
                 unnamed.append(f"{job_name} step {i + 1}")
     return names, unnamed
 
 
 def skill_ci_only() -> list[str]:
-    """The step names listed in SKILL.md §13, read as ``- `exact name` — …``."""
+    """The steps listed in SKILL.md §13, read as ``- `job / exact name` ``."""
     text = SKILL.read_text()
     m = re.search(r"^## 13\..*?$(.*?)(?=^## |\Z)", text, re.M | re.S)
     if not m:
@@ -219,11 +229,12 @@ def main() -> int:
 
     # 1. Every ci.yml check is classified. A new step is in neither the map nor
     #    §13, so it fails here rather than drifting silently.
-    unclassified = [n for n in steps if n not in COVERAGE]
-    for n in unclassified:
+    unclassified = [s for s in steps if s not in COVERAGE]
+    for job, name in unclassified:
         failures.append(
-            f"ci.yml step {n!r} is not classified in scripts/check-gate-lockstep.py — "
-            "give it a validate.sh gate label, or CI_ONLY and a SKILL.md §13 entry"
+            f"ci.yml step {name!r} in job {job!r} is not classified in "
+            "scripts/check-gate-lockstep.py — give it a validate.sh gate label, "
+            "or CI_ONLY and a SKILL.md §13 entry"
         )
 
     # 2. A mapped validate.sh label must exist there, or renaming a gate
@@ -239,7 +250,7 @@ def main() -> int:
     # Contrived as a name, wrong as a rule — the question is whether a ci.yml
     # step claims this label, and a sentinel is not a step claiming anything.
     mapped = {v for v in COVERAGE.values() if v not in (SETUP, CI_ONLY)}
-    for name, target in COVERAGE.items():
+    for (job, name), target in COVERAGE.items():
         if target in (SETUP, CI_ONLY):
             continue
         if target not in labels:
@@ -252,7 +263,8 @@ def main() -> int:
                 else "does not declare"
             )
             failures.append(
-                f"{name!r} claims validate.sh gate {target!r}, which validate.sh {how}"
+                f"{name!r} (job {job!r}) claims validate.sh gate {target!r}, "
+                f"which validate.sh {how}"
             )
 
     # 2b. And the OTHER direction, which the first version did not ask: a gate
@@ -277,15 +289,16 @@ def main() -> int:
 
     # 3. A map entry naming a step ci.yml no longer has is stale, and a stale
     #    exception excuses a real check forever.
-    for name in COVERAGE:
-        if name not in steps:
+    for job, name in COVERAGE:
+        if (job, name) not in steps:
             failures.append(
-                f"scripts/check-gate-lockstep.py maps {name!r}, which is not a step in ci.yml"
+                f"scripts/check-gate-lockstep.py maps {name!r} in job {job!r}, "
+                "which is not a step in ci.yml"
             )
 
     # 4. Every CI_ONLY step is named verbatim in SKILL.md §13, and every §13
     #    entry names one — both directions, because each rots on its own.
-    ci_only = sorted(n for n, t in COVERAGE.items() if t == CI_ONLY)
+    ci_only = sorted(f"{job} / {name}" for (job, name), t in COVERAGE.items() if t == CI_ONLY)
     listed = skill_ci_only()
     if not listed:
         failures.append("read no entries out of SKILL.md §13 — this check is blind")

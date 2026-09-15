@@ -291,28 +291,34 @@ Keep this identical to `.github/workflows/ci.yml`'s step of the same name.
 
 ## 13. The rest of CI's invariant checks
 These run in `ci.yml` and NOWHERE ELSE, so a green `scripts/validate.sh` says
-nothing about them. Every entry is the `ci.yml` step's exact name, and
-`scripts/check-gate-lockstep.py` (gate 10g) fails in both directions: a
-CI-only step missing from this list, and a list entry naming a step that no
-longer exists. The count is checked too — `docs/dev/session-notes.md` told a
-fresh session there were two of these, the spec-drift audit that found it said
-seven, and the measured number is fifteen.
+nothing about them. Every entry is the `ci.yml` job and the step's exact name,
+separated by ` / `. The job is part of the identity because a display NAME is
+not — `Install` exists in two jobs, and keyed by name alone a new check reusing
+an existing name inherited that name's mapping and was classified by nobody.
+
+`scripts/check-gate-lockstep.py` (gate 10g) fails in both directions: a CI-only
+step missing from this list, and a list entry naming a step that no longer
+exists. It checks the count in `docs/dev/session-notes.md` too, which is where
+a fresh session reads it — that number has been wrong twice already (the notes
+said two, the spec-drift audit that found it said seven), which is the argument
+for measuring it rather than writing it into prose. It is fourteen today, and
+this list is the fourteen.
 
 Run one by hand when you touch its subject; read the workflow for what each
 actually does.
 
-- `The built service worker is stamped, and precaches a usable shell`
-- `A production build without Supabase config is refused`
-- `Every test file is claimed by a vitest project`
-- `The deployed frontend sets its security headers`
-- `The build stamps the commit it was built from`
-- `version.json is excluded from the SPA rewrite`
-- `DEV fixtures absent from the production bundle`
-- `Behavioural tests still execute`
-- `Exactly one <main>, owned by AppMain`
-- `Every e2e spec is actually run by this workflow`
-- `Every 5xx throw carries its cause`
-- `No secret logging grep (phase 01 gate)`
-- `Invariant 1 — credit_balance written only by fn_ledger_apply`
-- `The nightly schedule is in a migration`
+- `database / Invariant 1 — credit_balance written only by fn_ledger_apply`
+- `database / The nightly schedule is in a migration`
+- `e2e-today / Every e2e spec is actually run by this workflow`
+- `edge-functions / Every 5xx throw carries its cause`
+- `edge-functions / No secret logging grep (phase 01 gate)`
+- `frontend / A production build without Supabase config is refused`
+- `frontend / Behavioural tests still execute`
+- `frontend / DEV fixtures absent from the production bundle`
+- `frontend / Every test file is claimed by a vitest project`
+- `frontend / Exactly one <main>, owned by AppMain`
+- `frontend / The build stamps the commit it was built from`
+- `frontend / The built service worker is stamped, and precaches a usable shell`
+- `frontend / The deployed frontend sets its security headers`
+- `frontend / version.json is excluded from the SPA rewrite`
 
