@@ -846,11 +846,18 @@ function handedOn(holder: ts.Node): boolean {
  * `const { data: d } = box` is a partial read that never touches it).
  */
 function patternReads(ctx: Ctx, pattern: ts.BindingPattern, path: Path, seen: Set<ts.Node>): boolean {
-  if (path.length === 0) return true; // the value itself, taken apart: a read by construction
-  const [head, ...rest] = path;
-  if (head === UNKNOWN) return false;
   const via = (name: ts.BindingName, p: Path): boolean =>
     ts.isIdentifier(name) ? isReadAfter(ctx, name, seen, p) : patternReads(ctx, name, p, seen);
+  // The value itself, taken apart. Each binding carries a piece of the error,
+  // so the read is whichever piece is READ — taking it apart and discarding
+  // every piece (`const { message } = error; void message;`) inspects
+  // nothing. This is the member hop's rule in its sibling: found by checking
+  // it after Codex's round-sixteen finding, not by the review.
+  if (path.length === 0) {
+    return pattern.elements.some((el) => !ts.isOmittedExpression(el) && via(el.name, []));
+  }
+  const [head, ...rest] = path;
+  if (head === UNKNOWN) return false;
   if (ts.isObjectBindingPattern(pattern)) {
     return pattern.elements.some((el) => {
       if (el.dotDotDotToken) return via(el.name, path);
@@ -2431,6 +2438,21 @@ async function f(db: any) { const { data, error } = await db.from("a").select("i
     expect(one(`declare function log(x: unknown): void;
 async function f(db: any) { const { data, error } = await db.from("a").select("id"); log(error?.message); return data; }`).verdict).toBe("OK");
     expect(one(`async function f(db: any) { const r = await db.from("a").select("id"); if (r.error.code === "PGRST116") return null; return r.data; }`).verdict).toBe("OK");
+  });
+
+  it("taking the error apart is a read only of the piece that is read (own sibling check, PR #92)", () => {
+    // The member hop's rule one function over, in `patternReads`: with the
+    // path empty it answered "a read by construction", so `const { message }
+    // = error; void message;` took the error apart and discarded every piece
+    // while reporting OK. Found by checking the sibling of Codex's
+    // round-sixteen finding rather than by the review.
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const { message } = error; void message; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const { message } = error; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const { ...rest } = error; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const r = await db.from("a").select("id"); const { message } = r.error; void message; return r.data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const { code } = error; if (code) throw error; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const { ...rest } = error; throw rest; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const { details: { hint } } = error; if (hint) throw error; return data; }`).verdict).toBe("OK");
   });
 
   it("a builder REPLACED before it is awaited never runs (Codex, PR #92)", () => {
