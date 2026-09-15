@@ -174,6 +174,14 @@ run "10e. enum catalogue" enum_catalog
 # Reads the migrations only, so it always runs.
 run "10f. enum catalogue proofs" python3 scripts/gen-enum-catalog-proofs.py
 
+# 10g. CLAUDE.md calls ci.yml, SKILL.md and this file a lockstep, and until now
+# nothing checked it: `db-push-check.sh` was CI-only for a whole PR and
+# `concurrency.sh` for another, each found when CI refused a commit that had
+# passed locally. This classifies every ci.yml check as mirrored here, as
+# setup, or as CI-only — and a CI-only one has to be named in SKILL.md §13,
+# which is what a person reads to learn what a green local run did not cover.
+run "10g. gate lockstep" python3 scripts/check-gate-lockstep.py
+
 # ── 11. Secret-leak grep ──────────────────────────────────────────────────
 no_secret_literals() {
   local hits

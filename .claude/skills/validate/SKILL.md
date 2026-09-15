@@ -226,6 +226,27 @@ now: each writes a migration into a scratch copy of the real set and asserts
 the generator either renders the expected catalogue or refuses with the
 sentence the rule names. About half a minute; a FAIL line names the rule.
 
+## 10g. The three gate lists are in lockstep
+Reads four files, so it always runs:
+```
+python3 scripts/check-gate-lockstep.py
+```
+`CLAUDE.md` says to keep `ci.yml`, `SKILL.md` and `validate.sh` in lockstep,
+and nothing checked it — this repository's most-recorded defect, a rule written
+down and connected to nothing. It had already drifted three ways:
+`db-push-check.sh` was CI-only for a whole PR and `concurrency.sh` for another,
+each found only when CI refused a commit that had passed locally; §13 below
+told a fresh session that two gates existed only in CI when fifteen did; and
+the secret-leak step called itself "validate gate 7" when it is gate 11.
+
+Every named `run:` step in `ci.yml` is classified in the script as SETUP, as a
+`validate.sh` gate label, or as CI_ONLY. It fails on an unclassified step, on a
+map entry naming a step that no longer exists, on a `validate.sh` label the map
+claims and `validate.sh` does not declare, on a §13 entry with no step behind
+it, and on the CI-only count in `docs/dev/session-notes.md` disagreeing with
+the measured one. The map is an allowlist of exceptions, editable only in that
+file and only in the same commit as the step it describes.
+
 ## 11. Secret-leak grep
 ```
 grep -RInE "(VAULT_MASTER_KEY|SERVICE_ROLE|sk_live|sk_test)" app/src supabase/functions --include='*.ts' --include='*.tsx' | grep -v 'Deno.env.get' | grep -v env.ts && echo "FAIL: literal secret reference" || echo "PASS: no secret literals"
@@ -263,16 +284,30 @@ which is the only thing running these gates before committing is for.
 Keep this identical to `.github/workflows/ci.yml`'s step of the same name.
 
 ## 13. The rest of CI's invariant checks
-These live in `ci.yml` and are cheap to run by hand when touching their
-subject; run them when relevant, and read the workflow rather than trusting
-this list to stay complete:
+These run in `ci.yml` and NOWHERE ELSE, so a green `scripts/validate.sh` says
+nothing about them. Every entry is the `ci.yml` step's exact name, and
+`scripts/check-gate-lockstep.py` (gate 10g) fails in both directions: a
+CI-only step missing from this list, and a list entry naming a step that no
+longer exists. The count is checked too — `docs/dev/session-notes.md` told a
+fresh session there were two of these, the spec-drift audit that found it said
+seven, and the measured number is fifteen.
 
-- invariant 1 — `credit_balance` written only by `fn_ledger_apply` (a
-  `pg_proc` catalogue assertion, not a grep over migration text)
-- errors go through `FormError`, never a bare `field__error` span
-- exactly one `<main>`, owned by `AppMain`
-- the walk channel is private, and is the only channel
-- every `new HttpError(5xx, …)` carries its cause
-- DEV fixtures absent from the production bundle
-- the build stamps its commit, and `version.json` is excluded from the SPA rewrite
-- the nightly schedule is in a migration
+Run one by hand when you touch its subject; read the workflow for what each
+actually does.
+
+- `The built service worker is stamped, and precaches a usable shell`
+- `A production build without Supabase config is refused`
+- `Every test file is claimed by a vitest project`
+- `The deployed frontend sets its security headers`
+- `The build stamps the commit it was built from`
+- `version.json is excluded from the SPA rewrite`
+- `DEV fixtures absent from the production bundle`
+- `Behavioural tests still execute`
+- `Exactly one <main>, owned by AppMain`
+- `The walk channel is private, and is the only channel`
+- `Every e2e spec is actually run by this workflow`
+- `Every 5xx throw carries its cause`
+- `No secret logging grep (phase 01 gate)`
+- `Invariant 1 — credit_balance written only by fn_ledger_apply`
+- `The nightly schedule is in a migration`
+

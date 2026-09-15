@@ -293,6 +293,25 @@ function intercepts(
 
 const SUPABASE = "https://abcdefgh.supabase.co";
 
+/**
+ * The SAME origin as the worker (see `loadServiceWorker`'s `location`). These
+ * fixtures are the load-bearing half of the suite below, and their absence was
+ * a defect found by the spec-drift audit: every Supabase fixture used to be
+ * cross-origin, and `sw.js`'s fetch handler returns early for ANY cross-origin
+ * request before it reaches `cacheFirst`. So the five never-cache assertions
+ * were satisfied by the origin check alone — measured, replacing
+ * `isNeverCache`'s body with `return false` left all 31 tests green.
+ *
+ * Supabase is cross-origin in the deployment this repo ships today
+ * (`connect-src https://*.supabase.co` in `vercel.json`), which is exactly why
+ * the same-origin case has to be asserted rather than observed: `isNeverCache`
+ * is the rule that still holds if the API is ever put behind the app's own
+ * origin — a Supabase custom domain, or a proxy rewrite — and on that day the
+ * origin check protects nothing. A rule nothing exercises is a rule that has
+ * already quietly stopped working.
+ */
+const SAME_ORIGIN = "https://app.sanpo.test";
+
 describe("the service worker never caches Supabase traffic", () => {
   let handlers: Handlers;
   beforeEach(() => {
@@ -318,6 +337,17 @@ describe("the service worker never caches Supabase traffic", () => {
   for (const [what, url] of neverCached) {
     it(`goes straight to the network for ${what}`, () => {
       expect(intercepts(handlers, url), `${url} was intercepted by the worker`).toBe(false);
+    });
+
+    // The same path family on the worker's OWN origin, where the handler's
+    // origin check does not answer the question and `isNeverCache` is the only
+    // thing standing between a PostgREST response and the shell cache.
+    it(`goes straight to the network for same-origin ${what}`, () => {
+      const sameOrigin = SAME_ORIGIN + new URL(url).pathname + new URL(url).search;
+      expect(
+        intercepts(handlers, sameOrigin),
+        `${sameOrigin} was intercepted by the worker — isNeverCache is not deciding this`,
+      ).toBe(false);
     });
   }
 

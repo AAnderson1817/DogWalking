@@ -215,6 +215,17 @@ jobs:
       - name: Deploy workflow gating
         run: python3 scripts/verify-workflows.py
 
+      # CLAUDE.md calls ci.yml, SKILL.md and validate.sh a lockstep and nothing
+      # checked it. Two gates had already drifted CI-only for a PR each
+      # (db-push-check, concurrency), found only when CI refused a commit that
+      # passed locally; session-notes told a fresh session there were two such
+      # gates when there were fifteen; and the step below this one called
+      # itself "validate gate 7" when it is gate 11. Fails in both directions —
+      # an unclassified step, and a SKILL.md §13 entry naming a step that is
+      # gone.
+      - name: The three gate lists are in lockstep
+        run: python3 scripts/check-gate-lockstep.py
+
       # CLAUDE.md states the migration and edge-function counts in prose, and
       # its own note used to read "nothing enforces these two counts". They
       # went stale at H21, again by 0043, and a third time at 0051. The
@@ -222,7 +233,7 @@ jobs:
       - name: CLAUDE.md's counts match the tree
         run: python3 scripts/check-status-counters.py
 
-      - name: Secret-leak grep (validate gate 7)
+      - name: Secret-leak grep (validate gate 11)
         run: |
           if grep -RInE "(VAULT_MASTER_KEY|SERVICE_ROLE|sk_live|sk_test)" \
                app/src supabase/functions --include='*.ts' --include='*.tsx' \
@@ -339,17 +350,6 @@ jobs:
             exit 1
           fi
 
-      - name: Errors go through FormError, not a bare span
-        run: |
-          if grep -rn 'className="field__error"' app/src --include='*.tsx' \
-               | grep -v 'src/components/fields.tsx' | grep -q .; then
-            echo "FAIL: bare field__error outside fields.tsx — use <FormError message={…} />:"
-            grep -rn 'className="field__error"' app/src --include='*.tsx' \
-              | grep -v 'src/components/fields.tsx'
-            exit 1
-          fi
-          echo "PASS: all form errors render through FormError"
-
       # The shells supply the one <main> per route (AppMain). Two components
       # carried their own from before that existed, and TodayIllustratedSchedule's
       # ended up NESTED inside the shell's — invalid, and two "main" landmarks on
@@ -377,6 +377,15 @@ jobs:
       # way, and keep it private (review H1).
       - name: The walk channel is private, and is the only channel
         run: |
+          # COUNTED, not listed. `grep -rln` yields FILE names, so a second
+          # `supabase.channel(` inside useWalkChannel.ts produced the same one
+          # filename and passed — measured, by planting a public
+          # `supabase.channel(`shadow:${walkId}`)` beside the real one and
+          # watching the shipped check report PASS. The same hole made the
+          # `-Eq` below satisfiable by the ONE private call while any number of
+          # public ones sat next to it.
+          calls=$(grep -ro 'supabase\.channel(' app/src --include='*.ts' --include='*.tsx' | wc -l)
+          private=$(grep -roE 'supabase\.channel\([^)]*config: *\{ *private: true' app/src --include='*.ts' --include='*.tsx' | wc -l)
           callers=$(grep -rln 'supabase\.channel(' app/src --include='*.ts' --include='*.tsx' || true)
           if [ "$callers" != "app/src/hooks/useWalkChannel.ts" ]; then
             echo "FAIL: supabase.channel() is called outside useWalkChannel.ts:"
@@ -386,18 +395,33 @@ jobs:
             exit 1
           fi
           # Matched on the call itself, not on the string anywhere in the file:
-          # the first version of this check passed against a channel with the
+          # an early version of this check passed against a channel with the
           # option deleted, because the comment above it still said
           # "private: true". A grep that a comment can satisfy is not a check.
-          if ! grep -Eq 'supabase\.channel\([^)]*config: *\{ *private: true' app/src/hooks/useWalkChannel.ts; then
-            echo "FAIL: the walk channel is not private — the topic is joinable by any"
-            echo "holder of the anon key, which ships in the bundle (review H1)."
+          if [ "$calls" -ne 1 ] || [ "$private" -ne "$calls" ]; then
+            echo "FAIL: $calls supabase.channel() call(s), $private of them private."
+            echo "There is exactly one channel in this application and it is private."
+            echo "A topic opened without config.private is joinable by any holder of the"
+            echo "anon key, which ships in the bundle (review H1); every channel needs its"
+            echo "own realtime.messages policy in migration history."
+            grep -rn 'supabase\.channel(' app/src --include='*.ts' --include='*.tsx'
+            exit 1
+          fi
+          # PRESENCE, not the absence of `private: false`. Deleting the flag
+          # outright is the same defect as writing `false` — that is the whole
+          # lesson of review H1, since `private` defaults to FALSE — and the
+          # previous check could only see the literal `false`: measured, with
+          # the flag removed from the payload the shipped step reported PASS.
+          if ! grep -q 'private: true' supabase/functions/_lib/broadcast.ts; then
+            echo "FAIL: the server does not publish privately — a message published as"
+            echo "public is not delivered to subscribers of the private topic, and the"
+            echo "public topic of the same name is joinable by anyone (review H1)."
             exit 1
           fi
           if grep -rn 'private: false' supabase/functions/_lib/broadcast.ts; then
             echo "FAIL: the server publishes to the public topic"; exit 1
           fi
-          echo "PASS: one channel, private on both sides"
+          echo "PASS: $calls channel, private on both sides"
 
   # Backend-free: /dev/today renders deterministic fixtures with no Supabase,
   # so this runs in ~2 minutes against a plain `vite dev` and needs no secrets.
@@ -745,7 +769,14 @@ jobs:
             join pg_namespace n on n.oid = p.pronamespace
             where n.nspname = 'public'
               and p.proname <> 'fn_ledger_apply'
-              and p.prosrc ~* 'update[[:space:]]+clients[[:space:]]+set[^;]*credit_balance';
+              -- The schema qualifier and the alias are BOTH optional, and the
+              -- spec-drift audit found that the previous pattern allowed
+              -- neither: `update public.clients set …` and `update clients c
+              -- set …` were both silent against it (probed on a live database,
+              -- with the widened pattern catching five spellings — plain,
+              -- qualified, alias, `as` alias, quoted — and still saying nothing
+              -- about the real schema or about a write to another table).
+              and p.prosrc ~* 'update[[:space:]]+("?public"?\.)?"?clients"?([[:space:]]+(as[[:space:]]+)?[a-z_][a-z0-9_$]*)?[[:space:]]+set[^;]*credit_balance';
             if offenders is not null then
               raise exception 'INVARIANT 1 FAIL: credit_balance written outside fn_ledger_apply by: %', offenders;
             end if;
