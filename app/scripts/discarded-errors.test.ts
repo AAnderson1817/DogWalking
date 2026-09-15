@@ -507,6 +507,34 @@ function nextWriteTo(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node
   return Math.min(Infinity, ...writesTo(checker, sym, container).map((w) => executesAt(w, container, bound)).filter((w) => w > bound.pos));
 }
 
+/**
+ * The next write to `<sym>.<key>` — `box.error = fallback`, `box["error"] ??=
+ * …`, `delete box.error`, or a write through a key the gate cannot read. A
+ * value that CARRIES the error at `key` stops carrying it there once that
+ * member is replaced, which is the in-literal override (round seventeen) one
+ * statement later; a write to any OTHER member leaves it alone.
+ */
+function nextPropertyWriteTo(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node, bound: ts.Identifier, key: Key): number {
+  if (key === UNKNOWN) return Infinity;
+  const out: Write[] = [];
+  const hits = (target: ts.Node) => {
+    const m = target.kind === ts.SyntaxKind.PropertyAccessExpression || target.kind === ts.SyntaxKind.ElementAccessExpression
+      ? target as ts.PropertyAccessExpression | ts.ElementAccessExpression : null;
+    if (!m) return;
+    const receiver = m.expression;
+    if (!ts.isIdentifier(receiver) || symbolOf(checker, receiver) !== sym) return;
+    const k = ts.isPropertyAccessExpression(m) ? m.name.text : keyOf(m.argumentExpression);
+    if (k === UNKNOWN || k === key || String(k) === String(key)) out.push({ pos: m.pos, node: m });
+  };
+  const visit = (n: ts.Node) => {
+    if (ts.isBinaryExpression(n) && isAssignmentKind(n.operatorToken.kind)) hits(n.left);
+    if (ts.isDeleteExpression(n)) hits(n.expression);
+    ts.forEachChild(n, visit);
+  };
+  visit(container);
+  return Math.min(Infinity, ...out.map((w) => executesAt(w, container, bound)).filter((w) => w > bound.pos));
+}
+
 /** Every function nested inside `container` that encloses `n`, outermost first. */
 function closuresAround(n: ts.Node, container: ts.Node): ts.Node[] {
   const out: ts.Node[] = [];
@@ -818,17 +846,41 @@ function indexOf(list: ts.NodeArray<ts.Node>, element: ts.Node): Key {
  * that carries the error rather than to any member at all (Codex on PR
  * #92, round fifteen: `const box = { error, data }; return box.data;`).
  */
-function aggregateHolding(holder: ts.Node): { literal: ts.Node; key: Key | null } | null {
+function aggregateHolding(holder: ts.Node): { literal: ts.Node; key: Key | null; element: ts.Node } | null {
   const h = holder.parent;
-  if (ts.isPropertyAssignment(h) && h.initializer === holder) return { literal: h.parent, key: keyOf(h.name) };
-  if (ts.isShorthandPropertyAssignment(h)) return { literal: h.parent, key: h.name.text };
+  if (ts.isPropertyAssignment(h) && h.initializer === holder) return { literal: h.parent, key: keyOf(h.name), element: h };
+  if (ts.isShorthandPropertyAssignment(h)) return { literal: h.parent, key: h.name.text, element: h };
   // An object spread copies the keys of its operand through unchanged (`key:
   // null`, resolved against the path at the call site); an array spread
   // scatters them.
-  if (ts.isSpreadAssignment(h)) return { literal: h.parent, key: null };
-  if (ts.isArrayLiteralExpression(h)) return { literal: h, key: indexOf(h.elements, holder) };
-  if (ts.isSpreadElement(h) && ts.isArrayLiteralExpression(h.parent)) return { literal: h.parent, key: UNKNOWN };
+  if (ts.isSpreadAssignment(h)) return { literal: h.parent, key: null, element: h };
+  if (ts.isArrayLiteralExpression(h)) return { literal: h, key: indexOf(h.elements, holder), element: holder };
+  if (ts.isSpreadElement(h) && ts.isArrayLiteralExpression(h.parent)) return { literal: h.parent, key: UNKNOWN, element: h };
   return null;
+}
+
+/**
+ * Inside one object literal, can an element AFTER `element` define `key`
+ * again? The last definition wins, so `const box = { ...carrier, error:
+ * fallback }` hands back the fallback and a later `box.error` observes it,
+ * never the query's error (Codex on PR #92, round seventeen). A property of
+ * the same name, a computed key and a spread of anything all may; an array
+ * literal cannot, since a later element shifts no earlier index (and
+ * `indexOf` already gives up at a spread).
+ */
+function mayRedefine(literal: ts.Node, element: ts.Node, key: Key): boolean {
+  if (key === UNKNOWN || !ts.isObjectLiteralExpression(literal)) return false;
+  let after = false;
+  for (const p of literal.properties) {
+    if (p === element) { after = true; continue; }
+    if (!after) continue;
+    if (ts.isSpreadAssignment(p)) return true;
+    const k = ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p) ||
+      ts.isMethodDeclaration(p) || ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p)
+      ? keyOf(p.name) : UNKNOWN;
+    if (k === UNKNOWN || k === key) return true;
+  }
+  return false;
 }
 
 /** Does this consumer take the WHOLE value somewhere the gate cannot follow but a reader plausibly inspects it — a call, a `return`, a `throw`, a `yield`? */
@@ -919,7 +971,12 @@ function consumes(ctx: Ctx, n: ts.Node, seen: Set<ts.Node> = new Set(), path: Pa
     const carried: Path = aggregate.key === null
       ? (path.length === 0 ? [UNKNOWN] : path)
       : [aggregate.key, ...path];
-    return consumes(ctx, aggregate.literal, seen, carried);
+    // …and only while the rest of the literal leaves that key alone.
+    const head = carried[0];
+    const kept: Path = head !== undefined && mayRedefine(aggregate.literal, aggregate.element, head)
+      ? [UNKNOWN, ...carried.slice(1)]
+      : carried;
+    return consumes(ctx, aggregate.literal, seen, kept);
   }
   // Taken apart by a pattern: `const { error: e } = box`.
   if (ts.isVariableDeclaration(h) && h.initializer === holder && !ts.isIdentifier(h.name)) {
@@ -968,7 +1025,10 @@ function isReadAfter(ctx: Ctx, bound: ts.Identifier, seen: Set<ts.Node> = new Se
   const sym = symbolOf(ctx.checker, bound);
   if (!sym) return false;
   const container = scopeContainer(bound);
-  const overwritten = nextWriteTo(ctx.checker, sym, container, bound);
+  const overwritten = Math.min(
+    nextWriteTo(ctx.checker, sym, container, bound),
+    path.length > 0 ? nextPropertyWriteTo(ctx.checker, sym, container, bound, path[0]!) : Infinity,
+  );
   return usesOf(ctx.checker, sym, container).some((u) =>
     readsInWindow(u, bound, overwritten, container, ctx.checker) && consumes(ctx, u, seen, path)
   );
@@ -2453,6 +2513,28 @@ async function f(db: any) { const { data, error } = await db.from("a").select("i
     expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const { code } = error; if (code) throw error; return data; }`).verdict).toBe("OK");
     expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const { ...rest } = error; throw rest; }`).verdict).toBe("OK");
     expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const { details: { hint } } = error; if (hint) throw error; return data; }`).verdict).toBe("OK");
+  });
+
+  it("a carried key stops carrying the error once it is redefined (Codex, PR #92)", () => {
+    // Round seventeen: the key travelled with the value and nothing asked
+    // whether it survived. `{ ...carrier, error: fallback }` hands back the
+    // fallback, so `box.error` can only ever observe THAT — measured OK on
+    // the shipped gate, with a later computed key and a later spread beside
+    // it. The same one statement on: `box.error = fallback` replaces the
+    // member the path names, which is a write the read window did not close.
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const carrier = { error }; const box = { ...carrier, error: fallback }; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, k: string, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error, [k]: fallback }; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, extra: any) { const { data, error } = await db.from("a").select("id"); const box = { error, ...extra }; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; box.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { cause: error }; box.cause = fallback; if (box.cause) throw box.cause; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { cause: error }; delete box.cause; if (box.cause) throw box.cause; return data; }`).verdict).toBe("DISCARDED");
+    // The carrier wins when it comes LAST; a write to another member, an
+    // earlier sibling and an array's stable index all leave the path alone.
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const carrier = { error }; const box = { error: fallback, ...carrier }; if (box.error) throw box.error; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { cause: error, note: "x" }; box.note = fallback; if (box.cause) throw box.cause; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { const { data, error } = await db.from("a").select("id"); const box = { error, data }; if (box.error) throw box.error; return box.data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any, more: any[]) { const { data, error } = await db.from("a").select("id"); const errs = [error, ...more]; if (errs[0]) throw errs[0]; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; if (box.error) throw box.error; box.error = fallback; return data; }`).verdict).toBe("OK");
   });
 
   it("a builder REPLACED before it is awaited never runs (Codex, PR #92)", () => {
