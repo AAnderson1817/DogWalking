@@ -412,18 +412,28 @@ function serveFunctionLines(file: string): number[] {
   const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 
   // The local names bound to `_lib/http.ts`'s `serveFunction`. A named import
-  // may be renamed (`serveFunction as serve`), and that is still the wrapper.
+  // may be renamed (`serveFunction as serve`), and that is still the wrapper —
+  // and so is a NAMESPACE import, `import * as http from "…/_lib/http.ts"`,
+  // whose `http.serveFunction(…)` the first version read as unhoused and
+  // demanded a bespoke production contract for (Codex, PR #94: red on a
+  // healthy tree).
   const bound = new Set<string>();
+  const namespaces = new Set<string>();
   for (const st of sf.statements) {
     if (!ts.isImportDeclaration(st) || !ts.isStringLiteralLike(st.moduleSpecifier)) continue;
     if (!/(^|\/)_lib\/http\.ts$/.test(st.moduleSpecifier.text)) continue;
     const named = st.importClause?.namedBindings;
-    if (!named || !ts.isNamedImports(named)) continue;
+    if (!named) continue;
+    if (ts.isNamespaceImport(named)) {
+      namespaces.add(named.name.text);
+      continue;
+    }
+    if (!ts.isNamedImports(named)) continue;
     for (const el of named.elements) {
       if ((el.propertyName ?? el.name).text === "serveFunction") bound.add(el.name.text);
     }
   }
-  if (bound.size === 0) return [];
+  if (bound.size === 0 && namespaces.size === 0) return [];
 
   // `await x`, `(x)`, `x as T`, `x!`, `x satisfies T` and `void x` all hand
   // the same call through — `void serveFunction(handle)` still invokes the
@@ -444,7 +454,16 @@ function serveFunctionLines(file: string): number[] {
   const isWrapperCall = (e: ts.Expression | undefined): boolean => {
     if (!e) return false;
     const c = unwrap(e);
-    return ts.isCallExpression(c) && ts.isIdentifier(c.expression) && bound.has(c.expression.text);
+    if (!ts.isCallExpression(c)) return false;
+    const callee = unwrap(c.expression);
+    if (ts.isIdentifier(callee)) return bound.has(callee.text);
+    // `http.serveFunction(…)` through a namespace import of the same module.
+    return (
+      ts.isPropertyAccessExpression(callee) &&
+      callee.name.text === "serveFunction" &&
+      ts.isIdentifier(callee.expression) &&
+      namespaces.has(callee.expression.text)
+    );
   };
 
   const lines: number[] = [];
@@ -571,6 +590,11 @@ describe("verify-deployment: the read-only argument", () => {
     // spelling exists to say "I am deliberately not awaiting this".
     put("omicron", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nvoid serveFunction(handle);\n');
     put("pi", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nvoid (await serveFunction(handle));\n');
+    // Housed through a NAMESPACE import of the same module.
+    put("rho", "index.ts", 'import * as http from "../_lib/http.ts";\nhttp.serveFunction(handle);\n');
+    // NOT housed: the same spelling on a namespace of a DIFFERENT module is
+    // not the house wrapper, which is the whole point of reading the import.
+    put("sigma", "index.ts", 'import * as other from "./other.ts";\nother.serveFunction(handle);\nDeno.serve(handle);\n');
     // NOT housed, and this one isolates the ENTRYPOINT rule from the
     // module-scope rule: a sibling file calls `serveFunction` at top level,
     // and nothing imports it. Written because the first version of `eta`
@@ -600,6 +624,8 @@ describe("verify-deployment: the read-only argument", () => {
       xi: true,
       omicron: true,
       pi: true,
+      rho: true,
+      sigma: false,
     });
   });
 

@@ -671,7 +671,22 @@ describe("the walk channel is the only channel, and it is private on both sides"
       .toEqual(["<unresolvable spread `c`>"]);
     // An enum and a namespace introduce a VALUE binding, so either shadows an
     // outer object — the confident-wrong-answer hazard the shadow rule is for.
+    // So does the NAME of a function or class EXPRESSION, inside its own body.
     expect(read("const c = { private: true };\nfunction f() { enum c { x } ; return c; }\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read("const c = { private: true };\nconst F = function c() { return c; };\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read("const c = { private: true };\nconst K = class c {};\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    // `??=` and `||=` cannot assign to a name this map holds, because it only
+    // ever holds names initialised to an OBJECT LITERAL — non-nullish and
+    // truthy — so treating them as a definite rebinding threw away a literal
+    // the program still holds. `&&=` is the mirror and does rebind.
+    expect(read("let c = { private: true };\nc ??= other;\nsend({ topic, ...c });"))
+      .toEqual(["true"]);
+    expect(read("let c = { private: true };\nc ||= other;\nsend({ topic, ...c });"))
+      .toEqual(["true"]);
+    expect(read("let c = { private: true };\nc &&= other;\nsend({ topic, ...c });"))
       .toEqual(["<unresolvable spread `c`>"]);
     // PINNED REFUSAL, not an accident: an alias rebound BEFORE it is mutated
     // still invalidates the original. Dropping the stale edge needs to know

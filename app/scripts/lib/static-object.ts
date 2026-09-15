@@ -183,12 +183,16 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
       linkBinding(n.name, n.initializer);
     } else if (
       (ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n) ||
-        ts.isEnumDeclaration(n) || ts.isModuleDeclaration(n)) &&
+        ts.isEnumDeclaration(n) || ts.isModuleDeclaration(n) ||
+        ts.isFunctionExpression(n) || ts.isClassExpression(n)) &&
       n.name && ts.isIdentifier(n.name)
     ) {
       // An enum and a namespace introduce a VALUE binding, so either can
       // shadow an outer object and make this map answer confidently and
-      // wrongly — the hazard the shadow rule exists for.
+      // wrongly — the hazard the shadow rule exists for. So does the NAME of a
+      // function or class EXPRESSION, which binds inside its own body:
+      // `const C = function attrs() { … attrs … }` refers to the function
+      // there, not to an outer `attrs`.
       bind(n.name.text, null);
     } else if (ts.isImportSpecifier(n) || ts.isImportClause(n) || ts.isNamespaceImport(n)) {
       if (n.name && ts.isIdentifier(n.name)) bind(n.name.text, null);
@@ -198,30 +202,29 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
 
     // Rebinding the NAME: `x = …`, every compound form, and `x++`. A
     // destructuring assignment target counts too.
-    if (ts.isBinaryExpression(n) && isAssignmentOperator(n.operatorToken.kind)) {
+    if (ts.isBinaryExpression(n) && isDefiniteRebinding(n.operatorToken.kind)) {
       collectAssignmentTargets(n.left, rebound);
-      // `a = config` also makes the two names one object from here on — and so
-      // does `[a] = [config]` or `({ a } = { a: config })`, which the first
-      // version of this edge did not see. Rather than match a destructuring
-      // pattern positionally (the right side can be any expression, so the
-      // matching is not always possible), every target is linked to every
-      // identifier the right side mentions. That OVER-links, which is the
-      // conservative direction Codex offered as the alternative: it can refuse
-      // a name nothing touched, never miss one that was mutated.
-      //
-      // A LOGICAL assignment (`a ??= config`, `||=`, `&&=`) assigns the right
-      // side when it runs, so it forms the same alias. It is linked here and
-      // deliberately NOT treated as a definite rebinding above, which is the
-      // same asymmetry for the same reason: linking is the conservative
-      // direction, and claiming the name definitely holds the new value is
-      // not.
-      if (isAliasFormingAssignment(n.operatorToken.kind)) {
-        const targets = new Set<string>();
-        collectAssignmentTargets(n.left, targets);
-        const sources = new Set<string>();
-        collectIdentifiers(n.right, sources);
-        for (const target of targets) for (const source of sources) link(target, source);
-      }
+    }
+    // ALIASING is a separate question from rebinding and therefore a separate
+    // block, which the first version of this got wrong by nesting one inside
+    // the other: excluding `??=` from rebinding then silently excluded it from
+    // the alias graph too, so `let a; a ??= config; a.private = false;` stopped
+    // invalidating `config` — caught by this file's own fixtures rather than by
+    // review, which is what they are for.
+    //
+    // `a = config` makes the two names one object from here on, and so does
+    // `[a] = [config]` or `({ a } = { a: config })`. Rather than match a
+    // destructuring pattern positionally (the right side can be any
+    // expression, so the matching is not always possible), every target is
+    // linked to every identifier the right side mentions. That OVER-links,
+    // which is the conservative direction: it can refuse a name nothing
+    // touched, never miss one that was mutated.
+    if (ts.isBinaryExpression(n) && isAliasFormingAssignment(n.operatorToken.kind)) {
+      const targets = new Set<string>();
+      collectAssignmentTargets(n.left, targets);
+      const sources = new Set<string>();
+      collectIdentifiers(n.right, sources);
+      for (const target of targets) for (const source of sources) link(target, source);
     }
     if (
       (ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) &&
@@ -358,8 +361,11 @@ function collectIdentifiers(e: ts.Expression, into: Set<string>): void {
  * The assignments that make two names one object: `=` and the LOGICAL forms.
  *
  * `a ??= config` assigns `config` when it runs, so it forms an alias exactly as
- * `a = config` does. It is not, however, a definite REBINDING — it may not run
- * at all — which is why the two questions have different predicates.
+ * `a = config` does. It is not, however, a definite REBINDING — see
+ * `isDefiniteRebinding`, which is why the two questions have different
+ * predicates. The first version of this said so in a comment and then used one
+ * predicate for both, which is the defect the comment described (Codex,
+ * PR #94).
  */
 function isAliasFormingAssignment(kind: ts.SyntaxKind): boolean {
   return (
@@ -368,6 +374,28 @@ function isAliasFormingAssignment(kind: ts.SyntaxKind): boolean {
     kind === ts.SyntaxKind.BarBarEqualsToken ||
     kind === ts.SyntaxKind.AmpersandAmpersandEqualsToken
   );
+}
+
+/**
+ * The assignments that definitely REPLACE what a name holds.
+ *
+ * `??=` and `||=` are excluded, and the reason is a property of this map
+ * rather than a guess about control flow: a name is only ever IN it when its
+ * declaration initializer is an OBJECT LITERAL, which is both non-nullish and
+ * truthy — so neither of those operators can assign to such a name, and
+ * treating them as a rebinding threw away a literal the program still holds.
+ * `&&=` is the mirror: a truthy left side means it ALWAYS assigns, so it is a
+ * definite rebinding. Every other compound operator (`+=` and friends)
+ * replaces the value with something that is not the object, and counts.
+ */
+function isDefiniteRebinding(kind: ts.SyntaxKind): boolean {
+  if (
+    kind === ts.SyntaxKind.QuestionQuestionEqualsToken ||
+    kind === ts.SyntaxKind.BarBarEqualsToken
+  ) {
+    return false;
+  }
+  return isAssignmentOperator(kind);
 }
 
 /** Every assignment operator, `=` and the compound ones alike. */
