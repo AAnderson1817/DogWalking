@@ -213,7 +213,7 @@ whole enums — on the file an engineer reads to learn which statuses exist.
 Same shape as 10a, and red for the same false reason when
 `docs/spec/01-data-model.md` is merely uncommitted.
 
-## 10f. The enum catalogue generator's proof set holds
+## 10f. The catalogue generators' proof set holds
 Reads the migrations only, so it always runs:
 ```
 python3 scripts/gen-enum-catalog-proofs.py
@@ -225,6 +225,12 @@ connected to nothing once the container is gone. The probes are committed
 now: each writes a migration into a scratch copy of the real set and asserts
 the generator either renders the expected catalogue or refuses with the
 sentence the rule names. About half a minute; a FAIL line names the rule.
+
+It covers BOTH catalogue generators. `gen-definer-catalog.py` (gate 10a) read
+migrations with the naive comment-stripping regex pair `gen-enum-catalog.py`
+had to replace, so it carries its own probes here — the file name still says
+`enum` because renaming it would cost more than it tells anyone, and the
+footer says `catalogue-generator proofs` rather than `enum`.
 
 ## 10g. The three gate lists are in lockstep
 Reads four files, so it always runs:

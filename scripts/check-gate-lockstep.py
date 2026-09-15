@@ -106,7 +106,7 @@ COVERAGE: dict[str, str] = {
     "Generated types match the schema": "10b. generated types",
     "Spec 03's definer catalogue matches the migrations": "10a. definer catalogue",
     "Spec 01's enum catalogue matches the migrations": "10e. enum catalogue",
-    "The enum catalogue generator's proof set holds": "10f. enum catalogue proofs",
+    "The catalogue generators' proof set holds": "10f. catalogue generator proofs",
     # ── migrations ────────────────────────────────────────────────────────
     "No edits to migrations that already exist on the base branch": "9. append-only migrations",
 }

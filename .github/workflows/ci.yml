@@ -856,7 +856,7 @@ jobs:
       # each fix was proven red first — in a session scratchpad, which is a
       # rule connected to nothing once the container is gone. The probes are
       # a committed test now (validate gate 10f).
-      - name: The enum catalogue generator's proof set holds
+      - name: The catalogue generators' proof set holds
         run: python3 scripts/gen-enum-catalog-proofs.py
 
   # CLAUDE.md invariant 6 says migrations are append-only once applied. That
