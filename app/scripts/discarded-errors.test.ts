@@ -559,13 +559,25 @@ function rootOf(checker: ts.TypeChecker, id: ts.Identifier, container: ts.Node, 
   // assignment inside a closure may never run, and `executesAt` puts it at the
   // closure's creation, which is right for "this may have happened by now" and
   // wrong for "this decided what the name is" — it reported a genuine read
-  // DISCARDED (Codex on PR #92, round twenty-one). A write the gate cannot
-  // place leaves the name rooted at itself: unknown, not assumed.
-  const writes = writesTo(checker, sym, container)
-    .filter((w) => closureOf(w.node, container) === null && established(w.node, id, container))
+  // DISCARDED (Codex on PR #92, round twenty-one).
+  //
+  // A write that MIGHT have run is neither, and the two halves of that are
+  // what rounds twenty-one and twenty-two are: a closure the gate cannot see
+  // invoked CANNOT run, so it neither gives provenance nor takes it away,
+  // while a write in a branch — or in a closure that IS invoked — leaves the
+  // name unknown, which is null here and makes the caller treat a write
+  // through it as possibly landing on the error (Codex, round twenty-two:
+  // filtering those out instead let the declaration answer as though the
+  // branch could never be taken).
+  const before = writesTo(checker, sym, container)
     .map((w) => ({ pos: executesAt(w, container, id), node: w.node }))
-    .filter((w) => w.pos < at)
-    .sort((a, b) => b.pos - a.pos);
+    .filter((w) => w.pos < at);
+  const live = before.filter((w) => {
+    const fn = closureOf(w.node, container);
+    return fn === null || visiblyInvoked(fn, container, checker, id);
+  });
+  if (live.some((w) => closureOf(w.node, container) !== null || !established(w.node, id, container))) return null;
+  const writes = live.sort((a, b) => b.pos - a.pos);
   const last = writes[0];
   let source: { pos: number; expr: ts.Expression } | null = null;
   if (last) {
@@ -609,7 +621,7 @@ function rootOf(checker: ts.TypeChecker, id: ts.Identifier, container: ts.Node, 
 function nextPropertyWriteTo(checker: ts.TypeChecker, container: ts.Node, bound: ts.Identifier, path: Path): number {
   if (path.length === 0) return Infinity;
   const here = rootOf(checker, bound, container, bound.pos);
-  if (!here) return Infinity;
+  if (!here) return Infinity; // the read side itself unknown: the binding-write window still applies
   // Where the error sits, said from the root: the keys to this binding, then
   // the path it carries.
   const carriedFromRoot = [...here.keys, ...path];
@@ -618,8 +630,11 @@ function nextPropertyWriteTo(checker: ts.TypeChecker, container: ts.Node, bound:
     const chain = memberChain(target);
     if (!chain) return;
     const from = rootOf(checker, chain.base, container, target.pos);
-    if (!from || from.sym !== here.sym) return;
-    const written = [...from.keys, ...chain.keys];
+    // A base the gate cannot resolve MIGHT be this object, so its write might
+    // be the one that replaces the error: refused rather than assumed away
+    // (Codex on PR #92, round twenty-two).
+    if (from && from.sym !== here.sym) return;
+    const written = from ? [...from.keys, ...chain.keys] : [...here.keys, ...chain.keys];
     if (written.length > carriedFromRoot.length) return;
     for (let i = 0; i < written.length; i += 1) {
       const w = written[i]!;
@@ -2741,6 +2756,22 @@ async function f(db: any) { const { data, error } = await db.from("a").select("i
     // conservative direction, a false red rather than a miss.
     expect(one(`async function f(db: any, other: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias = box; const set = () => { alias = other; }; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
     expect(one(`async function f(db: any, other: any, fallback: any, c: boolean) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias = box; if (c) { alias = other; } alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
+  });
+
+  it("a write that CANNOT run is ignored; one that MIGHT have run is unknown (Codex, PR #92)", () => {
+    // Round twenty-two is round twenty-one's mirror: filtering the uncertain
+    // writes out let the declaration answer as though the branch could never
+    // be taken, so `let alias = other; if (c) alias = box; alias.error =
+    // fallback;` read OK while a taken branch replaces the query error. The
+    // two are only reconcilable by asking whether the write can run at all: a
+    // closure the gate cannot see INVOKED cannot, so it neither gives
+    // provenance nor takes it away; a branch — or an invoked closure — might,
+    // which leaves the name unknown, and a write through an unknown name is
+    // treated as possibly landing on the error rather than assumed away.
+    expect(one(`async function f(db: any, other: any, fallback: any, c: boolean) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias = other; if (c) alias = box; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias: any = { error: null }; const set = () => { alias = box; }; set(); alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias: any = { error: null }; const set = () => { alias = box; }; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; const other = { error: 1 }; other.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("OK");
   });
 
   it("a builder REPLACED before it is awaited never runs (Codex, PR #92)", () => {
