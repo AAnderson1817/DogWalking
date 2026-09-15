@@ -199,6 +199,12 @@ def main() -> int:
     labels = validate_labels()
     if not labels:
         failures.append("read no gate labels out of validate.sh — this check is blind")
+    # The GATE LABELS the map names, which is not the same as its values: SETUP
+    # and CI_ONLY are sentinels, and comparing a validate.sh label against
+    # `COVERAGE.values()` would let a local gate named `CI_ONLY` excuse itself.
+    # Contrived as a name, wrong as a rule — the question is whether a ci.yml
+    # step claims this label, and a sentinel is not a step claiming anything.
+    mapped = {v for v in COVERAGE.values() if v not in (SETUP, CI_ONLY)}
     for name, target in COVERAGE.items():
         if target in (SETUP, CI_ONLY):
             continue
@@ -213,7 +219,7 @@ def main() -> int:
     #     local gate that CI does not run reported the three lists in lockstep,
     #     which is the invariant inverted. LOCAL_ONLY is the allowlist.
     for label in sorted(labels - LOCAL_ONLY):
-        if label not in COVERAGE.values():
+        if label not in mapped:
             failures.append(
                 f"validate.sh declares gate {label!r}, which no ci.yml step runs — "
                 "add the step, or add the label to LOCAL_ONLY with a reason"
