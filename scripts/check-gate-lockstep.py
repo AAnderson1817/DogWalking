@@ -187,8 +187,8 @@ def skill_ci_only() -> list[str]:
     return re.findall(r"^- `([^`]+)`", m.group(1), re.M)
 
 
-def validate_labels() -> tuple[set[str], set[str]]:
-    """Gate labels declared in validate.sh: the RUNNABLE ones, and the skipped.
+def validate_labels() -> tuple[set[str], set[str], list[str]]:
+    """Gate labels declared in validate.sh: RUNNABLE, skipped, and DUPLICATE.
 
     Two sets, not one, and the split is the fix for a real hole: several gates
     have both a `run` and a `skip_gate` fallback (4, 5, 8c, 8d, 10b), so a
@@ -213,7 +213,17 @@ def validate_labels() -> tuple[set[str], set[str]]:
     # Inert, since nothing mapped to it, and exactly the mention-versus-use
     # distinction this repository has paid for before — a commented-out
     # `# run "10f. …"` would likewise have read as a gate that still runs.
-    runnable = set(re.findall(r'^[ \t]*run +"([^"]+)"', text, re.M))
+    #
+    # OCCURRENCES first, then the set. A label is a gate's identity here, so a
+    # second `run` accidentally reusing one is the `ci_steps()` duplicate a
+    # file over: the existing COVERAGE entry satisfies the label and the new
+    # command is mirrored by nobody, while the check reports lockstep
+    # (measured, Codex on PR #94 — a planted second `run "12. css tokens
+    # defined"` passed). Measured green on the tree: no label is declared
+    # twice. The remedy is to rename one, as it is for a duplicate step name.
+    found = re.findall(r'^[ \t]*run +"([^"]+)"', text, re.M)
+    duplicate = sorted({lbl for lbl in found if found.count(lbl) > 1})
+    runnable = set(found)
     skipped = set(re.findall(r'^[ \t]*skip_gate +"([^"]+)"', text, re.M))
     # `finditer`, not `search`. There is one such loop today; a `search` would
     # expand only the FIRST, and a ci.yml step mapped to a label from a second
@@ -227,7 +237,7 @@ def validate_labels() -> tuple[set[str], set[str]]:
         runnable.discard(prefix + '$(basename ')
         for f in sorted(ROOT.glob(m.group(2))):
             runnable.add(prefix + f.name)
-    return runnable, skipped
+    return runnable, skipped, duplicate
 
 
 def main() -> int:
@@ -266,7 +276,13 @@ def main() -> int:
 
     # 2. A mapped validate.sh label must exist there, or renaming a gate
     #    locally leaves this map pointing at nothing.
-    labels, skipped = validate_labels()
+    labels, skipped, dupe_labels = validate_labels()
+    for lbl in dupe_labels:
+        failures.append(
+            f"validate.sh declares gate {lbl!r} twice — rename one. A label is a "
+            "gate's identity here, so the second command inherits the first's "
+            "ci.yml mapping and is mirrored by nobody"
+        )
     if not labels:
         failures.append("read no runnable gates out of validate.sh — this check is blind")
     if not skipped:

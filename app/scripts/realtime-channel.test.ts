@@ -240,13 +240,39 @@ function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteralExpress
   // confident answer. Measured green on the tree: no name is declared twice in
   // either file this reads.
   const seen = new Map<string, ts.ObjectLiteralExpression | null>();
+  // Every way a name can be BOUND, not only `const x = {…}`. The first version
+  // of this rule counted variable declarations alone, so a function PARAMETER
+  // named `message` did not shadow a module-scope `const message` and the
+  // reader resolved an array element to the wrong object — the same defect the
+  // rule was written to close, one binding form over (Codex, PR #94). A
+  // parameter, a `function f()`, a `class C`, an import, a catch clause and a
+  // destructured element all bind a name; only a variable declaration can
+  // CARRY a literal, so everything else binds `null` and makes the name
+  // unresolvable if it collides.
+  const bind = (name: string, lit: ts.ObjectLiteralExpression | null) => {
+    seen.set(name, seen.has(name) ? null : lit);
+  };
+  const bindPattern = (nm: ts.BindingName): void => {
+    if (ts.isIdentifier(nm)) { bind(nm.text, null); return; }
+    for (const el of nm.elements) {
+      if (ts.isBindingElement(el)) bindPattern(el.name);
+    }
+  };
   const visit = (n: ts.Node): void => {
-    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name)) {
-      const name = n.name.text;
-      const init = n.initializer && ts.isObjectLiteralExpression(n.initializer) ? n.initializer : null;
-      // A second declaration of the same name makes it unresolvable, whichever
-      // of the two carries an object literal.
-      seen.set(name, seen.has(name) ? null : init);
+    if (ts.isVariableDeclaration(n)) {
+      if (ts.isIdentifier(n.name)) {
+        const init = n.initializer && ts.isObjectLiteralExpression(n.initializer) ? n.initializer : null;
+        bind(n.name.text, init);
+      } else bindPattern(n.name);
+    } else if (ts.isParameter(n) || ts.isBindingElement(n)) {
+      bindPattern(n.name);
+    } else if ((ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n)) && n.name) {
+      bind(n.name.text, null);
+    } else if (ts.isImportSpecifier(n) || ts.isImportClause(n) || ts.isNamespaceImport(n)) {
+      const nm = ts.isImportClause(n) ? n.name : n.name;
+      if (nm && ts.isIdentifier(nm)) bind(nm.text, null);
+    } else if (ts.isCatchClause(n) && n.variableDeclaration) {
+      bindPattern(n.variableDeclaration.name);
     }
     ts.forEachChild(n, visit);
   };
@@ -571,6 +597,17 @@ describe("the walk channel is the only channel, and it is private on both sides"
       .toEqual(["<unresolvable spread `c`>"]);
     // …while a name declared once still resolves.
     expect(read("const c = { private: true };\nsend({ topic, ...c });")).toEqual(["true"]);
+    // Every BINDING form shadows, not only `const`. A parameter was the one
+    // that got through: the reader resolved to the module-scope literal while
+    // the value actually spread came from the argument.
+    expect(read("const c = { private: true };\nfunction f(c) { return send({ topic, ...c }); }"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read("const c = { private: true };\nfunction c() {}\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read("const c = { private: true };\ntry { x(); } catch (c) { send({ topic, ...c }); }"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read("const c = { private: true };\nconst { c: renamed } = o;\nsend({ topic, ...renamed });"))
+      .toEqual(["<unresolvable spread `renamed`>"]);
   });
 
   it("reads every element of the messages array, and refuses what it cannot", () => {

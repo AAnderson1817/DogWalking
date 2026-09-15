@@ -358,11 +358,15 @@ describe("scripts/staging-fixtures.sh", () => {
     expect(out).toContain("auth user lookup failed: GET admin/users page 2 -> HTTP 401");
   });
 
-  it("stops when the server ignores `page` instead of scanning to the bound", async () => {
+  it("stops when the server ignores `page`, and calls it a failed lookup", async () => {
+    // Stopping early is right — scanning to the bound would be 50 pointless
+    // requests. Calling it ABSENCE was not: the same non-empty page twice
+    // proves pagination is broken, not that the address is missing, and the
+    // claim replay reads a 0-with-empty-stdout as "no account".
     const s = await stub({ ignorePage: true });
     const { code, out } = await runLib(s.base, `user_id_for "nobody@sanpo.test"`);
-    expect(code).toBe(0);
-    expect(out).toBe("");
+    expect(code).toBe(9);
+    expect(out).toContain("pagination is not advancing");
     expect(s.pages).toEqual([1, 2]);
   });
 

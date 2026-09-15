@@ -90,7 +90,15 @@ user_id_for() {
     [ -n "$id" ] && { printf '%s' "$id"; return 0; }
     [ "$(jq -r '.users | length' "$lbody")" -eq 0 ] && return 0
     first=$(jq -r '.users[0].id // empty' "$lbody")
-    [ -n "$first" ] && [ "$first" = "$seen" ] && return 0
+    # The same non-empty page twice means pagination did NOT advance. That
+    # proves the endpoint is misbehaving, not that the address is absent — and
+    # this returned 0 with empty stdout, which the claim replay reads as "no
+    # account". Fifth instance in this one function of "I could not find out"
+    # reported as "it is not there" (Codex, PR #94).
+    if [ -n "$first" ] && [ "$first" = "$seen" ]; then
+      echo "auth user lookup did not finish: page $page repeated page $((page - 1)), so pagination is not advancing" >&2
+      return 9
+    fi
     seen=$first
     page=$((page + 1))
   done
