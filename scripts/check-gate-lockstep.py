@@ -55,16 +55,19 @@ SESSION_NOTES = ROOT / "docs/dev/session-notes.md"
 SETUP = "SETUP"
 CI_ONLY = "CI_ONLY"
 
-# validate.sh labels that legitimately have no ci.yml step. Both are UMBRELLA
-# skip labels: `validate.sh` prints one of these when a whole family's
-# prerequisite is missing locally, and then never prints the individual gates
-# at all. CI always has deno and a database, so there is nothing for them to
-# mirror. Named, never pattern-matched, so the exception is editable only here
-# and only in the same commit as the thing it excuses.
-LOCAL_ONLY: set[str] = {
-    "6. edge functions",   # printed instead of 6a/6b when deno is absent
-    "7-8. database",       # printed instead of 7/7b/8/8b/8c/8d with no LOCAL_DB_URL
-}
+# RUNNABLE validate.sh gates that legitimately have no ci.yml step. Empty
+# today, and that is the honest state rather than an oversight: every gate this
+# file runs locally is also a CI step.
+#
+# It used to hold the two UMBRELLA skip labels (`6. edge functions`,
+# `7-8. database`), which `validate.sh` prints instead of a family's individual
+# gates when deno or a database is missing. Splitting `run` from `skip_gate`
+# (Codex on PR #94, round two) made that unnecessary: a skip label is no longer
+# a gate as far as this check is concerned, so there is nothing to excuse.
+# Kept as the documented escape hatch, with its own stale check, so the day a
+# genuinely local-only gate exists the decision is written here rather than
+# discovered. Named, never pattern-matched — the `TEXT_RE_EXEMPTIONS` shape.
+LOCAL_ONLY: set[str] = set()
 
 # ci.yml step name -> SETUP, CI_ONLY, or the validate.sh gate label that runs
 # the same check locally.
@@ -122,16 +125,29 @@ COVERAGE: dict[str, str] = {
 }
 
 
-def ci_steps() -> list[str]:
-    """Every named `run:` step in ci.yml. A `uses:` step runs an action, not a
-    check of ours, and has nothing to mirror."""
+def ci_steps() -> tuple[list[str], list[str]]:
+    """The named `run:` steps in ci.yml, and where the UNNAMED ones are.
+
+    A `uses:` step runs an action, not a check of ours, and has nothing to
+    mirror. An unnamed `run:` step is a different matter: `- run: python3
+    scripts/new-check.py` is valid YAML and a real check, and the first version
+    of this filter dropped it — so it was classified by nobody, mirrored by
+    nothing, and the lockstep reported success. The invariant is about CI
+    CHECKS, not about checks whose author remembered a display name, so an
+    unnamed one is returned as a location and fails by name.
+    """
     workflow = yaml.safe_load(CI.read_text())
     names: list[str] = []
-    for job in workflow["jobs"].values():
-        for step in job.get("steps", []):
-            if "run" in step and "name" in step:
+    unnamed: list[str] = []
+    for job_name, job in workflow["jobs"].items():
+        for i, step in enumerate(job.get("steps", [])):
+            if "run" not in step:
+                continue
+            if "name" in step:
                 names.append(step["name"])
-    return names
+            else:
+                unnamed.append(f"{job_name} step {i + 1}")
+    return names, unnamed
 
 
 def skill_ci_only() -> list[str]:
@@ -143,8 +159,16 @@ def skill_ci_only() -> list[str]:
     return re.findall(r"^- `([^`]+)`", m.group(1), re.M)
 
 
-def validate_labels() -> set[str]:
-    """Gate labels declared in validate.sh, from `run "…"` and `skip_gate "…"`.
+def validate_labels() -> tuple[set[str], set[str]]:
+    """Gate labels declared in validate.sh: the RUNNABLE ones, and the skipped.
+
+    Two sets, not one, and the split is the fix for a real hole: several gates
+    have both a `run` and a `skip_gate` fallback (4, 5, 8c, 8d, 10b), so a
+    combined set let the `skip_gate` alone satisfy a mapped ci.yml step.
+    Commenting out `run "8c. push endpoint parity"` while leaving its no-deno
+    `skip_gate` made this check report PASS on a `validate.sh` that could no
+    longer run 8c at all — measured. A mapped step has to be backed by a
+    command that can actually execute.
 
     One label is computed: the SQL suites run from a glob, as
     `for f in supabase/tests/*.sql; do run "8. $(basename "$f")"`, so that a
@@ -161,7 +185,8 @@ def validate_labels() -> set[str]:
     # Inert, since nothing mapped to it, and exactly the mention-versus-use
     # distinction this repository has paid for before — a commented-out
     # `# run "10f. …"` would likewise have read as a gate that still runs.
-    labels = set(re.findall(r'^[ \t]*(?:run|skip_gate) +"([^"]+)"', text, re.M))
+    runnable = set(re.findall(r'^[ \t]*run +"([^"]+)"', text, re.M))
+    skipped = set(re.findall(r'^[ \t]*skip_gate +"([^"]+)"', text, re.M))
     # `finditer`, not `search`. There is one such loop today; a `search` would
     # expand only the FIRST, and a ci.yml step mapped to a label from a second
     # one would then be reported as claiming a gate validate.sh does not
@@ -171,19 +196,26 @@ def validate_labels() -> set[str]:
         r'for (\w+) in (\S+); do\n\s*run "([^"$]*)\$\(basename "\$\1"\)"', text
     ):
         prefix = m.group(3)
-        labels.discard(prefix + '$(basename ')
+        runnable.discard(prefix + '$(basename ')
         for f in sorted(ROOT.glob(m.group(2))):
-            labels.add(prefix + f.name)
-    return labels
+            runnable.add(prefix + f.name)
+    return runnable, skipped
 
 
 def main() -> int:
-    steps = ci_steps()
+    steps, unnamed = ci_steps()
     if not steps:
         print("FAIL: read no named run-steps out of ci.yml — this check is blind")
         return 2
 
     failures: list[str] = []
+
+    # 0. An unnamed `run:` step is a check with nothing to classify it by.
+    for where in unnamed:
+        failures.append(
+            f"ci.yml has an unnamed `run:` step ({where}) — give it a `name:`, "
+            "or it is a CI check this file cannot classify and nobody mirrors"
+        )
 
     # 1. Every ci.yml check is classified. A new step is in neither the map nor
     #    §13, so it fails here rather than drifting silently.
@@ -196,9 +228,11 @@ def main() -> int:
 
     # 2. A mapped validate.sh label must exist there, or renaming a gate
     #    locally leaves this map pointing at nothing.
-    labels = validate_labels()
+    labels, skipped = validate_labels()
     if not labels:
-        failures.append("read no gate labels out of validate.sh — this check is blind")
+        failures.append("read no runnable gates out of validate.sh — this check is blind")
+    if not skipped:
+        failures.append("read no skip_gate labels out of validate.sh — this check is blind")
     # The GATE LABELS the map names, which is not the same as its values: SETUP
     # and CI_ONLY are sentinels, and comparing a validate.sh label against
     # `COVERAGE.values()` would let a local gate named `CI_ONLY` excuse itself.
@@ -209,8 +243,16 @@ def main() -> int:
         if target in (SETUP, CI_ONLY):
             continue
         if target not in labels:
+            # Named separately when the label exists only as a `skip_gate`,
+            # because the two have different fixes: one is a rename, the other
+            # is a gate that can no longer run.
+            how = (
+                "declares only as a skip_gate, so it can never run"
+                if target in skipped
+                else "does not declare"
+            )
             failures.append(
-                f"{name!r} claims validate.sh gate {target!r}, which validate.sh does not declare"
+                f"{name!r} claims validate.sh gate {target!r}, which validate.sh {how}"
             )
 
     # 2b. And the OTHER direction, which the first version did not ask: a gate

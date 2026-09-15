@@ -170,14 +170,25 @@ function serverPrivate(): { found: boolean; values: string[] } {
   const values: string[] = [];
   const visit = (node: ts.Node): void => {
     if (ts.isObjectLiteralExpression(node)) {
-      // `topic` is what makes this the message object rather than some other
-      // literal that happens to carry a `private` key. Presence is asked with
-      // `has` because `topic` is shorthand here; the VALUE of `private` still
-      // has to be a real assignment, since a shorthand one is a reference this
-      // check cannot resolve and "cannot say" is not "is private".
-      if (has(node, "private") && has(node, "topic")) {
-        const priv = property(node, "private");
-        values.push(priv ? priv.getText() : "<shorthand, unreadable>");
+      // `topic` alone is what makes this a message object — NOT `topic` AND
+      // `private`. Requiring both excluded exactly the literal that matters:
+      // `messages: [{ topic, event, payload }, { topic, event, payload,
+      // private: true }]` shipped a PUBLIC message and the sibling satisfied
+      // the assertion, measured green. That is review H1's whole point —
+      // `private` DEFAULTS to false, so omitting it is not a smaller mistake
+      // than writing `false`, it is the same one — so an omitted `private` is
+      // recorded as `<absent>` and fails like any other non-`true` value.
+      //
+      // Presence is still asked with `has` because `topic` is SHORTHAND here;
+      // the VALUE of `private` has to be a real assignment, since a shorthand
+      // one is a reference this check cannot resolve and "cannot say" is not
+      // "is private".
+      if (has(node, "topic")) {
+        if (!has(node, "private")) values.push("<absent>");
+        else {
+          const priv = property(node, "private");
+          values.push(priv ? priv.getText() : "<shorthand, unreadable>");
+        }
       }
     }
     ts.forEachChild(node, visit);
