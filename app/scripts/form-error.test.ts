@@ -80,18 +80,64 @@ interface Site {
  * `<span role={"alert" as const} />` passed 4 of 4 (Codex, PR #94).
  */
 function literalText(e: ts.Expression): string | null {
+  const cur = unwrapTransparent(e);
+  if (ts.isStringLiteral(cur) || ts.isNoSubstitutionTemplateLiteral(cur)) return cur.text;
+  return null;
+}
+
+/** `as`, `satisfies`, parentheses and `!` hand the same value through. */
+function unwrapTransparent(e: ts.Expression): ts.Expression {
   let cur = e;
   for (let i = 0; i < 8; i += 1) {
-    if (ts.isStringLiteral(cur) || ts.isNoSubstitutionTemplateLiteral(cur)) return cur.text;
     if (ts.isAsExpression(cur) || ts.isSatisfiesExpression(cur)
       || ts.isParenthesizedExpression(cur) || ts.isNonNullExpression(cur)
       || ts.isTypeAssertionExpression(cur)) {
       cur = cur.expression;
       continue;
     }
-    return null;
+    return cur;
   }
-  return null;
+  return cur;
+}
+
+/**
+ * Object literals bound to a name in this file, for a spread to resolve.
+ *
+ * A name bound more than once — anywhere, by any binding form — is
+ * UNRESOLVABLE rather than resolved to the last one seen. That is the channel
+ * gate's rule, arrived at there over two rounds: a name map that answers
+ * confidently and wrongly is worse than one that answers nothing.
+ */
+function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteralExpression> {
+  const seen = new Map<string, ts.ObjectLiteralExpression | null>();
+  const bind = (n: string, lit: ts.ObjectLiteralExpression | null) => {
+    seen.set(n, seen.has(n) ? null : lit);
+  };
+  const bindPattern = (nm: ts.BindingName): void => {
+    if (ts.isIdentifier(nm)) { bind(nm.text, null); return; }
+    for (const el of nm.elements) if (ts.isBindingElement(el)) bindPattern(el.name);
+  };
+  const visit = (n: ts.Node): void => {
+    if (ts.isVariableDeclaration(n)) {
+      if (ts.isIdentifier(n.name)) {
+        const init = n.initializer ? unwrapTransparent(n.initializer) : undefined;
+        bind(n.name.text, init && ts.isObjectLiteralExpression(init) ? init : null);
+      } else bindPattern(n.name);
+    } else if (ts.isParameter(n) || ts.isBindingElement(n)) {
+      bindPattern(n.name);
+    } else if ((ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n)) && n.name) {
+      bind(n.name.text, null);
+    } else if (ts.isImportSpecifier(n) || ts.isImportClause(n) || ts.isNamespaceImport(n)) {
+      if (n.name && ts.isIdentifier(n.name)) bind(n.name.text, null);
+    } else if (ts.isCatchClause(n) && n.variableDeclaration) {
+      bindPattern(n.variableDeclaration.name);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  const out = new Map<string, ts.ObjectLiteralExpression>();
+  for (const [name, lit] of seen) if (lit) out.set(name, lit);
+  return out;
 }
 
 /**
@@ -132,12 +178,20 @@ function objectLiteralProperty(
   obj: ts.ObjectLiteralExpression,
   name: string,
   depth = 0,
+  declared: Map<string, ts.ObjectLiteralExpression> = new Map(),
 ): string | null | undefined {
   let value: string | null | undefined;
   for (const prop of obj.properties) {
     if (ts.isSpreadAssignment(prop)) {
-      if (!ts.isObjectLiteralExpression(prop.expression) || depth >= 8) continue;
-      const nested = objectLiteralProperty(prop.expression, name, depth + 1);
+      if (depth >= 8) continue;
+      const inner = unwrapTransparent(prop.expression);
+      const from = ts.isObjectLiteralExpression(inner)
+        ? inner
+        : ts.isIdentifier(inner)
+          ? declared.get(inner.text)
+          : undefined;
+      if (!from) continue;
+      const nested = objectLiteralProperty(from, name, depth + 1, declared);
       if (nested !== undefined) value = nested;
       continue;
     }
@@ -177,16 +231,30 @@ function objectLiteralProperty(
  * not this gate's business, because the compiler cannot say what they hold and
  * a guess in either direction is worse than the silence.
  */
-function literalAttribute(attributes: ts.JsxAttributes, name: string): string | null {
+function literalAttribute(
+  attributes: ts.JsxAttributes,
+  name: string,
+  declared: Map<string, ts.ObjectLiteralExpression> = new Map(),
+): string | null {
   let value: string | null = null;
   for (const attr of attributes.properties) {
     if (ts.isJsxSpreadAttribute(attr)) {
       // Only an object literal written in place can be read. Anything else —
       // `{...props}`, a call, an identifier — leaves the answer where it was,
       // which is this gate's standing rule that it does not guess.
-      const spread = attr.expression;
-      if (!ts.isObjectLiteralExpression(spread)) continue;
-      const found = objectLiteralProperty(spread, name);
+      const spread = unwrapTransparent(attr.expression);
+      // An identifier naming a uniquely-bound object literal resolves, which
+      // is the ordinary attribute-composition pattern (`const errorAttrs =
+      // { role: "alert" }; <span {...errorAttrs} />`) and was invisible here
+      // while the channel gate's reader had followed it since round seven —
+      // the same sibling asymmetry, the other way round (Codex, PR #94).
+      const target = ts.isObjectLiteralExpression(spread)
+        ? spread
+        : ts.isIdentifier(spread)
+          ? declared.get(spread.text)
+          : undefined;
+      if (!target) continue;
+      const found = objectLiteralProperty(target, name, 0, declared);
       if (found !== undefined) value = found;
       continue;
     }
@@ -205,6 +273,7 @@ function scan(files: string[]): Site[] {
   for (const file of files) {
     const text = readFileSync(file, "utf8");
     const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const declared = declaredObjects(source);
     const rel = relative(APP_SRC, file).split("\\").join("/");
 
     const visit = (node: ts.Node): void => {
@@ -223,8 +292,8 @@ function scan(files: string[]): Site[] {
         const intrinsic =
           (ts.isIdentifier(name) && /^[a-z]/.test(tag)) || ts.isJsxNamespacedName(name);
         if (intrinsic) {
-          const role = literalAttribute(node.attributes, "role");
-          const cls = literalAttribute(node.attributes, "className");
+          const role = literalAttribute(node.attributes, "role", declared);
+          const cls = literalAttribute(node.attributes, "className", declared);
           const errorClass = cls !== null && /(^|\s)[a-z0-9-]*__error(\s|$)/.test(cls);
           if (role === "alert" || errorClass) {
             found.push({
@@ -253,11 +322,16 @@ describe("every error message renders through FormError or StateField", () => {
   // a screen reader. Both directions matter: a reader that answered "alert" to
   // everything would pass every sabotage of these rules for the wrong reason.
   it("reads a JSX attribute in every static spelling, and guesses at none", () => {
-    const role = (jsx: string): string | null => {
-      const sf = ts.createSourceFile("f.tsx", `const e = ${jsx};`, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    // The argument may carry a prelude (`const a = {…};\n<span … />`), so it
+    // is parsed as a whole file and the declarations are resolved from it, the
+    // way `scan()` does over a real one.
+    const role = (src: string): string | null => {
+      const jsx = src.includes("\n") ? src : `const e = ${src};`;
+      const sf = ts.createSourceFile("f.tsx", jsx, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+      const declared = declaredObjects(sf);
       let out: string | null = null;
       const visit = (n: ts.Node): void => {
-        if (ts.isJsxSelfClosingElement(n)) out = literalAttribute(n.attributes, "role");
+        if (ts.isJsxSelfClosingElement(n)) out = literalAttribute(n.attributes, "role", declared);
         ts.forEachChild(n, visit);
       };
       visit(sf);
@@ -293,6 +367,19 @@ describe("every error message renders through FormError or StateField", () => {
     expect(role('<span role={"alert" satisfies string} />')).toBe("alert");
     expect(role('<span role={("alert")!} />')).toBe("alert");
     expect(role('<span {...{ role: "alert" as const }} />')).toBe("alert");
+    // A spread of a name bound to an object literal — the ordinary
+    // attribute-composition pattern, and the one the channel gate's reader
+    // had followed since round seven while this one had not.
+    expect(role('const a = { role: "alert" };\n<span {...a} />')).toBe("alert");
+    expect(role('const a = { role: "alert" as const };\n<span {...a} />')).toBe("alert");
+    expect(role('const a = { role: "alert" };\n<span {...a} role="status" />')).toBe("status");
+    expect(role('const a = { role: "status" };\n<span {...a} {...{ role: "alert" }} />')).toBe("alert");
+    // A name bound twice is unresolvable, whichever binding carries the
+    // literal — the channel gate's rule, for the reason it arrived at there.
+    expect(role('const a = { role: "alert" };\nfunction f(a) { return <span {...a} />; }')).toBeNull();
+    // A name that is not bound to a literal here resolves to nothing, and
+    // leaves an earlier answer alone.
+    expect(role('<span role="alert" {...imported} />')).toBe("alert");
     // Nested spreads: one more layer of composition is the same element.
     expect(role('<span {...{ ...{ role: "alert" } }} />')).toBe("alert");
     expect(role('<span {...{ ...{ role: "alert" }, role: "status" }} />')).toBe("status");

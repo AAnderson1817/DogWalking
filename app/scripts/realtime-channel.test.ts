@@ -401,15 +401,52 @@ function effectiveProps(
   return props;
 }
 
+/**
+ * What a `private` value should be REPORTED as: the literal `true` for
+ * anything that unwraps to it, and its own source text otherwise.
+ *
+ * The assertions filter for the string `"true"`, so this is where the
+ * transparent wrappers have to be unwrapped on the message side — the same
+ * rule `isLiteralTrue` applies to the client's `config`, said once so the two
+ * halves of this file cannot disagree about what "private" means.
+ */
+function privateValue(v: ts.Expression | string | undefined): string {
+  return isLiteralTrue(v) ? "true" : shownAs(v);
+}
+
 /** The text a reader should print for a resolved property. */
 function shownAs(v: ts.Expression | string | undefined): string {
   if (v === undefined) return "<absent>";
   return typeof v === "string" ? v : v.getText();
 }
 
+/**
+ * `as`, `satisfies`, parentheses and `!` hand the same value through.
+ *
+ * Both readers in this repository need this and only one had it: the
+ * form-error gate unwrapped them from round seven, and here an exact-kind
+ * check called `private: true as const` — the ordinary way to preserve a
+ * literal type — NOT private, which is a gate red on a healthy tree and this
+ * repository's log calls that the worse of the two failure shapes (Codex,
+ * PR #94).
+ */
+function unwrapTransparent(e: ts.Expression): ts.Expression {
+  let cur = e;
+  for (let i = 0; i < 8; i += 1) {
+    if (ts.isAsExpression(cur) || ts.isSatisfiesExpression(cur)
+      || ts.isParenthesizedExpression(cur) || ts.isNonNullExpression(cur)
+      || ts.isTypeAssertionExpression(cur)) {
+      cur = cur.expression;
+      continue;
+    }
+    return cur;
+  }
+  return cur;
+}
+
 /** Whether a resolved property is the literal `true` and not a marker. */
 function isLiteralTrue(v: ts.Expression | string | undefined): boolean {
-  return typeof v === "object" && v.kind === ts.SyntaxKind.TrueKeyword;
+  return typeof v === "object" && unwrapTransparent(v).kind === ts.SyntaxKind.TrueKeyword;
 }
 
 /**
@@ -458,7 +495,7 @@ function messageElements(sf: ts.SourceFile): { found: boolean; values: string[] 
             values.push(`<unreadable message element: ${el.getText().split("\n")[0]}>`);
             continue;
           }
-          values.push(shownAs(effectiveProps(lit, declared).get("private")));
+          values.push(privateValue(effectiveProps(lit, declared).get("private")));
         }
         if (arr.elements.length === 0) values.push("<`messages` is empty>");
       }
@@ -489,7 +526,7 @@ function serverPrivate(): { found: boolean; values: string[]; mutations: string[
       // has no direct `topic` and was skipped entirely while its base supplied
       // a `true` from a line that is not what gets sent.
       const props = effectiveProps(node, declared);
-      if (props.has("topic")) values.push(shownAs(props.get("private")));
+      if (props.has("topic")) values.push(privateValue(props.get("private")));
     }
     ts.forEachChild(node, visit);
   };
@@ -544,7 +581,7 @@ describe("the walk channel is the only channel, and it is private on both sides"
       const visit = (n: ts.Node): void => {
         if (ts.isObjectLiteralExpression(n)) {
           const props = effectiveProps(n, declared);
-          if (props.has("topic")) out.push(shownAs(props.get("private")));
+          if (props.has("topic")) out.push(privateValue(props.get("private")));
         }
         ts.forEachChild(n, visit);
       };
@@ -584,6 +621,13 @@ describe("the walk channel is the only channel, and it is private on both sides"
     expect(read("send({ topic, private: true, ...{ private: false } });")).toEqual(["false"]);
     expect(read("send({ ...{ ...{ topic, private: false } } });"))
       .toEqual(["false", "false", "false"]);
+    // `true as const` is the ordinary way to preserve a literal type and is
+    // the same value — reporting it as non-private is a gate red on healthy
+    // code, which this repository calls the worse of the two failure shapes.
+    expect(read("send({ topic, private: true as const });")).toEqual(["true"]);
+    expect(read("send({ topic, private: (true) satisfies boolean });")).toEqual(["true"]);
+    // …and the wrappers do not launder a `false`.
+    expect(read("send({ topic, private: false as const });")).toEqual(["false as const"]);
 
     // And the precondition on the reader itself: a literal with no `topic` at
     // all is not a message and contributes nothing, so a reader that answered

@@ -221,10 +221,19 @@ def validate_labels() -> tuple[set[str], set[str], list[str]]:
     # (measured, Codex on PR #94 — a planted second `run "12. css tokens
     # defined"` passed). Measured green on the tree: no label is declared
     # twice. The remedy is to rename one, as it is for a duplicate step name.
-    found = re.findall(r'^[ \t]*run +"([^"]+)"', text, re.M)
+    #
+    # BOTH shell quote styles, with a backreference so `run "x'` matches
+    # nothing. Nothing in this repository enforces a quote style — no shfmt,
+    # no shellcheck rule — so `run '13. new check'` is valid shell and was
+    # invisible here: the reverse check then never required a CI counterpart
+    # for a real local gate, and reported lockstep (measured, Codex on
+    # PR #94). Same defect as `gen-enum-catalog.py`'s round twenty-five, in a
+    # different language.
+    quoted = r'^[ \t]*%s +(["\'])(.+?)\1'
+    found = [m[1] for m in re.findall(quoted % 'run', text, re.M)]
     duplicate = sorted({lbl for lbl in found if found.count(lbl) > 1})
     runnable = set(found)
-    skipped = set(re.findall(r'^[ \t]*skip_gate +"([^"]+)"', text, re.M))
+    skipped = {m[1] for m in re.findall(quoted % 'skip_gate', text, re.M)}
     # `finditer`, not `search`. There is one such loop today; a `search` would
     # expand only the FIRST, and a ci.yml step mapped to a label from a second
     # one would then be reported as claiming a gate validate.sh does not
