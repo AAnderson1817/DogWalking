@@ -275,6 +275,21 @@ whose `sub` is a seeded operator you get a genuine authenticated request with
 RLS live. That is how the `select=*` 42501 blocker was found; nothing in the
 repository could see it.
 
+The same is true of a workflow `run:` block: no gate here executes one, and the
+staging workflows run against a live project nobody should be poking at to test
+a change. Drive it instead — read the step out of the YAML with the parser
+`verify-workflows.py` uses, substitute the `${{ }}` expressions (asserting the
+substitution matched, or the step ends up talking to a URL that does not
+resolve and every assertion is really about curl failing), write the block to a
+file and run it with `bash -e`, which is GitHub's default `shell`. Point it at
+a stub that refuses the way the real API does — GoTrue caps `per_page`, a
+create collides with 422, a REST delete refused by a foreign key answers 409.
+`app/scripts/staging-fixtures.test.ts` is the worked example, and
+`ops(smoke-fixtures)`/`ops(deploy-retry)` are two earlier ones. Shell functions
+cannot cross a step boundary, so sharing them between steps means a committed
+script both steps source plus a checkout in that job — which is also the only
+way anything can exercise them.
+
 ## The rhythm, per PR
 
 1. Start from main: `git fetch origin main && git checkout -B <branch> origin/main`.
