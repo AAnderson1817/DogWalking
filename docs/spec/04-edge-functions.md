@@ -93,7 +93,9 @@ runs whenever it is called, which can be after any later write (`const check
 never = () => check();` beside it, a call that exists and never executes); a
 callback handed to a call, a closure returned on an object, or two closures
 that only call each other is execution the gate cannot see, refused rather
-than assumed. A call invokes whatever the name holds when it runs, so a
+than assumed. A GENERATOR is never visibly invoked at all: calling one returns
+an iterator and runs no body, and whether it is later iterated is a question
+the gate does not ask. A call invokes whatever the name holds when it runs, so a
 closure's call site counts only while the binding still holds that closure:
 a straight-line call before the binding's next write (a hoisted declaration
 is live from the top, so any write bounds it), or a call inside a closure
