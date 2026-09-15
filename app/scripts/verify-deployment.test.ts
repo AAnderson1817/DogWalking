@@ -425,14 +425,21 @@ function serveFunctionLines(file: string): number[] {
   }
   if (bound.size === 0) return [];
 
-  // `await x`, `(x)`, `x as T` and `x!` all hand the same call through.
+  // `await x`, `(x)`, `x as T`, `x!`, `x satisfies T` and `void x` all hand
+  // the same call through — `void serveFunction(handle)` still invokes the
+  // wrapper unconditionally, and refusing it demanded a bespoke production
+  // contract for a function that has one (Codex, PR #94: a gate red on a
+  // healthy tree, which this repository calls the worse failure shape).
   const unwrap = (e: ts.Expression): ts.Expression => {
     let cur = e;
-    for (;;) {
+    for (let i = 0; i < 8; i += 1) {
       if (ts.isAwaitExpression(cur) || ts.isParenthesizedExpression(cur)
-        || ts.isAsExpression(cur) || ts.isNonNullExpression(cur)) cur = cur.expression;
+        || ts.isAsExpression(cur) || ts.isNonNullExpression(cur)
+        || ts.isSatisfiesExpression(cur) || ts.isTypeAssertionExpression(cur)
+        || ts.isVoidExpression(cur)) cur = cur.expression;
       else return cur;
     }
+    return cur;
   };
   const isWrapperCall = (e: ts.Expression | undefined): boolean => {
     if (!e) return false;
@@ -560,6 +567,10 @@ describe("verify-deployment: the read-only argument", () => {
     // awaited spelling. Both are unconditional statements of the module.
     put("nu", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nconst server = serveFunction(handle);\n');
     put("xi", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nawait serveFunction(handle);\n');
+    // Housed: `void` is a transparent wrapper, not a refusal to run. The
+    // spelling exists to say "I am deliberately not awaiting this".
+    put("omicron", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nvoid serveFunction(handle);\n');
+    put("pi", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nvoid (await serveFunction(handle));\n');
     // NOT housed, and this one isolates the ENTRYPOINT rule from the
     // module-scope rule: a sibling file calls `serveFunction` at top level,
     // and nothing imports it. Written because the first version of `eta`
@@ -587,6 +598,8 @@ describe("verify-deployment: the read-only argument", () => {
       mu: false,
       nu: true,
       xi: true,
+      omicron: true,
+      pi: true,
     });
   });
 

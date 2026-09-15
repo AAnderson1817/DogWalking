@@ -96,7 +96,12 @@ export function propertyKey(name: ts.PropertyName): string | null {
  *  - a name that is ASSIGNED anywhere is unresolvable, whatever it was
  *    initialised to. `let attrs = { role: "status" }; attrs = { role: "alert" }`
  *    is a stale initializer, the same shape as reading a literal that has
- *    since been mutated.
+ *    since been mutated. "Assigned" means every form, not the one spelling
+ *    that came first: `x = …`, every compound operator, `x++`, a destructuring
+ *    target, a `for (x of …)` or `for (x in …)` loop variable, AND a mutation
+ *    of what it holds — `x.y = …`, `x["y"] = …`, `delete x.y`,
+ *    `Object.assign(x, …)`. The object is what the caller reads, so changing
+ *    the object is changing the answer just as much as rebinding the name.
  *
  * Both are refusals rather than analyses, which is the stopping rule this
  * repository settled on: an ambiguous name never gets a confident answer, and
@@ -134,8 +139,8 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
       bindPattern(n.variableDeclaration.name);
     }
 
-    // Assignment to the NAME, as opposed to a property of it: `x = …`, every
-    // compound form, and `x++`. A destructuring assignment target counts too.
+    // Rebinding the NAME: `x = …`, every compound form, and `x++`. A
+    // destructuring assignment target counts too.
     if (ts.isBinaryExpression(n) && isAssignmentOperator(n.operatorToken.kind)) {
       collectAssignmentTargets(n.left, assigned);
     }
@@ -145,6 +150,31 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
       ts.isIdentifier(n.operand)
     ) {
       assigned.add(n.operand.text);
+    }
+    // A loop variable is assigned on every iteration and produces no
+    // BinaryExpression at all, so `for (x of […])` slipped past the rule above.
+    // Only the bare-identifier form matters: `for (const x of …)` declares a
+    // fresh binding, which the declaration branch already sees.
+    if ((ts.isForOfStatement(n) || ts.isForInStatement(n)) && !ts.isVariableDeclarationList(n.initializer)) {
+      collectAssignmentTargets(n.initializer, assigned);
+    }
+    // And MUTATING what the name holds. The caller reads the object, so
+    // `channelConfig.private = false` changes the answer exactly as rebinding
+    // the name would — and the first version of this rule watched only the
+    // rebinding, which is the same half-a-rule the property-mutation check in
+    // the channel gate had before it (Codex, PR #94).
+    if (ts.isBinaryExpression(n) && isAssignmentOperator(n.operatorToken.kind)) {
+      collectMutatedRoots(n.left, assigned);
+    }
+    if (ts.isDeleteExpression(n)) collectMutatedRoots(n.expression, assigned);
+    if (
+      ts.isCallExpression(n) &&
+      ts.isPropertyAccessExpression(n.expression) &&
+      n.expression.name.text === "assign"
+    ) {
+      // `Object.assign(target, …)` writes into its FIRST argument.
+      const target = n.arguments[0];
+      if (target) collectMutatedRoots(target, assigned, true);
     }
 
     ts.forEachChild(n, visit);
@@ -162,6 +192,24 @@ export function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
     kind === ts.SyntaxKind.EqualsToken ||
     (kind >= ts.SyntaxKind.FirstCompoundAssignment && kind <= ts.SyntaxKind.LastCompoundAssignment)
   );
+}
+
+/**
+ * The identifier at the ROOT of a member chain, when the chain is being
+ * written to — `a.b.c = x`, `a["b"] = x`, `delete a.b`, `Object.assign(a, …)`.
+ *
+ * `direct` is for the `Object.assign` case, where the target is the object
+ * itself rather than a member of it.
+ */
+function collectMutatedRoots(e: ts.Expression, into: Set<string>, direct = false): void {
+  let cur: ts.Expression = unwrapTransparent(e);
+  if (!direct) {
+    if (!ts.isPropertyAccessExpression(cur) && !ts.isElementAccessExpression(cur)) return;
+    while (ts.isPropertyAccessExpression(cur) || ts.isElementAccessExpression(cur)) {
+      cur = unwrapTransparent(cur.expression);
+    }
+  }
+  if (ts.isIdentifier(cur)) into.add(cur.text);
 }
 
 /** The identifiers an assignment's left-hand side writes to. */

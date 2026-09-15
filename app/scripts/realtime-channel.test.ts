@@ -583,6 +583,26 @@ describe("the walk channel is the only channel, and it is private on both sides"
     // …while a `let` nothing assigns to still resolves, so the rule is about
     // the assignment and not about the keyword.
     expect(read("let c = { private: true };\nsend({ topic, ...c });")).toEqual(["true"]);
+    // MUTATING what a name holds is changing the answer, exactly as rebinding
+    // it is: the caller reads the object, not the binding.
+    expect(read("const c = { private: true };\nc.private = false;\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read('const c = { private: true };\nc["private"] = false;\nsend({ topic, ...c });'))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read("const c = { private: true };\ndelete c.private;\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read("const c = { private: true };\nObject.assign(c, { private: false });\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    // A loop variable is assigned on every iteration and produces no
+    // assignment expression at all.
+    expect(read("let c = { private: true };\nfor (c of xs) {}\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read("let c = { private: true };\nfor (c in xs) {}\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    // …while a loop that DECLARES its own variable is a different binding and
+    // leaves the outer one alone, so this is not red on healthy code.
+    expect(read("const c = { private: true };\nfor (const x of xs) {}\nsend({ topic, ...c });"))
+      .toEqual(["true"]);
     // A spread of a WRAPPED literal is the same object. Reading the wrapper
     // made this gate red on healthy code.
     expect(read("send({ topic, ...({ private: true } as const) });")).toEqual(["true"]);
