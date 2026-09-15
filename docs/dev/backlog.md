@@ -119,6 +119,19 @@ function as `PUBLIC` rather than **none**.
 
 ## Done
 
+- **The walk-cost duplication and the last two `index.ts`-only functions** —
+  `api.ts`'s `walkCost()` wrapper deleted (zero importers), the arithmetic
+  moved to a zero-import leaf so a deno script can load it, and gate 8d
+  (`scripts/check-walk-cost-parity.sh`) ties that leaf, `fn_walk_cost` and the
+  `fn_snapshot_walk_price` trigger to one case list — the residual this item
+  named as "nothing ties the two together". Booking now prices a persisted
+  walk from its `cost_credits` snapshot rather than re-deriving it live.
+  `billing-portal` and `connect-onboarding` got the house `handler.ts` +
+  `deps.ts` seams and 37 tests; `{ action: "foo" }` is a 400 rather than a
+  fall-through that mints a Stripe Connect account. Three adversarial passes
+  ran before the PR opened and the third refuted the second's own sentence
+  about the gate. See the `fix(walk-cost)+edge(seams)` status-log entry.
+
 - **Push notifications (M27)** — RFC 8291 payload encryption and RFC 8292
   VAPID written against `crypto.subtle` and pinned byte-for-byte to
   `http_ece`, the reference implementation; migration `0049` for the
