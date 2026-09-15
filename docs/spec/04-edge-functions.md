@@ -146,7 +146,9 @@ a plain assignment in straight-line code; `const inner = box.nested`,
 transitively, resolved as of that copy), while a closure the gate cannot see
 invoked cannot run and is ignored, and a name a branch or an invoked closure
 could have moved since the last definite write is UNKNOWN (a logical
-assignment — `||=`, `&&=`, `??=` — settles nothing, since it may not assign) — a write through an
+assignment — `||=`, `&&=`, `??=` — settles nothing, since it may not assign;
+whether its condition is statically settled is not asked, so such a name is
+refused rather than resolved) — a write through an
 unknown name is treated as possibly landing on the error, at any depth along
 the path, rather than assumed away — while a write deeper
 than the path mutates a field of the error and leaves the error itself. A class field initializer, instance or static, is
