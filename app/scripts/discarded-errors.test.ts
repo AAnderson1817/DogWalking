@@ -507,6 +507,13 @@ function nextWriteTo(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node
   return Math.min(Infinity, ...writesTo(checker, sym, container).map((w) => executesAt(w, container, bound)).filter((w) => w > bound.pos));
 }
 
+/** The assignment operators that may not assign at all. */
+const LOGICAL_ASSIGNMENTS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.BarBarEqualsToken,
+  ts.SyntaxKind.AmpersandAmpersandEqualsToken,
+  ts.SyntaxKind.QuestionQuestionEqualsToken,
+]);
+
 /** An expression with its transparent wrappers stripped: `(x)`, `x as T`, `x!`, `x satisfies T`. */
 function unwrapped(e: ts.Expression): ts.Expression {
   let r = e;
@@ -576,7 +583,16 @@ function rootOf(checker: ts.TypeChecker, id: ts.Identifier, container: ts.Node, 
     const fn = closureOf(w.node, container);
     return fn === null || visiblyInvoked(fn, container, checker, id);
   });
-  const definite = live.filter((w) => closureOf(w.node, container) === null && established(w.node, id, container));
+  // `alias ||= other` may not assign at all, so it is never the write that
+  // says what a name is (Codex on PR #92, round twenty-four): it passes
+  // `established` — the statement is on every path — while the ASSIGNMENT
+  // inside it is not.
+  const conditional = (w: { node: ts.Node }) => {
+    const target = forwardedTo(w.node);
+    const p = target.parent;
+    return ts.isBinaryExpression(p) && p.left === target && LOGICAL_ASSIGNMENTS.has(p.operatorToken.kind);
+  };
+  const definite = live.filter((w) => closureOf(w.node, container) === null && established(w.node, id, container) && !conditional(w));
   const latest = definite.sort((a, b) => b.pos - a.pos)[0];
   // An uncertain write SUPERSEDED by a definite one no longer decides
   // anything: `if (c) alias = other; alias = other2;` ends certain, and
@@ -586,7 +602,7 @@ function rootOf(checker: ts.TypeChecker, id: ts.Identifier, container: ts.Node, 
   // stays pessimistic.
   const uncertain = live.some((w) =>
     closureOf(w.node, container) !== null ||
-    (!established(w.node, id, container) && (!latest || w.pos > latest.pos)));
+    ((!established(w.node, id, container) || conditional(w)) && (!latest || w.pos > latest.pos)));
   if (uncertain) return null;
   const writes = definite.sort((a, b) => b.pos - a.pos);
   const last = writes[0];
@@ -2804,6 +2820,21 @@ async function f(db: any) { const { data, error } = await db.from("a").select("i
     expect(one(`async function f(db: any, other: any, fallback: any, c: boolean) { const { data, error } = await db.from("a").select("id"); const box = { nested: { cause: error } }; let inner = other; if (c) inner = box.nested; inner.cause = fallback; if (box.nested.cause) throw box.nested.cause; return data; }`).verdict).toBe("DISCARDED");
     // Uncertainty AFTER the last definite write still counts.
     expect(one(`async function f(db: any, other: any, other2: any, fallback: any, c: boolean) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias = box; alias = other2; if (c) alias = other; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
+  });
+
+  it("a logical assignment may not assign, so it settles nothing (Codex, PR #92)", () => {
+    // Round twenty-four: `alias ||= other2` passes `established` — the
+    // STATEMENT is on every path — while the assignment inside it is not, so
+    // it was counted as the definite write that supersedes earlier
+    // uncertainty and the name read as `other2`. It is uncertain now, both as
+    // provenance and as a supersession, so the name is unknown either way.
+    expect(one(`async function f(db: any, other: any, other2: any, fallback: any, c: boolean) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias = box; if (c) alias = other; alias ||= other2; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`async function f(db: any, other2: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias: any = box; alias ??= other2; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
+    // A plain assignment settles it, and so does a compound one that is not
+    // logical: `alias += ""` always assigns, and what it assigns is not the
+    // carrier, so the member write cannot reach the error.
+    expect(one(`async function f(db: any, other: any, other2: any, fallback: any, c: boolean) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias = box; if (c) alias = other; alias = other2; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any, other: any, fallback: any, c: boolean) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias: any = box; if (c) alias = other; alias += ""; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("OK");
   });
 
   it("a builder REPLACED before it is awaited never runs (Codex, PR #92)", () => {
