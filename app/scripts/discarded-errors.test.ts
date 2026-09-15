@@ -576,8 +576,19 @@ function rootOf(checker: ts.TypeChecker, id: ts.Identifier, container: ts.Node, 
     const fn = closureOf(w.node, container);
     return fn === null || visiblyInvoked(fn, container, checker, id);
   });
-  if (live.some((w) => closureOf(w.node, container) !== null || !established(w.node, id, container))) return null;
-  const writes = live.sort((a, b) => b.pos - a.pos);
+  const definite = live.filter((w) => closureOf(w.node, container) === null && established(w.node, id, container));
+  const latest = definite.sort((a, b) => b.pos - a.pos)[0];
+  // An uncertain write SUPERSEDED by a definite one no longer decides
+  // anything: `if (c) alias = other; alias = other2;` ends certain, and
+  // calling it unknown was a red on healthy code (Codex on PR #92, round
+  // twenty-three). A live CLOSURE write is not ordered against anything —
+  // its position is where it was created, not where it is called — so it
+  // stays pessimistic.
+  const uncertain = live.some((w) =>
+    closureOf(w.node, container) !== null ||
+    (!established(w.node, id, container) && (!latest || w.pos > latest.pos)));
+  if (uncertain) return null;
+  const writes = definite.sort((a, b) => b.pos - a.pos);
   const last = writes[0];
   let source: { pos: number; expr: ts.Expression } | null = null;
   if (last) {
@@ -630,17 +641,24 @@ function nextPropertyWriteTo(checker: ts.TypeChecker, container: ts.Node, bound:
     const chain = memberChain(target);
     if (!chain) return;
     const from = rootOf(checker, chain.base, container, target.pos);
-    // A base the gate cannot resolve MIGHT be this object, so its write might
-    // be the one that replaces the error: refused rather than assumed away
-    // (Codex on PR #92, round twenty-two).
     if (from && from.sym !== here.sym) return;
-    const written = from ? [...from.keys, ...chain.keys] : [...here.keys, ...chain.keys];
-    if (written.length > carriedFromRoot.length) return;
-    for (let i = 0; i < written.length; i += 1) {
-      const w = written[i]!;
-      const c = carriedFromRoot[i];
-      if (c === undefined) break; // past the path: the length check above decides those
-      if (w !== UNKNOWN && c !== UNKNOWN && String(w) !== String(c)) return;
+    const along = (written: Key[], depth: number): boolean => {
+      if (depth + written.length > carriedFromRoot.length) return false;
+      return written.every((w, i) => {
+        const c = carriedFromRoot[depth + i]!;
+        return w === UNKNOWN || c === UNKNOWN || String(w) === String(c);
+      });
+    };
+    if (from) {
+      if (!along([...from.keys, ...chain.keys], 0)) return;
+    } else {
+      // A base the gate cannot resolve MIGHT be this object — at ANY depth
+      // along the path, since an unknown name can just as well hold the
+      // nested carrier (Codex on PR #92, rounds twenty-two and twenty-three):
+      // refused rather than assumed away.
+      let possible = false;
+      for (let d = 0; d <= carriedFromRoot.length && !possible; d += 1) possible = along(chain.keys, d);
+      if (!possible) return;
     }
     out.push({ pos: target.pos, node: target });
   };
@@ -2772,6 +2790,20 @@ async function f(db: any) { const { data, error } = await db.from("a").select("i
     expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias: any = { error: null }; const set = () => { alias = box; }; set(); alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
     expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias: any = { error: null }; const set = () => { alias = box; }; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("OK");
     expect(one(`async function f(db: any, fallback: any) { const { data, error } = await db.from("a").select("id"); const box = { error }; const other = { error: 1 }; other.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("OK");
+  });
+
+  it("uncertainty ends at the next definite write, and an unknown name may hold the carrier at any depth (Codex, PR #92)", () => {
+    // Round twenty-three, both halves of round twenty-two's own rule. An
+    // uncertain write SUPERSEDED by a definite one decides nothing —
+    // `if (c) alias = other; alias = other2;` ends certain, and calling it
+    // unknown was a red on healthy code. And an unknown name was matched at
+    // the bound object's depth only, so one that may hold the NESTED carrier
+    // slipped past: `let inner = other; if (c) inner = box.nested;` writes
+    // `inner.cause`, which is the error when the branch is taken.
+    expect(one(`async function f(db: any, other: any, other2: any, fallback: any, c: boolean) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias = box; if (c) alias = other; alias = other2; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any, other: any, fallback: any, c: boolean) { const { data, error } = await db.from("a").select("id"); const box = { nested: { cause: error } }; let inner = other; if (c) inner = box.nested; inner.cause = fallback; if (box.nested.cause) throw box.nested.cause; return data; }`).verdict).toBe("DISCARDED");
+    // Uncertainty AFTER the last definite write still counts.
+    expect(one(`async function f(db: any, other: any, other2: any, fallback: any, c: boolean) { const { data, error } = await db.from("a").select("id"); const box = { error }; let alias = box; alias = other2; if (c) alias = other; alias.error = fallback; if (box.error) throw box.error; return data; }`).verdict).toBe("DISCARDED");
   });
 
   it("a builder REPLACED before it is awaited never runs (Codex, PR #92)", () => {
