@@ -604,6 +604,18 @@ describe("the walk channel is the only channel, and it is private on both sides"
     // `Object.assign`, and reading it as one was red on healthy code.
     expect(read("const c = { private: true };\nregistry.assign(c);\nsend({ topic, ...c });"))
       .toEqual(["true"]);
+    // A mutation through an ALIAS is a mutation of the same object, whichever
+    // name it was written through, and transitively along a chain of them.
+    expect(read("const c = { private: true };\nconst a = c;\na.private = false;\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read("const c = { private: true };\nconst a = c;\nconst b = a;\nObject.assign(b, {});\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read("const c = { private: true };\nconst a = c;\ndelete a.private;\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    // …while an alias nobody mutates leaves the original alone, so aliasing by
+    // itself is not a refusal.
+    expect(read("const c = { private: true };\nconst a = c;\nuse(a);\nsend({ topic, ...c });"))
+      .toEqual(["true"]);
     // A loop variable is assigned on every iteration and produces no
     // assignment expression at all.
     expect(read("let c = { private: true };\nfor (c of xs) {}\nsend({ topic, ...c });"))

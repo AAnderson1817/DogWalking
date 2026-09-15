@@ -101,7 +101,11 @@ export function propertyKey(name: ts.PropertyName): string | null {
  *    target, a `for (x of …)` or `for (x in …)` loop variable, AND a mutation
  *    of what it holds — `x.y = …`, `x["y"] = …`, `delete x.y`,
  *    `Object.assign(x, …)`. The object is what the caller reads, so changing
- *    the object is changing the answer just as much as rebinding the name.
+ *    the object is changing the answer just as much as rebinding the name —
+ *    and a mutation through an ALIAS is a mutation of the same object, so
+ *    `const alias = config; alias.private = false;` invalidates `config` too.
+ *    Without that the rule read the name it was written through rather than
+ *    the object it reached, which is one indirection short of the point.
  *
  * Both are refusals rather than analyses, which is the stopping rule this
  * repository settled on: an ambiguous name never gets a confident answer, and
@@ -111,6 +115,16 @@ export function propertyKey(name: ts.PropertyName): string | null {
 export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteralExpression> {
   const seen = new Map<string, ts.ObjectLiteralExpression | null>();
   const assigned = new Set<string>();
+  // `const b = a` makes the two names one object, so a mutation of either is a
+  // mutation of both. Undirected, and closed transitively below.
+  const aliases = new Map<string, Set<string>>();
+  const link = (a: string, b: string) => {
+    if (a === b) return;
+    if (!aliases.has(a)) aliases.set(a, new Set());
+    if (!aliases.has(b)) aliases.set(b, new Set());
+    aliases.get(a)!.add(b);
+    aliases.get(b)!.add(a);
+  };
 
   const bind = (name: string, lit: ts.ObjectLiteralExpression | null) => {
     seen.set(name, seen.has(name) ? null : lit);
@@ -128,6 +142,7 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
       if (ts.isIdentifier(n.name)) {
         const init = n.initializer ? unwrapTransparent(n.initializer) : undefined;
         bind(n.name.text, init && ts.isObjectLiteralExpression(init) ? init : null);
+        if (init && ts.isIdentifier(init)) link(n.name.text, init.text);
       } else bindPattern(n.name);
     } else if (ts.isParameter(n) || ts.isBindingElement(n)) {
       bindPattern(n.name);
@@ -176,6 +191,19 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
     ts.forEachChild(n, visit);
   };
   visit(sf);
+
+  // Close the invalidation over the alias graph: whichever name a mutation was
+  // written through, every name for the same object loses its literal.
+  const queue = [...assigned];
+  while (queue.length) {
+    const name = queue.pop() as string;
+    for (const other of aliases.get(name) ?? []) {
+      if (!assigned.has(other)) {
+        assigned.add(other);
+        queue.push(other);
+      }
+    }
+  }
 
   const out = new Map<string, ts.ObjectLiteralExpression>();
   for (const [name, lit] of seen) if (lit && !assigned.has(name)) out.set(name, lit);
