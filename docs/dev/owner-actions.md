@@ -37,6 +37,7 @@ not quietly rot:
 
 | Item | What tells you |
 | --- | --- |
+| §2a `SUPABASE_ACCESS_TOKEN` | Any push to `main`: the `Deploy staging` run goes red at `Link project` with an `::error` naming token expiry |
 | §2 vault key verification | The staging deploy's `Verify the vault key opens this project` step warns and says it proved nothing |
 | §5 schema capability | `docs/dev/db-push-requirements.md`, run once before the first production push |
 | §6 Realtime public access | Nothing automated. `docs/dev/realtime-authorization.md` has a positive and a negative check to run by hand |
@@ -114,6 +115,31 @@ Production now refuses to deploy without it; staging stays non-fatal, because
 blocking every staging deploy on a secret only the owner can add would be worse
 than the gap — but it says outright that it proved nothing. Until it is set,
 staging's vault verification is decoration.
+
+### 2a. `SUPABASE_ACCESS_TOKEN` expires — renew it, and staging is down until you do
+Where: supabase.com/dashboard/account/tokens → mint a personal access token →
+GitHub → Settings → Environments → **staging** → `SUPABASE_ACCESS_TOKEN`.
+
+**This is its second lapse and staging is red right now.** The first was
+2026-08-12 (`ops(staging-auth)`, silent for two weeks). The second was read off
+the Actions API on 2026-09-15: deploy-staging run 101 on `c34df1e` failed at
+`Apply migrations` → `Link project` with
+`Unexpected error retrieving remote project status: {"message":"Unauthorized"}`.
+The last green staging deploy was run 100 on 2026-09-05 (`957319b`), so
+everything merged since then is on `main` and on no staging project.
+
+Nothing is broken and nothing needs cleaning up. The step runs **before** any
+migration, so the database was never touched; `sync-secrets`, `deploy-functions`,
+`verify-functions` and `frontend` all `needs: migrate`, so they skipped, and the
+`Everything actually deployed` job correctly stood down rather than reporting a
+green deploy of nothing. The workflow prints an `::error` naming token expiry and
+the page to renew on, which is exactly what it is for.
+
+Until it is renewed, **every merge to `main` produces a red deploy and no staging
+deploy at all** — so staging-smoke, the auth-posture check and the M4 boot probe
+all stay skipped, and the whole staging rehearsal that the production runbook
+depends on is not running. A token with no expiry, or a calendar reminder a few
+days before one, is the only durable fix; nothing in this repository can mint it.
 
 ### 3. Vercel production branches
 Set the production branch to `release/staging` (staging project) and
