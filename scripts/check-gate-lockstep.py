@@ -198,6 +198,33 @@ SHELL_RESERVED = (
 )
 
 
+def _subst_region(depth: int) -> str:
+    """A command substitution in the SKELETON, from its opening `(` to the
+    `_SUBST_CLOSE` that matches it.
+
+    The lexer normalises all three spellings to the same pair — `$(`, `<(` and
+    a backtick all reach the skeleton as `(`, and every closer as
+    `_SUBST_CLOSE` — so one shape reads all of them.
+
+    Balanced to a bounded depth because `re` has no recursion. Two is far past
+    anything written here, and past it the region simply does not match, which
+    loses the prefix rather than inventing a command: the direction this reader
+    fails in everywhere else. A bare `(` is the LAST alternative so a nested
+    SUBSHELL, which closes with `)` and not `_SUBST_CLOSE`, is still crossed
+    (`MODE=$( (printf a) ) run "…"` runs the gate, measured), and `)` is an
+    ordinary character inside the region because a `case` pattern's closer has
+    no opener of its own (`MODE=$(case a in a) printf x;; esac) run "…"` runs
+    it too, measured).
+    """
+    if depth == 0:
+        return r'\([^(%s]*%s' % (_SUBST_CLOSE, _SUBST_CLOSE)
+    return r'\((?:%s|[^(%s]|\()*%s' % (
+        _subst_region(depth - 1),
+        _SUBST_CLOSE,
+        _SUBST_CLOSE,
+    )
+
+
 def _command(body: str) -> str:
     """`body` matched only where a COMMAND can start, captured as `cmd`.
 
@@ -251,9 +278,10 @@ def _command(body: str) -> str:
     # Codex on PR #94). In the chain a `{` has to stand alone at a command
     # position, which is exactly bash's own rule: `{run "…" true; }` is a
     # syntax error (measured).
-    sep = r'(?:^|(?<=\n)|(?<=[;&|()]))'
+    # The separators themselves are `_BOUNDARY_CHARS` below, enumerated by
+    # `_find_commands` rather than written here as a lookbehind, so that the
+    # match can be tried at each one independently.
     chain = r'(?:[ \t]*(?:(?:%s)[ \t]+|![ \t]*))*' % words
-    boundary = sep + chain
     # `VAR=value` and `>file` / `2>&1` / `<in`, repeated, with the spacing bash
     # allows. Nothing here is captured; the command word follows.
     #
@@ -278,9 +306,80 @@ def _command(body: str) -> str:
     # branch last and `\\` left in the bare branch the engine backtracks into
     # it and every spelling still reads, so no matrix row can pin the order.
     # What the rows pin is that the branch exists at all.
-    word = r"""(?:\\[\s\S]|[^\s;&|'"\\]|'[^']*'|"(?:[^"\\]|\\.)*")*"""
-    prefixes = r'(?:[ \t]*(?:[A-Za-z_][A-Za-z0-9_]*=%s|[0-9]*[<>]{1,2}&?%s)[ \t]+)*' % (word, word)
-    return r'%s[ \t]*%s(?P<cmd>%s)' % (boundary, prefixes, body)
+    #
+    # A word also spans a COMMAND SUBSTITUTION, whose contents are real shell
+    # and may therefore hold the whitespace, `;`, `&` and `|` that end a bare
+    # word: bash runs `run` for `MODE=$(printf ci) run "13. new check" true`,
+    # and for the backtick and `<(…)` spellings (measured), while a branch
+    # that stopped at the space inside one read none of them — invisible in
+    # BOTH directions, so a local gate could lack a CI counterpart while
+    # lockstep reported success (measured, Codex on PR #94). `${…}` and
+    # `$((…))` already read, because the lexer MASKS their bodies; a
+    # substitution's body must stay visible, since a gate inside one is real
+    # (round 32), which is why this has to be a balanced scan rather than
+    # another masked region.
+    word = r"""(?:%s|\\[\s\S]|[^\s;&|'"\\]|'[^']*'|"(?:[^"\\]|\\.)*")*""" % _SUBST_REGION
+    # An assignment word is `NAME=`, `NAME+=`, or either with an array
+    # SUBSCRIPT: bash runs `run` for `MODE+=x run "…"`, `a[0]=1 run "…"` and
+    # `a[1 + 2]=1 run "…"` (measured — the subscript forms also warn "not a
+    # valid identifier" at runtime, and still execute the command), while a
+    # grammar accepting only `NAME=` read none of them. `MODE+x=1 run "…"` and
+    # `9MODE=1 run "…"` are NOT prefixes and bash runs no gate (measured), so
+    # the `+` belongs to `+=` alone and the name may not start with a digit.
+    #
+    # The subscript stops at a NEWLINE, which bash's does not: a subscript runs
+    # to its matching `]` wherever that is (`x[y run "…" true` with no `]` at
+    # all is a syntax error, "unexpected EOF while looking for matching `]'",
+    # measured). Widening it to match was tried and declined, because it buys
+    # one shape and cannot close its mirror. `a[1 +`⏎`2]=1 run "…" true` runs
+    # the gate and is then read — but `a[1 +`⏎`run "…" true`⏎`x]=2 :` runs
+    # NOTHING, the gate being INSIDE the subscript, and is reported anyway,
+    # because each boundary is tried independently and nothing here knows a
+    # newline can sit inside a subscript. Both of those are the behaviour on
+    # the previous head (measured, a miss and a phantom), and this round moves
+    # neither: closing the phantom needs the lexer to track `[`, which appears
+    # in globs and `[[ … ]]` tests, so the rule would be red on a healthy tree
+    # far more often than the shape it guards against occurs.
+    assign = r'[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]\n]*\])?\+?='
+    prefixes = r'(?:[ \t]*(?:%s%s|[0-9]*[<>]{1,2}&?%s)[ \t]+)*' % (assign, word, word)
+    return r'%s[ \t]*%s(?P<cmd>%s)' % (chain, prefixes, body)
+
+
+# Every offset at which a command may begin, which is what `sep` used to say
+# inside the pattern: the start of the text, after a newline, and after one of
+# the separators `; & | ( )`. A brace is a reserved WORD and reaches the chain
+# instead.
+#
+# Enumerated rather than matched because the match must be tried AT each one
+# independently. `re.finditer` does not overlap, and a prefix that spans a
+# substitution SWALLOWS whatever is inside it — so with the prefix grammar
+# above, `MODE=$(run "13. inner" true) run "13. outer" true`, which bash runs
+# BOTH of (measured), reported only the outer: the round-32 rule that a gate
+# inside a substitution is real, undone by the fix for the prefix in front of
+# it.
+_BOUNDARY_CHARS = "\n;&|()"
+
+
+def _find_commands(body: str, skel: str) -> list[re.Match]:
+    """Every match of `body` at a command position in `skel`, in source order.
+
+    ONE implementation, called by both readers, for the reason
+    `shell_gate_labels` is one reader: a rule that only one of them enforces is
+    a rule the other can contradict.
+
+    Sorted by where the COMMAND word starts, not by the boundary a match was
+    found from, so an outer command whose prefix spans an inner one still reads
+    in the order a person does. Two boundaries can reach the same command word;
+    it is reported once.
+    """
+    pattern = re.compile(_command(body))
+    offsets = [0] + [i + 1 for i, ch in enumerate(skel) if ch in _BOUNDARY_CHARS]
+    found: dict[int, re.Match] = {}
+    for off in offsets:
+        m = pattern.match(skel, off)
+        if m is not None:
+            found.setdefault(m.start("cmd"), m)
+    return [found[k] for k in sorted(found)]
 
 
 # Bash's METACHARACTERS, which are what terminate a word — read from the
@@ -311,6 +410,11 @@ _MASK = "\x01"
 # Distinct from `_MASK` only so the two reasons stay legible; both are inert to
 # every scan here.
 _SUBST_CLOSE = "\x02"
+
+
+# Built once, after the marker it is written in terms of. Depth two: see
+# `_subst_region`.
+_SUBST_REGION = _subst_region(2)
 
 
 # A bare word at the point a command can start, used only to recognise the
@@ -1191,7 +1295,7 @@ def shell_gate_labels(source: str, word: str) -> list[str]:
     code, skel = _lex_shell(_join_continuations(source))
     return [
         code[m.start("label") : m.end("label")]
-        for m in re.finditer(_command(_QUOTED_LABEL % word), skel)
+        for m in _find_commands(_QUOTED_LABEL % word, skel)
     ]
 
 
@@ -1228,8 +1332,8 @@ def shell_unreadable_calls(source: str) -> list[str]:
     #
     # A `(` is excluded by the pattern below rather than here, because
     # `run() {` is a DEFINITION and not an invocation at all.
-    for m in re.finditer(
-        _command(r'(?:run|skip_gate)(?=[\s;&|)<>]|$)[^\n;&|]*'), skel
+    for m in _find_commands(
+        r'(?:run|skip_gate)(?=[\s;&|)<>]|$)[^\n;&|]*', skel
     ):
         call = code[m.start("cmd") : m.end("cmd")].strip()
         if not re.match(r'^(?:run|skip_gate)[ \t]+(["\']).+?\1', call):
@@ -1822,6 +1926,48 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     # A TAB is a separator too (measured), so a tab-indented gate is read
     # rather than refused by name.
     ('run\t"1. tab-separated" true', ["1. tab-separated"]),
+    # An assignment word is `NAME=`, `NAME+=`, or either with an array
+    # SUBSCRIPT, and its VALUE is a word that may span a command substitution.
+    # A grammar accepting only `NAME=` with a value of bare and quoted
+    # characters read NONE of the next eleven — invisible in BOTH directions,
+    # so a local gate could lack a CI counterpart while lockstep reported
+    # success. Every expectation measured against bash.
+    ('MODE+=x run "1. plus-equals" true', ["1. plus-equals"]),
+    ('MODE+= run "1. plus-equals-empty" true', ["1. plus-equals-empty"]),
+    ('MODE=$(printf ci) run "1. subst-value" true', ["1. subst-value"]),
+    ('MODE=$(printf ci)x run "1. subst-glued" true', ["1. subst-glued"]),
+    ('MODE=`printf ci` run "1. backtick-value" true', ["1. backtick-value"]),
+    ('MODE=<(printf ci) run "1. procsub-value" true', ["1. procsub-value"]),
+    # The separators a substitution's body may contain are exactly what a bare
+    # word stops at, which is why spanning it is the whole rule.
+    ('MODE=$(printf a; printf b) run "1. subst-separator" true',
+     ["1. subst-separator"]),
+    ('MODE=$(echo $(printf a)) run "1. subst-nested" true', ["1. subst-nested"]),
+    ('MODE=$( (printf a) ) run "1. subst-subshell" true', ["1. subst-subshell"]),
+    ('MODE=$(case a in a) printf x;; esac) run "1. subst-case" true',
+     ["1. subst-case"]),
+    # The row that pins BOTH requirements at once: the substitution's body is
+    # real shell, so a gate inside it is real (round 32), AND the prefix spans
+    # it, so the gate after it is real too. Bash runs both (measured); a
+    # non-overlapping scan reported only the outer.
+    ('MODE=$(run "1. subst-inner" true) run "1. subst-outer" true',
+     ["1. subst-inner", "1. subst-outer"]),
+    ('>$(printf /dev/null) run "1. redirect-subst" true', ["1. redirect-subst"]),
+    ('MODE=$(printf ci) MODE2=x run "1. two-prefixes" true', ["1. two-prefixes"]),
+    # TWO boundaries reach this one command word — the start of the text, and
+    # the `;` INSIDE the substitution, after which `MODE2=1` reads as a prefix
+    # of its own. Bash runs the gate once (measured); without the dedup the
+    # reader reported it twice.
+    ('MODE=$(printf a; MODE2=1) run "1. subst-two-boundaries" true',
+     ["1. subst-two-boundaries"]),
+    ('a[0]=1 run "1. subscript" true', ["1. subscript"]),
+    ('a[1 + 2]=1 run "1. subscript-spaces" true', ["1. subscript-spaces"]),
+    # …and the two that are NOT assignment words. Bash runs no gate for either
+    # (measured: `command not found`), so reading them as prefixes would be a
+    # PHANTOM local gate — the `+` belongs to `+=` alone, and a name may not
+    # begin with a digit.
+    ('MODE+x=1 run "1. phantom" true', []),
+    ('9MODE=1 run "1. phantom" true', []),
     ('run() {\n  :\n}', []),
 )
 
@@ -1895,6 +2041,12 @@ _UNREADABLE_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('echo ${UNSET:-x; run $label true}', []),
     ('echo ${UNSET:-$(run $label true)}', ['run $label true)}']),
     ('result="`echo \\`run $label true\\``"', ['run $label true\\``"']),
+    # The prefix grammar belongs to BOTH readers, so an unreadable call behind
+    # one must be refused BY NAME rather than left invisible — and the shape
+    # that is no prefix at all must stay invisible in both directions.
+    ('MODE+=x run bare', ['run bare']),
+    ('MODE=$(printf ci) run bare', ['run bare']),
+    ('MODE+x=1 run bare', []),
 )
 
 
