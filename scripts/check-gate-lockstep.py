@@ -277,7 +277,7 @@ def _command(body: str) -> str:
     words = "|".join(
         re.escape(w)
         for w in SHELL_RESERVED
-        if w not in ("!", "}", "time", "function", "coproc")
+        if w not in ("!", "}", "time", "function")
         and w not in SHELL_WORD_TAKING
     )
     # A reserved word itself begins at a command position, so the SAME set of
@@ -388,39 +388,38 @@ def _command(body: str) -> str:
     # is about.
     funcspec = r'function[ \t]+[^ \t\n|&;()<>$%s]+[ \t]+' % re.escape(_MASK)
     # `coproc` is the third reserved word that may be followed by something
-    # other than a command: an OPTIONAL name, and only then the body. Left in
-    # the plain set, the chain read the name as the command and stopped, so
-    # the body's `{` was reachable from no boundary and `coproc checks { run
-    # "13. new check" true; }` — which bash runs — was read by NEITHER reader:
-    # invisible in both directions, a local gate with no CI counterpart while
-    # lockstep reported success (Codex, PR #94). The same hole for a tab
-    # before the brace, a redirection after the group, a `$NAME` and a quoted
-    # name, and a gate at the HEAD of a named `until`/`if` — and the OTHER
-    # direction one word over: `coproc run { run "…" true; }` names the
-    # coprocess `run`, and the chain read that name as an unlabelled
-    # invocation, so `shell_unreadable_calls` refused a healthy file by name.
-    #
-    # The name is admitted only where `_COPROC_OPENER` says bash reads one —
-    # before a compound-command opener, across blanks and never a newline —
-    # which is what keeps `coproc checks run "1. fake" true` (a command called
-    # `checks`) from being read as a gate. The lexer asks the same question at
-    # the word's end, so the command position survives the name and the
-    # body's `{` opens one.
-    # The name is a skeleton WORD — a substitution region, an escape, a bare
-    # character that is not a metacharacter, or a quoted run — because
-    # `coproc $(printf checks) { … }` names the coprocess `checks` and runs
-    # the body (measured), and a bare character class read none of the
-    # substitution spellings (Codex, PR #94). Non-empty, and followed by
-    # the opener the lexer asks for, so the two halves agree.
-    name_piece = (
-        r"""(?:%s|\\[\s\S]|[^\s;&|'"\\()<>%s%s]|'[^']*'|"(?:[^"\\]|\\.)*")"""
-        % (_SUBST_REGION, _NOCLOBBER, _SUBST_CLOSE)
-    )
-    coprocspec = r'coproc[ \t]+(?:%s+(?=%s))?' % (name_piece, _COPROC_OPENER.pattern)
-    chain = r'(?:[ \t]*(?:%s|%s|%s|(?:%s)[ \t]+|![ \t]+))*' % (
+    # other than a command — an OPTIONAL name, and only then the body — and
+    # it is the one this chain does NOT read, on purpose. Left in the plain
+    # set with no rule at all, the chain read the name as the command and
+    # stopped, so the body's `{` was reachable from no boundary and `coproc
+    # checks { run "13. new check" true; }` — which bash runs — was read by
+    # NEITHER reader: a local gate with no CI counterpart while lockstep
+    # reported success (Codex, PR #94). A name grammar here then went one
+    # word short of bash twice over: a character class missed every
+    # substitution spelling, and a skeleton-word grammar built on
+    # `_SUBST_REGION` missed a name four substitutions deep, because a
+    # regular expression cannot balance nesting and a bounded depth is a
+    # count standing where a structure belongs (Codex, PR #94, both). So
+    # the name is not read here at all. The LEXER reads it — it has to read
+    # every word to its end anyway, with balanced regions of any depth — and
+    # where it finds a name it hands this chain one thing: the blank after
+    # the name becomes `_NAME_BREAK`, a boundary the body is reached from.
+    # That also closes the OTHER direction, the false red
+    # `shell_unreadable_calls` used to raise for a coprocess called `run`
+    # (`coproc run { run "…" true; }` — legal, measured): the name is then
+    # `run` followed by the marker rather than by a blank, and both readers
+    # admit an invocation only before a blank or a separator; a name ended by
+    # `(` is `run(`, which they already exclude as a definition's shape. A
+    # mask of the name's first character was written for that direction and
+    # DELETED, because no row could pin it — with it removed every row stayed
+    # green (measured), and code no row can reach is code a reader trusts for
+    # nothing. `_COPROC_OPENER`, the question that decides a name, lives with
+    # the lexer alone; a word the lexer does not mark (`coproc checks run
+    # "1. fake" true`, a command called `checks`) reaches this chain exactly
+    # as bash reads it.
+    chain = r'(?:[ \t]*(?:%s|%s|(?:%s)[ \t]+|![ \t]+))*' % (
         timespec,
         funcspec,
-        coprocspec,
         words,
     )
     # `VAR=value` and `>file` / `2>&1` / `<in`, repeated, with the spacing bash
@@ -536,7 +535,18 @@ def _command(body: str) -> str:
 # BOTH of (measured), reported only the outer: the round-32 rule that a gate
 # inside a substitution is real, undone by the fix for the prefix in front of
 # it.
-_BOUNDARY_CHARS = "\n;&|()"
+# What the blank that ENDS a coprocess name becomes in the skeleton: a command
+# boundary, so the chain reaches the body (`{ run "…" true; }`, `until run
+# …`) from it without ever reading the name. The name is a shell WORD and a
+# word may nest substitutions to any depth, which a regular expression cannot
+# balance — the chain's name grammar rested on `_SUBST_REGION`, whose depth is
+# a fixed two, so `coproc $(echo $(echo $(echo $(printf checks)))) { run "G"
+# true; }` — which bash runs — was read by neither reader (Codex, PR #94). The
+# LEXER already reads the word to its end with balanced regions, so it marks
+# the end and the chain needs no grammar for what came before it. A name that
+# ends at a `(` needs no marker, because a `(` is a boundary already.
+_NAME_BREAK = "\x04"
+_BOUNDARY_CHARS = "\n;&|()" + _NAME_BREAK
 
 
 def _find_commands(body: str, skel: str) -> list[re.Match]:
@@ -719,13 +729,17 @@ _TIME_OPTION = re.compile(r"(-p|--)(?=[\s;&|()<>]|$)")
 # `;`, and one whose body invokes a gate of its own (all measured, bash 5.2).
 # A character class that stopped at the substitution's `(` read none of them
 # — invisible in both directions, so a local gate could lack a CI counterpart
-# while lockstep reported success (Codex, PR #94). So there is no name regex:
-# the chain reads the name as a skeleton word, substitution regions included,
-# exactly as it reads an assignment's value, and the lexer decides at the
-# word's END, where its own tokenisation has already carried it through
-# whatever the word contained. What the two share is the question asked
-# after the word — this lookahead, anchored at the word-break character —
-# so they cannot disagree about which opener makes a name.
+# while lockstep reported success (Codex, PR #94) — and a skeleton-word
+# grammar in the chain, built on the depth-two `_SUBST_REGION`, then missed a
+# name four substitutions deep (Codex, PR #94 again): a regular expression
+# cannot balance nesting. So there is no name grammar anywhere. The LEXER
+# decides at the word's END, where its own tokenisation has already carried
+# it through whatever the word contained at any depth, by asking THIS
+# question — anchored at the word-break character — and it hands the chain a
+# boundary (`_NAME_BREAK`) after a name, so the chain reaches the body without
+# reading the name and, the marker standing where the blank was, cannot
+# mistake the name for a command. One reader of the name, so there is no
+# sibling to disagree with it.
 _COPROC_OPENER = re.compile(
     r"(?:[ \t]*\(|[ \t]+(?:\{|\[\[|while|until|for|if|case|select)(?=[ \t\n;&|()<>]|$))"
 )
@@ -986,6 +1000,9 @@ def _lex_shell(
     # around it — both legal names (measured, bash 5.2; Codex, PR #94).
     coproc_depth = 0
     coproc_bt = False
+    # Whether the character about to be emitted is the blank that ended a
+    # name — what the lexer hands the chain (see `_NAME_BREAK`).
+    name_break = False
     # An unquoted backtick is the other spelling of `$( )`: what follows it is
     # a command position (`echo `run "13. x" y`` runs `run` — measured, and the
     # reader found NOTHING for it, invisible in both directions), and the word
@@ -1170,6 +1187,14 @@ def _lex_shell(
             coproc_name = ""
             if _COPROC_OPENER.match(text, i):
                 at_cmd = True
+                # The chain's half, handed over rather than re-derived: the
+                # blank that ends the name becomes a boundary the body is
+                # reached from. A name ending at `(` needs none — `(` is a
+                # boundary — and neither reader admits `run(` as an
+                # invocation, which is what keeps a coprocess called `run`
+                # from a false refusal there too.
+                if ch in " \t":
+                    name_break = True
         elif coproc_name == "next" and at_word_start and at_cmd and ch not in _WORD_BREAK:
             head = _BARE_WORD.match(text, i)
             if ch in "{(!" or (head and head.group(1) in SHELL_RESERVED):
@@ -1899,10 +1924,13 @@ def _lex_shell(
                 ch in ";&|\n" and bool(parens) and parens[-1] == "glob"
             )
             skel.append(
-                _NOCLOBBER
+                _NAME_BREAK
+                if name_break
+                else _NOCLOBBER
                 if noclobber
                 else (_MASK if pattern_alt or glob_text else ch)
             )
+            name_break = False
             at_word_start = ch in _WORD_BREAK
             if (
                 ch in ";&|\n"
@@ -3033,6 +3061,13 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     # that direction is pinned in the unreadable matrix below.
     ('coproc run { run "1. coproc-name-is-run" true; }; wait',
      ["1. coproc-name-is-run"]),
+    # …and with the body a SUBSHELL, where the name ends at a `(` that is a
+    # boundary already and no marker replaces a blank: here it is the readers'
+    # own exclusion of `run(` — a definition's shape — that keeps the name
+    # from a false refusal. A mask of the first character was written for
+    # this row and deleted: measured, it changed nothing.
+    ('coproc run( run "1. coproc-name-is-run-paren" true ); wait',
+     ["1. coproc-name-is-run-paren"]),
     # The LEXER's half: the command position survives the name, so the body's
     # `{` opens one and a `case` inside it is recognised. Without that the
     # pattern's `)` popped the enclosing substitution and the tail became
@@ -3102,6 +3137,30 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('echo $(coproc $(printf c) { :; }) run "1. fake" true; wait', []),
     ('coproc $(printf checks)\n{ run "1. coproc-subst-name-newline-group" true; }; wait',
      ["1. coproc-subst-name-newline-group"]),
+    # A name may nest substitutions to ANY depth — four and six here, each
+    # expanding to `checks` and running its body (measured, bash 5.2) — and
+    # the chain's skeleton-word grammar, built on the depth-two
+    # `_SUBST_REGION`, read neither (Codex, PR #94). The name is not read by
+    # the chain at all now: the lexer, which reads every word to its end with
+    # balanced regions, marks the end as a boundary. Both directions at depth
+    # four, so the marker cannot become
+    # "every word after `coproc` is a name": a simple word after the name is
+    # the command, a coproc inside a substitution that runs nothing is still
+    # nothing, and a gate inside the name's own substitution still reads.
+    ('coproc $(echo $(echo $(echo $(printf checks)))) { run "1. coproc-name-depth-4" true; }; wait',
+     ["1. coproc-name-depth-4"]),
+    ('coproc $(echo $(echo $(echo $(echo $(echo $(printf checks)))))) { run "1. coproc-name-depth-6" true; }; wait',
+     ["1. coproc-name-depth-6"]),
+    ('coproc $(echo $(echo $(echo $(printf run)))) { run "1. coproc-name-depth-4-run" true; }; wait',
+     ["1. coproc-name-depth-4-run"]),
+    ('coproc $(echo $(echo $(echo $(printf checks)))) until run "1. coproc-name-depth-4-until" true; do break; done; wait',
+     ["1. coproc-name-depth-4-until"]),
+    ('coproc $(echo $(echo $(echo $(printf checks))))( run "1. coproc-name-depth-4-paren" true ); wait',
+     ["1. coproc-name-depth-4-paren"]),
+    ('coproc $(echo $(echo $(echo $(run "1. coproc-name-depth-4-inner" true >&2; printf checks)))) { :; }; wait',
+     ["1. coproc-name-depth-4-inner"]),
+    ('coproc $(echo $(echo $(echo $(printf checks)))) run "1. fake" true; wait', []),
+    ('echo $(coproc $(echo $(echo $(echo $(printf c)))) { case a in a) :;; esac; }) run "1. fake" true', []),
     # A case pattern may carry an OPTIONAL leading parenthesis, which is not a
     # subshell. Reading it as one left a command position open, so a pattern
     # spelled `case` or `esac` was taken for the reserved word: the marker it
@@ -3319,6 +3378,8 @@ _UNREADABLE_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     # `coproc checks run` is a command called `checks`, and its argument is
     # not a call.
     ('coproc run { run "1. x" true; }; wait', []),
+    ('coproc run( run "1. x" true ); wait', []),
+    ('coproc run ( run "1. x" true ); wait', []),
     ('coproc checks { run $LABEL true; }; wait', ["run $LABEL true"]),
     ('coproc checks { skip_gate $LABEL; }; wait', ["skip_gate $LABEL"]),
     ('coproc run\n{ run "1. x" true; }; wait', ["run"]),
@@ -3327,6 +3388,7 @@ _UNREADABLE_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     # (it was invisible), a `run` after it on the same line is the command's
     # argument, and one on the NEXT line is the main shell's unlabelled call.
     ('coproc $(printf checks) { run $LABEL true; }; wait', ["run $LABEL true"]),
+    ('coproc $(echo $(echo $(echo $(printf checks)))) { run $LABEL true; }; wait', ["run $LABEL true"]),
     ('coproc $(printf checks) run; wait', []),
     ('coproc $(printf checks)\nrun', ["run"]),
     # A case PATTERN is not a command, so neither its optional leading
@@ -3564,7 +3626,7 @@ _ARITH_MASK: tuple[tuple[str, str, bool], ...] = (
 
 
 # The ESCAPE rule as an INVARIANT, for the reason the three body masks are
-# invariants: the behavioural rows above pin the five characters in
+# invariants: the behavioural rows above pin the characters in
 # `_BOUNDARY_CHARS` and nothing else, so a `>`, a `"`, a `$` or a `#` reaching
 # the skeleton raw is a rule no row can speak for — and enumerating the
 # characters that must be masked is how the next one is missed (the
