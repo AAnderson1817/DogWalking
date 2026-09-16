@@ -429,6 +429,35 @@ def _find_commands(body: str, skel: str) -> list[re.Match]:
 _WORD_BREAK = " \t\n|&;()<>"
 
 
+def _backslash_run(text: str, i: int) -> int:
+    """How many consecutive backslashes end at `i`, inclusive.
+
+    A nested backtick's delimiter is recognised by PARITY, not by the pair in
+    front of the scan: bash reads the body of a backtick substitution once,
+    turning `\\\\` into `\\` and `` \\` `` into a bare backtick, and then parses
+    the RESULT as shell — so a run of N backslashes before a backtick opens a
+    nested substitution only when N % 4 == 1. Measured across N = 0..8: bash
+    invokes the inner command at N = 1 and N = 5 and at no other length, and
+    N = 3 and N = 7 leave the backtick literal because the first pass emits an
+    ODD number of backslashes in front of it and the second pass then reads
+    them as escaping it.
+
+    The scan is backward over `text` because the escape branch below has
+    already consumed the earlier pairs of the same run, so the character at `i`
+    alone cannot say how long the run is.
+
+    The `i - n >= 0` bound is defensive and NO ROW PINS IT, which is said here
+    rather than left looking tested: the one caller fires only inside a
+    backtick region, so a backtick always stands before the run and `i - n`
+    can never reach 0 on a backslash. Measured by narrowing it to `> 0` — the
+    whole matrix stays green.
+    """
+    n = 0
+    while i - n >= 0 and text[i - n] == "\\":
+        n += 1
+    return n
+
+
 # What a masked quoted character becomes in the SKELETON. Any single character
 # keeps the offsets (Python indexes code points), and this one can carry no
 # meaning to any scan here: it is not a quote, not a metacharacter, not `#`.
@@ -824,10 +853,26 @@ def _lex_shell(
                 skel.append(_MASK if (exp_depth or arith_depth) else ch)
             else:
                 skel.append(masked(ch))
-        elif ch == "\\" and in_backtick and text.startswith("\\`", i):
+        elif (
+            ch == "\\"
+            and in_backtick
+            and text.startswith("\\`", i)
+            and _backslash_run(text, i) % 4 == 1
+        ):
             # A nested substitution's delimiter — see `nested_backtick` above.
             # Opening carries the boundary a bare backtick spells; closing is
             # inert and the word runs on, exactly as the outer pair behaves.
+            #
+            # The PARITY guard above is what makes this a delimiter rather than
+            # an escaped backtick: `\\\\\\`` — three backslashes — is data, and
+            # without the guard this branch fired on the third one (the escape
+            # branch having eaten the first two) and opened a substitution bash
+            # never opens, so `` result=`echo \\\\\\`run "G" true\\\\\\`` `` invoked no
+            # gate while the label reader returned `G`: a PHANTOM local gate,
+            # which satisfies a ci.yml mapping and keeps the reverse check
+            # happy after the real local gate has been deleted (Codex on PR
+            # #94). The same rule governs the CLOSER, which the review did not
+            # name and which was equally unchecked.
             out.append(text[i : i + 2])
             skel.append(("\\" + _SUBST_CLOSE) if nested_backtick else "\\(")
             at_word_start = not nested_backtick
@@ -2132,6 +2177,21 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('echo "x\\;" ; run "1. double-quoted-escape" true',
      ["1. double-quoted-escape"]),
     ('echo x\\;y; run "1. escape-then-real" true', ["1. escape-then-real"]),
+    # A nested backtick's delimiter is recognised by PARITY. Bash reads a
+    # backtick body ONCE — turning an escape pair into one backslash and
+    # `` \` `` into a bare backtick — and then parses the RESULT as shell, so a
+    # run of N backslashes before an inner backtick opens a nested
+    # substitution only when N % 4 == 1. Measured across N = 0..8: the inner
+    # command runs at 1 and 5 and at no other length, because 3 and 7 leave
+    # an ODD number of backslashes in front of the backtick after the first
+    # pass and the second pass then reads them as escaping it. Three
+    # backslashes was a PHANTOM local gate on the previous head (Codex on
+    # PR #94); seven is the next period, and the two positives are what stop
+    # the rule becoming "a long run never opens".
+    ('result=`echo \\\\\\`run "1. phantom" true\\\\\\``', []),
+    ('result=`echo \\\\\\\\\\\\\\`run "1. phantom" true\\\\\\\\\\\\\\``', []),
+    ('result=`echo \\\\\\\\\\`run "1. four-period" true\\\\\\\\\\``', ['1. four-period']),
+    ('result=`echo \\`run "1. mixed-period" true\\\\\\\\\\``', ['1. mixed-period']),
     ('run() {\n  :\n}', []),
 )
 
@@ -2225,7 +2285,9 @@ _UNREADABLE_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('2>|g.err run bare', ['run bare']),
     ('> g.a run bare', ['run bare']),
     ('{fd}>g.fd run bare', ['run bare']),
-    ('> run bare', []),
+    ('> run bare', []),    # The SIBLING reader on the parity rule: with the delimiters left
+    # literal bash invokes nothing, so neither reader may report anything.
+    ('result=`echo \\\\\\`run $label true\\\\\\``', []),
 )
 
 

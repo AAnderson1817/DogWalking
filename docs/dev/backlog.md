@@ -52,6 +52,21 @@ it in its own PR, with the four-round spelling matrix in
 `check-gate-lockstep.py` kept as a test of the lister's output rather than
 deleted.
 
+Measured while fixing the round-41 parity finding and worth carrying into that
+PR: gate 10g reads `validate.sh` and never asks whether bash could RUN it. An
+unterminated construct — an unbalanced quote, a nested backtick substitution
+whose delimiters have different backslash parities — is `unexpected EOF while
+looking for matching …`, so bash refuses the file outright and every gate in
+it is dead; this reader carries on past the point bash gives up and can report
+a label, and gate 10g then prints lockstep over a `validate.sh` that cannot
+execute. Nothing else in CI reads `validate.sh` (`ci.yml` runs its checks
+directly), so gate 10g is the only place that would notice. `_lex_shell`
+already tracks every open region, so the cheap form is to report an
+unterminated one at EOF as a refusal by name — but it changes `_lex_shell`'s
+return shape at five call sites, which is why it is here rather than in the
+review round that found it. `--list-gates` closes it for free, since a file
+bash cannot parse cannot answer.
+
 ### 2. Tell the operator when an edited address is already suppressed
 Also recorded in spec 04. Editing a client's address to one already in
 `email_suppressions` makes every future client-facing email skip
