@@ -258,8 +258,25 @@ def _command(body: str) -> str:
 _WORD_BREAK = " \t\n|&;()<>"
 
 
-def _strip_shell_comments(text: str) -> str:
-    """Blank out `#` comments, respecting quotes AND word boundaries.
+# What a masked quoted character becomes in the SKELETON. Any single character
+# keeps the offsets (Python indexes code points), and this one can carry no
+# meaning to any scan here: it is not a quote, not a metacharacter, not `#`.
+_MASK = "\x01"
+
+
+def _lex_shell(text: str) -> tuple[str, str]:
+    """Return (clean, skeleton): comments blanked, and quoted contents masked.
+
+    Both are the SAME LENGTH as the input, so a span found in one reads back
+    from the other. The command-position scans run on the SKELETON and their
+    labels are read out of `clean` at the same span, because a separator
+    inside a quoted word is data and not a command boundary — `echo
+    'diagnostic; run "13. fake" true'` runs only `echo` (measured), while a
+    scan over the raw text read `13. fake` as a runnable gate: a PHANTOM local
+    gate, which satisfies a ci.yml mapping and lets quoted diagnostic text keep
+    the reverse check happy after the real gate has been deleted (measured,
+    Codex on PR #94). The quote DELIMITERS survive masking, so a gate's own
+    label is still found by the same pattern and read back intact.
 
     A command-position reader that did not strip comments would read
     `# run "x"` as a gate — the mention-versus-use distinction this repository
@@ -281,6 +298,22 @@ def _strip_shell_comments(text: str) -> str:
     rather than reasoned about.
     """
     out = []
+    skel = []
+
+    def masked(chunk: str) -> str:
+        # A newline inside a quoted string is a literal newline to bash, and
+        # the unreadable scan stops at one, so it is kept rather than masked —
+        # the skeleton must not disagree with the text about where lines are.
+        #
+        # NO MATRIX ROW PINS THIS, and saying so is better than implying one
+        # does: masking it changes no verdict I can construct. A command
+        # boundary before a real gate is a newline OUTSIDE the quotes, which is
+        # never masked either way, so the only behaviour that moves is a label
+        # that itself spans lines — refused by name here, read as a multi-line
+        # label if masked, and both end in a red naming it. Kept as the
+        # conservative reading rather than because a sabotage demanded it.
+        return "".join("\n" if c == "\n" else _MASK for c in chunk)
+
     quote = None
     at_word_start = True
     i = 0
@@ -290,37 +323,95 @@ def _strip_shell_comments(text: str) -> str:
             out.append(ch)
             if ch == "\\" and quote == '"' and i + 1 < len(text):
                 out.append(text[i + 1])
+                skel.append(masked(text[i : i + 2]))
                 i += 2
                 continue
             if ch == quote:
                 quote = None
                 at_word_start = False
+                skel.append(ch)
+            else:
+                skel.append(masked(ch))
         elif ch == "\\":
             # An unquoted backslash escapes the next character, whatever it is,
             # and the word continues through both.
             out.append(ch)
             if i + 1 < len(text):
                 out.append(text[i + 1])
+                skel.append(text[i : i + 2])
                 i += 2
                 at_word_start = False
                 continue
+            skel.append(ch)
             at_word_start = False
         elif ch in "'\"":
             quote = ch
             out.append(ch)
+            skel.append(ch)
             at_word_start = False
         elif ch == "#" and at_word_start:
             # To the end of the line, replaced by spaces.
             end = text.find("\n", i)
             end = len(text) if end == -1 else end
             out.append(" " * (end - i))
+            skel.append(" " * (end - i))
             i = end
             continue
         else:
             out.append(ch)
+            skel.append(ch)
             at_word_start = ch in _WORD_BREAK
         i += 1
-    return "".join(out)
+    clean, skeleton = "".join(out), "".join(skel)
+    assert len(clean) == len(text) and len(skeleton) == len(text)
+    return clean, skeleton
+
+
+_QUOTED_LABEL = r'%s +(?P<q>["\'])(?P<label>.+?)(?P=q)'
+
+
+def shell_gate_labels(source: str, word: str) -> list[str]:
+    """Every `word "label"` invoked at a command position in `source`.
+
+    ONE reader, called by `validate_labels` and driven by `_SPELLINGS`, so the
+    matrix proves the rules the real run uses. It was two: the matrix drove the
+    pattern directly while `validate_labels` did its own scanning, and a
+    sabotage of the real one therefore stayed GREEN — a rule with nothing
+    behind it, in the commit that added the rule.
+
+    Matched on the SKELETON so a separator inside a quoted word cannot look
+    like a command boundary, then read out of the clean text at the same span
+    so the label is the real text (the quote delimiters survive masking, which
+    is what lets one pattern do both).
+    """
+    code, skel = _lex_shell(re.sub(r"\\\n[ \t]*", " ", source))
+    return [
+        code[m.start("label") : m.end("label")]
+        for m in re.finditer(_command(_QUOTED_LABEL % word), skel)
+    ]
+
+
+def shell_unreadable_calls(source: str) -> list[str]:
+    """Every `run`/`skip_gate` invocation in `source` whose label cannot be read.
+
+    A parser that sees nothing reports agreement, so an invocation this cannot
+    read is REFUSED BY NAME rather than skipped — the rule
+    `gen-enum-catalog.py` needed forty-three rounds to arrive at, in a third
+    language. A DEFINITION (`run() {`) is not an invocation and is excluded by
+    the `(`, which the first version of this went red on.
+
+    On the SKELETON for the same reason the label reader is, and in the
+    direction that matters more here: `echo 'note; run'` reported `run'` as an
+    unreadable gate off the raw text (measured) — a gate RED ON A HEALTHY TREE,
+    the worst shape this log records.
+    """
+    code, skel = _lex_shell(re.sub(r"\\\n[ \t]*", " ", source))
+    out = []
+    for m in re.finditer(_command(r'(?:run|skip_gate)(?![(\w])[^\n;&|]*'), skel):
+        call = code[m.start("cmd") : m.end("cmd")].strip()
+        if not re.match(r'^(?:run|skip_gate) +(["\']).+?\1', call):
+            out.append(call)
+    return out
 
 
 def validate_labels() -> tuple[set[str], set[str], list[str], list[str]]:
@@ -370,24 +461,12 @@ def validate_labels() -> tuple[set[str], set[str], list[str], list[str]]:
     # check" …` is one command to the shell and was invisible to a
     # same-line regex, so a real local gate could be absent from CI while
     # the reverse check reported lockstep (measured, Codex on PR #94).
-    joined = re.sub(r'\\\n[ \t]*', ' ', text)
-    code = _strip_shell_comments(joined)
-    quoted = r'%s +(?P<q>["\'])(?P<label>.+?)(?P=q)'
-    found = [m.group("label") for m in re.finditer(_command(quoted % 'run'), code)]
+    found = shell_gate_labels(text, "run")
     duplicate = sorted({lbl for lbl in found if found.count(lbl) > 1})
     runnable = set(found)
-    skipped = {m.group("label") for m in re.finditer(_command(quoted % 'skip_gate'), code)}
+    skipped = set(shell_gate_labels(text, "skip_gate"))
 
-    # And an invocation whose label this cannot read is REFUSED by name rather
-    # than skipped, because a parser that sees nothing reports agreement — the
-    # rule `gen-enum-catalog.py` needed forty-three rounds to arrive at, in a
-    # third language. A DEFINITION (`run() {`) is not an invocation and is
-    # excluded by the `(`, which the first version of this went red on.
-    unreadable = []
-    for m in re.finditer(_command(r'(?:run|skip_gate)(?![(\w])[^\n;&|]*'), code):
-        call = m.group("cmd").strip()
-        if not re.match(r'^(?:run|skip_gate) +(["\']).+?\1', call):
-            unreadable.append(call)
+    unreadable = shell_unreadable_calls(text)
     # `finditer`, not `search`. There is one such loop today; a `search` would
     # expand only the FIRST, and a ci.yml step mapped to a label from a second
     # one would then be reported as claiming a gate validate.sh does not
@@ -464,8 +543,20 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     # word and the `#` after it is literal (`echo x}#y; run "L" z` invokes
     # `run` — measured). Putting braces in the break set would blank the gate.
     ('echo x}#y; run "1. brace-in-word" z', ["1. brace-in-word"]),
+    # A separator inside a QUOTED word is data, not a command boundary, so the
+    # label still reads back intact through the mask (read off the skeleton it
+    # would come back as mask characters).
+    ('run "1. label with ; and # inside" x', ["1. label with ; and # inside"]),
     # NOT invocations: a comment, an argument, and a definition.
     ('# run "1. commented" x', []),
+    # `echo` is the only command here — bash runs nothing else (measured).
+    ("echo 'diagnostic; run \"1. phantom\" true'", []),
+    # A quoted string may span lines, and only the `echo` and the gate on the
+    # NEXT line run (measured). The gate inside the quotes must stay invisible
+    # while the real one after it is still found.
+    ('echo \'a\nrun "1. inside-multiline" x\'\nrun "1. after-multiline" true',
+     ["1. after-multiline"]),
+    ('echo "double; run \'1. phantom-dq\' true"', []),
     ('echo x;#run "1. comment-after-separator" x', []),
     # These two are what makes comment stripping LOAD-BEARING rather than
     # decorative: a bare space is not a command position, so `# run "x"` is
@@ -482,6 +573,18 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
 )
 
 
+# The UNREADABLE reader's own two rows. It answers a different question from
+# the label reader, so the spelling matrix above cannot speak for it — and its
+# failure direction is the worse one: off the raw text `echo 'note; run'` was
+# reported as an unreadable gate (measured), a gate red on a healthy tree.
+_UNREADABLE_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
+    # A real invocation whose label is not a literal must be refused BY NAME.
+    ('run $label x', ["run $label x"]),
+    # A quoted MENTION is data and must be invisible in both directions.
+    ("echo 'note; run'", []),
+)
+
+
 def _self_check() -> list[str]:
     """Drive the command-position reader over `_SPELLINGS`.
 
@@ -491,8 +594,6 @@ def _self_check() -> list[str]:
     a matrix of only-positive rows is satisfied by a reader that matches
     everything and a matrix of only-negative rows by one that matches nothing.
     """
-    quoted = r'%s +(?P<q>["\'])(?P<label>.+?)(?P=q)'
-    pattern = re.compile(_command(quoted % "run"))
     bad = []
     # Counted INSIDE the loop, so the precondition speaks for what was
     # actually driven rather than for what the list happens to hold: an
@@ -504,12 +605,27 @@ def _self_check() -> list[str]:
             positive += 1
         else:
             negative += 1
-        code = _strip_shell_comments(re.sub(r"\\\n[ \t]*", " ", src))
-        got = [m.group("label") for m in pattern.finditer(code)]
+        got = shell_gate_labels(src, "run")
         if got != expected:
             bad.append(
                 f"the command-position reader answers {got!r} for {src!r}, expected {expected!r}"
             )
+    unreadable_pos = unreadable_neg = 0
+    for src, expected in _UNREADABLE_SPELLINGS:
+        if expected:
+            unreadable_pos += 1
+        else:
+            unreadable_neg += 1
+        got = shell_unreadable_calls(src)
+        if got != expected:
+            bad.append(
+                f"the unreadable-call reader answers {got!r} for {src!r}, expected {expected!r}"
+            )
+    if unreadable_pos < 1 or unreadable_neg < 1:
+        bad.append(
+            f"the unreadable-call matrix drove {unreadable_pos} refusals and "
+            f"{unreadable_neg} mentions — it cannot prove that reader in both directions"
+        )
     if positive < 2 or negative < 2:
         bad.append(
             f"the command-position spelling matrix drove {positive} invocations and "
