@@ -244,7 +244,9 @@ def _command(body: str) -> str:
     # `{ :; } run "…" true` is a bash SYNTAX ERROR (measured), so a separator
     # always stands between a group's closer and whatever follows it.
     words = "|".join(
-        re.escape(w) for w in SHELL_RESERVED if w not in ("!", "}", "time")
+        re.escape(w)
+        for w in SHELL_RESERVED
+        if w not in ("!", "}", "time", "function")
     )
     # A reserved word itself begins at a command position, so the SAME set of
     # places must precede it — `cmd;if run "…"` and `(if run "…"` are ordinary
@@ -310,7 +312,54 @@ def _command(body: str) -> str:
     # real local gate has been deleted. Glued, it is not the reserved word at
     # all: `!case a in a) …` is a bash SYNTAX ERROR (measured). A newline after
     # it needs no clause, because a newline is itself a command position.
-    chain = r'(?:[ \t]*(?:%s|(?:%s)[ \t]+|![ \t]+))*' % (timespec, words)
+    # `function` is the second reserved word that is not followed by a command
+    # — it is followed by the function's NAME, and only then by the body. Left
+    # in the plain set above, the chain stopped at the name, and the body's `{`
+    # was then reachable from no boundary at all (a `{` is a reserved word
+    # rather than a metacharacter, so it is not in `_BOUNDARY_CHARS`): `function
+    # checks { run "13. new check" true; }; checks` runs the gate (measured)
+    # and was read by NEITHER this reader nor `shell_unreadable_calls` —
+    # invisible in BOTH directions, so a local gate written in this supported
+    # spelling could have no CI counterpart while lockstep reported success
+    # (Codex, PR #94). Six spellings shared the hole, including the extra-blank
+    # and tab forms, `skip_gate`, inside a substitution and after a separator.
+    #
+    # ONLY the `function NAME {` form: `function NAME() {`, the POSIX `NAME()
+    # {`, a newline before the brace and a `( … )` body all read already,
+    # because each puts a `(` or a newline — real boundaries — between the name
+    # and the body (all measured).
+    #
+    # The NAME's own grammar was swept off the shell rather than guessed: every
+    # printable ASCII character was tried inside one, and bash accepts
+    # `!#%+,-./:?@]^_{}~`, the digits and the letters, while `$` and a
+    # backslash are refused outright ("not a valid identifier") and a QUOTED
+    # name is refused the same way — so the definition never happens and its
+    # body never runs, which is why a masked (quoted or escaped) character and
+    # a `$` are excluded here: admitting them would report a gate that bash
+    # cannot define. The rest end the word anyway.
+    #
+    # A blank after the name is bash's own rule and not a convenience:
+    # `function f {echo x; }` is a SYNTAX ERROR, and so is a newline between
+    # `function` and the name (both measured, both pinned by a row). What NO
+    # ROW PINS is the `+` rather than a `*`: scanned over 2080 constructed
+    # inputs — every name spelling above against every separator and every
+    # body opener — 143 answer differently and bash refuses to PARSE all 143,
+    # so on every input that could distinguish them nothing runs and neither
+    # answer is right. It is a `+` because that is what bash does.
+    #
+    # STATED RESIDUAL, in the other direction: a `{` is legal INSIDE a name
+    # (`function f{g { run "…" true; }; f{g` runs the gate, measured), so the
+    # class admits one — and a name ending in `{` therefore reads a gate that
+    # cannot run, since `function f{ run "…" true; }` is a syntax error. That
+    # is a phantom in a file bash refuses outright; excluding `{` would trade
+    # it for a MISS on a legal spelling, which is the defect this whole rule
+    # is about.
+    funcspec = r'function[ \t]+[^ \t\n|&;()<>$%s]+[ \t]+' % re.escape(_MASK)
+    chain = r'(?:[ \t]*(?:%s|%s|(?:%s)[ \t]+|![ \t]+))*' % (
+        timespec,
+        funcspec,
+        words,
+    )
     # `VAR=value` and `>file` / `2>&1` / `<in`, repeated, with the spacing bash
     # allows. Nothing here is captured; the command word follows.
     #
@@ -766,6 +815,20 @@ def _lex_shell(
     # keep the command position open, which is what stops `-p` clearing
     # `at_cmd` and hiding a `case` from the marker rule above.
     time_opt = ""
+    # True when the word about to start is a function's NAME — the word after
+    # `function`, which bash does NOT recognise as a reserved word however it
+    # is spelled (`function case { :; }` is legal, measured, while `case() {
+    # :; }` is a syntax error). Without it the name was read as an ordinary
+    # command word, which broke the marker rule in BOTH directions: `function
+    # case` pushed a marker that was never popped, so the substitution's own
+    # closer stopped being one and `echo $(function case { :; }; printf x) run
+    # "1. fake" true` reported a PHANTOM for a word bash passes to `echo`; and
+    # the name CLEARED `at_cmd`, so the body's `{` did not open a command
+    # position, a `case` inside it was not recognised, and its pattern's `)`
+    # popped the enclosing substitution — the same phantom by the opposite
+    # route (both measured). Round thirty's defect, reached through `function`
+    # as round forty-six reached it through `time` and forty-seven through `!`.
+    fn_name = False
     # An unquoted backtick is the other spelling of `$( )`: what follows it is
     # a command position (`echo `run "13. x" y`` runs `run` — measured, and the
     # reader found NOTHING for it, invisible in both directions), and the word
@@ -1371,6 +1434,15 @@ def _lex_shell(
                 elif opt == "--":
                     time_opt = ""
                     at_cmd = True
+                elif fn_name:
+                    # The function's NAME. It is not a reserved word whatever
+                    # it says, and the command position SURVIVES it, because
+                    # what follows is the body — whose `{` opens one of its own
+                    # only while `at_cmd` still holds (the `{` branch above
+                    # requires it). `time_opt` cannot be live here: the word
+                    # that set `fn_name` cleared it.
+                    fn_name = False
+                    at_cmd = True
                 elif _BANG.match(text, i):
                     # `!` negates a pipeline, so a command position survives it
                     # — and `_BARE_WORD` matches letters only, so this branch
@@ -1400,6 +1472,7 @@ def _lex_shell(
                     time_opt = ""
                     at_cmd = True
                 else:
+                    fn_name = name == "function"
                     time_opt = "opt" if name == "time" else ""
                     at_cmd = name in SHELL_RESERVED
                     if name == "case":
@@ -1779,6 +1852,64 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('echo $(time -p case a in a) run "1. time-case-in-subst" true;; esac)',
      ["1. time-case-in-subst"]),
     ('echo $(time -p case a in a) :;; esac) run "1. fake" true', []),
+    # `function` is the other reserved word that is not followed by a command:
+    # its NAME comes first, and the body's `{` was then reachable from no
+    # boundary at all. Every cell measured against bash. The positives were
+    # invisible in BOTH directions before this rule — neither runnable nor
+    # unreadable — so a local gate written in this supported spelling could
+    # have no CI counterpart while lockstep reported success.
+    ('function checks { run "1. function-brace" true; }; checks',
+     ["1. function-brace"]),
+    ('function checks  {  run "1. function-blanks" true; }; checks',
+     ["1. function-blanks"]),
+    ('function checks\t{ run "1. function-tab" true; }; checks',
+     ["1. function-tab"]),
+    ('echo $(function checks { run "1. function-in-subst" true; }; checks)',
+     ["1. function-in-subst"]),
+    ('true; function checks { run "1. function-after-separator" true; }; checks',
+     ["1. function-after-separator"]),
+    ('if function checks { run "1. function-in-if" true; }; then checks; fi',
+     ["1. function-in-if"]),
+    # …and the three spellings that read ALREADY, because each puts a real
+    # boundary — a `(` or a newline — between the name and the body. They are
+    # here so the new rule cannot be narrowed to them by accident.
+    ('function checks() { run "1. function-parens" true; }; checks',
+     ["1. function-parens"]),
+    ('function checks\n{\nrun "1. function-newline-brace" true\n}\nchecks',
+     ["1. function-newline-brace"]),
+    ('function checks ( run "1. function-subshell-body" true ); checks',
+     ["1. function-subshell-body"]),
+    # A blank after the NAME and after the `{` is bash's own rule, not a
+    # convenience: both of these are SYNTAX ERRORS, as is a newline between
+    # `function` and the name (measured).
+    ('function f {run "1. fake" true; }; f', []),
+    # …while a `{` INSIDE the name is legal and its gate must still read, which
+    # is what stops the rule being narrowed to names without one.
+    ('function f{g { run "1. brace-in-name" true; }; f{g', ["1. brace-in-name"]),
+    ('function\nchecks { run "1. fake" true; }; checks', []),
+    # A word merely STARTING with `function` is not the reserved word, and one
+    # in an ARGUMENT opens no command position.
+    ('functional checks { run "1. fake" true; }', []),
+    ('echo function checks { run "1. fake" true; }', []),
+    # A name bash refuses as an identifier defines NOTHING, so its body never
+    # runs and no gate may be reported: a `$`, a quoted name and an escaped
+    # one are each "not a valid identifier" (measured).
+    ('x=1; function f$x { run "1. fake" true; }; f', []),
+    ('function "f g" { run "1. fake" true; }; "f g"', []),
+    ('function f\\ g { run "1. fake" true; }', []),
+    # The lexer half of the same rule, which fails in BOTH directions. A name
+    # is not a reserved word however it is spelled, so `function case` must
+    # push no marker — it pushed one that was never popped, the substitution's
+    # own closer stopped being one, and the label after it read as a gate for
+    # a word bash passes to `echo`. And the command position SURVIVES the
+    # name, so the body's `{` opens one: without that a `case` inside the body
+    # went unrecognised and its pattern's `)` popped the substitution — the
+    # same phantom by the opposite route. Round thirty's defect, reached
+    # through `function`.
+    ('echo $(function case { :; }; printf x) run "1. fake" true', []),
+    ('echo $(function f { case a in a) :;; esac; }) run "1. fake" true', []),
+    ('echo $(function f { case a in a) run "1. function-case-in-body" true;; esac; }; f)',
+     ["1. function-case-in-body"]),
     # A command position opens inside every substitution, and after a bare `(`
     # and a case pattern's `)` — all four measured, and all four must survive
     # the rule that stops a substitution's CLOSER being one.
@@ -2436,6 +2567,10 @@ _UNREADABLE_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     # …and a word that is NOT an option makes itself the command, so there is
     # no invocation to refuse.
     ('time -pv run $label true', []),
+    # A gate inside a `function NAME { … }` body, for both words: the chain
+    # reads them the same way, so one row each pins it.
+    ('function checks { run $label true; }; checks', ['run $label true']),
+    ('function checks { skip_gate $label; }; checks', ['skip_gate $label']),
     # A quoted body keeps its continuation, so a real unreadable call after the
     # terminator is still seen rather than swallowed with the rest of the file.
     ('cat <<\'EOF\'\nlast \\\nEOF\nrun $label true\n', ['run $label true']),
