@@ -1047,6 +1047,30 @@ def _lex_shell(
         # happens to consume its last character.
         if fn_name == "in" and ch in _WORD_BREAK:
             fn_name = ""
+        # An extglob group is INSIDE A WORD, so no character in one starts a
+        # word — `@(a|b)` is one word to bash, and the separators within it are
+        # pattern text rather than boundaries. Every branch that sets
+        # `at_word_start` did so from the character's own shape, so `|`, `;`,
+        # `&`, a newline and a SPACE each left the flag true inside a group and
+        # the `#` branch then read the next character as a COMMENT: it consumed
+        # the group's closing `)` and the rest of the line, every later newline
+        # stayed masked as glob text, and both readers lost the gate after it.
+        # `shopt -s extglob` + `echo @(a|#foo)` followed by `run "G" true`
+        # invokes the gate (measured) while the shipped reader answered neither
+        # runnable nor unreadable — a MISS in both directions, which is how a
+        # local gate lacks a CI counterpart while lockstep reports success.
+        # Codex named the `|`; the other four spellings and the case-pattern
+        # form came from measuring the general claim.
+        #
+        # Cleared HERE rather than in the `#` branch, and rather than beside
+        # each separator, because the rule is about the GROUP and not about
+        # which character last set the flag — the space reaches the final
+        # branch and is not one of the masked separators at all, so a fix that
+        # enumerated them would have missed it. A substitution inside a group
+        # is real shell and pushes its own entry, so a `#` there is still a
+        # comment (measured); only the group itself is word interior.
+        if parens and parens[-1] == "glob":
+            at_word_start = False
         # An ESCAPED `\$(` or ``\` `` is literal and opens nothing (measured),
         # and the backslash is consumed by the quote branch below before this
         # test ever sees the character after it.
@@ -2980,6 +3004,64 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('shopt -s extglob\ncase yrun in @(!(x))run) run "1. nested-bang" true;; esac',
      ["1. nested-bang"]),
     ('shopt -s extglob\n@(zzz) ; run "1. cmd-at" true', ["1. cmd-at"]),
+    # A `#` inside an extglob group is PATTERN TEXT, never a comment, because
+    # the group is inside a word. Every branch set `at_word_start` from the
+    # character's own shape, so `|`, `;`, `&`, a newline and a SPACE each left
+    # it true inside a group and the comment branch then ate the group's
+    # closing `)` and the rest of the line — both readers lost the gate after
+    # it, a MISS in both directions. Codex named the `|`; the other four
+    # spellings, the nested group and the case-pattern forms came from
+    # measuring the general claim.
+    ('shopt -s extglob\necho @(a|#foo)\nrun "1. eg-hash-pipe" true',
+     ["1. eg-hash-pipe"]),
+    ('shopt -s extglob\necho @(a;#foo)\nrun "1. eg-hash-semi" true',
+     ["1. eg-hash-semi"]),
+    ('shopt -s extglob\necho @(a&#foo)\nrun "1. eg-hash-amp" true',
+     ["1. eg-hash-amp"]),
+    ('shopt -s extglob\necho @(a\n#foo)\nrun "1. eg-hash-nl" true',
+     ["1. eg-hash-nl"]),
+    # The SPACE is why the rule is cleared for the GROUP rather than beside
+    # each masked separator: a space is a word break that reaches the final
+    # branch and is not one of them, so an enumeration would have missed it.
+    ('shopt -s extglob\necho @(a #foo)\nrun "1. eg-hash-space" true',
+     ["1. eg-hash-space"]),
+    ('shopt -s extglob\necho @(@(a)|#foo)\nrun "1. eg-hash-nested" true',
+     ["1. eg-hash-nested"]),
+    ('shopt -s extglob\ncase "a" in @(a|#foo)) :;; esac\nrun "1. eg-hash-pat" true',
+     ["1. eg-hash-pat"]),
+    ('shopt -s extglob\ncase "a" in (@(a|#foo)) :;; esac\nrun "1. eg-hash-pat-lparen" true',
+     ["1. eg-hash-pat-lparen"]),
+    ('shopt -s extglob\necho @(a|#foo); run "1. eg-hash-inline" true',
+     ["1. eg-hash-inline"]),
+    # The other direction, which is what stops the fix becoming "mask the whole
+    # group": a substitution inside a group is real shell, pushes its own
+    # entry, and a `#` there IS a comment (measured, both spellings). A comment
+    # AFTER a closed group still works too.
+    ('shopt -s extglob\necho @($(printf a  # run "1. fake" true\n))\nrun "1. eg-subst-comment" true',
+     ["1. eg-subst-comment"]),
+    ('shopt -s extglob\necho @(`printf a  # run "1. fake" true\n`)\nrun "1. eg-bt-comment" true',
+     ["1. eg-bt-comment"]),
+    # This one carries a BOUNDARY inside the comment, which is what makes the
+    # scope of the rule load-bearing rather than merely stated: applied to any
+    # open region instead of the innermost one, the `#` stops being a comment
+    # inside the nested substitution, the `;` in its text becomes real, and the
+    # reader invents `1. fake` — a PHANTOM out of commented-out prose.
+    ('shopt -s extglob\necho @($(printf a; # x; run "1. fake" true\nprintf b))\nrun "1. eg-subst-comment2" true',
+     ["1. eg-subst-comment2"]),
+    ('shopt -s extglob\necho @(a|b) # run "1. fake" true\nrun "1. eg-after-group" true',
+     ["1. eg-after-group"]),
+    # And no phantom: a word after a group is an argument, not a command.
+    ('shopt -s extglob\necho @(a|#foo) run "1. fake" true', []),
+    ('shopt -s extglob\necho @(a #foo) run "1. fake" true', []),
+    # THE RESIDUAL, the same one round fifty-two pinned in its other shape:
+    # `!(` outside a case pattern keeps the SUBSHELL reading, so the `#` inside
+    # it is at a command position and opens a comment that eats the closer.
+    # bash runs this gate and the reader misses it. Deciding it needs to tell a
+    # command position from an argument at the `(`, and `at_cmd` is false in
+    # BOTH (a preceding word clears it, and `_BANG` requires a blank so `!`
+    # never sets it) — which is exactly why round fifty-two's `at_cmd`
+    # exception never fired. Changing this row is a decision, not a bug fix.
+    ('shopt -s extglob\necho !(a|#foo); run "1. fake" true', []),
 )
 
 
@@ -3026,6 +3108,11 @@ _UNREADABLE_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('shopt -s extglob\ncase yrun in !(x)run) :;; esac', []),
     ('shopt -s extglob\ncase yskip_gate in !(x)skip_gate) :;; esac', []),
     ('shopt -s extglob\ncase yrun in (!(x)run) :;; esac', []),
+    # The sibling reader, where the same miss shows as a gate call this file
+    # never sees at all: with the comment eating the group's closer, `run` on
+    # the next line was reported by NEITHER reader.
+    ('shopt -s extglob\necho @(a|#foo)\nrun', ["run"]),
+    ('shopt -s extglob\necho @(a #foo)\nskip_gate', ["skip_gate"]),
     ('case x in a|skip_gate) :;; esac', []),
     ('echo `case x in (run) :;; esac`', []),
     ('echo `case x in a|run) :;; esac`', []),
