@@ -419,6 +419,21 @@ def _lex_shell(text: str) -> tuple[str, str]:
     dq_pending = False
     dq_resume_at: list[int] = []
     dq_resume_backtick = False
+    # Inside a backtick substitution an ESCAPED backtick is not an escape at
+    # all: it delimits a NESTED substitution, and bash requires that spelling
+    # because a bare one would close the outer (measured — `` result="`echo
+    # \`run '1. nested' true\``" `` executes `run`, and so does the same
+    # nesting with no double quote around it). The generic escape branch
+    # consumed both delimiters, so the nested command was masked as ordinary
+    # text and the gate inside it was invisible in BOTH directions — neither
+    # runnable nor unreadable, which is how one lacks a CI counterpart while
+    # lockstep reports success (measured, Codex on PR #94).
+    #
+    # One level, which is the depth a person writes: a third needs `\\\``,
+    # and a bare backtick while the nested region is open is degenerate. This
+    # flag is only consulted where `in_backtick` already holds, so an escaped
+    # backtick anywhere else stays the literal it is (measured, both spellings).
+    nested_backtick = False
     i = 0
     while i < len(text):
         ch = text[i]
@@ -444,6 +459,16 @@ def _lex_shell(text: str) -> tuple[str, str]:
                 skel.append(ch)
             else:
                 skel.append(masked(ch))
+        elif ch == "\\" and in_backtick and text.startswith("\\`", i):
+            # A nested substitution's delimiter — see `nested_backtick` above.
+            # Opening carries the boundary a bare backtick spells; closing is
+            # inert and the word runs on, exactly as the outer pair behaves.
+            out.append(text[i : i + 2])
+            skel.append(("\\" + _SUBST_CLOSE) if nested_backtick else "\\(")
+            at_word_start = not nested_backtick
+            nested_backtick = not nested_backtick
+            i += 2
+            continue
         elif ch == "\\":
             # An unquoted backslash escapes the next character, whatever it is,
             # and the word continues through both.
@@ -730,6 +755,11 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('echo "$(run \'1. arg-dq-subst\' true)"', ["1. arg-dq-subst"]),
     ('MODE="$(printf a; printf b)" run \'1. prefix-dq-subst\' true',
      ["1. prefix-dq-subst"]),
+    # Inside a backtick substitution an ESCAPED backtick opens a NESTED one —
+    # the only spelling bash accepts there — so the command inside it runs
+    # (measured, with and without the double quote the reviewer's case had).
+    ('result="`echo \\`run \'1. nested-bt\' true\\``"', ["1. nested-bt"]),
+    ('result=`echo \\`run \'1. bare-nested-bt\' true\\``', ["1. bare-nested-bt"]),
     # A case pattern's `)` closes no `(`, so a `case` inside a substitution
     # must not consume it: bash runs `run` here (measured) where a reader that
     # popped saw no command position at all.
@@ -863,6 +893,25 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('result="`printf a`; run \'1. after-backtick-semi\' true"', []),
     ('result="$HOME; run \'1. dollar-var-semi\' true"', []),
     ('result="$((1+2)); run \'1. arith-semi\' true"', []),
+    # …and the boundaries of the nested rule, each measured: an escaped
+    # backtick OUTSIDE any substitution is the literal it looks like, and the
+    # nested pair resumes the OUTER region rather than ending it, so the
+    # double quote is still suspended until the outer closer and literal
+    # after it is literal.
+    ('result=\\`run \'1. esc-bt-bare\' true\\`', []),
+    ('result="`echo \\`printf a\\``; run \'1. after-nested\' true"', []),
+    ('result="`echo \\`printf a\\`` run \'1. after-nested-word\' true"', []),
+    # The nested CLOSER behaves as the outer one does — the word runs on
+    # through it, so a `#` after it is literal and a gate behind that `;`
+    # survives, while a word glued straight onto it is one word and not a
+    # command (all three measured). These are the rows that distinguish a
+    # closer from a second opener; without them a delimiter that only ever
+    # opens passes the whole matrix.
+    ('result="`echo \\`printf a\\`run \'1. glued-after-nested\' true`"', []),
+    ('result="`echo \\`printf a\\`#b; run \'1. after-nested-hash\' true`"',
+     ["1. after-nested-hash"]),
+    ('result="`echo \\`printf a\\`; run \'1. sep-inside-outer\' true`"',
+     ["1. sep-inside-outer"]),
     # A reserved word is reserved only WHERE A COMMAND CAN START. In an
     # argument it is an ordinary word, so bash runs only `echo` here (measured
     # for all three), while a rule that accepted a reserved word after any
@@ -915,6 +964,9 @@ _UNREADABLE_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     # inside an ordinary double-quoted word stays invisible.
     ('result="$(run $label true)"', ['run $label true)"']),
     ('result="note; run"', []),
+    # A non-literal label inside a NESTED substitution is a real invocation
+    # (measured) and must be refused by name, not swallowed as escaped text.
+    ('result="`echo \\`run $label true\\``"', ['run $label true\\``"']),
 )
 
 
