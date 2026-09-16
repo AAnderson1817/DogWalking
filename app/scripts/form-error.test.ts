@@ -5,7 +5,6 @@ import ts from "typescript";
 import {
   declaredObjects,
   literalText,
-  propertyKey,
   resolveProperty,
   unwrapTransparent,
 } from "./lib/static-object.js";
@@ -85,42 +84,53 @@ function tsxFiles(dir: string): string[] {
 interface Site {
   file: string;
   line: number;
-  /** The nearest NAMED declaration around the element, or "" at module scope. */
+  /** The module-scope declaration the element belongs to, or "" when none. */
   component: string;
   tag: string;
   why: string;
 }
 
 /**
- * The name of the nearest enclosing declaration, which is the component a JSX
- * element belongs to.
+ * The name the element's TOP-LEVEL STATEMENT binds — the module-scope
+ * declaration it belongs to, or "" when that statement binds nothing.
  *
- * Read from the declaration rather than from the file, because the exemption
- * this feeds is about one component and a file holds several. A function
- * expression or arrow assigned to a name takes that name (`const FormError =
- * () => …`), which is how a React component is as often written as with
- * `function`. An element at module scope, or inside an anonymous callback
- * with no named declaration above it, answers "" and is therefore never
- * exempt — the refusing direction, since an unnamed site is one nobody
- * approved.
+ * It was the NEAREST named declaration, and a nearest-name rule reads a
+ * reusable name as an identity: `const helpers = { FormError: () => <span
+ * role="alert" /> };` in the file that owns the approved component was
+ * classified as `FormError` and inherited its exemption, so a forbidden raw
+ * live region passed the gate that exists to forbid it (measured, Codex on PR
+ * #94). The same held for `register({ FormError: () => … })`, for a method of
+ * that name, and for a local `const FormError` nested inside another
+ * component — four spellings of one hole, because a property key, a method
+ * name and a local binding are all names anybody may reuse.
+ *
+ * So the question is which DECLARATION the element sits in, not which name is
+ * closest to it. A function or class declaration answers its own name, a
+ * variable statement answers the declarator on the path (`const a = 1,
+ * FormError = () => …` is the second one), and every other top-level
+ * statement — an expression statement, an `export default` of an anonymous
+ * function — binds nothing and answers "", which is never exempt.
+ *
+ * That also makes the answer module-scope by construction rather than by a
+ * second test: nothing nested can be the top-level statement, so a local or a
+ * property named after the approved component reports the statement that
+ * really does contain it.
  */
 function enclosingComponent(node: ts.Node): string {
-  for (let n: ts.Node | undefined = node.parent; n; n = n.parent) {
-    if (ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n) || ts.isMethodDeclaration(n)) {
-      if (n.name && ts.isIdentifier(n.name)) return n.name.text;
-      continue;
-    }
-    if (ts.isFunctionExpression(n) || ts.isArrowFunction(n) || ts.isClassExpression(n)) {
-      const owner = n.parent;
-      if (owner && ts.isVariableDeclaration(owner) && ts.isIdentifier(owner.name)) {
-        return owner.name.text;
-      }
-      if (owner && ts.isPropertyAssignment(owner)) {
-        const key = propertyKey(owner.name);
-        if (key !== null) return key;
-      }
-      continue;
-    }
+  // The outermost variable declarator on the path, which is the one the
+  // top-level variable statement binds for this element.
+  let declarator: ts.VariableDeclaration | undefined;
+  let cur: ts.Node = node;
+  while (cur.parent && !ts.isSourceFile(cur.parent)) {
+    if (ts.isVariableDeclaration(cur)) declarator = cur;
+    cur = cur.parent;
+  }
+  if (!cur.parent) return "";
+  if (ts.isFunctionDeclaration(cur) || ts.isClassDeclaration(cur)) {
+    return cur.name && ts.isIdentifier(cur.name) ? cur.name.text : "";
+  }
+  if (ts.isVariableStatement(cur)) {
+    return declarator && ts.isIdentifier(declarator.name) ? declarator.name.text : "";
   }
   return "";
 }
@@ -446,14 +456,33 @@ describe("every error message renders through FormError or StateField", () => {
     };
 
     expect(at('function FormError() { return <span role="alert" />; }')).toBe("FormError");
+    expect(at('export function FormError() { return <span role="alert" />; }')).toBe("FormError");
     expect(at('const FormError = () => <span role="alert" />;')).toBe("FormError");
     expect(at('const FormError = function () { return <span role="alert" />; };')).toBe("FormError");
-    expect(at('const ui = { FormError: () => <span role="alert" /> };')).toBe("FormError");
-    expect(at('class C { render() { return <span role="alert" />; } }')).toBe("render");
-    // A nested anonymous callback belongs to the named declaration above it.
+    // The declarator ON THE PATH, not the first one the statement declares.
+    expect(at('const a = 1, FormError = () => <span role="alert" />;')).toBe("FormError");
+    // A nested anonymous callback belongs to the declaration above it.
     expect(at('function FormError() { return xs.map(() => <span role="alert" />); }')).toBe("FormError");
-    // Nothing named it: never exempt, which is the refusing direction.
-    expect(at('const e = <span role="alert" />;')).toBe("");
+
+    // A REUSABLE NAME is not a declaration. Each of these was classified as
+    // the approved `FormError` by the nearest-name rule and inherited its
+    // exemption (Codex, PR #94); each now answers the statement that really
+    // contains it, and none of those is exempt.
+    expect(at('const helpers = { FormError: () => <span role="alert" /> };')).toBe("helpers");
+    expect(at('register({ FormError: () => <span role="alert" /> });')).toBe("");
+    expect(at('class Fields { FormError() { return <span role="alert" />; } }')).toBe("Fields");
+    expect(at('function Input() { const FormError = () => <span role="alert" />; return FormError; }'))
+      .toBe("Input");
+    expect(at('register({ m() { const FormError = () => <span role="alert" />; return FormError; } });'))
+      .toBe("");
+    // A method name is a property name too, so the class answers, not the method.
+    expect(at('class C { render() { return <span role="alert" />; } }')).toBe("C");
+
+    // A top-level statement that binds nothing: never exempt, which is the
+    // refusing direction.
     expect(at('export default () => <span role="alert" />;')).toBe("");
+    expect(at('render(<span role="alert" />);')).toBe("");
+    // …and one that binds an ordinary name answers it, which is also not exempt.
+    expect(at('const e = <span role="alert" />;')).toBe("e");
   });
 });

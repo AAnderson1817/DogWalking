@@ -303,7 +303,14 @@ def _command(body: str) -> str:
     # and `echo -p run "13. fake" true` invoke no gate (measured) and a
     # free-floating option would have invented a PHANTOM out of each.
     timespec = r'time[ \t]+(?:-p[ \t]+)?(?:--[ \t]+)?'
-    chain = r'(?:[ \t]*(?:%s|(?:%s)[ \t]+|![ \t]*))*' % (timespec, words)
+    # `!` takes a delimiter like every other reserved word, and the `*` here
+    # was a PHANTOM: `!run "1. fake" true` makes bash look for a command
+    # literally called `!run` and find none, so no gate runs (measured), while
+    # this read the label — and a phantom satisfies a ci.yml mapping after the
+    # real local gate has been deleted. Glued, it is not the reserved word at
+    # all: `!case a in a) …` is a bash SYNTAX ERROR (measured). A newline after
+    # it needs no clause, because a newline is itself a command position.
+    chain = r'(?:[ \t]*(?:%s|(?:%s)[ \t]+|![ \t]+))*' % (timespec, words)
     # `VAR=value` and `>file` / `2>&1` / `<in`, repeated, with the spacing bash
     # allows. Nothing here is captured; the command word follows.
     #
@@ -530,6 +537,27 @@ _SUBST_REGION = _subst_region(2)
 # being a boundary (`echo $(case{ ; :) run "1. x" true` runs only `echo`,
 # while the reader reported the label: the same phantom one construct over).
 _BARE_WORD = re.compile(r"([A-Za-z]+)(?=[\s;&|()<>]|$)")
+
+# The `!` reserved word, which `_BARE_WORD` cannot match because it is not a
+# letter. It needs a BLANK after it for the same reason every reserved word
+# does — `!case` glued is a bash syntax error and `!run` is an ordinary command
+# word (both measured). A newline after it is not spelled here: a newline opens
+# a command position on its own.
+#
+# NO BEHAVIOURAL ROW PINS THE LOOKAHEAD, and saying so is better than implying
+# one does. `_WORD_BREAK` excludes `!`, so a character glued to one is never a
+# word start and is never examined either way; what the lookahead changes is
+# whether the flag SURVIVES a word like `!xy`, and for that to matter the next
+# word must be `case` or `esac` at a command position — which cannot happen
+# once `!xy` is the command word, since `case a in a)` in an ARGUMENT position
+# is a bash syntax error. Measured over 45 constructed inputs across five
+# contexts: the twelve that answer differently all exit 2.
+#
+# Kept because the rule belongs here as much as in `_command`'s chain, which
+# requires the same blank: without it the two would mean different things by
+# "the `!` reserved word", the one-rule-two-scopes disagreement these rounds
+# keep finding.
+_BANG = re.compile(r"!(?=[ \t])")
 
 # The option words bash's `time` accepts, with `_BARE_WORD`'s terminator set so
 # that a word merely STARTING with one is not read as it: `time -pv`, `time -x`
@@ -1343,6 +1371,34 @@ def _lex_shell(
                 elif opt == "--":
                     time_opt = ""
                     at_cmd = True
+                elif _BANG.match(text, i):
+                    # `!` negates a pipeline, so a command position survives it
+                    # — and `_BARE_WORD` matches letters only, so this branch
+                    # read `name` as "" and CLEARED the flag. `case` was then
+                    # not recognised, no marker was pushed, and the pattern's
+                    # `)` popped the enclosing substitution: `echo $(! case a
+                    # in a) run "G" true;; esac)` runs the gate and was read by
+                    # neither reader, while its mirror reported a phantom for a
+                    # word bash passes to `echo` (both measured, Codex PR #94).
+                    # Round thirty's defect, reached through `!` this time, as
+                    # round forty-six reached it through `time`.
+                    #
+                    # `time_opt` RESETS here rather than carrying: after a `!`
+                    # the next `-p` is the command, not an option — measured,
+                    # `time -p ! -p run "G" true` answers `-p: command not
+                    # found`. `! time -p …` still reads, because `time` re-arms
+                    # it one word later.
+                    #
+                    # NO BEHAVIOURAL ROW PINS THE RESET either, for the same
+                    # reason the lookahead above has none: `_command`'s chain
+                    # already refuses `time -p ! -p run`, so only the `case`
+                    # marker can see the difference, and `time -p ! -- case a
+                    # in a)` is a syntax error. Measured over 16 constructed
+                    # inputs: the two that answer differently exit 2. It is
+                    # here so the lexer and the chain agree about where a
+                    # timespec ends.
+                    time_opt = ""
+                    at_cmd = True
                 else:
                     time_opt = "opt" if name == "time" else ""
                     at_cmd = name in SHELL_RESERVED
@@ -1648,6 +1704,36 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('{ ! run "1. group-then-bang" true; }', ["1. group-then-bang"]),
     ('{ if run "1. group-then-reserved" true; then :; fi; }',
      ["1. group-then-reserved"]),
+    # `!` negates a pipeline and a command position survives it, so a `case`
+    # behind one still opens a pattern. The lexer read `!` as no word at all
+    # and cleared the flag, so the marker was never pushed and the pattern's
+    # `)` popped the enclosing substitution — a MISS for the real gate and a
+    # PHANTOM for its mirror, both measured against bash.
+    ('echo $(! case a in a) run "1. bang-case-in-subst" true;; esac)',
+     ["1. bang-case-in-subst"]),
+    ('echo $(! case a in a) :;; esac) run "1. fake" true', []),
+    ('echo `! case a in a) run "1. bang-case-in-backtick" true;; esac`',
+     ["1. bang-case-in-backtick"]),
+    # …and the same through `time`'s options, in both orders, since `!` may sit
+    # on either side of a timespec (measured).
+    ('echo $(! time -p case a in a) run "1. bang-time-case" true;; esac)',
+     ["1. bang-time-case"]),
+    ('echo $(time -p ! case a in a) run "1. time-bang-case" true;; esac)',
+     ["1. time-bang-case"]),
+    ('echo $(! ! case a in a) run "1. bang-bang-case" true;; esac)',
+     ["1. bang-bang-case"]),
+    # A `!` is the reserved word only when DELIMITED, exactly like the others:
+    # `!run "…"` makes bash look for a command called `!run` and find none
+    # (measured), so no gate runs — this read the label, a PHANTOM. Glued to a
+    # reserved word it is not one either: `!case a in a) …` is a syntax error.
+    ('!run "1. fake" true', []),
+    # …while the delimited spellings still read, on one line and across a
+    # newline, which needs no rule of its own because a newline opens a
+    # command position on its own.
+    ('! run "1. bang-then-gate" true', ["1. bang-then-gate"]),
+    ('!\nrun "1. bang-newline-gate" true', ["1. bang-newline-gate"]),
+    ('echo $(!\ncase a in a) run "1. bang-newline-case" true;; esac)',
+     ["1. bang-newline-case"]),
     # `time` is the one reserved word with OPTIONS, and every cell below was
     # measured against bash. The positives were invisible in BOTH directions
     # before this rule — neither runnable nor unreadable — so a timed local
@@ -2337,6 +2423,11 @@ _UNREADABLE_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     # so both spellings are correctly silent for the same reason.
     ('run=1\na[1 +\nrun]=2', []),
     ('echo a[1 +\nrun]=2', []),
+    # A delimited `!` opens a command position, so an unreadable call behind
+    # one is refused by name; glued, it is part of another command word and
+    # there is no invocation to refuse.
+    ('! run $label true', ['run $label true']),
+    ('!run $label true', []),
     # `time`'s options open a command position, so an unreadable call behind
     # one is refused BY NAME rather than passed over — the other half of the
     # invisible-in-both-directions hole (Codex, PR #94).
