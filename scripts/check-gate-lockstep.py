@@ -374,6 +374,12 @@ def _lex_shell(text: str) -> tuple[str, str]:
         # that itself spans lines — refused by name here, read as a multi-line
         # label if masked, and both end in a red naming it. Kept as the
         # conservative reading rather than because a sabotage demanded it.
+        if exp_depth:
+            # Inside a parameter expansion nothing is ever read as a gate, so
+            # line structure carries no meaning there and the newline is
+            # masked with everything else — leaving it would make
+            # `_command`'s `(?<=\n)` a boundary inside a word.
+            return _MASK * len(chunk)
         return "".join("\n" if c == "\n" else _MASK for c in chunk)
 
     quote = None
@@ -434,6 +440,38 @@ def _lex_shell(text: str) -> tuple[str, str]:
     # flag is only consulted where `in_backtick` already holds, so an escaped
     # backtick anywhere else stays the literal it is (measured, both spellings).
     nested_backtick = False
+    # A PARAMETER EXPANSION is one word: bash does not invoke `run` for
+    # `echo ${UNSET:-x; run "12. css tokens defined" true}` (measured), nor for
+    # the same body carrying `|`, `&`, a newline, a bare `( … )`, a reserved
+    # word or a nested `${ … }` — every separator inside one is part of the
+    # word. The reader marked them as command boundaries and returned the
+    # label: a PHANTOM local gate, which satisfies a ci.yml mapping and lets
+    # the reverse check stay green after the real gate has been deleted
+    # (thirteen spellings measured, Codex on PR #94).
+    #
+    # So the body is MASKED, exactly as a quoted one is — except that a real
+    # `$( … )`, `` ` … ` `` or `<( … )` inside it genuinely runs (measured), so
+    # it SUSPENDS the masking for its duration and the expansion resumes at the
+    # closer: `${UNSET:-$(printf a); run "…" true}` runs nothing, while
+    # `${UNSET:-$(echo x; run "…" true)}` runs `run` (both measured). Same
+    # shape as the double-quote suspension above, and tracked the same way.
+    #
+    # Only `${` nests. A bare `{` inside an expansion does not: bash closes at
+    # the FIRST unquoted `}`, so `echo ${UNSET:-{a,b}; run "…" true}` really
+    # does run `run` (measured). An escaped `\${` is not an expansion either
+    # (measured), which is what `escaped_dollar_at` is for, and a quoted or
+    # escaped `}` does not close one (measured) — those reach the quote and
+    # escape branches above this one.
+    #
+    # LIMIT, stated rather than chased: an UNTERMINATED `${` masks the rest of
+    # the file, so every later gate disappears. Bash refuses such a script
+    # outright, so it cannot be a healthy tree, and the loss is loud rather
+    # than silent — the map still names the vanished gates, which this check
+    # reports as `validate.sh` labels that no longer exist.
+    exp_depth = 0
+    exp_resume_at: list[tuple[int, int]] = []
+    exp_resume_backtick: list[int] = []
+    escaped_dollar_at = -1
     i = 0
     while i < len(text):
         ch = text[i]
@@ -456,7 +494,7 @@ def _lex_shell(text: str) -> tuple[str, str]:
             if ch == quote:
                 quote = None
                 at_word_start = False
-                skel.append(ch)
+                skel.append(_MASK if exp_depth else ch)
             else:
                 skel.append(masked(ch))
         elif ch == "\\" and in_backtick and text.startswith("\\`", i):
@@ -466,6 +504,11 @@ def _lex_shell(text: str) -> tuple[str, str]:
             out.append(text[i : i + 2])
             skel.append(("\\" + _SUBST_CLOSE) if nested_backtick else "\\(")
             at_word_start = not nested_backtick
+            if nested_backtick:
+                exp_depth = exp_resume_backtick.pop() if exp_resume_backtick else 0
+            else:
+                exp_resume_backtick.append(exp_depth)
+                exp_depth = 0
             nested_backtick = not nested_backtick
             i += 2
             continue
@@ -475,7 +518,17 @@ def _lex_shell(text: str) -> tuple[str, str]:
             out.append(ch)
             if i + 1 < len(text):
                 out.append(text[i + 1])
-                skel.append(text[i : i + 2])
+                # Inside an expansion the pair is data like everything else:
+                # `${UNSET:-\; run "…" true}` runs nothing (measured), and an
+                # unmasked `;` in the skeleton is a boundary to `_command`.
+                # Outside one the pair is kept, so `\#` stays a literal.
+                if exp_depth:
+                    skel.append(_MASK * 2)
+                else:
+                    skel.append(text[i : i + 2])
+                if text[i + 1] == "$":
+                    # `\${` is a literal `$` and opens no expansion (measured).
+                    escaped_dollar_at = i + 1
                 i += 2
                 at_word_start = False
                 continue
@@ -484,9 +537,18 @@ def _lex_shell(text: str) -> tuple[str, str]:
         elif ch in "'\"":
             quote = ch
             out.append(ch)
-            skel.append(ch)
+            # The DELIMITERS survive masking outside an expansion, which is
+            # what lets one pattern find a gate's own quoted label; inside one
+            # nothing is read, so they are masked with the rest of the body and
+            # the invariant stays one rule rather than a list of exceptions.
+            skel.append(_MASK if exp_depth else ch)
             at_word_start = False
         elif ch == "#" and at_word_start:
+            # No `exp_depth` clause: `at_word_start` is never true inside a
+            # parameter expansion — the opening `{` clears it and every body
+            # character keeps it clear — so a guard here would be a rule with
+            # nothing behind it (measured: removing one left the whole matrix
+            # green). The `hash-in-exp` row pins the behaviour.
             # To the end of the line, replaced by spaces.
             end = text.find("\n", i)
             end = len(text) if end == -1 else end
@@ -498,7 +560,22 @@ def _lex_shell(text: str) -> tuple[str, str]:
             # `$`, `<` or `>` immediately before it opens a substitution.
             # `\$(` cannot reach here as anything else: bash refuses it
             # outright ("syntax error near unexpected token `('", measured).
-            parens.append("subst" if i > 0 and text[i - 1] in "$<>" else "paren")
+            opens_subst = i > 0 and text[i - 1] in "$<>"
+            if exp_depth and not opens_subst:
+                # `echo ${UNSET:-x ( run "…" true )}` runs nothing (measured),
+                # and the matching `)` must not pop a construct this never
+                # pushed, so both are ordinary masked characters.
+                out.append(ch)
+                skel.append(_MASK)
+                at_word_start = False
+                at_cmd = False
+                i += 1
+                continue
+            parens.append("subst" if opens_subst else "paren")
+            # Always recorded, even at depth 0, so open and close stay
+            # symmetric and restoring is a no-op where nothing was masked.
+            exp_resume_at.append((len(parens) - 1, exp_depth))
+            exp_depth = 0
             if dq_pending:
                 # The `$` one character back suspended a double quote; this is
                 # the entry whose closer resumes it.
@@ -509,6 +586,14 @@ def _lex_shell(text: str) -> tuple[str, str]:
             at_word_start = True
             at_cmd = True
         elif ch == ")":
+            if exp_depth:
+                # Nothing inside an expansion pushed, so nothing may pop.
+                out.append(ch)
+                skel.append(_MASK)
+                at_word_start = False
+                at_cmd = False
+                i += 1
+                continue
             if parens and parens[-1] == "case":
                 # A case pattern's closer: a real command position (`case a in
                 # a) run "…" x;; esac` runs `run`, measured) that closes no
@@ -526,7 +611,28 @@ def _lex_shell(text: str) -> tuple[str, str]:
             # boundary `(` already spells. Closing: inert, and the word runs on.
             skel.append(_SUBST_CLOSE if in_backtick else "(")
             at_word_start = not in_backtick
+            if in_backtick:
+                exp_depth = exp_resume_backtick.pop() if exp_resume_backtick else 0
+            else:
+                exp_resume_backtick.append(exp_depth)
+                exp_depth = 0
             in_backtick = not in_backtick
+        elif ch in "{}" and (
+            exp_depth
+            or (ch == "{" and i > 0 and text[i - 1] == "$" and escaped_dollar_at != i - 1)
+        ):
+            if ch == "{" and i > 0 and text[i - 1] == "$" and escaped_dollar_at != i - 1:
+                exp_depth += 1
+            elif ch == "}":
+                exp_depth -= 1
+            out.append(ch)
+            skel.append(_MASK)
+            # A closing `}` opens no command position: `echo ${UNSET:-x}run …`
+            # is one word and `echo ${#HOME} run …` passes `run` to `echo`
+            # (both measured); a separator AFTER the expansion is real again
+            # (`x=${UNSET:-a; b}; run "…" true` runs `run`, measured).
+            at_word_start = False
+            at_cmd = False
         elif ch in "{}":
             # A brace is a RESERVED WORD, not a metacharacter: it counts only
             # where it stands alone at a command position, so `echo x{ …` and
@@ -548,6 +654,17 @@ def _lex_shell(text: str) -> tuple[str, str]:
             skel.append(ch)
             at_word_start = opens
             at_cmd = opens
+        elif exp_depth:
+            # Data: a separator, a newline, a reserved word, a `#` — none of
+            # them is a command boundary inside a parameter expansion
+            # (measured). The newline is masked too, unlike the one inside a
+            # quoted string that `masked()` keeps: nothing here is ever read as
+            # a gate, so line structure carries no meaning, and leaving it
+            # would make `_command`'s `(?<=\n)` a boundary — the phantom.
+            out.append(ch)
+            skel.append(_MASK)
+            at_word_start = False
+            at_cmd = False
         else:
             if at_word_start and at_cmd and not ch.isspace():
                 # The word about to start decides whether the NEXT one is also
@@ -574,6 +691,11 @@ def _lex_shell(text: str) -> tuple[str, str]:
         # the quote resumes for the rest of it. Checked after every branch
         # rather than inside the `)` one, because `esac` can shrink the stack
         # too; `<=` for the same reason.
+        # The substitution that suspended a parameter expansion has closed,
+        # so its body is data again. Same trigger as the double quote above,
+        # and for the same reason `esac` can shrink the stack too.
+        while exp_resume_at and len(parens) <= exp_resume_at[-1][0]:
+            exp_depth = exp_resume_at.pop()[1]
         while dq_resume_at and len(parens) <= dq_resume_at[-1]:
             dq_resume_at.pop()
             quote = '"'
@@ -945,6 +1067,84 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('echo $(echo x{ case) run "1. lexer-brace" true', []),
     ('echo $({ case a in a) run "1. group-case" true;; esac; })',
      ["1. group-case"]),
+    # A PARAMETER EXPANSION is one word, so every separator inside one is data.
+    # Bash runs nothing for any of these (measured), while the reader marked
+    # the separator as a command boundary and returned the label — a PHANTOM
+    # local gate, which satisfies a ci.yml mapping and lets the reverse check
+    # stay green after the real gate has been deleted. The reviewer's own
+    # example is the first; the rest are the same hole in other spellings.
+    ('echo ${UNSET:-x; run "12. css tokens defined" true}', []),
+    ('echo ${UNSET:-x | run "1. pipe-in-exp" true}', []),
+    ('echo ${UNSET:-x & run "1. amp-in-exp" true}', []),
+    ('echo ${UNSET:-x\nrun "1. nl-in-exp" true}', []),
+    ('echo ${UNSET:-x ( run "1. paren-in-exp" true )}', []),
+    # …and neither parenthesis may touch the stack, or the ENCLOSING
+    # substitution loses its entry and its own closer becomes a boundary.
+    # `run` is an argument to `echo` in both of these (measured). The first is
+    # what pins the `)` guard — a reader that popped there reported the label,
+    # measured — while the second goes red only against a reader with no
+    # expansion tracking at all, so it is a regression pin rather than a proof
+    # of the `(` guard, which the `paren-in-exp` row above carries.
+    ('echo $(echo ${UNSET:-a)b}) run "1. paren-pops-subst" true', []),
+    ('echo $(echo ${UNSET:-a(b}) run "1. lparen-in-exp-in-sub" true', []),
+    ('echo ${UNSET:-x; if run "1. reserved-in-exp" true; then :; fi}', []),
+    ('echo ${UNSET:-a; #b\nrun "1. hash-in-exp" true}', []),
+    ('echo ${UNSET:-x; case a in a) run "1. case-in-exp" true;; esac}', []),
+    ('echo ${UNSET:-$((1)); run "1. arith-in-exp" true}', []),
+    # An escaped pair inside one is data too: an unmasked `;` in the skeleton
+    # is a boundary to `_command`, so the escape branch masks both characters.
+    ('echo ${UNSET:-\; run "1. esc-sep-in-exp" true}', []),
+    # Only `${` nests. A bare `{` does not — bash closes the expansion at the
+    # FIRST unquoted `}`, so `run` really does execute in the second of these
+    # (both measured), and a reader that counted every brace would lose it.
+    ('echo ${UNSET:-${OTHER:-x; run "1. nested-exp" true}}', []),
+    ('echo ${UNSET:-{a,b}; run "1. inner-braces" true}', ["1. inner-braces"]),
+    # `$` immediately before the brace and not itself escaped: an escaped or
+    # separated one opens no expansion, and `run` executes (both measured).
+    ('echo \\${UNSET:-x; run "1. escaped-dollar" true}', ["1. escaped-dollar"]),
+    ('echo $ {UNSET:-x; run "1. space-brace" true}', ["1. space-brace"]),
+    # A real substitution inside an expansion SUSPENDS the masking and runs
+    # (measured, all three spellings) — the half a blanket mask would lose.
+    ('echo ${UNSET:-$(run "1. cmdsub-in-exp" true)}', ["1. cmdsub-in-exp"]),
+    ('echo ${UNSET:-`run "1. backtick-in-exp" true`}', ["1. backtick-in-exp"]),
+    ('echo ${UNSET:-<(run "1. procsub-in-exp" true)}', ["1. procsub-in-exp"]),
+    # …and the expansion RESUMES at its closer, so the separator after one is
+    # data again (measured, both spellings), including a `${ … }` reached
+    # through a substitution that was itself reached through an expansion.
+    ('echo ${UNSET:-$(printf a); run "1. after-nested-sub" true}', []),
+    ('echo ${UNSET:-`printf a`; run "1. after-nested-bt" true}', []),
+    ('echo ${UNSET:-$(echo ${OTHER:-y; run "1. exp-in-sub-in-exp" true})}', []),
+    # A quoted or escaped `}` does not close an expansion (measured), so the
+    # separator after it is still data.
+    ('echo ${UNSET:-"}"; run "1. quoted-brace" true}', []),
+    ("echo ${UNSET:-'}'; run \"1. sq-brace\" true}", []),
+    ('echo ${UNSET:-a\\}b; run "1. escaped-close" true}', []),
+    # A second expansion on the same line is masked in its own right, and a
+    # word GLUED to a closer is one word (both measured).
+    ('echo ${UNSET:-x} ${OTHER:-y; run "1. two-exps" true}', []),
+    ('echo ${UNSET:-x}run "1. glued-after-exp" true', []),
+    # Once the expansion has closed, a separator is a real boundary again —
+    # the direction a blanket mask would break, so each is its own row.
+    ('echo ${UNSET:-x}; run "1. after-exp" true', ["1. after-exp"]),
+    ('x=${UNSET:-a; b}; run "1. assign-then-gate" true', ["1. assign-then-gate"]),
+    ('echo ${UNSET:-a} && run "1. andand-after-exp" true',
+     ["1. andand-after-exp"]),
+    ('echo ${UNSET:-a;b}\nrun "1. next-line" true', ["1. next-line"]),
+    ('echo ${UNSET:-$(printf a)}; run "1. after-exp-with-sub" true',
+     ["1. after-exp-with-sub"]),
+    ('echo $(( ${UNSET:-1} )); run "1. arith-exp" true', ["1. arith-exp"]),
+    # An expansion reached through a backtick — plain and nested — is masked
+    # like any other, and its own save must not be lost when the backtick
+    # closes (measured, bash runs nothing for either).
+    ('result="`echo ${UNSET:-x; run \'1. exp-in-bt-in-dq\' true}`"', []),
+    ('result="`echo \\`echo ${UNSET:-x; run \'1. exp-in-nested-bt\' true}\\``"',
+     []),
+    # A NESTED backtick inside an expansion is a real substitution too, so it
+    # gets the same save and restore: bash runs the first of these and not the
+    # second (measured), which a reader carrying the expansion's depth into the
+    # nested body would have masked away.
+    ('result="`echo ${UNSET:-x \\`run \'1. bt-in-exp-in-bt\' true\\` ; run \'1. masked-after\' true}`"',
+     ["1. bt-in-exp-in-bt"]),
     ('run() {\n  :\n}', []),
 )
 
@@ -966,7 +1166,37 @@ _UNREADABLE_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('result="note; run"', []),
     # A non-literal label inside a NESTED substitution is a real invocation
     # (measured) and must be refused by name, not swallowed as escaped text.
+    # A parameter expansion is data, so a non-literal label inside one is a
+    # mention and must be invisible in both directions — while one inside a
+    # substitution that expansion contains is a real invocation (measured) and
+    # must still be refused BY NAME.
+    ('echo ${UNSET:-x; run $label true}', []),
+    ('echo ${UNSET:-$(run $label true)}', ['run $label true)}']),
     ('result="`echo \\`run $label true\\``"', ['run $label true\\``"']),
+)
+
+
+# Structural rows for the parameter-expansion mask: every character of a body
+# masked, and a real substitution inside one left alone. NO BEHAVIOURAL ROW CAN
+# PIN THESE, and saying so is better than implying one does — measured, by
+# unmasking the escape pair and then the newline, each of which left the whole
+# matrix green. The body mask already hides `run` and its quoted label, and an
+# unmasked separator inside an expansion cannot reach a word OUTSIDE it either:
+# the closing `}` always stands between them, and `_command` excludes `}`
+# outright because it never precedes a command (`{ :; } run "…" true` is a bash
+# syntax error, measured). So the mask is stated as an INVARIANT rather than
+# left resting on that argument — no character of a body reaches the skeleton
+# unmasked, which is one rule a reader can check instead of a list of
+# characters somebody has to remember to extend.
+#
+# `True`: every character of the fragment must be masked. `False`: none may be.
+_EXPANSION_MASK: tuple[tuple[str, str, bool], ...] = (
+    ('echo ${UNSET:-x; run "1. mask-sep" true}', '; run "1. mask-sep" true', True),
+    ('echo ${UNSET:-x\nrun "1. mask-nl" true}', '\nrun "1. mask-nl" true', True),
+    ('echo ${UNSET:-\; run "1. mask-esc" true}', '\; run', True),
+    ('echo ${UNSET:-x | y & z}', '| y & z', True),
+    ('echo ${UNSET:-$(run "1. unmasked" true)}', 'run', False),
+    ('echo ${UNSET:-`run "1. unmasked-bt" true`}', 'run', False),
 )
 
 
@@ -1010,6 +1240,35 @@ def _self_check() -> list[str]:
         bad.append(
             f"the unreadable-call matrix drove {unreadable_pos} refusals and "
             f"{unreadable_neg} mentions — it cannot prove that reader in both directions"
+        )
+    mask_all = mask_none = 0
+    for src, fragment, want_masked in _EXPANSION_MASK:
+        at = src.find(fragment)
+        if at == -1:
+            bad.append(
+                f"the expansion-mask matrix names a fragment {fragment!r} that is "
+                f"not in {src!r}"
+            )
+            continue
+        span = _lex_shell(src)[1][at : at + len(fragment)]
+        if want_masked:
+            mask_all += 1
+            if any(c != _MASK for c in span):
+                bad.append(
+                    f"an expansion body reaches the skeleton unmasked: {fragment!r} "
+                    f"in {src!r}"
+                )
+        else:
+            mask_none += 1
+            if any(c == _MASK for c in span):
+                bad.append(
+                    f"a substitution inside an expansion is masked: {fragment!r} "
+                    f"in {src!r}"
+                )
+    if mask_all < 1 or mask_none < 1:
+        bad.append(
+            f"the expansion-mask matrix drove {mask_all} masked bodies and "
+            f"{mask_none} suspensions — it cannot prove the mask in both directions"
         )
     if positive < 2 or negative < 2:
         bad.append(
