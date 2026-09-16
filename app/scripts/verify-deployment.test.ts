@@ -663,6 +663,15 @@ describe("verify-deployment: the read-only argument", () => {
     // needing a bespoke contract), which is a gate red on a healthy tree.
     put("psi", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, undefined);\n');
     put("omega", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { methods: undefined });\n');
+    // NOT housed: `undefined` is not a reserved word and an IMPORT ALIAS binds
+    // it (measured: tsc accepts this, and a `.ts` specifier is how these Deno
+    // functions import). The identifier is resolved rather than matched by
+    // name, so a file that binds it gets no answer and needs a reviewed case.
+    put("alpha2", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nimport { wideOpen as undefined } from "./opts.ts";\nserveFunction(handle, undefined);\n');
+    writeFileSync(join(dir, "alpha2", "opts.ts"), 'export const wideOpen = { methods: ["GET", "POST"] };\n');
+    // NOT housed either: the shadow is what disqualifies the file, so a local
+    // binding of the name does it too, even where the call reads the global.
+    put("beta2", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nfor (const undefined of []) { void undefined; }\nserveFunction(handle, undefined);\n');
     // Housed: `void <anything>` is undefined whatever the operand does.
     put("psi2", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, void 0);\n');
     // NOT housed: `null` is NOT undefined — a default initializer does not
@@ -717,50 +726,65 @@ describe("verify-deployment: the read-only argument", () => {
       psi2: true,
       omega: true,
       omega2: false,
+      alpha2: false,
+      beta2: false,
     });
   });
 
-  // The PRECONDITION under `isExplicitUndefined` reading a bare identifier as
-  // the global rather than walking the file for a shadow. Plain JavaScript
-  // ALLOWS the binding — measured, a module-scope `let undefined = {…}` makes
-  // a defaulted parameter take that object — so if the compiler stopped
-  // refusing it, `serveFunction(handle, undefined)` could pass a GET-admitting
-  // options object while this gate read it as the POST-only default: the gate
-  // blessing exactly what it forbids. Every file it reads is typechecked, so
-  // the guarantee holds today; this pins it rather than leaving it implicit.
-  it("TypeScript refuses to bind the name `undefined`, so the identifier is the global", () => {
+  // `isExplicitUndefined` RESOLVES the identifier rather than matching its
+  // name, and this is why. The first version of that helper asserted the
+  // compiler refuses to bind `undefined` at all — measured here, that claim is
+  // false in one direction that matters: an IMPORT ALIAS is accepted, and a
+  // `.ts` specifier is exactly how these Deno functions import. A name-only
+  // check called the GET-admitting options object the POST-only default.
+  //
+  // Both directions are pinned. If the declaration forms ever stop being
+  // refused nothing breaks (the resolver already covers them); if the import
+  // form ever starts being refused, the shadow scan is carrying weight it no
+  // longer needs to and whoever notices decides.
+  it("tsc refuses a declared `undefined` and ACCEPTS an imported one", () => {
     const dir = mkdtempSync(join(tmpdir(), "undef-"));
-    const file = join(dir, "shadow.ts");
-    writeFileSync(
-      file,
-      "type ServeOptions = { methods?: readonly string[] };\n"
-        + "declare function serveFunction(h: () => void, options?: ServeOptions): void;\n"
-        + 'let undefined: ServeOptions = { methods: ["GET", "POST"] };\n'
-        + "serveFunction(() => {}, undefined);\n",
-    );
+    writeFileSync(join(dir, "dep.ts"), 'export const wideOpen = { methods: ["GET"] };\n');
 
-    let status = 0;
-    let output = "";
-    try {
-      output = execFileSync(
-        join(REPO, "app", "node_modules", ".bin", "tsc"),
-        ["--noEmit", "--ignoreConfig", "--target", "es2022", "--module", "esnext", "--strict", file],
-        { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-      );
-    } catch (err) {
-      const e = err as { status?: number; stdout?: string; stderr?: string };
-      status = e.status ?? -1;
-      output = `${e.stdout ?? ""}${e.stderr ?? ""}`;
-    }
+    const HEAD = "type ServeOptions = { methods?: readonly string[] };\n"
+      + "declare function serveFunction(h: () => void, options?: ServeOptions): void;\n";
+    const TAIL = "serveFunction(() => {}, undefined);\n";
 
+    const check = (name: string, binding: string): { status: number; output: string } => {
+      const file = join(dir, `${name}.ts`);
+      writeFileSync(file, `${HEAD}${binding}\n${TAIL}`);
+      try {
+        const output = execFileSync(
+          join(REPO, "app", "node_modules", ".bin", "tsc"),
+          [
+            "--noEmit", "--ignoreConfig", "--target", "es2022", "--module", "esnext",
+            "--moduleResolution", "bundler", "--allowImportingTsExtensions", "--strict", file,
+          ],
+          { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+        );
+        return { status: 0, output };
+      } catch (err) {
+        const e = err as { status?: number; stdout?: string; stderr?: string };
+        return { status: e.status ?? -1, output: `${e.stdout ?? ""}${e.stderr ?? ""}` };
+      }
+    };
+
+    const declared = check("declared", 'let undefined: ServeOptions = { methods: ["GET"] };');
     expect(
-      status,
-      "tsc accepted a module-scope binding named `undefined`. `isExplicitUndefined` "
-        + "reads that identifier as the global without checking for a shadow, so a file "
-        + "could now pass GET-admitting options where this gate reads the POST-only "
-        + "default. Decide: walk for the shadow, or state why it still cannot happen.",
+      declared.status,
+      "tsc accepted a module-scope `let undefined`. Harmless on its own — the "
+        + "resolver covers it — but the comment in `isExplicitUndefined` names this "
+        + "as measured, so re-measure before trusting the rest of it.",
     ).not.toBe(0);
-    expect(output, "tsc refused for some other reason than the name conflict").toContain("TS2397");
+    expect(declared.output).toContain("TS2397");
+
+    const imported = check("imported", 'import { wideOpen as undefined } from "./dep.ts";');
+    expect(
+      imported.status,
+      "tsc now REFUSES an import aliased to `undefined`. That is the one form "
+        + "that made the shadow scan necessary; if the compiler bars it, the scan "
+        + "may be carrying weight it no longer needs. Decide, do not assume.",
+    ).toBe(0);
   }, 30_000);
 
   it("every function not behind serveFunction has a bespoke contract_for case", () => {

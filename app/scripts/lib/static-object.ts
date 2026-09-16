@@ -481,21 +481,85 @@ export function definesWithoutValue(
  * `void <anything>` is `undefined` whatever its operand evaluates to, so the
  * VALUE is static even where the operand is not.
  *
- * PRECONDITION, measured rather than assumed: the bare identifier is read as
- * the global without checking for a shadow, because TypeScript REFUSES to
- * bind that name at all — `let undefined: ServeOptions = …` is
- * `TS2397: Declaration name conflicts with built-in global identifier`. Plain
- * JavaScript does allow it (measured: a module-scope `let undefined = {…}`
- * makes a defaulted parameter take that object instead), so the guarantee is
- * the compiler's rather than the language's, and every file these gates read
- * is typechecked. That precondition is PINNED by a test rather than left
- * implicit: if the compiler ever stops refusing, whoever notices decides,
- * which is cheaper than a shadow walk for a state that cannot occur.
+ * THE IDENTIFIER IS RESOLVED, not matched by name. `undefined` is not a
+ * reserved word, and the claim this first shipped with — that TypeScript
+ * refuses to bind it at all — is FALSE. Measured across every module-scope
+ * form: the DECLARATION spellings are refused (`let`/`var`/`const`, object and
+ * array destructuring, a defaulted binding element, `function`, `class`,
+ * `enum`, `namespace` — TS2397, TS2414, TS2431), and an IMPORT ALIAS is
+ * ACCEPTED:
+ *
+ *     import { wideOpen as undefined } from "./opts.ts";
+ *     serveFunction(handle, undefined);   // admits GET
+ *
+ * That typechecks, and a `.ts` specifier is exactly how these Deno functions
+ * import, so the form is reachable in the very files this reads (Codex, PR
+ * #94 — its own example, a destructuring binding, is refused, but the general
+ * point held). A name-only check called that the POST-only default and the
+ * deploy probe would then fire an unauthenticated production GET at a handler
+ * that runs: the gate blessing what it forbids, the worse direction.
+ *
+ * So a file that binds the name anywhere gets no answer here, which sends its
+ * function to a reviewed `contract_for` case. Conservative by construction:
+ * the cost of a false refusal is one recorded reading, the cost of a false
+ * acceptance is a live GET. The binding forms are the set this module's
+ * `bindingSources` header already enumerates, plus the import clause, which
+ * binds a name with no in-file source expression; a form outside that set
+ * would be a MISS, which is why the enumeration is the documented one rather
+ * than a fresh list. `void <anything>` involves no identifier and is
+ * unconditional.
  */
 export function isExplicitUndefined(e: ts.Expression): boolean {
   const cur = unwrapTransparent(e);
   if (ts.isVoidExpression(cur)) return true;
-  return ts.isIdentifier(cur) && cur.text === "undefined";
+  if (!ts.isIdentifier(cur) || cur.text !== "undefined") return false;
+  return !bindsUndefined(cur.getSourceFile());
+}
+
+const SHADOWS_UNDEFINED = new WeakMap<ts.SourceFile, boolean>();
+
+/** Does anything in this file bind the name `undefined`? */
+function bindsUndefined(sf: ts.SourceFile): boolean {
+  const cached = SHADOWS_UNDEFINED.get(sf);
+  if (cached !== undefined) return cached;
+
+  let found = false;
+  const names = new Set<string>();
+  const named = (n: ts.Node | undefined): boolean =>
+    !!n && ts.isIdentifier(n) && n.text === "undefined";
+
+  const visit = (n: ts.Node): void => {
+    if (found) return;
+    if (ts.isVariableDeclaration(n) || ts.isParameter(n) || ts.isBindingElement(n)) {
+      names.clear();
+      bindPatternNames(n.name, names);
+      if (names.has("undefined")) {
+        found = true;
+        return;
+      }
+    } else if (
+      ts.isFunctionDeclaration(n)
+      || ts.isFunctionExpression(n)
+      || ts.isClassDeclaration(n)
+      || ts.isClassExpression(n)
+      || ts.isEnumDeclaration(n)
+      || ts.isModuleDeclaration(n)
+      || ts.isImportClause(n)
+      || ts.isImportSpecifier(n)
+      || ts.isNamespaceImport(n)
+      || ts.isImportEqualsDeclaration(n)
+    ) {
+      if (named(n.name)) {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+
+  visit(sf);
+  SHADOWS_UNDEFINED.set(sf, found);
+  return found;
 }
 
 /** Every assignment operator, `=` and the compound ones alike. */
