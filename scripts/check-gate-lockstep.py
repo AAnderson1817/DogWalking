@@ -404,9 +404,33 @@ def _lex_shell(text: str) -> tuple[str, str]:
     # reader found NOTHING for it, invisible in both directions), and the word
     # continues through the closing one exactly as it does through `)`.
     in_backtick = False
+    # A command substitution SUSPENDS a double-quoted word: bash evaluates
+    # `$(…)` and `` `…` `` inside double quotes as CODE while the quote goes
+    # on around them (measured — `result="$(run "13. hidden" true)"` executes
+    # `run`, and so does `` result="`run …`" ``), so masking the whole quoted
+    # region made a real local gate invisible in BOTH directions, neither
+    # runnable nor unreadable, which is how one lacks a CI counterpart while
+    # lockstep reports success (measured, Codex on PR #94). A SINGLE quote
+    # suspends nothing: everything inside one is literal (measured).
+    #
+    # Two resume triggers, because the two spellings are tracked differently:
+    # a `$(` lands on `parens`, so its quote resumes when that entry is popped;
+    # a backtick only flips `in_backtick`, so its quote resumes when that does.
+    dq_pending = False
+    dq_resume_at: list[int] = []
+    dq_resume_backtick = False
     i = 0
     while i < len(text):
         ch = text[i]
+        # An ESCAPED `\$(` or ``\` `` is literal and opens nothing (measured),
+        # and the backslash is consumed by the quote branch below before this
+        # test ever sees the character after it.
+        if quote == '"' and (text.startswith("$(", i) or ch == "`"):
+            quote = None
+            if ch == "`":
+                dq_resume_backtick = True
+            else:
+                dq_pending = True
         if quote:
             out.append(ch)
             if ch == "\\" and quote == '"' and i + 1 < len(text):
@@ -450,6 +474,11 @@ def _lex_shell(text: str) -> tuple[str, str]:
             # `\$(` cannot reach here as anything else: bash refuses it
             # outright ("syntax error near unexpected token `('", measured).
             parens.append("subst" if i > 0 and text[i - 1] in "$<>" else "paren")
+            if dq_pending:
+                # The `$` one character back suspended a double quote; this is
+                # the entry whose closer resumes it.
+                dq_resume_at.append(len(parens) - 1)
+                dq_pending = False
             out.append(ch)
             skel.append(ch)
             at_word_start = True
@@ -516,6 +545,16 @@ def _lex_shell(text: str) -> tuple[str, str]:
             at_word_start = ch in _WORD_BREAK
             if ch in ";&|\n":
                 at_cmd = True
+        # The substitution that suspended a double-quoted word has closed, so
+        # the quote resumes for the rest of it. Checked after every branch
+        # rather than inside the `)` one, because `esac` can shrink the stack
+        # too; `<=` for the same reason.
+        while dq_resume_at and len(parens) <= dq_resume_at[-1]:
+            dq_resume_at.pop()
+            quote = '"'
+        if dq_resume_backtick and not in_backtick:
+            dq_resume_backtick = False
+            quote = '"'
         i += 1
     clean, skeleton = "".join(out), "".join(skel)
     assert len(clean) == len(text) and len(skeleton) == len(text)
@@ -681,6 +720,16 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('echo $(run "1. inside-subst" x)', ["1. inside-subst"]),
     ('case a in a) run "1. case-pattern" x;; esac', ["1. case-pattern"]),
     ('echo `run "1. backtick" x`', ["1. backtick"]),
+    # A command substitution SUSPENDS a double-quoted word: its contents are
+    # CODE, so a gate inside one runs (measured for all four) while a reader
+    # that masked the whole quoted region saw nothing — invisible in BOTH
+    # directions, so the gate could be dropped from CI with lockstep still
+    # reporting success (Codex, PR #94).
+    ('result="$(run \'1. dq-subst\' true)"', ["1. dq-subst"]),
+    ('result="`run \'1. dq-backtick\' true`"', ["1. dq-backtick"]),
+    ('echo "$(run \'1. arg-dq-subst\' true)"', ["1. arg-dq-subst"]),
+    ('MODE="$(printf a; printf b)" run \'1. prefix-dq-subst\' true',
+     ["1. prefix-dq-subst"]),
     # A case pattern's `)` closes no `(`, so a `case` inside a substitution
     # must not consume it: bash runs `run` here (measured) where a reader that
     # popped saw no command position at all.
@@ -793,6 +842,27 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     # And `case` counts only AT a command position: as an argument it is an
     # ordinary word, so the closer after it is the substitution's (measured).
     ('echo $(echo case) run "1. word-case" true', []),
+    # …and the boundaries of that suspension, each measured: a SINGLE quote
+    # suspends nothing, an escaped `\\$(` or ``\\` `` opens nothing, a `$` not
+    # followed by `(` is an expansion rather than a substitution, and the
+    # quote RESUMES at the closer, so text after one is literal again.
+    ("result='$(run \"1. sq-literal\" true)'", []),
+    ('result="note; run \'1. dq-plain\' true"', []),
+    ('result="\\$(run \'1. esc-dollar\' true)"', []),
+    ('result="\\`run \'1. esc-backtick\' true\\`"', []),
+    ('result="$HOME run \'1. dollar-var\' true"', []),
+    ('result="${HOME} run \'1. dq-bracevar\' true"', []),
+    ('result="$((1+2)) run \'1. dq-arith\' true"', []),
+    ('result="$(printf a) run \'1. after-subst-in-dq\' true"', []),
+    ('result="\'; run \\"1. sq-in-dq\\" true\'"', []),
+    # The RESUME is what these four pin, and they are the rows that
+    # distinguish it: with the quote never coming back the `;` after the
+    # substitution would be a command boundary and the literal text behind it
+    # a PHANTOM gate, where bash runs only the substitution (measured).
+    ('result="$(printf a); run \'1. after-subst-semi\' true"', []),
+    ('result="`printf a`; run \'1. after-backtick-semi\' true"', []),
+    ('result="$HOME; run \'1. dollar-var-semi\' true"', []),
+    ('result="$((1+2)); run \'1. arith-semi\' true"', []),
     # A reserved word is reserved only WHERE A COMMAND CAN START. In an
     # argument it is an ordinary word, so bash runs only `echo` here (measured
     # for all three), while a rule that accepted a reserved word after any
@@ -839,6 +909,12 @@ _UNREADABLE_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('run $label x', ["run $label x"]),
     # A quoted MENTION is data and must be invisible in both directions.
     ("echo 'note; run'", []),
+    # The same suspension, on the reader whose failure direction is the worse
+    # one: a non-literal label inside a double-quoted substitution is a real
+    # invocation (measured) and must be refused BY NAME, while a mention
+    # inside an ordinary double-quoted word stays invisible.
+    ('result="$(run $label true)"', ['run $label true)"']),
+    ('result="note; run"', []),
 )
 
 
