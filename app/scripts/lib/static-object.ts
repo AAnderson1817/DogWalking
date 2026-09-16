@@ -1,0 +1,635 @@
+import ts from "typescript";
+
+/**
+ * Reading STATIC OBJECT SHAPES out of TypeScript, for the gates that need to
+ * know what a literal actually carries.
+ *
+ * Two gates ask that question — `form-error.test.ts` about a JSX attribute,
+ * `realtime-channel.test.ts` about a broadcast message and a channel's
+ * `config` — and they kept diverging. Three consecutive Codex rounds on PR #94
+ * were the same finding: a rule present in one reader and absent from the
+ * other, once in each direction (a declared identifier the JSX side would not
+ * follow; a transparent `as const` the channel side would not unwrap; then a
+ * `let` reassignment neither refused). Patching whichever side is pointed at
+ * is the per-site disease this repository's log records more than any other,
+ * so the PRIMITIVES live here, in one implementation, and there is no sibling
+ * to forget.
+ *
+ * What stays in each gate is the part that genuinely differs: the shape of an
+ * answer. The JSX reader distinguishes "absent" (leave an earlier answer
+ * standing) from "present but dynamic" (replace it with no answer); the
+ * channel reader carries nodes and markers so it can recurse into `config`
+ * and print what it could not read. Those are different questions and share
+ * nothing but these building blocks.
+ *
+ * Stated limit, on the stopping rule the enum-catalogue generator writes down:
+ * this catches the mistake, not the adversary. Nothing here follows a value
+ * across a module boundary, through a function call, or into a computed
+ * member, and a value it cannot read is reported as unreadable rather than
+ * guessed at.
+ */
+
+/**
+ * `as`, `satisfies`, parentheses and `!` hand the same value through.
+ *
+ * React receives the same literal through every one of them and so does
+ * Realtime, so a reader that stops at the wrapper either calls a static value
+ * dynamic (a miss) or calls a private option non-private (a gate red on a
+ * healthy tree, which is the worse of the two).
+ */
+export function unwrapTransparent(e: ts.Expression): ts.Expression {
+  let cur = e;
+  for (let i = 0; i < 8; i += 1) {
+    if (
+      ts.isAsExpression(cur) ||
+      ts.isSatisfiesExpression(cur) ||
+      ts.isParenthesizedExpression(cur) ||
+      ts.isNonNullExpression(cur) ||
+      ts.isTypeAssertionExpression(cur)
+    ) {
+      cur = cur.expression;
+      continue;
+    }
+    return cur;
+  }
+  return cur;
+}
+
+/** The text of a statically readable string, or null for a dynamic one. */
+export function literalText(e: ts.Expression): string | null {
+  const cur = unwrapTransparent(e);
+  if (ts.isStringLiteral(cur) || ts.isNoSubstitutionTemplateLiteral(cur)) return cur.text;
+  return null;
+}
+
+/**
+ * A property's name when the compiler can read it, or null when it cannot.
+ *
+ * A COMPUTED key whose expression is a string literal is fully static and
+ * names exactly one property: `{ ["role"]: "alert" }` is the same object as
+ * `{ role: "alert" }`. A key that is genuinely an expression stays null, which
+ * every caller must read as "could be the name I am asking about".
+ */
+export function propertyKey(name: ts.PropertyName): string | null {
+  if (
+    ts.isIdentifier(name) ||
+    ts.isStringLiteral(name) ||
+    ts.isNoSubstitutionTemplateLiteral(name)
+  ) {
+    return name.text;
+  }
+  if (ts.isComputedPropertyName(name)) return literalText(name.expression);
+  return null;
+}
+
+/**
+ * The object literals a name reliably holds, for a spread to resolve.
+ *
+ * Two rules, each arrived at the hard way:
+ *
+ *  - a name bound MORE THAN ONCE, anywhere and by any binding form, is
+ *    unresolvable. A file-global map does not merely miss a shadowed binding,
+ *    it answers confidently and WRONGLY, which is worse — and the first
+ *    version of that rule counted variable declarations alone, so the very
+ *    first binding form that is not `const` (a function parameter) walked past
+ *    it;
+ *  - a name that is ASSIGNED anywhere is unresolvable, whatever it was
+ *    initialised to. `let attrs = { role: "status" }; attrs = { role: "alert" }`
+ *    is a stale initializer, the same shape as reading a literal that has
+ *    since been mutated. "Assigned" means every form, not the one spelling
+ *    that came first: `x = …`, every compound operator, `x++`, a destructuring
+ *    target, a `for (x of …)` or `for (x in …)` loop variable, AND a mutation
+ *    of what it holds — `x.y = …`, `x["y"] = …`, `delete x.y`,
+ *    `Object.assign(x, …)`. The object is what the caller reads, so changing
+ *    the object is changing the answer just as much as rebinding the name —
+ *    and a mutation through an ALIAS is a mutation of the same object, so
+ *    `const alias = config; alias.private = false;` invalidates `config` too.
+ *    Without that the rule read the name it was written through rather than
+ *    the object it reached, which is one indirection short of the point. An
+ *    alias is formed by a declaration OR an assignment (`let a; a = config;`),
+ *    which the first version of the graph missed — the same one-binding-form
+ *    -short shape as the shadow rule two rounds earlier.
+ *
+ * REBINDING and MUTATING are tracked separately, and that separation is what
+ * keeps the graph from over-refusing: `let a = config; a = other;` rebinds the
+ * NAME `a` and leaves `config`'s object untouched, so only `a` loses its
+ * literal, while `a.private = false` reaches the object every alias names and
+ * invalidates all of them.
+ *
+ * ALIAS EDGES ARE PERMANENT, and that is a decision rather than an oversight.
+ * An alias that is rebound and THEN mutated — `let a = config; a = other;
+ * a.private = false;` — still invalidates `config`, which nothing touched.
+ * Codex reported that as a false red on PR #94 and it is one. Removing the
+ * stale edge requires knowing which assignment happened first, i.e. flow
+ * sensitivity, and the trade is not free in either direction: the mirror,
+ * `let a = config; a.private = false; a = other;`, is a real mutation of
+ * `config` that a lifetime-aware graph would MISS. For a gate that decides
+ * whether a walk's live position goes to a public topic, an over-refusal is
+ * legible and its remedy is obvious (rename, or use `const`), while a miss is
+ * silent. The refusal is therefore deliberate and PINNED as a test, so that
+ * changing it is a decision somebody makes rather than a regression. Neither
+ * file these gates read aliases anything today (measured), so the cost is
+ * currently zero.
+ *
+ * Both are refusals rather than analyses, which is the stopping rule this
+ * repository settled on: an ambiguous name never gets a confident answer, and
+ * the remedy — rename one, or use `const` — is cheaper than a Program over
+ * the whole app for this question.
+ */
+export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteralExpression> {
+  const seen = new Map<string, ts.ObjectLiteralExpression | null>();
+  // Rebinding a NAME costs that name its literal; MUTATING an object costs it
+  // to every name for that object. Two sets, because closing the first over
+  // the alias graph would make `let a = config; a = other;` refuse `config`,
+  // which nothing has touched.
+  const rebound = new Set<string>();
+  const mutated = new Set<string>();
+  // `const b = a` makes the two names one object, so a mutation of either is a
+  // mutation of both. Undirected, and closed transitively below.
+  const aliases = new Map<string, Set<string>>();
+  const link = (a: string, b: string) => {
+    if (a === b) return;
+    if (!aliases.has(a)) aliases.set(a, new Set());
+    if (!aliases.has(b)) aliases.set(b, new Set());
+    aliases.get(a)!.add(b);
+    aliases.get(b)!.add(a);
+  };
+  const { linkBinding, linkNames } = makeLinkBinding(link);
+
+  // `const attrs = base` — the name holds whatever `base` holds. Recorded
+  // here and resolved after the walk, because the source may be declared
+  // later in the file; `null` marks a name bound twice, which is unresolvable
+  // whichever binding carried the literal.
+  const aliasSource = new Map<string, string | null>();
+
+  const bind = (
+    name: string,
+    lit: ts.ObjectLiteralExpression | null,
+    aliasOf: string | null = null,
+  ) => {
+    if (seen.has(name)) {
+      seen.set(name, null);
+      aliasSource.set(name, null);
+      return;
+    }
+    seen.set(name, lit);
+    if (aliasOf) aliasSource.set(name, aliasOf);
+  };
+  const bindPattern = (nm: ts.BindingName): void => {
+    if (ts.isIdentifier(nm)) {
+      bind(nm.text, null);
+      return;
+    }
+    for (const el of nm.elements) if (ts.isBindingElement(el)) bindPattern(el.name);
+  };
+
+  const visit = (n: ts.Node): void => {
+    if (ts.isVariableDeclaration(n)) {
+      if (ts.isIdentifier(n.name)) {
+        const init = n.initializer ? unwrapTransparent(n.initializer) : undefined;
+        const lit = init && ts.isObjectLiteralExpression(init) ? init : null;
+        const aliasOf = init && ts.isIdentifier(init) ? init.text : null;
+        bind(n.name.text, lit, aliasOf);
+        if (aliasOf) link(n.name.text, aliasOf);
+      } else bindPattern(n.name);
+      linkBinding(n.name, n.initializer);
+    } else if (ts.isParameter(n) || ts.isBindingElement(n)) {
+      bindPattern(n.name);
+      // A DEFAULT is a source expression like any other: `function m(alias =
+      // config)` and `const { a = config } = o` both let `alias` hold the same
+      // object, so a mutation through it reaches `config`.
+      linkBinding(n.name, n.initializer);
+    } else if (
+      (ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n) ||
+        ts.isEnumDeclaration(n) || ts.isModuleDeclaration(n) ||
+        ts.isFunctionExpression(n) || ts.isClassExpression(n)) &&
+      n.name && ts.isIdentifier(n.name)
+    ) {
+      // An enum and a namespace introduce a VALUE binding, so either can
+      // shadow an outer object and make this map answer confidently and
+      // wrongly — the hazard the shadow rule exists for. So does the NAME of a
+      // function or class EXPRESSION, which binds inside its own body:
+      // `const C = function attrs() { … attrs … }` refers to the function
+      // there, not to an outer `attrs`.
+      bind(n.name.text, null);
+    } else if (ts.isImportSpecifier(n) || ts.isImportClause(n) || ts.isNamespaceImport(n)) {
+      if (n.name && ts.isIdentifier(n.name)) bind(n.name.text, null);
+    } else if (ts.isCatchClause(n) && n.variableDeclaration) {
+      bindPattern(n.variableDeclaration.name);
+    }
+
+    // Rebinding the NAME: `x = …`, every compound form, and `x++`. A
+    // destructuring assignment target counts too.
+    if (ts.isBinaryExpression(n) && isDefiniteRebinding(n.operatorToken.kind)) {
+      collectAssignmentTargets(n.left, rebound);
+    }
+    // ALIASING is a separate question from rebinding and therefore a separate
+    // block, which the first version of this got wrong by nesting one inside
+    // the other: excluding `??=` from rebinding then silently excluded it from
+    // the alias graph too, so `let a; a ??= config; a.private = false;` stopped
+    // invalidating `config` — caught by this file's own fixtures rather than by
+    // review, which is what they are for.
+    //
+    // `a = config` makes the two names one object from here on, and so does
+    // `[a] = [config]` or `({ a } = { a: config })`. Rather than match a
+    // destructuring pattern positionally (the right side can be any
+    // expression, so the matching is not always possible), every target is
+    // linked to every identifier the right side mentions. That OVER-links,
+    // which is the conservative direction: it can refuse a name nothing
+    // touched, never miss one that was mutated.
+    if (ts.isBinaryExpression(n) && isAliasFormingAssignment(n.operatorToken.kind)) {
+      const targets = new Set<string>();
+      collectAssignmentTargets(n.left, targets);
+      const sources = new Set<string>();
+      collectIdentifiers(n.right, sources);
+      for (const target of targets) for (const source of sources) link(target, source);
+    }
+    if (
+      (ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) &&
+      (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken) &&
+      ts.isIdentifier(n.operand)
+    ) {
+      rebound.add(n.operand.text);
+    }
+    // A loop variable is assigned on every iteration and produces no
+    // BinaryExpression at all, so `for (x of […])` slipped past the rule above.
+    // Only the bare-identifier form matters: `for (const x of …)` declares a
+    // fresh binding, which the declaration branch already sees.
+    if (ts.isForOfStatement(n) || ts.isForInStatement(n)) {
+      if (!ts.isVariableDeclarationList(n.initializer)) {
+        collectAssignmentTargets(n.initializer, rebound);
+        const targets = new Set<string>();
+        collectAssignmentTargets(n.initializer, targets);
+        linkNames(targets, n.expression);
+      } else {
+        // `for (const alias of [config])` declares a FRESH binding — so it
+        // does not shadow-invalidate `config`, which the declaration branch
+        // already handles — but `alias` holds the same object, so a mutation
+        // through it must still reach `config`.
+        const targets = new Set<string>();
+        for (const d of n.initializer.declarations) bindPatternNames(d.name, targets);
+        linkNames(targets, n.expression);
+      }
+    }
+    // And MUTATING what the name holds. The caller reads the object, so
+    // `channelConfig.private = false` changes the answer exactly as rebinding
+    // the name would — and the first version of this rule watched only the
+    // rebinding, which is the same half-a-rule the property-mutation check in
+    // the channel gate had before it (Codex, PR #94).
+    if (ts.isBinaryExpression(n) && isAssignmentOperator(n.operatorToken.kind)) {
+      collectMutatedRoots(n.left, mutated);
+    }
+    if (ts.isDeleteExpression(n)) collectMutatedRoots(n.expression, mutated);
+    if (isObjectAssignCall(n)) {
+      // `Object.assign(target, …)` writes into its FIRST argument.
+      const target = n.arguments[0];
+      if (target) collectMutatedRoots(target, mutated, true);
+    }
+
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+
+  // Close MUTATION over the alias graph: whichever name it was written
+  // through, every name for the same object loses its literal. Rebinding is
+  // deliberately not closed — see the note above.
+  const queue = [...mutated];
+  while (queue.length) {
+    const name = queue.pop() as string;
+    for (const other of aliases.get(name) ?? []) {
+      if (!mutated.has(other)) {
+        mutated.add(other);
+        queue.push(other);
+      }
+    }
+  }
+
+  // An ALIAS carries the object, so it carries the literal: `const base = {…};
+  // const attrs = base; <span {...attrs} />` bound `attrs` to null, the spread
+  // was skipped as unresolvable and the JSX gate MISSED the element — the
+  // ordinary composition pattern, one hop longer (Codex, PR #94).
+  //
+  // The source must be resolvable in its own right. Following a REBOUND one
+  // would answer confidently and wrongly: `let base = {a}; base = {b}; const
+  // attrs = base;` gives `attrs` the second object while `seen` still holds
+  // the first, which is the hazard this whole map exists to avoid. Mutation is
+  // already closed over the alias graph, so a mutated source has already cost
+  // every name for that object its literal; the test is kept here so the rule
+  // reads as one rule rather than two halves in different places.
+  const aliasLiteral = (name: string): ts.ObjectLiteralExpression | undefined => {
+    const guard = new Set<string>([name]);
+    let cur = aliasSource.get(name) ?? null;
+    for (let i = 0; cur && i < 16; i += 1) {
+      if (guard.has(cur)) return undefined;
+      guard.add(cur);
+      if (rebound.has(cur) || mutated.has(cur)) return undefined;
+      const lit = seen.get(cur);
+      if (lit) return lit;
+      cur = aliasSource.get(cur) ?? null;
+    }
+    return undefined;
+  };
+
+  const out = new Map<string, ts.ObjectLiteralExpression>();
+  for (const [name, lit] of seen) {
+    if (rebound.has(name) || mutated.has(name)) continue;
+    const resolved = lit ?? aliasLiteral(name);
+    if (resolved) out.set(name, resolved);
+  }
+  return out;
+}
+
+/**
+ * Link every name a binding introduces to every identifier its SOURCE mentions.
+ *
+ * This is the one place that answers "what can this name come to hold?", and
+ * it is deliberately the COMPLETE set of TypeScript constructs that bind a
+ * name together with a value expression, because four consecutive review
+ * rounds found this rule one form short — a parameter, then an assignment,
+ * then a destructuring declaration, then a parameter DEFAULT. The set is:
+ *
+ *   VariableDeclaration   `const a = …`         initializer
+ *   Parameter             `(a = …)`             initializer (the default)
+ *   BindingElement        `{ a = … }`           initializer (the default)
+ *   ForOf / ForIn         `for (a of …)`        the iterable
+ *   assignment `=`        `a = …`               the right-hand side
+ *
+ * Nothing else in the language introduces a binding with an in-file source
+ * expression: a class field, a catch clause and an import bind a name with
+ * nothing here to link it to. Conservative by construction — every target to
+ * every identifier the source mentions, not a positional match — so it can
+ * refuse a name nothing touched and can never miss one that was mutated.
+ */
+
+/** The names a binding pattern introduces. */
+function bindPatternNames(nm: ts.BindingName, into: Set<string>): void {
+  if (ts.isIdentifier(nm)) {
+    into.add(nm.text);
+    return;
+  }
+  for (const el of nm.elements) if (ts.isBindingElement(el)) bindPatternNames(el.name, into);
+}
+
+/** Link a binding's names to the identifiers its source expression mentions. */
+function makeLinkBinding(
+  link: (a: string, b: string) => void,
+): {
+  linkBinding: (name: ts.BindingName, source: ts.Expression | undefined) => void;
+  linkNames: (targets: Set<string>, source: ts.Expression) => void;
+} {
+  const linkNames = (targets: Set<string>, source: ts.Expression) => {
+    if (targets.size === 0) return;
+    const sources = new Set<string>();
+    collectIdentifiers(source, sources);
+    for (const target of targets) for (const s of sources) link(target, s);
+  };
+  return {
+    linkNames,
+    linkBinding: (name, source) => {
+      if (!source) return;
+      const targets = new Set<string>();
+      bindPatternNames(name, targets);
+      linkNames(targets, source);
+    },
+  };
+}
+
+/** Every identifier an expression mentions, however deeply. */
+function collectIdentifiers(e: ts.Expression, into: Set<string>): void {
+  const visit = (n: ts.Node): void => {
+    if (ts.isIdentifier(n)) into.add(n.text);
+    ts.forEachChild(n, visit);
+  };
+  visit(e);
+}
+
+/**
+ * The assignments that make two names one object: `=` and the LOGICAL forms.
+ *
+ * `a ??= config` assigns `config` when it runs, so it forms an alias exactly as
+ * `a = config` does. It is not, however, a definite REBINDING — see
+ * `isDefiniteRebinding`, which is why the two questions have different
+ * predicates. The first version of this said so in a comment and then used one
+ * predicate for both, which is the defect the comment described (Codex,
+ * PR #94).
+ */
+function isAliasFormingAssignment(kind: ts.SyntaxKind): boolean {
+  return (
+    kind === ts.SyntaxKind.EqualsToken ||
+    kind === ts.SyntaxKind.QuestionQuestionEqualsToken ||
+    kind === ts.SyntaxKind.BarBarEqualsToken ||
+    kind === ts.SyntaxKind.AmpersandAmpersandEqualsToken
+  );
+}
+
+/**
+ * The assignments that definitely REPLACE what a name holds.
+ *
+ * `??=` and `||=` are excluded, and the reason is a property of this map
+ * rather than a guess about control flow: a name is only ever IN it when its
+ * declaration initializer is an OBJECT LITERAL, which is both non-nullish and
+ * truthy — so neither of those operators can assign to such a name, and
+ * treating them as a rebinding threw away a literal the program still holds.
+ * `&&=` is the mirror: a truthy left side means it ALWAYS assigns, so it is a
+ * definite rebinding. Every other compound operator (`+=` and friends)
+ * replaces the value with something that is not the object, and counts.
+ */
+function isDefiniteRebinding(kind: ts.SyntaxKind): boolean {
+  if (
+    kind === ts.SyntaxKind.QuestionQuestionEqualsToken ||
+    kind === ts.SyntaxKind.BarBarEqualsToken
+  ) {
+    return false;
+  }
+  return isAssignmentOperator(kind);
+}
+
+/**
+ * An object-literal member that DEFINES a property without a readable value:
+ * `get x() {…}`, `set x(v) {…}`, `x() {…}`.
+ *
+ * A getter overrides whatever a spread before it supplied, and what it returns
+ * is a function body rather than a literal — so a reader that skips these
+ * reports the SPREAD's value for a key the object no longer carries, which is
+ * a confidently wrong answer rather than an absent one (Codex, PR #94:
+ * `{ ...base, get private() { return false; } }` read as private).
+ *
+ * The two gates differ only in how they say "no answer", so this names the
+ * shape and each records its own marker.
+ */
+export function definesWithoutValue(
+  p: ts.ObjectLiteralElementLike,
+): p is ts.GetAccessorDeclaration | ts.SetAccessorDeclaration | ts.MethodDeclaration {
+  return ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p) || ts.isMethodDeclaration(p);
+}
+
+/**
+ * Does this expression statically evaluate to `undefined`?
+ *
+ * An optional parameter with a DEFAULT INITIALIZER treats an explicit
+ * `undefined` exactly as an omitted argument, and `??` treats an `undefined`
+ * property exactly as an absent one. So both of these are byte-for-byte the
+ * POST-only default that makes `serveFunction` read-only:
+ *
+ *     serveFunction(handle, undefined)        // _lib/http.ts:258, `= {}`
+ *     serveFunction(handle, { methods: undefined })  // :294, `?? DEFAULT_METHODS`
+ *
+ * A reader that files either under "a value I cannot read" refuses a healthy
+ * call and demands a bespoke production contract for it — a gate red on a
+ * healthy tree, the worst shape this file records (Codex, PR #94).
+ *
+ * `void <anything>` is `undefined` whatever its operand evaluates to, so the
+ * VALUE is static even where the operand is not.
+ *
+ * THE IDENTIFIER IS RESOLVED, not matched by name. `undefined` is not a
+ * reserved word, and the claim this first shipped with — that TypeScript
+ * refuses to bind it at all — is FALSE. Measured across every module-scope
+ * form: the DECLARATION spellings are refused (`let`/`var`/`const`, object and
+ * array destructuring, a defaulted binding element, `function`, `class`,
+ * `enum`, `namespace` — TS2397, TS2414, TS2431), and an IMPORT ALIAS is
+ * ACCEPTED:
+ *
+ *     import { wideOpen as undefined } from "./opts.ts";
+ *     serveFunction(handle, undefined);   // admits GET
+ *
+ * That typechecks, and a `.ts` specifier is exactly how these Deno functions
+ * import, so the form is reachable in the very files this reads (Codex, PR
+ * #94 — its own example, a destructuring binding, is refused, but the general
+ * point held). A name-only check called that the POST-only default and the
+ * deploy probe would then fire an unauthenticated production GET at a handler
+ * that runs: the gate blessing what it forbids, the worse direction.
+ *
+ * So a file that binds the name anywhere gets no answer here, which sends its
+ * function to a reviewed `contract_for` case. Conservative by construction:
+ * the cost of a false refusal is one recorded reading, the cost of a false
+ * acceptance is a live GET. The binding forms are the set this module's
+ * `bindingSources` header already enumerates, plus the import clause, which
+ * binds a name with no in-file source expression; a form outside that set
+ * would be a MISS, which is why the enumeration is the documented one rather
+ * than a fresh list. `void <anything>` involves no identifier and is
+ * unconditional.
+ */
+export function isExplicitUndefined(e: ts.Expression): boolean {
+  const cur = unwrapTransparent(e);
+  if (ts.isVoidExpression(cur)) return true;
+  if (!ts.isIdentifier(cur) || cur.text !== "undefined") return false;
+  return !bindsUndefined(cur.getSourceFile());
+}
+
+const SHADOWS_UNDEFINED = new WeakMap<ts.SourceFile, boolean>();
+
+/** Does anything in this file bind the name `undefined`? */
+function bindsUndefined(sf: ts.SourceFile): boolean {
+  const cached = SHADOWS_UNDEFINED.get(sf);
+  if (cached !== undefined) return cached;
+
+  let found = false;
+  const names = new Set<string>();
+  const named = (n: ts.Node | undefined): boolean =>
+    !!n && ts.isIdentifier(n) && n.text === "undefined";
+
+  const visit = (n: ts.Node): void => {
+    if (found) return;
+    if (ts.isVariableDeclaration(n) || ts.isParameter(n) || ts.isBindingElement(n)) {
+      names.clear();
+      bindPatternNames(n.name, names);
+      if (names.has("undefined")) {
+        found = true;
+        return;
+      }
+    } else if (
+      ts.isFunctionDeclaration(n)
+      || ts.isFunctionExpression(n)
+      || ts.isClassDeclaration(n)
+      || ts.isClassExpression(n)
+      || ts.isEnumDeclaration(n)
+      || ts.isModuleDeclaration(n)
+      || ts.isImportClause(n)
+      || ts.isImportSpecifier(n)
+      || ts.isNamespaceImport(n)
+      || ts.isImportEqualsDeclaration(n)
+    ) {
+      if (named(n.name)) {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+
+  visit(sf);
+  SHADOWS_UNDEFINED.set(sf, found);
+  return found;
+}
+
+/** Every assignment operator, `=` and the compound ones alike. */
+export function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
+  return (
+    kind === ts.SyntaxKind.EqualsToken ||
+    (kind >= ts.SyntaxKind.FirstCompoundAssignment && kind <= ts.SyntaxKind.LastCompoundAssignment)
+  );
+}
+
+/**
+ * A call to the BUILT-IN `Object.assign`, which writes into its first argument.
+ *
+ * The receiver matters, and the first version of this rule ignored it: any
+ * `.assign(…)` counted, so an unrelated `registry.assign(channelConfig)` made
+ * an immutable literal unresolvable and the gate red on healthy code (Codex,
+ * PR #94). `Object` and `globalThis.Object` only — and, deliberately, not a
+ * local shadow of the name, because a file that shadows `Object` is beyond
+ * what this catches and refusing on the name alone is the defect being fixed.
+ */
+export function isObjectAssignCall(n: ts.Node): n is ts.CallExpression {
+  if (!ts.isCallExpression(n) || !ts.isPropertyAccessExpression(n.expression)) return false;
+  if (n.expression.name.text !== "assign") return false;
+  const receiver = unwrapTransparent(n.expression.expression);
+  if (ts.isIdentifier(receiver)) return receiver.text === "Object";
+  return (
+    ts.isPropertyAccessExpression(receiver) &&
+    receiver.name.text === "Object" &&
+    ts.isIdentifier(receiver.expression) &&
+    receiver.expression.text === "globalThis"
+  );
+}
+
+/**
+ * The identifier at the ROOT of a member chain, when the chain is being
+ * written to — `a.b.c = x`, `a["b"] = x`, `delete a.b`, `Object.assign(a, …)`.
+ *
+ * `direct` is for the `Object.assign` case, where the target is the object
+ * itself rather than a member of it.
+ */
+function collectMutatedRoots(e: ts.Expression, into: Set<string>, direct = false): void {
+  let cur: ts.Expression = unwrapTransparent(e);
+  if (!direct) {
+    if (!ts.isPropertyAccessExpression(cur) && !ts.isElementAccessExpression(cur)) return;
+    while (ts.isPropertyAccessExpression(cur) || ts.isElementAccessExpression(cur)) {
+      cur = unwrapTransparent(cur.expression);
+    }
+  }
+  if (ts.isIdentifier(cur)) into.add(cur.text);
+}
+
+/** The identifiers an assignment's left-hand side writes to. */
+function collectAssignmentTargets(left: ts.Expression, into: Set<string>): void {
+  const target = unwrapTransparent(left);
+  if (ts.isIdentifier(target)) {
+    into.add(target.text);
+    return;
+  }
+  if (ts.isObjectLiteralExpression(target)) {
+    for (const p of target.properties) {
+      if (ts.isShorthandPropertyAssignment(p)) into.add(p.name.text);
+      else if (ts.isPropertyAssignment(p)) collectAssignmentTargets(p.initializer, into);
+      else if (ts.isSpreadAssignment(p)) collectAssignmentTargets(p.expression, into);
+    }
+    return;
+  }
+  if (ts.isArrayLiteralExpression(target)) {
+    for (const el of target.elements) {
+      if (ts.isSpreadElement(el)) collectAssignmentTargets(el.expression, into);
+      else collectAssignmentTargets(el, into);
+    }
+  }
+}

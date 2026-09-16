@@ -1423,6 +1423,18 @@ gate. Any new function that answers something other than 405 to a GET must also
 be given a contract in `scripts/verify-deployment.sh`, which probes exactly
 this.
 
+One half of that is enforced rather than remembered. The probe is safe to fire
+at production because a function behind `serveFunction` refuses a GET before
+its handler runs; a function with its own `Deno.serve` has no such wrapper, so
+its read-only behaviour is a per-function fact somebody has to establish, and
+`contract_for` is where that reading is recorded. `verify-deployment.test.ts`
+parses `supabase/functions/` and fails if any function naming `Deno.serve` in
+its own code has no `contract_for` case — parsed rather than grepped, because
+`platform-webhook`'s header mentions `Deno.serve` in prose and a gate that
+went red on a comment would be red on a healthy tree. The converse is not a
+rule: `unsubscribe` has a bespoke contract and goes through `serveFunction`,
+which is exactly what a widened `methods` means.
+
 Three deliberate non-features:
 
 - **It never says whether a token exists.** `fn_unsubscribe_by_token` answers

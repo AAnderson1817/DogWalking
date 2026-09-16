@@ -25,14 +25,41 @@ before you hit them.
 
 ## Open
 
-### 1. Tell the operator when an edited address is already suppressed
+### 1. `validate.sh` should list its own gates, instead of being parsed
+`scripts/check-gate-lockstep.py` reads `validate.sh` with regexes to learn
+which gates it declares, and PR #94 spent four review rounds on that reader:
+line continuations, single quotes, control prefixes (`if run "…"`), shell
+reserved words, assignment and redirection prefixes (`MODE=ci run "…"`). Each
+was real and each was fixed, but the class does not close, because telling an
+INVOCATION from an ARGUMENT needs command position and `npm --prefix app run
+lint` legitimately contains the word `run`. The `unreadable` refusal — which
+is what makes the rest of the reader honest — therefore cannot be widened to
+every occurrence of the word.
+
+The robust answer is to let the shell parse the shell:
+
+  * `scripts/validate.sh --list-gates` sets a flag; `run` and `skip_gate`
+    print `run\t<label>` / `skip\t<label>` and return without executing;
+  * `check-gate-lockstep.py` invokes that instead of reading the file.
+
+The one hard part is that the prerequisite branches (`have deno`,
+`LOCAL_DB_URL`, the Playwright path) decide whether a gate reaches `run` or
+`skip_gate`, and the lockstep check wants the DECLARED set rather than the set
+this machine would run. So list mode has to force those branches — stub
+`have()` to true and give the environment checks a list-mode short circuit —
+and that has to be done in a way that cannot change what a real run does. Do
+it in its own PR, with the four-round spelling matrix in
+`check-gate-lockstep.py` kept as a test of the lister's output rather than
+deleted.
+
+### 2. Tell the operator when an edited address is already suppressed
 Also recorded in spec 04. Editing a client's address to one already in
 `email_suppressions` makes every future client-facing email skip
 permanently and terminally, with no signal in the UI. Whether to surface it
 — and how, without exposing one operator's suppression list to another — is
 a product question.
 
-### 2. The pinned Supabase CLI is behind, and `db push` warns every deploy
+### 3. The pinned Supabase CLI is behind, and `db push` warns every deploy
 Read off the `24c74bd` staging deploy (run 33537033230, `Apply migrations`),
 not recalled:
 
@@ -67,45 +94,12 @@ Not urgent: nothing is broken, and the cost of being wrong here is a deploy
 that fails at `link` or `push`, which is exactly the failure 2.109.1 was
 pinned to avoid.
 
-### 3. Spec-drift audit follow-ups (two PRs left, in this order)
-Found by the audit recorded as `docs(spec-drift)`; each was verified against
-HEAD and none is fixed by that PR, which corrected documents only.
+### 4. Spec-drift audit follow-up — the last PR
+Found by the audit recorded as `docs(spec-drift)`. PR A — eight gates that
+passed for the wrong reason — has landed; see Done. This is what is left.
 
-**PR A — gates that pass for the wrong reason** (tests and CI only):
-- `app/scripts/service-worker.test.ts`: every Supabase fixture is
-  `https://abcdefgh.supabase.co` against a worker origin of `app.sanpo.test`,
-  so `sw.js`'s same-origin gate alone satisfies all five never-cache
-  assertions — replacing `isNeverCache`'s body with `return false` stays
-  green. Add same-origin fixtures for the five families; prove red first.
-- `ci.yml` "Errors go through FormError": greps one literal
-  `className="field__error"`. A bare `<span className="signin__error"
-  role="alert">` slips past. Fail any `role="alert"` outside `fields.tsx` /
-  `StateField`, and any `__error` class outside `fields.tsx`.
-- `ci.yml` invariant-1 catalogue regex: misses `update public.clients set …`
-  and `update clients c set …` (probed; both silent). Allow an optional
-  `public.` and an optional alias; prove with both probe functions.
-- `ci.yml` "the only channel": a second `supabase.channel(` inside
-  `useWalkChannel.ts` passes (`grep -q`), and the server half greps only the
-  literal `private: false`. Count channel calls against `private: true` calls.
-- `docs/dev/session-notes.md` says two gates exist only in CI; there are
-  seven (service worker stamped, build refused without config, vitest
-  orphan, security headers, behavioural tests execute, e2e spec has a step,
-  no-secret-logging grep). Add `scripts/check-gate-lockstep.py` (every
-  `ci.yml` step name appears in `SKILL.md` as a gate or in its §13), wire it
-  as a gate, and point session-notes at §13. Relabel `ci.yml`'s "Secret-leak
-  grep (validate gate 7)" — it is gate 11, and gate 7 is `db reset`.
-- `scripts/gen-definer-catalog.py` still strips comments with the naive regex
-  pair `gen-enum-catalog.py` had to replace (labels containing `--`, nested
-  block comments). Share the state machine rather than copy it.
-- `verify-deployment.test.ts`: assert every function calling `Deno.serve`
-  directly (`stripe-webhook`, `platform-webhook` today) has a `contract_for`
-  case, so the read-only argument is derived rather than enumerated.
-- `staging-smoke.yml` `onboard-repro`: still the single-page `user_id_for`
-  and `|| true` cleanup the claim-replay step was cured of; dead today only
-  because its address is run-scoped.
-
-**PR B — migration `0052`, invariant 5's REVOKE half** (money/trust path:
-written safety argument, adversarial self-review, red-first smoke):
+Migration `0052`, invariant 5's REVOKE half (a money/trust path, so: a
+written safety argument, adversarial self-review, and red-first smoke):
 `fn_assert_plan_change_intent_tenant`, `fn_assert_tenant_consistency`,
 `fn_cancel_paused_walks` and `fn_refund_cancelled_debit` carry `=X` (PUBLIC)
 and `anon=X` in `proacl`; the other 13 definer trigger functions were
@@ -117,7 +111,43 @@ smoke block asserting no `prosecdef` function in `public` grants EXECUTE to
 `scripts/gen-definer-catalog.py` read `revoke` too and render an unrevoked
 function as `PUBLIC` rather than **none**.
 
+### 5. Two grant forms the definer catalogue does not read
+Both measured against the generator as it now stands (a scratch copy of the
+real migrations plus one probe function), not recalled:
+
+- a final `grant execute on function … to authenticated` with **no
+  terminating semicolon** at end-of-file renders **none**;
+- `grant execute on function … to "authenticated";` — a **quoted role** —
+  renders **none** too.
+
+Neither occurs in the tree today (checked: no `to "` grant in any migration,
+and every migration's last statement is terminated), which is why this is a
+backlog line rather than a fix inside `qa(definer-lexer)`. The direction
+matters though: both make spec 03 say **none** — "no API role can call it" —
+about a function `authenticated` CAN call, which is the wrong way round for a
+security document someone audits reachability with. Whoever fixes it owes gate
+10f a probe per form, red first.
+
+Item 3's last sentence asks the same generator to read `revoke` as well, so
+whoever takes either item should read both.
+
 ## Done
+
+- **Eight gates that passed for the wrong reason, and the lockstep nothing
+  enforced** — PR A of the spec-drift follow-up. Each defect was measured
+  against the shipped gate before anything changed: the service-worker suite's
+  Supabase fixtures were all cross-origin, so `isNeverCache` could be replaced
+  with `return false` and stay green; the FormError check greped one literal
+  class name; the invariant-1 catalogue regex could not see `update
+  public.clients set …` or an alias; the walk-channel check used `grep -q`, so
+  a second channel passed; and `gen-definer-catalog.py` read SQL with the naive
+  stripper `gen-enum-catalog.py` had to replace. `scripts/check-gate-lockstep.py`
+  is the new gate 10g: it classifies every `ci.yml` run-step as mirrored in
+  `validate.sh`, as setup, or as CI-only — and a CI-only one must be named
+  verbatim in SKILL.md §13. The audit said seven gates exist only in CI and
+  `session-notes.md` said two; measured against the tree there are fifteen,
+  which is the argument for counting it rather than writing a third number into
+  prose. See the `ci(gates)` status-log entry.
 
 - **The walk-cost duplication and the last two `index.ts`-only functions** —
   `api.ts`'s `walkCost()` wrapper deleted (zero importers), the arithmetic

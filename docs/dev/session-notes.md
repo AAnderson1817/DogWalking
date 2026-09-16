@@ -52,7 +52,7 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   only the case where the generator produced a change. If they are the only
   red, commit and re-run before diagnosing. A dirty tree elsewhere does not
   trip them.
-- **Gate 10f is the enum-catalogue generator's proof set**
+- **Gate 10f is the catalogue generators' proof set**
   (`scripts/gen-enum-catalog-proofs.py`: the probes from the forty-three review
   rounds on PR #88 plus the controls; its footer reports how many hold, and no
   count is written here because a count in prose goes stale the day a control
@@ -74,6 +74,16 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   baseline renders the committed block before any probe runs. Prove it red
   by reinstating the defect on a snapshot of the generator, then `cp` the
   snapshot back and `cmp` before believing the next green run.
+- **Gate 10f also carries the DEFINER catalogue's probes**, at the end of the
+  same file, because `gen-definer-catalog.py` reads migrations through the
+  same `strip_sql` (it carried its own regex comment stripper until then, and
+  every catalogue probe there made spec 03's grant-audit checklist wrong
+  against it). A definer probe is `definer_rows(name, sql)` against a migration set
+  holding that SQL and NOTHING else, and it asserts the WHOLE table plus the
+  exit code and stderr — an expectation naming one row is satisfied by a
+  harness that produces no rows, which is why three preconditions sit above
+  them (a grant shows its role, an invoker function is catalogued by nobody, a
+  real grant to `anon` fails the run by name).
 - **A missing tool makes a gate PASS by not running.** `validate.sh` skips its
   deno gate when deno is absent. Install it first; a gate that goes green by
   not running is this repository's most-recorded failure.
@@ -82,17 +92,48 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   run that CI refused, one PR apart. If you add a gate to `ci.yml`, add it to
   `validate.sh` and `SKILL.md` in the same commit — `CLAUDE.md` calls the
   three a lockstep and the drift is invisible until CI disagrees with you.
-- **Two gates still exist only in CI**: *Every test file is claimed by a
-  vitest project* and *Every e2e spec is actually run by this workflow*.
+- **Fourteen gates still exist only in CI**, so a green local run is not a
+  green CI run. They are listed by exact step name in `SKILL.md` §13 rather
+  than here, because a count written into prose is a count that rots — and this
+  one has already rotted three times: the bullet said TWO, the spec-drift audit
+  that found it said seven, measuring gave fifteen, and moving the walk-channel
+  check into gate 3 one commit later made it fourteen.
+  `scripts/check-gate-lockstep.py` (gate 10g) checks the list, the count and
+  this sentence against `ci.yml`, which is why the number above is right rather
+  than merely written down.
 
 ## Traps this repository has already paid for
 
-- **Never `git restore` or `git checkout <file>` to recover uncommitted work.**
-  The status log records six separate times this destroyed work in progress.
+- **Never write the working tree from git to recover uncommitted work.** The
+  named offenders are `git restore` and `git checkout <file>`, but the rule is
+  about the CLASS, not those two spellings: the eighth instance was
+  `git checkout-index -f -a`, reached for reflexively, which overwrote every
+  unstaged file from the index — silently destroying two finished edits and
+  their red-first proof. Anything that writes the tree from git, the index or a
+  commit is the same hazard, including `git stash`, `git clean` and
+  `git read-tree -u`. The status log records eight earlier times.
   For red-first sabotages: copy the **fixed** file to a scratch directory,
   apply the sabotage, verify the diff is non-empty, run, then restore from
   that copy. Restoring from a snapshot taken *before* the fix silently reverts
-  it — that is how the sixth one happened.
+  it — that is how the sixth one happened, and the NINTH, which is worth its
+  own sentence because the command was right and the FILE was wrong: a
+  review round's snapshots were all taken at the top of the round, before that
+  round's fix existed, under names ending `.FIXED.ts`. The sabotage restore
+  then quietly un-fixed the file, and three later "proofs" ran against pre-fix
+  code — one of them reporting a pass that meant nothing. **Name a snapshot
+  for when it was taken, re-take it after every fix and before every
+  sabotage**, and confirm the fix is still there (`grep -c` for a symbol the
+  fix introduced) rather than trusting the name.
+- **A GitHub check-runs snapshot goes stale; the JOB record does not.** Polling
+  `pull_request_read(get_check_runs)` kept returning `in_progress` for a
+  `frontend` job that had in fact finished green 76 seconds after it started —
+  and reading elapsed time off a sense of how long the session had been going,
+  rather than off the timestamps, turned that into a "wedged for the better
+  part of an hour" that reached a commit message, two code comments, `CLAUDE.md`
+  and a PR comment before `date -u` refuted it. Ask
+  `actions_get(get_workflow_job)` or `get_workflow_run`, subtract
+  `started_at` from `completed_at`, and compare against `date -u` in the
+  container. `ci(apt)` records the same mistake; this is its third instance.
 - **Then check the restore actually happened.** The seventh instance was not a
   wrong snapshot but a restore that never ran: the sabotage was one link of a
   `cd app && SNAP=… && cp …` chain, the `cd` failed because the shell was
@@ -270,6 +311,21 @@ The binary is a single download from the PostgREST GitHub releases, points at
 whose `sub` is a seeded operator you get a genuine authenticated request with
 RLS live. That is how the `select=*` 42501 blocker was found; nothing in the
 repository could see it.
+
+The same is true of a workflow `run:` block: no gate here executes one, and the
+staging workflows run against a live project nobody should be poking at to test
+a change. Drive it instead — read the step out of the YAML with the parser
+`verify-workflows.py` uses, substitute the `${{ }}` expressions (asserting the
+substitution matched, or the step ends up talking to a URL that does not
+resolve and every assertion is really about curl failing), write the block to a
+file and run it with `bash -e`, which is GitHub's default `shell`. Point it at
+a stub that refuses the way the real API does — GoTrue caps `per_page`, a
+create collides with 422, a REST delete refused by a foreign key answers 409.
+`app/scripts/staging-fixtures.test.ts` is the worked example, and
+`ops(smoke-fixtures)`/`ops(deploy-retry)` are two earlier ones. Shell functions
+cannot cross a step boundary, so sharing them between steps means a committed
+script both steps source plus a checkout in that job — which is also the only
+way anything can exercise them.
 
 ## The rhythm, per PR
 
