@@ -822,9 +822,30 @@ def _lex_shell(
     quote = None
     at_word_start = True
     # One entry per open construct: "subst" for a command, arithmetic or
-    # process substitution (`$(`, `$((`, `<(`, `>(`), "paren" for a subshell
-    # or a parenthesised case pattern, and "case" for a `case … esac` whose
-    # pattern closers carry no `(` of their own.
+    # process substitution (`$(`, `$((`, `<(`, `>(`), "paren" for a subshell,
+    # and "case-pat"/"case-body" for a `case … esac`, whose pattern closers
+    # carry no `(` of their own.
+    #
+    # A case carries WHICH HALF of a clause it is in, because bash allows an
+    # OPTIONAL leading parenthesis on a pattern and that `(` is not a subshell:
+    # `case x in (run) :;; esac` invokes nothing (measured) while an
+    # unconditional boundary there made the pattern read as a command, so
+    # `shell_unreadable_calls` refused `run) :` — a gate RED ON A HEALTHY TREE
+    # (Codex, PR #94), with `(skip_gate)`, `(a|run)`, a second clause's
+    # pattern, the newline form and `( run )` behind it. Worse, the `(` left a
+    # command position open, so a pattern spelled `case` or `esac` was read as
+    # reserved: the marker it pushed swallowed the pattern's own closer and the
+    # leading paren went unpopped, so the ENCLOSING substitution's closer
+    # became a boundary and `echo $(case x in (case) :;; esac) run "1. fake"
+    # true` reported a PHANTOM gate (measured, both spellings).
+    #
+    # A clause runs pattern → `)` → body → `;;`, so "case-pat" says a bare `(`
+    # opens a pattern and "case-body" says it opens a subshell — and that
+    # distinction is load-bearing rather than tidy, because a subshell in a
+    # body genuinely runs commands: `case a in a) (run "…" true);; esac` and
+    # `case a in a) :; (run "…" true);; esac` both invoke the gate (measured).
+    # The flip back is `;;`, `;&` or `;;&` and never a single `;`, which is
+    # what keeps that second row readable.
     #
     # Only a substitution's CLOSER stops being a command boundary. A case
     # pattern's `)` must not consume the entry beneath it: inside a
@@ -1243,6 +1264,24 @@ def _lex_shell(
             # out of a left shift — it would queue a delimiter that never
             # arrives and mask the rest of the file, losing every gate after it
             # silently.
+            if (
+                not opens_subst
+                and not arith_open
+                and parens
+                and parens[-1] == "case-pat"
+            ):
+                # The pattern's optional leading parenthesis. Inert and pushing
+                # NOTHING, so the pattern's own `)` falls to the "case" rule
+                # below and balances it; `at_cmd` stays false because what
+                # follows is a PATTERN, which is also why `case x in case) …`
+                # reads correctly today (`case` takes a word, not a command —
+                # `SHELL_WORD_TAKING`).
+                out.append(ch)
+                skel.append(_MASK)
+                at_word_start = True
+                at_cmd = False
+                i += 1
+                continue
             kind = "arith" if arith_open else ("subst" if opens_subst else "paren")
             parens.append(kind)
             # Always recorded, even at depth 0, so open and close stay
@@ -1290,10 +1329,14 @@ def _lex_shell(
                 at_cmd = False
                 i += 1
                 continue
-            if parens and parens[-1] == "case":
+            if parens and parens[-1].startswith("case"):
                 # A case pattern's closer: a real command position (`case a in
                 # a) run "…" x;; esac` runs `run`, measured) that closes no
-                # `(`, so the construct beneath it stays open.
+                # `(`, so the construct beneath it stays open. It ends the
+                # pattern half of the clause, whether or not the pattern
+                # carried a leading `(`.
+                if parens[-1] == "case-pat":
+                    parens[-1] = "case-body"
                 closed = "case"
             else:
                 closed = parens.pop() if parens else None
@@ -1322,6 +1365,17 @@ def _lex_shell(
             # boundary `(` already spells. Closing: inert, and the word runs on.
             skel.append(_SUBST_CLOSE if in_backtick else "(")
             at_word_start = not in_backtick
+            # A backtick OPENS a command position — the skeleton has spelled it
+            # `(` since round twenty-nine — and this branch never said so, so
+            # the lexer and the skeleton disagreed: `case` inside one was not
+            # recognised, no marker was pushed, and a pattern's alternation was
+            # therefore still a boundary. `echo `case a in a|run) run "…"
+            # true;; esac`` invokes the gate (measured) while
+            # `shell_unreadable_calls` reported `run) run "…" true` — the same
+            # red-on-a-healthy-tree as the `$( … )` spelling, pre-existing and
+            # invisible until the pattern rules above needed the marker. A
+            # CLOSER is not a command position: a word runs on through it.
+            at_cmd = not in_backtick
             if in_backtick:
                 exp_depth, arith_depth, hd = (
                     exp_resume_backtick.pop()
@@ -1533,11 +1587,31 @@ def _lex_shell(
                         and name not in SHELL_WORD_TAKING
                     )
                     if name == "case":
-                        parens.append("case")
-                    elif name == "esac" and "case" in parens:
+                        parens.append("case-pat")
+                    elif name == "esac" and any(
+                        p.startswith("case") for p in parens
+                    ):
                         # Back to and including the nearest `case`; a
                         # well-formed script leaves nothing above it.
-                        del parens[len(parens) - 1 - parens[::-1].index("case"):]
+                        last = max(
+                            k
+                            for k, p in enumerate(parens)
+                            if p.startswith("case")
+                        )
+                        del parens[last:]
+            if (
+                ch == ";"
+                and parens
+                and parens[-1] == "case-body"
+                and text[i + 1 : i + 2] in (";", "&")
+            ):
+                # `;;`, `;&` and `;;&` end a case clause, so the next bare `(`
+                # opens a PATTERN again. A single `;` deliberately does NOT:
+                # `case a in a) :; (run "…" true);; esac` invokes the gate
+                # (measured), and flipping here would read that subshell as a
+                # pattern and lose it. `;;&` flips on its first `;`; the second
+                # then sees "case-pat" and is a no-op.
+                parens[-1] = "case-pat"
             out.append(ch)
             # `>|` is the noclobber override, one operator: its `|` is not a
             # pipe and opens no command. Without this, `>| run "1. fake" true`
@@ -1557,9 +1631,26 @@ def _lex_shell(
             # the `|` after `>>` a boundary so that `echo x >>| run "1. fake"
             # true` reported a PHANTOM gate for a line bash refuses outright.
             noclobber = ch == "|" and bool(skel) and skel[-1] == ">"
-            skel.append(_NOCLOBBER if noclobber else ch)
+            # A `|` in a case PATTERN is alternation, not a pipe, and opens no
+            # command: `case x in a|run) :;; esac` invokes nothing (measured,
+            # with and without the optional leading parenthesis) while an
+            # unconditional boundary made `shell_unreadable_calls` refuse
+            # `run) :` — a gate red on a healthy tree, pre-existing rather than
+            # introduced by the leading-paren fix (measured on both heads), and
+            # the same construct one character over. A pipe in the BODY is
+            # untouched, because the pattern's `)` has flipped the clause to
+            # "case-body" by then: `case a in a) printf x | run "…" true;;
+            # esac` still reads (measured).
+            pattern_alt = (
+                ch == "|" and bool(parens) and parens[-1] == "case-pat"
+            )
+            skel.append(
+                _NOCLOBBER
+                if noclobber
+                else (_MASK if pattern_alt else ch)
+            )
             at_word_start = ch in _WORD_BREAK
-            if ch in ";&|\n" and not noclobber:
+            if ch in ";&|\n" and not noclobber and not pattern_alt:
                 at_cmd = True
             if (
                 ch == "\n"
@@ -2647,6 +2738,61 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('case a in a) run "1. case-body" true;; esac', ["1. case-body"]),
     ('for case; do :; done; run "1. for-noin" true', ["1. for-noin"]),
     ('coproc run "1. coproc-command" true\nwait', ["1. coproc-command"]),
+    # A case pattern may carry an OPTIONAL leading parenthesis, which is not a
+    # subshell. Reading it as one left a command position open, so a pattern
+    # spelled `case` or `esac` was taken for the reserved word: the marker it
+    # pushed swallowed the pattern's own closer, the leading paren went
+    # unpopped, and the ENCLOSING substitution's closer became a boundary —
+    # a PHANTOM gate for a word bash passes to `echo` (measured, both).
+    ('echo $(case case in (case) :;; esac) run "1. fake" true', []),
+    ('echo $(case x in (esac) :;; esac) run "1. fake" true', []),
+    # The other direction: a clause BODY is ordinary shell, so neither the
+    # leading paren nor the alternation rule may cost it a gate. A subshell in
+    # a body runs commands, and so does one after a single `;` — which is why
+    # only `;;`, `;&` and `;;&` flip the clause back to its pattern half.
+    ('case a in (a) run "1. case-lparen-body" true;; esac',
+     ["1. case-lparen-body"]),
+    ('case a in a) (run "1. case-body-subshell" true);; esac',
+     ["1. case-body-subshell"]),
+    ('case a in a) :; (run "1. case-body-semi-subshell" true);; esac',
+     ["1. case-body-semi-subshell"]),
+    ('case a in (a) (run "1. case-lparen-subshell" true);; esac',
+     ["1. case-lparen-subshell"]),
+    ('case a in (a) case b in (b) run "1. case-lparen-nested" true;; esac;; esac',
+     ["1. case-lparen-nested"]),
+    ('case a in (a) :;& (a) run "1. case-semi-amp" true;; esac',
+     ["1. case-semi-amp"]),
+    ('case a in (a) :;;& (a) run "1. case-semisemi-amp" true;; esac',
+     ["1. case-semisemi-amp"]),
+    ('case a in b) :;; a) (run "1. case-second-clause-subshell" true);; esac',
+     ["1. case-second-clause-subshell"]),
+    ('case a in a) printf x | run "1. case-body-pipe" true;; esac',
+     ["1. case-body-pipe"]),
+    ('case a in (a) printf x | run "1. case-lparen-pipe" true;; esac',
+     ["1. case-lparen-pipe"]),
+    ('case a in a|b) run "1. case-alt-body" true;; esac', ["1. case-alt-body"]),
+    ('case a in b) :;; a) printf x | run "1. case-second-pipe" true;; esac',
+     ["1. case-second-pipe"]),
+    # A STATED RESIDUAL, pinned so a future change to it is deliberate. `esac`
+    # is the one pattern word bash's own `$( … )` scanner mis-reads: measured
+    # across all nineteen reserved words and two ordinary ones, `$(case X in
+    # (W) run '…' true;; esac)` invokes the gate for every W except `esac`,
+    # where the substitution ends early and bash ECHOES the rest instead. The
+    # same line OUTSIDE a substitution runs it (measured), so the two contexts
+    # disagree and modelling that would mean modelling a parser quirk rather
+    # than a grammar. This reader answers what the source says, which is a
+    # PHANTOM in that one shape — and it is the shape the leading-paren fix
+    # moved, from silent-by-accident to reported.
+    ('echo $(case a in (esac) run "1. esac-pattern-residual" true;; esac)',
+     ["1. esac-pattern-residual"]),
+    # The BACKTICK spelling of a substitution, where the same rules must hold:
+    # the lexer never opened a command position there, so `case` inside one was
+    # not recognised and neither pattern rule could fire.
+    ('echo `case a in a|run) run "1. bt-alt-body" true;; esac`',
+     ["1. bt-alt-body"]),
+    ('echo `case a in (a) run "1. bt-lparen-body" true;; esac`',
+     ["1. bt-lparen-body"]),
+    ('echo `printf x | run "1. bt-pipe" true`', ["1. bt-pipe"]),
 )
 
 
@@ -2655,6 +2801,25 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
 # failure direction is the worse one: off the raw text `echo 'note; run'` was
 # reported as an unreadable gate (measured), a gate red on a healthy tree.
 _UNREADABLE_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
+    # A case PATTERN is not a command, so neither its optional leading
+    # parenthesis nor its alternation `|` is a boundary. Both were, so an
+    # ordinary pattern spelled like the gate helper was refused BY NAME —
+    # `case x in (run) :;; esac` invokes nothing (measured) and this reader
+    # reported `run) :`: a gate RED ON A HEALTHY TREE, the worst shape this
+    # gate can take. Codex named the leading paren; the alternation `|` is the
+    # same construct one character over and was red with and without it, on
+    # the previous head as well (measured on both).
+    ('case x in (run) :;; esac', []),
+    ('case x in (skip_gate) :;; esac', []),
+    ('case x in ( run ) :;; esac', []),
+    ('case x in a) :;; (run) :;; esac', []),
+    ('case x in\n(run) :;;\nesac', []),
+    ('echo $(case x in (run) :;; esac) run "1. fake" true', []),
+    ('case x in a|run) :;; esac', []),
+    ('case x in (a|run) :;; esac', []),
+    ('case x in a|skip_gate) :;; esac', []),
+    ('echo `case x in (run) :;; esac`', []),
+    ('echo `case x in a|run) :;; esac`', []),
     # A `for`/`select` loop's NAME, and a `case`'s SUBJECT, are words and not
     # invocations — and `run` is an ordinary name for one. `for run in a; do
     # :; done` is legal bash that invokes nothing, and the chain read the name
