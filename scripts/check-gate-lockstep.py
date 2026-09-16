@@ -318,7 +318,11 @@ def _command(body: str) -> str:
     # substitution's body must stay visible, since a gate inside one is real
     # (round 32), which is why this has to be a balanced scan rather than
     # another masked region.
-    word = r"""(?:%s|\\[\s\S]|[^\s;&|'"\\]|'[^']*'|"(?:[^"\\]|\\.)*")*""" % _SUBST_REGION
+    word_piece = (
+        r"""(?:%s|\\[\s\S]|[^\s;&|'"\\%s%s]|'[^']*'|"(?:[^"\\]|\\.)*")"""
+        % (_SUBST_REGION, _NOCLOBBER, _SUBST_CLOSE)
+    )
+    word = word_piece + "*"
     # An assignment word is `NAME=`, `NAME+=`, or either with an array
     # SUBSCRIPT: bash runs `run` for `MODE+=x run "…"`, `a[0]=1 run "…"` and
     # `a[1 + 2]=1 run "…"` (measured — the subscript forms also warn "not a
@@ -341,7 +345,41 @@ def _command(body: str) -> str:
     # in globs and `[[ … ]]` tests, so the rule would be red on a healthy tree
     # far more often than the shape it guards against occurs.
     assign = r'[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]\n]*\])?\+?='
-    prefixes = r'(?:[ \t]*(?:%s%s|[0-9]*[<>]{1,2}&?%s)[ \t]+)*' % (assign, word, word)
+    # A REDIRECTION prefix, read off bash's own operator set rather than
+    # approximated by "one or two angle brackets with an optional `&`", which
+    # was three holes at once and every one of them measured:
+    #
+    #   * `>|`, the noclobber override, matched nothing at all, so
+    #     `2>|g.err run "…" true` — which bash runs — was reported by NEITHER
+    #     reader: invisible in both directions, which is how a local gate lacks
+    #     a CI counterpart while lockstep reports success (Codex on PR #94).
+    #   * a `{varname}` target, bash's allocate-a-descriptor form, the same
+    #     (`{fd}>g.fd run "…" true` runs, and `{fd}>|`, `{fd}<`, `{fd}>>`,
+    #     `{fd}<>`, `{fd}>&` and `{fd}<<<` with it).
+    #   * and the most ordinary spelling of all, a SPACE between the operator
+    #     and its target: `> g.a run "…" true`, `2> g.a …`, `>> g.a …`,
+    #     `< g.in …` and `>& 2 …` all run the gate and all read as nothing,
+    #     because the word had to start immediately after the operator.
+    #
+    # The target is a decimal descriptor or `{name}`, attached with NO space —
+    # `2 >|g.a run "…"` runs a command called `2` (measured) — while `&>` and
+    # `&>>` take no target at all: `2&>f` and `{fd}&>f` are both "command not
+    # found". Operators are longest-first so `<<<` is not read as `<<` and a
+    # word beginning `<`.
+    #
+    # The target word must be NON-EMPTY, which closes a PHANTOM the old
+    # grammar had: with an empty word allowed, `> run "1. fake" true` read as
+    # a redirection with no target followed by the gate, while bash redirects
+    # stdout to a file NAMED `run` and then tries to execute the label —
+    # no gate runs (measured), and reporting one satisfies a ci.yml mapping
+    # for a gate that does not exist.
+    redirect = (
+        r'(?:(?:[0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\})?'
+        r'(?:<<<|<<-|<<|<>|<&|>%s|>>|>&|<|>)|&>>|&>)' % _NOCLOBBER
+    )
+    prefixes = r'(?:[ \t]*(?:%s%s|%s[ \t]*%s)[ \t]+)*' % (
+        assign, word, redirect, word_piece + "+"
+    )
     return r'%s[ \t]*%s(?P<cmd>%s)' % (chain, prefixes, body)
 
 
@@ -410,6 +448,19 @@ _MASK = "\x01"
 # Distinct from `_MASK` only so the two reasons stay legible; both are inert to
 # every scan here.
 _SUBST_CLOSE = "\x02"
+
+
+# What the `|` of a `>|` noclobber override becomes in the skeleton. It is one
+# operator with the `>` before it, so the `|` is not a pipe and opens no
+# command — `>| run "1. fake" true` redirects stdout to a file NAMED `run` and
+# then tries to execute the label, running no gate (measured), while a `|` left
+# as a boundary reported one.
+#
+# Its OWN marker rather than `_MASK`, because the redirection grammar in
+# `_command` still has to recognise the operator: masked as an ordinary
+# character it became an unreadable target word and the phantom came back
+# through the word instead of through the boundary (measured).
+_NOCLOBBER = "\x03"
 
 
 # Built once, after the marker it is written in terms of. Depth two: see
@@ -1169,9 +1220,27 @@ def _lex_shell(
                     # script leaves nothing above it.
                     del parens[len(parens) - 1 - parens[::-1].index("case"):]
             out.append(ch)
-            skel.append(ch)
+            # `>|` is the noclobber override, one operator: its `|` is not a
+            # pipe and opens no command. Without this, `>| run "1. fake" true`
+            # reported a PHANTOM gate off the boundary after the `|`, while
+            # bash redirects stdout to a file NAMED `run` and then tries to
+            # execute the label — no gate runs (measured). It is the sibling of
+            # the empty-target phantom `_command`'s redirection grammar closes,
+            # reached by a different mechanism, which is why it is fixed here
+            # and not there.
+            #
+            # A quoted or escaped `>` never reaches the skeleton as `>`, so
+            # this cannot fire on one, and `>>|` and `<|` are bash SYNTAX
+            # ERRORS (measured) — so the only `|` this reaches in a script bash
+            # will parse is a real noclobber override. A `skel[-2] != ">"`
+            # guard was written first and then deleted: no row could pin it,
+            # and on the one input it changed it gave the WORSE answer, leaving
+            # the `|` after `>>` a boundary so that `echo x >>| run "1. fake"
+            # true` reported a PHANTOM gate for a line bash refuses outright.
+            noclobber = ch == "|" and bool(skel) and skel[-1] == ">"
+            skel.append(_NOCLOBBER if noclobber else ch)
             at_word_start = ch in _WORD_BREAK
-            if ch in ";&|\n":
+            if ch in ";&|\n" and not noclobber:
                 at_cmd = True
             if (
                 ch == "\n"
@@ -1968,6 +2037,48 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     # begin with a digit.
     ('MODE+x=1 run "1. phantom" true', []),
     ('9MODE=1 run "1. phantom" true', []),
+    # A REDIRECTION prefix, read off bash's operator set. The first five were
+    # invisible in BOTH directions before, the next five are the ordinary
+    # spelling with a SPACE before the target, and the last four are forms
+    # that already read and must keep reading. Every expectation measured
+    # against bash, with `run` appending to a file so a redirection under test
+    # cannot steal the evidence — the first probe printed to stderr and `2>|`
+    # redirected it away, which reads exactly like a gate that did not run.
+    ('2>|g.err run "1. noclobber" true', ["1. noclobber"]),
+    ('>|g.out run "1. noclobber-bare" true', ["1. noclobber-bare"]),
+    ('{fd}>g.fd run "1. fd-variable" true', ["1. fd-variable"]),
+    ('{fd}>|g.a run "1. fd-variable-noclobber" true', ["1. fd-variable-noclobber"]),
+    ('{fd}<<<hello run "1. fd-variable-herestring" true', ["1. fd-variable-herestring"]),
+    ('> g.a run "1. redirect-space" true', ["1. redirect-space"]),
+    ('2> g.a run "1. fd-redirect-space" true', ["1. fd-redirect-space"]),
+    ('>> g.a run "1. append-space" true', ["1. append-space"]),
+    ('< g.in run "1. stdin-space" true', ["1. stdin-space"]),
+    ('>& 2 run "1. dup-space" true', ["1. dup-space"]),
+    ('&>g.both run "1. amp-redirect" true', ["1. amp-redirect"]),
+    ('<<<hello run "1. herestring" true', ["1. herestring"]),
+    ('<>g.rw run "1. read-write" true', ["1. read-write"]),
+    ('>&- run "1. close-fd" true', ["1. close-fd"]),
+    ('2>g.e >g.o run "1. two-redirects" true', ["1. two-redirects"]),
+    ('MODE=x 2>|g.err run "1. assign-then-noclobber" true',
+     ["1. assign-then-noclobber"]),
+    ('2>|g.err MODE=x run "1. noclobber-then-assign" true',
+     ["1. noclobber-then-assign"]),
+    ('<<EOF run "1. heredoc-prefix" true\nbody\nEOF\n', ["1. heredoc-prefix"]),
+    # …and the four that are NOT a gate. A redirection's target word is
+    # required, so in the first three `run` IS the file and bash then tries to
+    # execute the label; the fourth attaches nothing, and bash runs a command
+    # called `2` (all measured, no gate in any of them).
+    ('> run "1. phantom" true', []),
+    ('2> run "1. phantom" true', []),
+    ('>| run "1. phantom" true', []),
+    ('2 >|g.a run "1. phantom" true', []),
+    # Two more that bash runs no gate for, both PHANTOMS on the previous head
+    # and reached by their own mechanisms rather than by the empty target.
+    # `>>|` is a bash syntax error outright, and `$(>|case)` is a substitution
+    # whose redirection target word ENDS at the closer — a word outside one
+    # continues through it (round 29) and a word that began inside it cannot.
+    ('echo x >>| run "1. phantom" true', []),
+    ('echo $(>|case) run "1. phantom" true', []),
     ('run() {\n  :\n}', []),
 )
 
@@ -2047,6 +2158,11 @@ _UNREADABLE_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('MODE+=x run bare', ['run bare']),
     ('MODE=$(printf ci) run bare', ['run bare']),
     ('MODE+x=1 run bare', []),
+    # The redirection grammar belongs to both readers too.
+    ('2>|g.err run bare', ['run bare']),
+    ('> g.a run bare', ['run bare']),
+    ('{fd}>g.fd run bare', ['run bare']),
+    ('> run bare', []),
 )
 
 
