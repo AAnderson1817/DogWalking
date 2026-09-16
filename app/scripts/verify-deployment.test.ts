@@ -5,7 +5,12 @@ import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import ts from "typescript";
 import { afterEach, describe, expect, it } from "vitest";
-import { literalText, propertyKey, unwrapTransparent } from "./lib/static-object.ts";
+import {
+  isExplicitUndefined,
+  literalText,
+  propertyKey,
+  unwrapTransparent,
+} from "./lib/static-object.ts";
 
 /**
  * Review M4: the production deploy asserted nothing, so a function that
@@ -428,8 +433,11 @@ function sourceFiles(dir: string): string[] {
  */
 function refusesGet(call: ts.CallExpression): boolean {
   const opts = call.arguments[1];
-  // No options at all is the DEFAULT, which is POST-only.
-  if (!opts) return true;
+  // No options at all is the DEFAULT, which is POST-only — and so is an
+  // EXPLICIT `undefined`, because the parameter carries a default initializer
+  // (`_lib/http.ts:258`). Reading that as an unresolvable value refused a
+  // healthy call (Codex, PR #94: red on a healthy tree).
+  if (!opts || isExplicitUndefined(opts)) return true;
   const lit = unwrapTransparent(opts);
   if (!ts.isObjectLiteralExpression(lit)) return false;
   let methods: ts.Expression | undefined;
@@ -445,7 +453,11 @@ function refusesGet(call: ts.CallExpression): boolean {
     readable = false;
   }
   if (!readable) return false;
-  if (!methods) return true;
+  // An absent `methods` is the default list, and `options.methods ??
+  // DEFAULT_METHODS` (`_lib/http.ts:294`) makes an explicit `undefined` the
+  // same thing — the sibling of the argument position above, and the review
+  // named both in one finding.
+  if (!methods || isExplicitUndefined(methods)) return true;
   const arr = unwrapTransparent(methods);
   if (!ts.isArrayLiteralExpression(arr)) return false;
   const names: string[] = [];
@@ -645,6 +657,18 @@ describe("verify-deployment: the read-only argument", () => {
     // NOT housed: the wrapper admits GET, so it does NOT answer 405 before the
     // handler and `verify-deployment.sh`'s production GET would run the body.
     put("upsilon", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { methods: ["GET", "POST"] });\n');
+    // Housed: an EXPLICIT `undefined` in either position is the POST-only
+    // default, because the parameter has a default initializer and `methods`
+    // is read through `??`. Both were refused before (measured: each named as
+    // needing a bespoke contract), which is a gate red on a healthy tree.
+    put("psi", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, undefined);\n');
+    put("omega", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { methods: undefined });\n');
+    // Housed: `void <anything>` is undefined whatever the operand does.
+    put("psi2", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, void 0);\n');
+    // NOT housed: `null` is NOT undefined — a default initializer does not
+    // fire for it, so `options.methods` throws rather than defaulting, and
+    // either way this reader has no evidence of POST-only.
+    put("omega2", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, null);\n');
     // NOT housed: a `methods` this reader cannot resolve is not evidence of
     // POST-only, so it needs a reviewed contract like any bypasser.
     put("phi", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { methods: ALLOWED });\n');
@@ -689,8 +713,55 @@ describe("verify-deployment: the read-only argument", () => {
       upsilon: false,
       phi: false,
       chi: false,
+      psi: true,
+      psi2: true,
+      omega: true,
+      omega2: false,
     });
   });
+
+  // The PRECONDITION under `isExplicitUndefined` reading a bare identifier as
+  // the global rather than walking the file for a shadow. Plain JavaScript
+  // ALLOWS the binding — measured, a module-scope `let undefined = {…}` makes
+  // a defaulted parameter take that object — so if the compiler stopped
+  // refusing it, `serveFunction(handle, undefined)` could pass a GET-admitting
+  // options object while this gate read it as the POST-only default: the gate
+  // blessing exactly what it forbids. Every file it reads is typechecked, so
+  // the guarantee holds today; this pins it rather than leaving it implicit.
+  it("TypeScript refuses to bind the name `undefined`, so the identifier is the global", () => {
+    const dir = mkdtempSync(join(tmpdir(), "undef-"));
+    const file = join(dir, "shadow.ts");
+    writeFileSync(
+      file,
+      "type ServeOptions = { methods?: readonly string[] };\n"
+        + "declare function serveFunction(h: () => void, options?: ServeOptions): void;\n"
+        + 'let undefined: ServeOptions = { methods: ["GET", "POST"] };\n'
+        + "serveFunction(() => {}, undefined);\n",
+    );
+
+    let status = 0;
+    let output = "";
+    try {
+      output = execFileSync(
+        join(REPO, "app", "node_modules", ".bin", "tsc"),
+        ["--noEmit", "--ignoreConfig", "--target", "es2022", "--module", "esnext", "--strict", file],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+      );
+    } catch (err) {
+      const e = err as { status?: number; stdout?: string; stderr?: string };
+      status = e.status ?? -1;
+      output = `${e.stdout ?? ""}${e.stderr ?? ""}`;
+    }
+
+    expect(
+      status,
+      "tsc accepted a module-scope binding named `undefined`. `isExplicitUndefined` "
+        + "reads that identifier as the global without checking for a shadow, so a file "
+        + "could now pass GET-admitting options where this gate reads the POST-only "
+        + "default. Decide: walk for the shadow, or state why it still cannot happen.",
+    ).not.toBe(0);
+    expect(output, "tsc refused for some other reason than the name conflict").toContain("TS2397");
+  }, 30_000);
 
   it("every function not behind serveFunction has a bespoke contract_for case", () => {
     const shipped = shippedFunctions();

@@ -463,6 +463,41 @@ export function definesWithoutValue(
   return ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p) || ts.isMethodDeclaration(p);
 }
 
+/**
+ * Does this expression statically evaluate to `undefined`?
+ *
+ * An optional parameter with a DEFAULT INITIALIZER treats an explicit
+ * `undefined` exactly as an omitted argument, and `??` treats an `undefined`
+ * property exactly as an absent one. So both of these are byte-for-byte the
+ * POST-only default that makes `serveFunction` read-only:
+ *
+ *     serveFunction(handle, undefined)        // _lib/http.ts:258, `= {}`
+ *     serveFunction(handle, { methods: undefined })  // :294, `?? DEFAULT_METHODS`
+ *
+ * A reader that files either under "a value I cannot read" refuses a healthy
+ * call and demands a bespoke production contract for it — a gate red on a
+ * healthy tree, the worst shape this file records (Codex, PR #94).
+ *
+ * `void <anything>` is `undefined` whatever its operand evaluates to, so the
+ * VALUE is static even where the operand is not.
+ *
+ * PRECONDITION, measured rather than assumed: the bare identifier is read as
+ * the global without checking for a shadow, because TypeScript REFUSES to
+ * bind that name at all — `let undefined: ServeOptions = …` is
+ * `TS2397: Declaration name conflicts with built-in global identifier`. Plain
+ * JavaScript does allow it (measured: a module-scope `let undefined = {…}`
+ * makes a defaulted parameter take that object instead), so the guarantee is
+ * the compiler's rather than the language's, and every file these gates read
+ * is typechecked. That precondition is PINNED by a test rather than left
+ * implicit: if the compiler ever stops refusing, whoever notices decides,
+ * which is cheaper than a shadow walk for a state that cannot occur.
+ */
+export function isExplicitUndefined(e: ts.Expression): boolean {
+  const cur = unwrapTransparent(e);
+  if (ts.isVoidExpression(cur)) return true;
+  return ts.isIdentifier(cur) && cur.text === "undefined";
+}
+
 /** Every assignment operator, `=` and the compound ones alike. */
 export function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
   return (
