@@ -350,7 +350,9 @@ def _heredoc_delimiter(text: str, i: int) -> tuple[str, bool, bool]:
         ch = text[i]
         if ch in " \t\n|&;()<>":
             break
-        if ch in "'\"":
+        if ch == "'":
+            # No escapes at all inside single quotes: `cat <<\'E\\OF\'` is
+            # terminated by the literal `E\\OF` (measured).
             quoted = True
             found = True
             end = text.find(ch, i + 1)
@@ -360,6 +362,40 @@ def _heredoc_delimiter(text: str, i: int) -> tuple[str, bool, bool]:
                 break
             out.append(text[i + 1 : end])
             i = end + 1
+            continue
+        if ch == '"':
+            # Bash's own rules inside double quotes, character by character. An
+            # unconditional `find()` for the next raw quote closed the word at
+            # an ESCAPED one: `cat <<"E\\"OF"` is the delimiter `E"OF`, and
+            # bash resumes executing commands after a terminator line reading
+            # `E"OF` (measured) — while the delimiter this derived ran on into
+            # later lines, so the lexer masked the remainder of the file and
+            # lost every gate after it, invisible in BOTH directions (measured,
+            # Codex on PR #94).
+            #
+            # A backslash is special ONLY before `"`, `\\`, `$`, a backtick or a
+            # newline; everywhere else it is literal — all six measured, and
+            # both directions matter, since collapsing `\\n` to `n` would derive
+            # a terminator that never arrives and mask the rest of the file
+            # just the same. Before a newline it is a line continuation and
+            # contributes nothing (`cat <<"EO\\<newline>F"` is `EOF`).
+            quoted = True
+            found = True
+            i += 1
+            while i < len(text):
+                c = text[i]
+                if c == '"':
+                    i += 1
+                    break
+                if c == "\\" and i + 1 < len(text) and text[i + 1] in '"\\$`':
+                    out.append(text[i + 1])
+                    i += 2
+                    continue
+                if c == "\\" and i + 1 < len(text) and text[i + 1] == "\n":
+                    i += 2
+                    continue
+                out.append(c)
+                i += 1
             continue
         if ch == "\\" and i + 1 < len(text):
             quoted = True
@@ -421,7 +457,7 @@ def _lex_shell(text: str) -> tuple[str, str]:
         # that itself spans lines — refused by name here, read as a multi-line
         # label if masked, and both end in a red naming it. Kept as the
         # conservative reading rather than because a sabotage demanded it.
-        if exp_depth and hd is None:
+        if (exp_depth or arith_depth) and hd is None:
             # Inside a parameter expansion nothing is ever read as a gate, so
             # line structure carries no meaning there and the newline is
             # masked with everything else — leaving it would make
@@ -516,6 +552,18 @@ def _lex_shell(text: str) -> tuple[str, str]:
     # than silent — the map still names the vanished gates, which this check
     # reports as `validate.sh` labels that no longer exist.
     exp_depth = 0
+    # ARITHMETIC is not shell. `$((run + 1))` and `((run + 1))` expand to a
+    # number and invoke no `run` (measured), so their contents are masked
+    # exactly as a parameter expansion's are — this reported `run + 1))` as
+    # an unreadable gate call at top level, inside a heredoc body and inside
+    # an expansion alike: a gate RED ON A HEALTHY TREE, the worst shape this
+    # log records (measured, Codex on PR #94, who named the heredoc; the
+    # top-level spelling is the base case and was the same defect).
+    #
+    # A counter rather than a predicate over `parens`, so the backtick stack
+    # can save and restore it: `$(( `run "…" true` ))` genuinely runs
+    # (measured), and a backtick pushes nothing onto `parens`.
+    arith_depth = 0
     # A HERE-DOCUMENT body is data, not shell: bash passes
     # `cat <<'EOF'\nrun "12. css tokens defined" true\nEOF` to `cat` and
     # invokes nothing (measured), while this reader carried on lexing the body
@@ -593,7 +641,7 @@ def _lex_shell(text: str) -> tuple[str, str]:
             if ch == quote:
                 quote = None
                 at_word_start = False
-                skel.append(_MASK if exp_depth else ch)
+                skel.append(_MASK if (exp_depth or arith_depth) else ch)
             else:
                 skel.append(masked(ch))
         elif ch == "\\" and in_backtick and text.startswith("\\`", i):
@@ -604,12 +652,15 @@ def _lex_shell(text: str) -> tuple[str, str]:
             skel.append(("\\" + _SUBST_CLOSE) if nested_backtick else "\\(")
             at_word_start = not nested_backtick
             if nested_backtick:
-                exp_depth, hd = (
-                    exp_resume_backtick.pop() if exp_resume_backtick else (0, None)
+                exp_depth, arith_depth, hd = (
+                    exp_resume_backtick.pop()
+                    if exp_resume_backtick
+                    else (0, 0, None)
                 )
             else:
-                exp_resume_backtick.append((exp_depth, hd))
+                exp_resume_backtick.append((exp_depth, arith_depth, hd))
                 exp_depth = 0
+                arith_depth = 0
                 hd = None
             nested_backtick = not nested_backtick
             i += 2
@@ -635,6 +686,11 @@ def _lex_shell(text: str) -> tuple[str, str]:
                 # `${UNSET:-\; run "…" true}` runs nothing (measured), and an
                 # unmasked `;` in the skeleton is a boundary to `_command`.
                 # Outside one the pair is kept, so `\#` stays a literal.
+                # No `arith_depth` clause: a backslash inside arithmetic is a
+                # bash SYNTAX ERROR ("invalid arithmetic operator", measured,
+                # and again before a digit), so the state cannot occur in a
+                # healthy tree and a guard for it would be a rule with nothing
+                # behind it — the same call the `#` branch below records.
                 if exp_depth or hd is not None:
                     skel.append(_MASK * 2)
                 else:
@@ -654,7 +710,7 @@ def _lex_shell(text: str) -> tuple[str, str]:
             # what lets one pattern find a gate's own quoted label; inside one
             # nothing is read, so they are masked with the rest of the body and
             # the invariant stays one rule rather than a list of exceptions.
-            skel.append(_MASK if exp_depth else ch)
+            skel.append(_MASK if (exp_depth or arith_depth) else ch)
             at_word_start = False
         elif ch == "#" and at_word_start and hd is None:
             # No `exp_depth` clause: `at_word_start` is never true inside a
@@ -682,7 +738,44 @@ def _lex_shell(text: str) -> tuple[str, str]:
             opens_subst = (
                 i > 0 and text[i - 1] in "$<>" and escaped_dollar_at != i - 1
             )
-            if hd is not None and (hd[2] or not opens_subst):
+            # `$((` is ARITHMETIC EXPANSION, not a command substitution: bash
+            # expands `$((run + 1))` to a number and invokes no `run`
+            # (measured). Suspending a mask for it therefore read the
+            # expression as shell, and `shell_unreadable_calls` reported
+            # `run + 1))` — a gate RED ON A HEALTHY TREE, the worst shape this
+            # log records (measured, Codex on PR #94). The parameter-expansion
+            # mask had the identical hole one construct over and it is closed
+            # in the same expression, because two copies of this rule is what
+            # keeps diverging here.
+            #
+            # Recognised by LOOKAHEAD, and the absence of a space is what makes
+            # it an arithmetic expansion: `$( (run "…" true) )` is a command
+            # substitution around a subshell and genuinely runs (measured), so
+            # it must still suspend. `<((` is not arithmetic either, hence the
+            # `$` rather than `opens_subst`.
+            #
+            # Nothing is pushed, so the matching `)`s pop nothing — and the
+            # mask staying ON is exactly what keeps a genuine nested
+            # substitution readable: `$(( $(run "…" true) + 1 ))` DOES invoke
+            # `run` (measured, in a heredoc body and in an expansion alike),
+            # and its own `$(` suspends as usual.
+            # A DOUBLED parenthesis is ARITHMETIC: `$((1 << 2))` and
+            # `((1 << 2))` are left shifts (measured), so this opens a masked
+            # region rather than a command. The absence of a SPACE is what
+            # makes it arithmetic — `$( (run "…" true) )` is a substitution
+            # around a subshell and genuinely runs (measured), so it must
+            # still open one.
+            #
+            # ONE recognition point, at the first half. Marking the second as
+            # well is REDUNDANT rather than belt-and-braces: whichever
+            # parenthesis opens the region masks the other, which falls
+            # through to an inert `paren` inside it and balances on the way
+            # out — 187 constructed inputs across eleven contexts, and either
+            # clause alone gives the identical answer on every one, so no row
+            # could pin the pair. The lookahead is kept because it recognises
+            # the construct at its opening and works at offset 0.
+            arith_open = text.startswith("((", i)
+            if hd is not None and (hd[2] or not opens_subst or arith_open):
                 # Literal: everything under a quoted delimiter, and a bare
                 # `( … )` under an unquoted one (`cat <<EOF` with `(x)` in the
                 # body runs nothing). Nothing pushed, so the matching `)` must
@@ -693,39 +786,52 @@ def _lex_shell(text: str) -> tuple[str, str]:
                 at_cmd = False
                 i += 1
                 continue
-            if exp_depth and not opens_subst:
+            if exp_depth and (not opens_subst or arith_open):
                 # `echo ${UNSET:-x ( run "…" true )}` runs nothing (measured),
                 # and the matching `)` must not pop a construct this never
-                # pushed, so both are ordinary masked characters.
+                # pushed, so both are ordinary masked characters. `arith_open`
+                # for the reason above: `${UNSET:-$((run + 1))}` invokes
+                # nothing (measured) and reported `run + 1))}"` before this.
                 out.append(ch)
                 skel.append(_MASK)
                 at_word_start = False
                 at_cmd = False
                 i += 1
                 continue
-            # A DOUBLED parenthesis is arithmetic, not a command: bash reads
-            # `$((1 << 2))` and `((1 << 2))` as a left shift (measured), so the
-            # `<<` branch below must not read a heredoc out of one — it would
-            # queue a delimiter that never appears and mask the rest of the
-            # file, losing every gate after it silently.
-            kind = "subst" if opens_subst else "paren"
-            if i > 0 and text[i - 1] == "(":
-                kind = "arith"
+            # `arith` also keeps the `<<` branch below from reading a heredoc
+            # out of a left shift — it would queue a delimiter that never
+            # arrives and mask the rest of the file, losing every gate after it
+            # silently.
+            kind = "arith" if arith_open else ("subst" if opens_subst else "paren")
             parens.append(kind)
             # Always recorded, even at depth 0, so open and close stay
             # symmetric and restoring is a no-op where nothing was masked.
-            exp_resume_at.append((len(parens) - 1, exp_depth, hd))
-            exp_depth = 0
-            hd = None
+            exp_resume_at.append((len(parens) - 1, exp_depth, arith_depth, hd))
+            if kind == "arith":
+                # Opens a masked region and NO command position: only a genuine
+                # substitution runs commands. The enclosing masks are left
+                # alone, which is what keeps a nested `$(` live — `$(( $(run
+                # "…" true) + 1 ))` really does invoke `run` (measured, at top
+                # level, in a heredoc body and in an expansion alike).
+                arith_depth += 1
+            elif kind == "subst":
+                exp_depth = 0
+                arith_depth = 0
+                hd = None
             if dq_pending:
                 # The `$` one character back suspended a double quote; this is
                 # the entry whose closer resumes it.
                 dq_resume_at.append(len(parens) - 1)
                 dq_pending = False
             out.append(ch)
-            skel.append(ch)
-            at_word_start = True
-            at_cmd = True
+            # A lone `(` INSIDE arithmetic is grouping — `$(( (1+2) * 3 ))` —
+            # so it pushes like any other and is masked like everything else
+            # here; one entry per character, so `))` needs no pair matching and
+            # `$(( (1+2)))` stays balanced.
+            inert = kind == "arith" or arith_depth > 0
+            skel.append(_MASK if inert else ch)
+            at_word_start = not inert
+            at_cmd = not inert
         elif ch == ")":
             if hd is not None:
                 # Nothing inside a heredoc body pushed, so nothing may pop.
@@ -747,13 +853,22 @@ def _lex_shell(text: str) -> tuple[str, str]:
                 # A case pattern's closer: a real command position (`case a in
                 # a) run "…" x;; esac` runs `run`, measured) that closes no
                 # `(`, so the construct beneath it stays open.
-                substitution = False
+                closed = "case"
             else:
-                substitution = parens.pop() == "subst" if parens else False
+                closed = parens.pop() if parens else None
+            substitution = closed == "subst"
             out.append(ch)
-            skel.append(_SUBST_CLOSE if substitution else ch)
-            at_word_start = not substitution
-            at_cmd = not substitution
+            # An arithmetic closer is part of the operator, not a boundary, and
+            # opens no command position either: `echo $((1+1)) run "…" true`
+            # passes `run` to `echo` (measured). `arith_depth` itself is
+            # restored by the resume loop below, which every push records an
+            # entry for.
+            inert = closed == "arith" or arith_depth > 0
+            skel.append(
+                _SUBST_CLOSE if substitution else (_MASK if inert else ch)
+            )
+            at_word_start = not substitution and not inert
+            at_cmd = not substitution and not inert
         elif ch == "`" and hd is not None and hd[2]:
             # No expansion under a quoted delimiter, so a backtick is data.
             out.append(ch)
@@ -767,12 +882,15 @@ def _lex_shell(text: str) -> tuple[str, str]:
             skel.append(_SUBST_CLOSE if in_backtick else "(")
             at_word_start = not in_backtick
             if in_backtick:
-                exp_depth, hd = (
-                    exp_resume_backtick.pop() if exp_resume_backtick else (0, None)
+                exp_depth, arith_depth, hd = (
+                    exp_resume_backtick.pop()
+                    if exp_resume_backtick
+                    else (0, 0, None)
                 )
             else:
-                exp_resume_backtick.append((exp_depth, hd))
+                exp_resume_backtick.append((exp_depth, arith_depth, hd))
                 exp_depth = 0
+                arith_depth = 0
                 hd = None
             in_backtick = not in_backtick
         elif (
@@ -825,13 +943,19 @@ def _lex_shell(text: str) -> tuple[str, str]:
             skel.append(_MASK)
             at_word_start = False
             at_cmd = False
+        # No `arith_depth` clause: a BARE brace inside arithmetic is a bash
+        # syntax error ("operand expected", measured, and "invalid arithmetic
+        # operator" for a brace token), while `${x}` inside one is masked by
+        # the `$`-prefixed disjunct below whatever the arithmetic depth is — so
+        # a guard here would be a rule with nothing behind it (measured:
+        # removing one left every row and every invariant green).
         elif ch in "{}" and (
             exp_depth
             or (ch == "{" and i > 0 and text[i - 1] == "$" and escaped_dollar_at != i - 1)
         ):
             if ch == "{" and i > 0 and text[i - 1] == "$" and escaped_dollar_at != i - 1:
                 exp_depth += 1
-            elif ch == "}":
+            elif ch == "}" and exp_depth:
                 exp_depth -= 1
             out.append(ch)
             skel.append(_MASK)
@@ -862,7 +986,7 @@ def _lex_shell(text: str) -> tuple[str, str]:
             skel.append(ch)
             at_word_start = opens
             at_cmd = opens
-        elif exp_depth or hd is not None:
+        elif exp_depth or arith_depth or hd is not None:
             # Data: a separator, a newline, a reserved word, a `#` — none of
             # them is a command boundary inside a parameter expansion
             # (measured). The newline is masked too, unlike the one inside a
@@ -882,7 +1006,16 @@ def _lex_shell(text: str) -> tuple[str, str]:
             # not a verdict. Kept as the conservative reading, which is also
             # what stops the skeleton disagreeing with the text about where the
             # lines are.
-            skel.append("\n" if ch == "\n" and exp_depth == 0 else _MASK)
+            # ARITHMETIC masks them too, and that half IS pinned: a newline
+            # inside one is legal bash (`echo $(( 1 +\nrun ))` prints 2 and
+            # invokes nothing, measured), so leaving it would put the variable
+            # `run` at a command position — the phantom this whole branch is
+            # about.
+            skel.append(
+                "\n"
+                if ch == "\n" and exp_depth == 0 and arith_depth == 0
+                else _MASK
+            )
             at_word_start = False
             at_cmd = False
         else:
@@ -927,7 +1060,7 @@ def _lex_shell(text: str) -> tuple[str, str]:
         # so its body is data again. Same trigger as the double quote above,
         # and for the same reason `esac` can shrink the stack too.
         while exp_resume_at and len(parens) <= exp_resume_at[-1][0]:
-            _, exp_depth, hd = exp_resume_at.pop()
+            _, exp_depth, arith_depth, hd = exp_resume_at.pop()
         while dq_resume_at and len(parens) <= dq_resume_at[-1]:
             dq_resume_at.pop()
             quote = '"'
@@ -940,7 +1073,42 @@ def _lex_shell(text: str) -> tuple[str, str]:
     return clean, skeleton
 
 
+def _join_continuations(source: str) -> str:
+    r"""Remove every unescaped line continuation, as bash does.
+
+    ONE definition, called by both readers, which duplicated the substitution
+    and could therefore disagree about what a line is.
+
+    It removes the pair and contributes NOTHING. It used to leave a SPACE and
+    to swallow the next line's indent, and both were wrong: bash JOINS the two
+    halves (`ec\<newline>ho hi` runs `echo hi`, measured) and does not consume
+    the following whitespace. The space was not cosmetic — inside a quoted
+    heredoc delimiter it derived `EO F` for `<<"EO\<newline>F"`, whose real
+    terminator is `EOF` (measured), so the lexer masked the remainder of the
+    file and lost every gate after it, invisible in BOTH directions. The same
+    outcome as an escaped-quote delimiter, reached through the other door.
+
+    A backslash at end of line is a continuation only when it is not itself
+    escaped: `echo a\\` prints `a\` and the NEXT line runs (measured), so the
+    run of backslashes is counted and an odd one leaves the newline standing.
+
+    Applied to the source rather than inside the lexer, so a `\<newline>`
+    between single quotes is removed where bash would keep it. That changes
+    DATA and never structure — the removal adds and removes no quote
+    character, so nothing can become a command or stop being one — and a gate
+    label cannot carry a newline in any case.
+    """
+    return re.sub(
+        r"(\\*)\\\n",
+        lambda m: m.group(1) if len(m.group(1)) % 2 == 0 else m.group(0),
+        source,
+    )
+
+
 _QUOTED_LABEL = r'%s +(?P<q>["\'])(?P<label>.+?)(?P=q)'
+
+# `name=`, `name+=` or `name[subscript]=` with NO space before it.
+_ASSIGNMENT = re.compile(r"^(?:run|skip_gate)(?:\[[^]]*\])?\+?=")
 
 
 def shell_gate_labels(source: str, word: str) -> list[str]:
@@ -957,7 +1125,7 @@ def shell_gate_labels(source: str, word: str) -> list[str]:
     so the label is the real text (the quote delimiters survive masking, which
     is what lets one pattern do both).
     """
-    code, skel = _lex_shell(re.sub(r"\\\n[ \t]*", " ", source))
+    code, skel = _lex_shell(_join_continuations(source))
     return [
         code[m.start("label") : m.end("label")]
         for m in re.finditer(_command(_QUOTED_LABEL % word), skel)
@@ -978,10 +1146,24 @@ def shell_unreadable_calls(source: str) -> list[str]:
     unreadable gate off the raw text (measured) — a gate RED ON A HEALTHY TREE,
     the worst shape this log records.
     """
-    code, skel = _lex_shell(re.sub(r"\\\n[ \t]*", " ", source))
+    code, skel = _lex_shell(_join_continuations(source))
     out = []
     for m in re.finditer(_command(r'(?:run|skip_gate)(?![(\w])[^\n;&|]*'), skel):
         call = code[m.start("cmd") : m.end("cmd")].strip()
+        if _ASSIGNMENT.match(call):
+            # A VARIABLE named `run`, not the function. `run=1` invokes nothing
+            # (measured) and was reported as an unreadable gate — a gate RED ON
+            # A HEALTHY TREE, the worst shape this log records, and latent only
+            # because `validate.sh` happens to carry no such assignment today
+            # (checked, not assumed). It surfaced from the setup line of the
+            # arithmetic case above, so the reviewer's own example would have
+            # stayed red after the fix they asked for.
+            #
+            # The boundary is the ABSENCE of a space, and it was measured in
+            # both directions: `run=1`, `run+=b` and `run[0]=1` are assignments
+            # bash runs nothing for, while `run =1` and `run == 1` really do
+            # invoke `run` with a strange argument and must stay refused.
+            continue
         if not re.match(r'^(?:run|skip_gate) +(["\']).+?\1', call):
             out.append(call)
     return out
@@ -1467,6 +1649,72 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('((1 << 2))\nrun "1. bare-arith" true\n', ["1. bare-arith"]),
     ('echo \'<<EOF\'\nrun "1. quoted-op" true\n', ["1. quoted-op"]),
     ('# cat <<EOF\nrun "1. hd-comment" true\n', ["1. hd-comment"]),
+    # A quoted DELIMITER honours bash's escape rules, and an unconditional
+    # `find()` for the next raw quote closed the word at an ESCAPED one:
+    # `cat <<"E\"OF"` is terminated by a line reading `E"OF`, after which bash
+    # resumes executing commands (measured, Codex on PR #94), while the
+    # delimiter this derived ran into later lines and masked the rest of the
+    # file — every gate after it lost, invisible in BOTH directions. A
+    # backslash is special ONLY before `"`, `\`, `$`, a backtick or a newline;
+    # everywhere else it is literal, and collapsing one that is not would
+    # derive a terminator that never arrives and lose the file just the same.
+    ('cat <<"E\\"OF"\nx\nE"OF\nrun "1. hd-esc-quote" true\n', ["1. hd-esc-quote"]),
+    ('cat <<"E\\\\OF"\nx\nE\\OF\nrun "1. hd-esc-bslash" true\n', ["1. hd-esc-bslash"]),
+    ('cat <<"E\\$OF"\nx\nE$OF\nrun "1. hd-esc-dollar" true\n', ["1. hd-esc-dollar"]),
+    ('cat <<"E\\`OF"\nx\nE`OF\nrun "1. hd-esc-tick" true\n', ["1. hd-esc-tick"]),
+    ('cat <<"E\\nOF"\nx\nE\\nOF\nrun "1. hd-literal-bslash" true\n',
+     ["1. hd-literal-bslash"]),
+    ('cat <<"E\\ OF"\nx\nE\\ OF\nrun "1. hd-literal-space" true\n',
+     ["1. hd-literal-space"]),
+    ("cat <<'E\\OF'\nx\nE\\OF\nrun \"1. hd-sq-bslash\" true\n", ["1. hd-sq-bslash"]),
+    # A line CONTINUATION inside one contributes nothing, so the terminator is
+    # `EOF`: joining the halves with a SPACE derived `EO F` and masked the rest
+    # of the file, the same outcome through the other door.
+    ('cat <<"EO\\\nF"\nx\nEOF\nrun "1. hd-cont-delim" true\n', ["1. hd-cont-delim"]),
+    # A continuation JOINS the halves anywhere (`ec\<newline>ho hi` runs `echo
+    # hi`, measured), and a backslash at end of line is one only when it is not
+    # itself escaped (`echo a\\` prints `a\` and the next line runs).
+    ('ru\\\nn "1. cont-midword" true\n', ["1. cont-midword"]),
+    ('echo a\\\\\nrun "1. after-esc-bslash" true\n', ["1. after-esc-bslash"]),
+    # ARITHMETIC is not shell: `$((…))` and `((…))` expand to a number and
+    # invoke nothing (measured), so their contents are masked and their closer
+    # opens no command position — `echo $((1+2)) run "…" true` passes `run` to
+    # `echo`. Reading the contents as shell reported `run + 1))` as an
+    # unreadable gate call: a gate RED ON A HEALTHY TREE.
+    ('echo $((1+2)) run "1. arith-closer" true', []),
+    ('echo $(( (1+2) * 3 ))\nrun "1. arith-group" true\n', ["1. arith-group"]),
+    ('echo $(( (1+2)))\nrun "1. arith-tight" true\n', ["1. arith-tight"]),
+    ('echo $(( ((1)) ))\nrun "1. arith-nested" true\n', ["1. arith-nested"]),
+    # …while a genuine substitution INSIDE one still runs, at top level, in a
+    # heredoc body and in an expansion alike (all measured), and a backtick
+    # does too — which is why the depth is a counter the backtick stack can
+    # save rather than a predicate over the parenthesis stack.
+    ('echo $(( $(run "1. arith-subst" true; echo 1) + 1 ))\n', ["1. arith-subst"]),
+    ('echo $(( `run "1. arith-tick" true; echo 1` + 1 ))\n', ["1. arith-tick"]),
+    ('cat <<EOF\n$(( $(run "1. hd-arith-subst" true; echo 1) + 1 ))\nEOF\n',
+     ["1. hd-arith-subst"]),
+    ('echo "${UNSET:-$(( $(run "1. exp-arith-subst" true; echo 1) + 1 ))}"\n',
+     ["1. exp-arith-subst"]),
+    # A SPACE is what tells the two apart: `$( (…) )` is a substitution around
+    # a subshell and genuinely runs (measured), so it must still open one.
+    ('echo $( (run "1. subst-subshell" true) )\n', ["1. subst-subshell"]),
+    # A NEWLINE inside arithmetic is legal bash and `run` there is a
+    # VARIABLE: `echo $(( 1 +\nrun ))` prints 2 and invokes nothing (measured),
+    # so an unmasked newline would put the name at a command position.
+    ('run=1\necho $(( 1 +\nrun ))\nrun "1. arith-newline" true\n',
+     ["1. arith-newline"]),
+    # Inside an ALREADY-MASKED body nothing is pushed at all, so `$((` is
+    # literal there rather than opening a region of its own. Letting it open
+    # one desyncs the stack: the pair's closers take the body's literal branch
+    # and pop nothing, so the entry is never removed — `"arith" in parens`
+    # then refuses every LATER heredoc in the file and the depth is never
+    # restored, so the rest of the file stays masked and every gate after it
+    # is lost, invisible in both directions. Both rows are green with the
+    # clause and red without it.
+    ('cat <<EOF\n$((1 + 1))\nEOF\ncat <<EOF2\nrun "1. phantom" true\nEOF2\n'
+     'run "1. after-hd-arith" true\n', ["1. after-hd-arith"]),
+    ('echo ${UNSET:-$((1 + 1))}\ncat <<EOF\nrun "1. phantom" true\nEOF\n'
+     'run "1. after-exp-arith" true\n', ["1. after-exp-arith"]),
     ('run() {\n  :\n}', []),
 )
 
@@ -1476,6 +1724,40 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
 # failure direction is the worse one: off the raw text `echo 'note; run'` was
 # reported as an unreadable gate (measured), a gate red on a healthy tree.
 _UNREADABLE_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
+    # ARITHMETIC contains no commands, so a variable named `run` inside one is
+    # not an invocation: `$((run + 1))` and `((run + 1))` invoke nothing
+    # (measured) and were reported as `run + 1))` — a gate RED ON A HEALTHY
+    # TREE, at top level, inside a heredoc body, inside an expansion and
+    # inside a double-quoted word alike. Codex named the heredoc; the
+    # top-level spelling is the base case and was the same defect.
+    ('echo $((run + 1))', []),
+    ('((run + 1))', []),
+    ('a=$((run + 1))', []),
+    ('echo "$((run + 1))"', []),
+    ('cat <<EOF\n$((run + 1))\nEOF\n', []),
+    ('echo "${UNSET:-$((run + 1))}"', []),
+    # A newline inside arithmetic is legal and `run` after it is a VARIABLE.
+    ('echo $(( 1 +\nrun ))', []),
+    # …and a real invocation inside one is still refused BY NAME, so the rule
+    # is not "arithmetic hides everything".
+    ('echo $(( $(run $label true) + 1 ))', ['run $label true) + 1 ))']),
+    # An ASSIGNMENT is not an invocation. `run=1` invokes nothing (measured)
+    # and was reported as an unreadable gate — latent only because
+    # `validate.sh` carries no such assignment today (checked, not assumed),
+    # and it is the setup line of the arithmetic case above, so the reviewer's
+    # own example would have stayed red after the fix they asked for. The
+    # boundary is the ABSENCE of a space, measured in both directions.
+    ('run=1', []),
+    ('run+=b', []),
+    ('run[0]=1', []),
+    ('skip_gate=0', []),
+    ('run =1', ['run =1']),
+    ('run == 1', ['run == 1']),
+    # A quoted delimiter that honours escapes keeps a later gate visible; one
+    # that does not masks the rest of the file, so the UNREADABLE reader sees
+    # nothing there either — the invisible-in-both-directions half of the
+    # heredoc rows above.
+    ('cat <<"E\\"OF"\nx\nE"OF\nrun $label true\n', ['run $label true']),
     # A real invocation whose label is not a literal must be refused BY NAME.
     ('run $label x', ["run $label x"]),
     # A quoted MENTION is data and must be invisible in both directions.
@@ -1539,6 +1821,29 @@ _HEREDOC_MASK: tuple[tuple[str, str, bool], ...] = (
 )
 
 
+# The same invariant for an ARITHMETIC expression. A newline inside one is
+# legal bash (`echo $(( 1 +\nrun ))` prints 2 and invokes nothing, measured),
+# so that half IS pinned behaviourally by the row above; a quote, a brace or a
+# separator inside one is not, because the body mask already hides the name
+# `run` and nothing readable can follow an unmasked character there. Stated as
+# an invariant for the same reason the other two are: one rule a reader can
+# check, rather than a list of characters somebody has to remember to extend.
+_ARITH_MASK: tuple[tuple[str, str, bool], ...] = (
+    ('echo $((run + 1))', 'run + 1', True),
+    ('((run + 1))', 'run + 1', True),
+    ('echo $(( "1" + run ))', '"1" + run', True),
+    ('echo $(( ${x} + 1 ))', '${x} + 1', True),
+    ('echo $(( 1 +\nrun ))', '\nrun ', True),
+    ('echo $(( (1+2) * 3 ))', '(1+2) * 3', True),
+    ('echo $(( $(run "1. unmasked" true) + 1 ))', 'run', False),
+    # A quoted subscript may carry a NEWLINE and is legal bash (`m["a\nb"]`
+    # in an associative-array subscript, measured), which is the one thing
+    # `masked()` decides differently inside arithmetic.
+    ('echo $(( m["a\nb"] + 1 ))', '"a\nb"', True),
+    ('echo $(( `run "1. unmasked-bt" true` + 1 ))', 'run', False),
+)
+
+
 def _self_check() -> list[str]:
     """Drive the command-position reader over `_SPELLINGS`.
 
@@ -1583,6 +1888,7 @@ def _self_check() -> list[str]:
     mask_all = mask_none = 0
     bodies = [("an expansion", r) for r in _EXPANSION_MASK]
     bodies += [("a heredoc", r) for r in _HEREDOC_MASK]
+    bodies += [("arithmetic", r) for r in _ARITH_MASK]
     for kind, (src, fragment, want_masked) in bodies:
         at = src.find(fragment)
         if at == -1:
