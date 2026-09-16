@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import ts from "typescript";
-import { calleeCall } from "./lib/static-object.js";
+import { calleeCall, memberAccess as sharedMemberAccess } from "./lib/static-object.js";
 import { describe, expect, it } from "vitest";
 
 /**
@@ -399,15 +399,13 @@ function inlineCallback(fn: ts.ArrowFunction): boolean {
  * `r.error` or `r["error"]`; the element-access spelling is the same member
  * and must not be invisible to the scan (adversarial review and Codex on
  * PR #92).
+ *
+ * The SHARED implementation, because this copy read a string literal and not a
+ * no-substitution template, so `` db[`from`]("walks") `` with a discarded error
+ * was invisible while `db["from"]` was caught — measured, 68 of 68 green
+ * (Codex, PR #94, found by checking the sibling of the reader it named).
  */
-function memberAccess(n: ts.Node | undefined): { receiver: ts.Expression; name: string; token: ts.Node } | null {
-  if (!n) return null;
-  if (ts.isPropertyAccessExpression(n)) return { receiver: n.expression, name: n.name.text, token: n.name };
-  if (ts.isElementAccessExpression(n) && ts.isStringLiteral(n.argumentExpression)) {
-    return { receiver: n.expression, name: n.argumentExpression.text, token: n.argumentExpression };
-  }
-  return null;
-}
+const memberAccess = sharedMemberAccess;
 
 /**
  * Every identifier an assignment TARGET writes: the plain `r = …`, and the
@@ -1937,6 +1935,7 @@ function g(db: any) { return db.from("clients").select("id"); }`, "fixture.ts");
       'async function f() { const db = adminClient(); const call = db.rpc; const { data } = await call.apply(db, ["fn_x", {}]); return data; }',
       'function f() { const db = adminClient(); register(db.from); }',
       'async function f() { const db = adminClient(); const { data } = await db["from"].call(db, "walks").select("id"); return data; }',
+      'async function f() { const db = adminClient(); const { data } = await db[`from`].call(db, "walks").select("id"); return data; }',
     ]) {
       const s = classifySource(escaped, "f.ts").filter((x) => /handed somewhere/.test(x.reason));
       expect(s.map((x) => x.verdict), escaped).toEqual(["UNCLASSIFIED"]);
@@ -1954,6 +1953,19 @@ function g(db: any) { return db.from("clients").select("id"); }`, "fixture.ts");
       'async function f() { const db = adminClient(); const { data, error } = await db.from("walks").select("id"); if (error) throw error; return data; }',
       "f.ts",
     ).map((s) => s.verdict)).toEqual(["OK"]);
+
+    // `db.from(…)`, `db["from"](…)` and `` db[`from`](…) `` are the same
+    // member. This reader knew a string literal and not a no-substitution
+    // TEMPLATE, so the third spelling with a discarded error was invisible —
+    // 68 of 68 green, measured (Codex, PR #94, found by checking the sibling
+    // of the reader it named). One shared implementation now.
+    for (const spelling of ["db.from", 'db["from"]', "db[`from`]"]) {
+      const s = classifySource(
+        `async function f() { const db = adminClient(); const { data } = await ${spelling}("walks").select("id"); return data; }`,
+        "f.ts",
+      );
+      expect(s.map((x) => x.verdict), spelling).toEqual(["DISCARDED"]);
+    }
   });
 
   it("receivers: a capitalised global is not a query; anything unrecognised is UNCLASSIFIED", () => {

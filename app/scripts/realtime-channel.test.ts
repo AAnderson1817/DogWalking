@@ -7,6 +7,7 @@ import ts from "typescript";
 import {
   calleeCall,
   declaredObjects,
+  memberAccess,
   isAssignmentOperator,
   isEscapedObjectAssign,
   isObjectAssignCall,
@@ -177,21 +178,21 @@ function channelCallsIn(source: ts.SourceFile, rel: string): ChannelCall[] {
       // `const ch = supabase.channel; ch(t)` and a bare `register(
       // supabase.channel)` — five spellings the finding did not name, which is
       // why the fix is the POSITION and not a list of them.
-      const access = ts.isPropertyAccessExpression(node) && node.name.text === "channel"
-        ? node
-        : ts.isElementAccessExpression(node)
-            && ts.isStringLiteralLike(node.argumentExpression)
-            && node.argumentExpression.text === "channel"
-          ? node
-          : null;
-      if (access) {
+      //
+      // `x.channel` and `x["channel"]` are the same member, read by the SHARED
+      // helper rather than by a fourth inline spelling of the question — three
+      // readers in this family each spelled it differently and each had a
+      // different hole (Codex, PR #94).
+      const member = memberAccess(node);
+      const access = member && member.name === "channel" ? node : null;
+      if (access && member) {
         // The receiver goes through the same transparent unwrapping the
         // alias resolver uses. `(supabase).channel(…)` is behaviour-preserving
         // and left the receiver a `ParenthesizedExpression`, so an
         // identifier-only test reported a correctly private call as
         // unresolvable — a gate RED ON A HEALTHY TREE, this log's worst shape
         // (Codex, PR #94). Measured on the real call before the fix.
-        const receiver = unwrapTransparent(access.expression);
+        const receiver = unwrapTransparent(member.receiver);
         const onClient = ts.isIdentifier(receiver) && clients.has(receiver.text);
         const accessLine = source.getLineAndCharacterOfPosition(access.getStart()).line + 1;
         const call = calleeCall(access);
@@ -787,6 +788,8 @@ describe("the walk channel is the only channel, and it is private on both sides"
       "[1].forEach(supabase.channel);",
       'new supabase.channel("walk:public");',
       'supabase["channel"].call(supabase, "walk:public");',
+      'const ch = supabase["channel"]; ch("walk:public");',
+      'const ch = supabase[`channel`]; ch("walk:public");',
     ]) {
       expect(verdicts(escaped), escaped).toEqual([
         "the client's `channel` method is referenced without being called here, so whatever "
@@ -811,6 +814,9 @@ describe("the walk channel is the only channel, and it is private on both sides"
     // anything unfamiliar": every spelling that really does invoke it here.
     for (const ok of [
       `supabase["channel"](t, ${OPTS});`,
+      // A no-substitution TEMPLATE is the same member, and the shared reader
+      // is what makes the three gates in this family agree about that.
+      "supabase[`channel`](t, " + OPTS + ");",
       `supabase.channel?.(t, ${OPTS});`,
       `(supabase.channel)(t, ${OPTS});`,
       `(supabase.channel as never)(t, ${OPTS});`,
@@ -917,6 +923,12 @@ describe("the walk channel is the only channel, and it is private on both sides"
     expect(read("const c = { private: true };\ndelete c.private;\nsend({ topic, ...c });"))
       .toEqual(["<unresolvable spread `c`>"]);
     expect(read("const c = { private: true };\nObject.assign(c, { private: false });\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    // …and the computed spelling reaches the same consumer, which is the half
+    // that decides whether a public message passes (Codex, PR #94).
+    expect(read('const c = { private: true };\nObject["assign"](c, { private: false });\nsend({ topic, ...c });'))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read('const c = { private: true };\nObject["assign"].call(null, other, {});\nsend({ topic, ...c });'))
       .toEqual(["<unresolvable spread `c`>"]);
     // An escaped `Object.assign` names no target at all, so the conservative
     // answer is that NO literal in the file is known to be current — the
@@ -1258,6 +1270,33 @@ describe("the walk channel is the only channel, and it is private on both sides"
     expect(muts("const m = { private: true };\nrun(registry.assign);")).toEqual([]);
     // The receiver decides. `metrics.assign({…})` is somebody else's method.
     expect(muts("const m = { private: true };\nmetrics.assign({ topic });")).toEqual([]);
+    // `x.m` and `x["m"]` are the same member. The predicate knew only the
+    // property spelling, so `Object["assign"](message, { private: false })`
+    // was neither a direct mutation nor an escaped one and the stale literal
+    // survived (Codex, PR #94; five more spellings measured beyond the one
+    // reported).
+    for (const computed of [
+      'const m = { private: true };\nObject["assign"](m, { private: false });',
+      "const m = { private: true };\nObject[`assign`](m, { private: false });",
+      'const m = { private: true };\nglobalThis["Object"].assign(m, { private: false });',
+      'const m = { private: true };\nglobalThis["Object"]["assign"](m, { private: false });',
+      'const m = { private: true };\nObject["assign"].call(null, m, { private: false });',
+      'const m = { private: true };\nconst f = Object["assign"];',
+    ]) {
+      expect(muts(computed), computed).toHaveLength(1);
+    }
+    // …and the other direction, which is what stops that becoming "any
+    // subscript is the built-in": a bound name, a bound `globalThis`, somebody
+    // else's method, and a key this reader cannot resolve at all.
+    expect(muts('const Object = { assign(_v: unknown) {} };\nconst m = { private: true };\nObject["assign"](m, {});')).toEqual([]);
+    expect(muts('const globalThis = { Object: { assign(_v: unknown) {} } };\nconst m = { private: true };\nglobalThis["Object"]["assign"](m, {});')).toEqual([]);
+    expect(muts('const m = { private: true };\nregistry["assign"](m);')).toEqual([]);
+    expect(muts('const m = { private: true };\nObject[k](m, { private: false });')).toEqual([]);
+    // …including one whose key VARIABLE is itself called `assign`, which is
+    // the row that makes "a computed key is not a name" load-bearing: reading
+    // the subscript's source text would report this as the built-in while the
+    // program calls whatever the variable holds.
+    expect(muts('const m = { private: true };\nObject[assign](m, { private: false });')).toEqual([]);
     // …and so does what the receiver's NAME refers to: a module that binds
     // `Object` calls its own, and reading that as the built-in made this
     // reader refuse a file it has no business refusing (Codex, PR #94). The

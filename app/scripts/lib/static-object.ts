@@ -99,6 +99,39 @@ export function calleeCall(node: ts.Node): ts.CallExpression | null {
   return null;
 }
 
+/**
+ * `x.m` and `x["m"]` are the SAME member, read one way.
+ *
+ * Three gates in this family each asked this question and each spelled it
+ * differently, so each had a different hole (Codex, PR #94): this module's
+ * `Object.assign` predicate knew only the property form, so
+ * `Object["assign"](message, { private: false })` was neither a direct
+ * mutation nor an escaped one and the stale literal survived; the query scan
+ * in `discarded-errors.test.ts` read a string literal and not a
+ * NO-SUBSTITUTION TEMPLATE, so `db[`from`]("walks")` with a discarded error
+ * was invisible (measured, 68 of 68 green). One implementation, so there is no
+ * sibling to forget.
+ *
+ * The key goes through `literalText`, which unwraps the transparent wrappers
+ * and accepts both literal spellings; a genuinely computed key (`x[k]`) is not
+ * a member this module can name, so it answers null rather than guessing.
+ * `token` is the node a caller reports a line from — the name for a property
+ * access, the subscript for an element one.
+ */
+export function memberAccess(
+  n: ts.Node | undefined,
+): { receiver: ts.Expression; name: string; token: ts.Node } | null {
+  if (!n) return null;
+  if (ts.isPropertyAccessExpression(n)) {
+    return { receiver: n.expression, name: n.name.text, token: n.name };
+  }
+  if (ts.isElementAccessExpression(n)) {
+    const name = literalText(n.argumentExpression);
+    if (name !== null) return { receiver: n.expression, name, token: n.argumentExpression };
+  }
+  return null;
+}
+
 /** The text of a statically readable string, or null for a dynamic one. */
 export function literalText(e: ts.Expression): string | null {
   const cur = unwrapTransparent(e);
@@ -852,20 +885,19 @@ export function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
  * scanned, 0 hits), so the rule costs nothing now.
  */
 export function isObjectAssignAccess(access: ts.Node): boolean {
-  if (!ts.isPropertyAccessExpression(access)) return false;
-  if (access.name.text !== "assign") return false;
+  const member = memberAccess(access);
+  if (!member || member.name !== "assign") return false;
   const sf = access.getSourceFile();
-  const receiver = unwrapTransparent(access.expression);
+  const receiver = unwrapTransparent(member.receiver);
   if (ts.isIdentifier(receiver)) {
     return receiver.text === "Object" && !bindsName(sf, "Object");
   }
-  return (
-    ts.isPropertyAccessExpression(receiver) &&
-    receiver.name.text === "Object" &&
-    ts.isIdentifier(receiver.expression) &&
-    receiver.expression.text === "globalThis" &&
-    !bindsName(sf, "globalThis")
-  );
+  // `globalThis.Object.assign` and `globalThis["Object"]["assign"]` are the
+  // same call; the receiver is read by the same helper for the same reason.
+  const outer = memberAccess(receiver);
+  if (!outer || outer.name !== "Object") return false;
+  const base = unwrapTransparent(outer.receiver);
+  return ts.isIdentifier(base) && base.text === "globalThis" && !bindsName(sf, "globalThis");
 }
 
 export function isObjectAssignCall(n: ts.Node): n is ts.CallExpression {
