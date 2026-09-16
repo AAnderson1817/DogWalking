@@ -402,6 +402,13 @@ describe("every error message renders through FormError or StateField", () => {
     // A mutation through either name costs both their literal, which the alias
     // graph already closed — stated here so the rule is pinned end to end.
     expect(role('const b = { role: "alert" };\nconst a = b;\nb.role = "status";\n<span {...a} />')).toBeNull();
+    // A COMPUTED member of the built-in `Object` may be `assign`, so a literal
+    // handed to one is no longer readable: `Object[k](b, { role: "status" })`
+    // with `k: "assign"` runs exactly that, and reading `alert` off the
+    // declaration was a confidently wrong answer (Codex, PR #94, round 63, in
+    // the shared module). The mirror — a benign literal made `alert` by the
+    // same call — stays a MISS, the dynamic-spread limit this file states.
+    expect(role('const b = { role: "alert" };\nconst k: "assign" = "assign";\nObject[k](b, { role: "status" });\n<span {...b} />')).toBeNull();
     // A cycle terminates rather than resolving or hanging.
     expect(role("let b = a;\nlet a = b;\n<span {...a} />")).toBeNull();
     // An accessor or method DEFINES the property and answers a function body,

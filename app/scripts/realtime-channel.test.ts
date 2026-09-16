@@ -6,8 +6,11 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import {
   calleeCall,
+  computedAccess,
   declaredObjects,
+  isComputedObjectAccess,
   memberAccess,
+  memberRoot,
   isAssignmentOperator,
   isEscapedObjectAssign,
   isObjectAssignCall,
@@ -276,6 +279,34 @@ function channelCallsIn(source: ts.SourceFile, rel: string): ChannelCall[] {
         }
         found.push({ file: rel, line: accessLine, private: isPrivate, why });
       }
+      // A COMPUTED member reached from the client: `supabase[key](…)`,
+      // `supabase[pick()](…)`, `supabase.realtime[key](…)`. `memberAccess`
+      // answers null for one and this visitor read that null as "not
+      // `channel`" — so `const key: "channel" = "channel";
+      // supabase[key]("walk:public")`, which type-checks and opens a second
+      // PUBLIC topic, left all 11 tests green planted in the real hook
+      // (Codex, PR #94), and so did eight more spellings measured beside it.
+      // This check cannot say the member is not `channel`, so it cannot say
+      // the topic is private: REPORTED, in every position, on a receiver
+      // whose ROOT is the client — the client itself, an alias, a wrapper,
+      // or a namespace reached from it — and left alone on any other
+      // receiver, where a computed member is ordinary code
+      // (`handlers[type](payload)`) and reporting it would be red on a
+      // healthy tree. Measured: no computed access on the client in app/src.
+      const computed = computedAccess(node);
+      if (computed) {
+        const root = memberRoot(computed.receiver);
+        if (ts.isIdentifier(root) && clients.has(root.text)) {
+          found.push({
+            file: rel,
+            line: source.getLineAndCharacterOfPosition(node.getStart()).line + 1,
+            private: false,
+            why: `\`${node.getText(source)}\` — a computed member reached from the Supabase client; `
+              + "this check cannot say whether it is `channel`, so it cannot say the topic is "
+              + "private. Name the member, or classify it here.",
+          });
+        }
+      }
       // The client DESTRUCTURED. `const { channel } = supabase; channel(t)`
       // opens a topic with no receiver left for the rule above to resolve, and
       // it too left all 11 tests green on the shipped gate (measured; one of
@@ -383,6 +414,16 @@ function mutations(sf: ts.SourceFile): string[] {
     // `.bind` and `Reflect.apply` measured the same way).
     if (isEscapedObjectAssign(n)) {
       out.push(`${n.getText().split("\n")[0]} — referenced without being called (line ${at(n)})`);
+    }
+    // …and a COMPUTED member of it, in any position: `Object[k](m, {…})` may
+    // be `assign` (or any other mutator) and `const f = Object[k]` hands one
+    // away. Neither was reported — round 55 pinned a computed key as "not a
+    // name", which is right, and read it as "not a member", which is not —
+    // so a literal survived a mutation the language performed and this file
+    // read it stale (Codex, PR #94, round 63; measured with `Object[key](stale,
+    // { private: false })` planted in broadcast.ts: 11 of 11 green).
+    if (isComputedObjectAccess(n)) {
+      out.push(`${n.getText().split("\n")[0]} — a computed member of Object, which this check cannot tell from \`assign\` (line ${at(n)})`);
     }
     if (ts.isDeleteExpression(n)) out.push(`${n.getText()} (line ${at(n)})`);
     // `c.private--` writes to a property exactly as `c.private = 0` does, and
@@ -757,6 +798,50 @@ describe("the walk channel is the only channel, and it is private on both sides"
   // would pass the sabotages for the wrong reason, and one that called
   // everything unresolvable would be red on a healthy tree — which is exactly
   // what the identifier-only receiver test was.
+  it("reports a computed member reached from the client, in every position (Codex, PR #94)", () => {
+    const IMP = 'import { supabase } from "./supabase";\n';
+    const OPTS = "{ config: { private: true } }";
+    const verdicts = (body: string): string[] => {
+      const sf = ts.createSourceFile("f.ts", IMP + body, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+      return channelCallsIn(sf, "f.ts").map((c) => (c.private ? "private" : c.why));
+    };
+    const computedMember = /a computed member reached from the Supabase client/;
+    // Codex's case: the key is a string-literal TYPE, so this type-checks and
+    // opens a second public topic; planted in the real hook it left all 11
+    // tests green. Then every other spelling of a key this check cannot read.
+    for (const body of [
+      'const key: "channel" = "channel"; supabase[key]("walk:public");',
+      'const k = "channel"; supabase[k]("walk:public");',
+      'supabase[chooseMethod()]("walk:public");',
+      'const x = "nel"; supabase[`chan${x}`]("walk:public");',
+      'supabase["chan" + "nel"]("walk:public");',
+      // …handed away rather than invoked here.
+      'const key: "channel" = "channel"; const opener = supabase[key]; opener("walk:public");',
+      // …through a transparent wrapper, and through an alias of the client.
+      'const key: "channel" = "channel"; (supabase as never)[key]("walk:public");',
+      'const key: "channel" = "channel"; const db = supabase; db[key]("walk:public");',
+      // …and reached through a namespace: `supabase.realtime.channel` opens a
+      // topic exactly as `supabase.channel` does, so a computed member of it
+      // is the same question one hop in.
+      'const key: "channel" = "channel"; supabase.realtime[key]("walk:public");',
+    ]) {
+      const got = verdicts(body);
+      expect(got, body).toHaveLength(1);
+      expect(got[0], body).toMatch(computedMember);
+    }
+    // The other direction: a computed member of something that is NOT the
+    // client is ordinary code (`handlers[type](payload)`), and reporting it
+    // would be a gate red on a healthy tree. And a LITERAL key is not
+    // computed — `supabase["channel"]` is `supabase.channel`, classified as
+    // it always was, in both directions.
+    expect(verdicts('handlers[type]("walk:public");')).toEqual([]);
+    expect(verdicts('const key: "channel" = "channel"; other[key]("walk:public");')).toEqual([]);
+    expect(verdicts(`supabase["channel"](t, ${OPTS});`)).toEqual(["private"]);
+    expect(verdicts('supabase["channel"](t);')).toEqual([
+      "called with no options — `private` defaults to false (H1)",
+    ]);
+  });
+
   it("classifies a channel call through every transparent receiver spelling", () => {
     const IMP = 'import { supabase } from "./supabase";\n';
     const OPTS = "{ config: { private: true } }";
@@ -1322,17 +1407,36 @@ describe("the walk channel is the only channel, and it is private on both sides"
       expect(muts(computed), computed).toHaveLength(1);
     }
     // …and the other direction, which is what stops that becoming "any
-    // subscript is the built-in": a bound name, a bound `globalThis`, somebody
-    // else's method, and a key this reader cannot resolve at all.
+    // subscript is the built-in": a bound name, a bound `globalThis` and
+    // somebody else's method.
     expect(muts('const Object = { assign(_v: unknown) {} };\nconst m = { private: true };\nObject["assign"](m, {});')).toEqual([]);
     expect(muts('const globalThis = { Object: { assign(_v: unknown) {} } };\nconst m = { private: true };\nglobalThis["Object"]["assign"](m, {});')).toEqual([]);
     expect(muts('const m = { private: true };\nregistry["assign"](m);')).toEqual([]);
-    expect(muts('const m = { private: true };\nObject[k](m, { private: false });')).toEqual([]);
-    // …including one whose key VARIABLE is itself called `assign`, which is
-    // the row that makes "a computed key is not a name" load-bearing: reading
-    // the subscript's source text would report this as the built-in while the
-    // program calls whatever the variable holds.
-    expect(muts('const m = { private: true };\nObject[assign](m, { private: false });')).toEqual([]);
+    // A key this reader cannot resolve on the RESOLVED built-in is reported,
+    // which REVERSES round fifty-five's pin: `const k: "assign" = "assign";
+    // Object[k](m, { private: false })` mutates exactly as the direct call
+    // does and left this list empty and the literal stale (Codex, PR #94,
+    // round 63 — the client's `supabase[key]` finding, in this predicate).
+    // "A computed key is not a name" still holds: the row whose key VARIABLE
+    // is itself called `assign` is reported as a COMPUTED member, not as the
+    // built-in's `assign`, because the program calls whatever the variable
+    // holds — and that is exactly why it cannot be read as no member either.
+    for (const computedKey of [
+      'const m = { private: true };\nObject[k](m, { private: false });',
+      'const m = { private: true };\nconst k: "assign" = "assign"; Object[k](m, { private: false });',
+      'const m = { private: true };\nObject[pick()](m, { private: false });',
+      'const m = { private: true };\nObject[assign](m, { private: false });',
+      'const m = { private: true };\nconst f = Object[k];',
+      'const m = { private: true };\nglobalThis["Object"][k](m, { private: false });',
+    ]) {
+      expect(muts(computedKey), computedKey).toEqual([expect.stringContaining("a computed member of Object")]);
+    }
+    // …and not on a receiver that is NOT the built-in: a bound `Object`, a
+    // bound `globalThis`, somebody else's object. A computed member of those
+    // is ordinary code.
+    expect(muts('const Object = { assign(_v: unknown) {} };\nconst m = { private: true };\nObject[k](m, {});')).toEqual([]);
+    expect(muts('const globalThis = { Object: {} };\nconst m = { private: true };\nglobalThis["Object"][k](m, {});')).toEqual([]);
+    expect(muts('const m = { private: true };\nregistry[k](m);')).toEqual([]);
     // …and so does what the receiver's NAME refers to: a module that binds
     // `Object` calls its own, and reading that as the built-in made this
     // reader refuse a file it has no business refusing (Codex, PR #94). The
@@ -1384,7 +1488,10 @@ describe("the walk channel is the only channel, and it is private on both sides"
     // wrapper, so a bound name and somebody else's method stay silent.
     expect(muts("const Object = { assign(_v: unknown) {} };\nconst m = { private: true };\n(Object.assign)(m, {});")).toEqual([]);
     expect(muts("const m = { private: true };\n(registry.assign)(m);")).toEqual([]);
-    expect(muts("const m = { private: true };\n(Object[k])(m, { private: false });")).toEqual([]);
+    // A wrapped computed member of the built-in is the computed-member case,
+    // reported as such (round 63 reversed the silence this row used to pin).
+    expect(muts("const m = { private: true };\n(Object[k])(m, { private: false });"))
+      .toEqual([expect.stringContaining("a computed member of Object")]);
   });
 
   // Preconditions. "No channel is public" is satisfied by a scanner that finds

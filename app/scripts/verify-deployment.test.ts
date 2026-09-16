@@ -648,6 +648,13 @@ describe("verify-deployment: the read-only argument", () => {
     // this rule counted it, on an argument about healthy trees I had not
     // measured — and `if (false) serveFunction(handle)` reads identically.
     put("iota", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nif (Deno.env.get("MODE")) {\n  serveFunction(handle);\n}\nDeno.serve(handle);\n');
+    // NOT housed: the wrapper reached through a COMPUTED member of the
+    // namespace import. `http[k](handle)` with `k: "serveFunction"` runs the
+    // wrapper, and this check cannot read which member — so it is not housed
+    // and needs a reviewed `contract_for` case, the conservative direction
+    // (Codex, PR #94, round 63: the same computed member the realtime gate
+    // missed, checked here as the sibling and found already refusing).
+    put("theta2", "index.ts", 'import * as http from "../_lib/http.ts";\nconst k: "serveFunction" = "serveFunction";\nhttp[k](handle);\n');
     // Codex's case, the same rule at its plainest.
     put("mu", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nimport { serve } from "https://deno.land/std/http/server.ts";\nif (false) serveFunction(handle);\nserve(handle);\n');
     // Housed: the wrapper's result kept in a module-scope binding, and the
@@ -794,6 +801,7 @@ describe("verify-deployment: the read-only argument", () => {
       zeta: false,
       eta: false,
       theta: false,
+      theta2: false,
       iota: false,
       kappa: false,
       mu: false,

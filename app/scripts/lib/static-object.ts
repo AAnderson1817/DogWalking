@@ -219,6 +219,48 @@ export function memberAccess(
   return null;
 }
 
+/**
+ * `x[k]`, `x[f()]`, `` x[`a${b}`] `` — a member this module cannot NAME.
+ *
+ * `memberAccess` answers null for one, and every caller read that null as
+ * "not a member". That was the hole: `const key: "channel" = "channel";
+ * supabase[key]("walk:public")` type-checks, opens a second PUBLIC topic, and
+ * left all 11 realtime-channel tests green with it planted in the real hook
+ * (Codex, PR #94) — and so did `supabase[k]`, `supabase[pick()]`, a template,
+ * a concatenation, the escaped, wrapped and aliased spellings, and the
+ * namespace hop `supabase.realtime[key]`; a `db[key]("walks")` query whose
+ * error is discarded was equally invisible one gate over, and `Object[k](m,
+ * …)` mutated a literal the readers then read stale. A computed member is not
+ * "no member": on a receiver a gate has RESOLVED it may be the very member
+ * the gate asks about, so the conservative answer is to report it by name —
+ * and this is the one reader each gate asks, so they cannot disagree about
+ * what a computed member is.
+ */
+export function computedAccess(
+  n: ts.Node | null | undefined,
+): { receiver: ts.Expression; token: ts.Node } | null {
+  if (!n || !ts.isElementAccessExpression(n)) return null;
+  if (literalText(n.argumentExpression) !== null) return null;
+  return { receiver: n.expression, token: n.argumentExpression };
+}
+
+/**
+ * The expression a member chain is rooted at — `a.b["c"][k].d` is rooted at
+ * `a` — with the transparent wrappers unwrapped at every hop. Stops at
+ * anything that is not a member access (a call, a literal, an identifier),
+ * which is then the root a caller classifies: `supabase.realtime[key]` and
+ * `db.auth[key]` are computed members reached FROM a client, and the client
+ * is what decides whether they are reported.
+ */
+export function memberRoot(e: ts.Expression): ts.Expression {
+  let cur = unwrapTransparent(e);
+  for (;;) {
+    const hop = memberAccess(cur) ?? computedAccess(cur);
+    if (!hop) return cur;
+    cur = unwrapTransparent(hop.receiver);
+  }
+}
+
 /** The text of a statically readable string, or null for a dynamic one. */
 export function literalText(e: ts.Expression): string | null {
   const cur = unwrapTransparent(e);
@@ -465,6 +507,10 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
       if (target) collectMutatedRoots(target, mutated, true);
     }
     if (isEscapedObjectAssign(n)) escapedMutator = true;
+    // …and a COMPUTED member of the built-in, which may be `assign` or any
+    // other mutator: `Object[k](m, …)` kept `m`'s literal readable and stale
+    // (measured, every computed spelling; Codex, PR #94, round 63).
+    if (isComputedObjectAccess(n)) escapedMutator = true;
 
     ts.forEachChild(n, visit);
   };
@@ -989,19 +1035,62 @@ export function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
  * scanned, 0 hits), so the rule costs nothing now.
  */
 export function isObjectAssignAccess(access: ts.Node): boolean {
+  return objectBuiltinMember(access) === "assign";
+}
+
+/**
+ * A COMPUTED member of the built-in `Object`, in any position — `Object[k](m,
+ * …)`, `Object[pick()](…)`, `const f = Object[k]`.
+ *
+ * It may be `assign`, or `defineProperty`, or any other mutator, and nothing
+ * here can say which — so it gets the answer an ESCAPED `Object.assign`
+ * already gets: some object may be written, and a reader of literals must
+ * refuse rather than read one that may be stale. `const k: "assign" =
+ * "assign"; Object[k](msg, { private: false })` mutates exactly as the direct
+ * call does, and every computed spelling left `declaredObjects` holding the
+ * stale `private: true` and `mutations()` reporting nothing (measured: 11 of
+ * 11 green with it planted in `broadcast.ts`; Codex, PR #94, the client's
+ * `supabase[key]` finding in this module's own predicate).
+ *
+ * This REVERSES the round-55 pin that `Object[k](m, …)` is silent. That pin
+ * was right that a computed key is not a NAME — reading the subscript's text
+ * would call `Object[assign]` the built-in while the program calls whatever
+ * the variable holds — and wrong that it is therefore no member. Not guessing
+ * which member and not reading it as none are different rules; this is the
+ * second. The scanned trees carry no computed access on `Object` at all
+ * (measured), so the conservative reading costs nothing today.
+ */
+export function isComputedObjectAccess(n: ts.Node): boolean {
+  return objectBuiltinMember(n) === null;
+}
+
+/**
+ * Which member of the BUILT-IN `Object` an access reaches: its name, null
+ * when the key is computed and could therefore be any of them, and undefined
+ * when the receiver is not the resolved global at all. One reader for both
+ * spellings of the receiver and both kinds of key, so `isObjectAssignAccess`
+ * and `isComputedObjectAccess` cannot disagree about what `Object` is.
+ */
+function objectBuiltinMember(access: ts.Node): string | null | undefined {
   const member = memberAccess(access);
-  if (!member || member.name !== "assign") return false;
+  const hop = member ?? computedAccess(access);
+  if (!hop) return undefined;
   const sf = access.getSourceFile();
-  const receiver = unwrapTransparent(member.receiver);
+  const receiver = unwrapTransparent(hop.receiver);
+  let builtin = false;
   if (ts.isIdentifier(receiver)) {
-    return receiver.text === "Object" && !bindsName(sf, "Object");
+    builtin = receiver.text === "Object" && !bindsName(sf, "Object");
+  } else {
+    // `globalThis.Object.assign` and `globalThis["Object"]["assign"]` are the
+    // same call; the receiver is read by the same helper for the same reason.
+    const outer = memberAccess(receiver);
+    if (outer && outer.name === "Object") {
+      const base = unwrapTransparent(outer.receiver);
+      builtin = ts.isIdentifier(base) && base.text === "globalThis" && !bindsName(sf, "globalThis");
+    }
   }
-  // `globalThis.Object.assign` and `globalThis["Object"]["assign"]` are the
-  // same call; the receiver is read by the same helper for the same reason.
-  const outer = memberAccess(receiver);
-  if (!outer || outer.name !== "Object") return false;
-  const base = unwrapTransparent(outer.receiver);
-  return ts.isIdentifier(base) && base.text === "globalThis" && !bindsName(sf, "globalThis");
+  if (!builtin) return undefined;
+  return member ? member.name : null;
 }
 
 export function isObjectAssignCall(n: ts.Node): n is ts.CallExpression {

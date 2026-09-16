@@ -5,8 +5,10 @@ import ts from "typescript";
 import {
   calleeCall,
   calleeOf,
+  computedAccess,
   isTransparentWrapper,
   memberAccess as sharedMemberAccess,
+  memberRoot,
   outward,
   unwrapTransparent,
 } from "./lib/static-object.js";
@@ -247,6 +249,21 @@ function uncalledReason(what: string, member: string): string {
 function escapedQueryReason(member: string): string {
   return `query: \`.${member}\` is handed somewhere rather than called here, so the envelope it `
     + `produces is never classified — call \`<client>.${member}(…)\` directly`;
+}
+
+/**
+ * `db[key](…)`, `db.auth[key](…)`: a member reached from a client that this
+ * gate cannot NAME. It may be `from`, `rpc` or a GoTrue call, so the envelope
+ * it produces is never classified — `const key: "from" = "from"; const { data }
+ * = await db[key]("walks").select("id")` type-checks, discards its error, and
+ * produced no site at all (measured; Codex, PR #94, the realtime gate's
+ * `supabase[key]` finding in this reader). Reported by name, on a receiver
+ * with positive client evidence only: a computed member of anything else is
+ * ordinary code, and `handlers[type](payload)` must stay silent.
+ */
+function computedMemberReason(text: string): string {
+  return `\`${text}\` is a computed member reached from a client — this check cannot say whether it `
+    + "is a query or a GoTrue call, so nothing it produces is classified; name the member";
 }
 
 const COMPILER_OPTIONS: ts.CompilerOptions = {
@@ -1774,6 +1791,22 @@ function classifyFile(program: ts.Program, sf: ts.SourceFile, file: string): Sit
       if (declaredAsClient(ctx, acc.receiver) === "client") {
         sites.push(site(ctx, n, "UNCLASSIFIED", escapedQueryReason(acc.name)));
       }
+    } else if (computedAccess(n)) {
+      // A COMPUTED member reached from a client. `memberAccess` answers null
+      // for one, and every branch above read that null as "not a query" —
+      // so `db[key]("walks")`, `db.auth[key]("t")` and `db["auth"][key]("t")`
+      // each discarded an error and produced no site (measured; Codex, PR
+      // #94). The ROOT of the chain decides: a client, and the member is
+      // reported by name; anything else, and a computed member is ordinary
+      // code this gate has no business refusing. The `.auth` hop beneath a
+      // reported access is not re-read as a namespace, because its parent
+      // is not a member this reader can name.
+      const computed = computedAccess(n)!;
+      const root = memberRoot(computed.receiver);
+      const ctx: Ctx = { sf, checker, file, queryLine: lineOf(sf, computed.token), followed };
+      if (declaredAsClient(ctx, root) === "client") {
+        sites.push(site(ctx, n, "UNCLASSIFIED", computedMemberReason(n.getText(sf).split("\n")[0])));
+      }
     } else {
       const auth = memberAccess(n);
       const authOuter = outward(n);
@@ -3281,6 +3314,49 @@ async function f(token: string) { const { data, error } = await ${nine("db.auth"
     }
     expect(one(`async function f(token: string) { const db = ${nine("adminClient")}(); const { data, error } = await db.auth.getUser(token); if (error) throw error; return data; }`).verdict).toBe("OK");
     expect(one(`async function f(token: string) { const db = ${nine("adminClient")}(); const { data } = await db.auth.getUser(token); return data; }`).verdict).toBe("DISCARDED");
+  });
+
+  it("a computed member reached from a client is refused by name (Codex, PR #94)", () => {
+    const CLIENT = "declare function adminClient(): any;\n";
+    const computedMember = /is a computed member reached from a client/;
+    // Codex's case one gate over: the key's TYPE is the literal, so this
+    // type-checks, runs the query, discards its error, and produced NO site
+    // on the shipped gate — and so did every other spelling here.
+    for (const src of [
+      `${CLIENT}async function f() { const db = adminClient(); const key: "from" = "from"; const { data } = await db[key]("walks").select("id"); return data; }`,
+      `${CLIENT}async function f() { const db = adminClient(); const { data } = await db[pick()]("walks").select("id"); return data; }`,
+      `${CLIENT}async function f() { const db = adminClient(); const key: "from" = "from"; const q = db[key]; const { data } = await q("walks").select("id"); return data; }`,
+      `${CLIENT}async function f() { const db = adminClient(); const key: "from" = "from"; const { data } = await (db as never)[key]("walks").select("id"); return data; }`,
+      // …and reached through the GoTrue namespace, in both spellings of it.
+      `${CLIENT}async function f() { const db = adminClient(); const key: "getUser" = "getUser"; const { data } = await db.auth[key]("t"); return data; }`,
+      `${CLIENT}async function f() { const db = adminClient(); const key: "getUser" = "getUser"; const { data } = await db["auth"][key]("t"); return data; }`,
+    ]) {
+      const site = one(src);
+      expect(site.verdict, src).toBe("UNCLASSIFIED");
+      expect(site.reason, src).toMatch(computedMember);
+    }
+    // Conservative on purpose, and stated: a HANDLED error behind a computed
+    // member is refused too, because the refusal is about what this gate
+    // cannot read rather than about what the code does. The remedy is to name
+    // the member. Measured: no computed member on a client in the scanned
+    // tree, so this is red on nothing today.
+    const handled = one(`${CLIENT}async function f() { const db = adminClient(); const key: "from" = "from"; const { data, error } = await db[key]("walks").select("id"); if (error) throw error; return data; }`);
+    expect(handled.verdict).toBe("UNCLASSIFIED");
+    expect(handled.reason).toMatch(computedMember);
+    // Beneath the admin namespace the same site is reported — the hop's own
+    // "referenced and never called" sentence may ride beside it.
+    const admin = classifySource(`${CLIENT}async function f() { const db = adminClient(); const key: "getUserById" = "getUserById"; const { data } = await db.auth.admin[key]("id"); return data; }`, "fixture.ts");
+    expect(admin.map((s) => s.reason).some((r) => computedMember.test(r))).toBe(true);
+    // The other direction: a computed member of something that is NOT a client
+    // is ordinary code, and a receiver with no client evidence gets no report
+    // either — the round-five rule, since a computed member on `db: any` is a
+    // field read on a value until something says otherwise.
+    expect(classifySource('async function f(range: { from: number }, k: "from") { const v = range[k]; return v; }', "fixture.ts")).toEqual([]);
+    expect(classifySource("async function f(handlers: any, type: string) { const r = await handlers[type](1); return r; }", "fixture.ts")).toEqual([]);
+    expect(classifySource('async function f(db: any) { const key: "from" = "from"; const { data } = await db[key]("walks").select("id"); return data; }', "fixture.ts")).toEqual([]);
+    // A LITERAL key is not computed: `db["from"]` is `db.from`, classified as
+    // it always was.
+    expect(one(`${CLIENT}async function f() { const db = adminClient(); const { data } = await db["from"]("walks").select("id"); return data; }`).verdict).toBe("DISCARDED");
   });
 
   it("a transparent wrapper around a callee or a receiver is the same call (Codex, PR #94)", () => {
