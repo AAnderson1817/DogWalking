@@ -598,8 +598,12 @@ export type BindingSource = {
   whole: boolean;
   /** The pattern, for a destructuring binding, so a consumer can match it against a literal. */
   pattern?: ts.BindingName | ts.Expression;
-  /** A `for…of` / `for…in` binding: the targets hold elements of `source`. */
-  loop?: boolean;
+  /**
+   * A loop binding. `for…of` targets hold ELEMENTS of `source`; `for…in`
+   * targets hold its KEYS — the indices of an array, the names of an object
+   * — which is never a value the source carries.
+   */
+  loop?: "of" | "in";
 };
 
 export function bindingSources(sf: ts.SourceFile): BindingSource[] {
@@ -628,7 +632,9 @@ export function bindingSources(sf: ts.SourceFile): BindingSource[] {
       if (ts.isVariableDeclarationList(n.initializer)) {
         for (const d of n.initializer.declarations) bindPatternNames(d.name, targets);
       } else collectAssignmentTargets(n.initializer, targets);
-      if (targets.size > 0) out.push({ targets, source: n.expression, whole: false, loop: true });
+      if (targets.size > 0) {
+        out.push({ targets, source: n.expression, whole: false, loop: ts.isForOfStatement(n) ? "of" : "in" });
+      }
     }
     ts.forEachChild(n, visit);
   };
@@ -643,13 +649,33 @@ export function bindingSources(sf: ts.SourceFile): BindingSource[] {
  * A name holds the seed when it is bound to the seed's identifier (through the
  * transparent wrappers) by a WHOLE binding: a declaration, an assignment in
  * any alias-forming spelling, a parameter default or a binding-element
- * default. A pattern's names hold PARTS of the source and a loop variable
- * holds ELEMENTS, so those are followed only where the part is visible — a
- * literal aggregate written in place, matched by position or by key, one
- * level deep: `const [db] = [supabase]`, `({ db } = { db: supabase })`,
- * `for (const db of [supabase])`. A part taken from anything else — `const {
+ * default. A pattern's names hold PARTS of the source and a `for…of`
+ * variable holds ELEMENTS, so those are followed only where the part is
+ * visible — a literal aggregate written in place, matched by position or by
+ * key, with an inline literal SPREAD expanded in place (`{ ...{ db: supabase }
+ * }` supplies `db`, and the last definition of a key wins, as the language
+ * has it): `const [db] = [supabase]`, `({ db } = { db: supabase })`, `for
+ * (const db of [...[supabase]])`. A part taken from anything else — `const {
  * data } = await supabase.from(…)` — is NOT the seed, and saying otherwise
- * would put every query result on the client's side of a gate that reports.
+ * would put every query result on the client's side of a gate that reports;
+ * a spread of a NAME is not expanded either, stated rather than modelled,
+ * since following it needs the literal map this module builds one level up
+ * and would make the two readers each other's input. Such a spread — or a
+ * key this reader cannot read — makes UNKNOWN every part it could affect,
+ * and not knowing is not evidence that a name holds the seed: every position
+ * AFTER it in an array (`const [db] = [...others, supabase]` puts `supabase`
+ * at slot 0 only when `others` is empty) and every key BEFORE it in an
+ * object (`{ db: supabase, ...others }` may replace `db`), at whatever depth
+ * of inline literal the spread sits. An ITERATION is different in kind: `for
+ * (const db of [...others, supabase])` binds `supabase` on some pass whatever
+ * `others` holds, so a `for…of` variable holds every readable element and
+ * only an unreadable one is passed over. A `for…in` variable holds KEYS and
+ * never the seed (Codex, PR #94, round 65 — three findings in this reader,
+ * each one of those rules).
+ *
+ * `alsoHolds` names a second spelling of a seed that is not an identifier —
+ * `globalThis.Object` for the global `Object` — so a name bound to it holds
+ * the seed too.
  *
  * Name-based and file-wide, like `declaredObjects`: a name bound to the seed
  * anywhere in the file holds it everywhere, which over-includes a name that
@@ -657,12 +683,16 @@ export function bindingSources(sf: ts.SourceFile): BindingSource[] {
  * member on such a name is refused rather than blessed — and every reader
  * that consumes this set states it.
  */
-export function holdersOf(sf: ts.SourceFile, seeds: Iterable<string>): Set<string> {
+export function holdersOf(
+  sf: ts.SourceFile,
+  seeds: Iterable<string>,
+  alsoHolds?: (e: ts.Expression) => boolean,
+): Set<string> {
   const names = new Set(seeds);
   const bindings = bindingSources(sf);
   const holds = (e: ts.Expression): boolean => {
     const v = unwrapTransparent(e);
-    return ts.isIdentifier(v) && names.has(v.text);
+    return (ts.isIdentifier(v) && names.has(v.text)) || (alsoHolds?.(v) ?? false);
   };
   for (let grew = true; grew;) {
     grew = false;
@@ -688,7 +718,12 @@ function partsHolding(b: BindingSource, holds: (e: ts.Expression) => boolean): S
   const out = new Set<string>();
   const src = unwrapTransparent(b.source);
   if (b.loop) {
-    if (ts.isArrayLiteralExpression(src) && src.elements.some((el) => !ts.isSpreadElement(el) && holds(el))) {
+    // `for…in` binds KEYS — `for (const db in [supabase])` gives `db` the
+    // string "0" — so nothing it binds can hold the seed; reading it as the
+    // client refused an unrelated `db[key]` on healthy code (Codex, PR #94).
+    // Only `for…of` yields the elements, and an inline literal spread among
+    // them is expanded like any other.
+    if (b.loop === "of" && ts.isArrayLiteralExpression(src) && literalElements(src, false).some(holds)) {
       for (const t of b.targets) out.add(t);
     }
     return out;
@@ -697,30 +732,108 @@ function partsHolding(b: BindingSource, holds: (e: ts.Expression) => boolean): S
   if (!pat) return out;
   if (ts.isArrayLiteralExpression(src)) {
     const slots = arraySlots(pat);
-    for (let i = 0; i < src.elements.length && i < slots.length; i++) {
-      const el = src.elements[i]!;
-      if (ts.isSpreadElement(el)) break; // indices shift past a spread; not followed
+    const elements = literalElements(src, true);
+    for (let i = 0; i < elements.length && i < slots.length; i++) {
       const name = slots[i];
-      if (name && holds(el)) out.add(name);
+      if (name && holds(elements[i]!)) out.add(name);
     }
   } else if (ts.isObjectLiteralExpression(src)) {
     const byKey = objectSlots(pat);
-    for (const p of src.properties) {
-      let key: string | null = null;
-      let value: ts.Expression | null = null;
-      if (ts.isPropertyAssignment(p)) {
-        key = propertyKey(p.name);
-        value = p.initializer;
-      } else if (ts.isShorthandPropertyAssignment(p)) {
-        key = p.name.text;
-        value = p.name;
-      }
-      if (key === null || !value || !holds(value)) continue;
+    for (const [key, value] of literalEntries(src)) {
+      if (!value || !holds(value)) continue;
       const name = byKey.get(key);
       if (name) out.add(name);
     }
   }
   return out;
+}
+
+/**
+ * The readable elements of an array literal in order, with an inline literal
+ * spread expanded in place (`[...[supabase]]` has one element, `supabase`).
+ *
+ * Two questions, one collector. Read POSITIONALLY — for a pattern, where a
+ * name takes the element at its slot — the list ENDS at a spread this reader
+ * cannot expand: every position after `[...others, supabase]` depends on how
+ * many elements `others` has, and reading the spread as zero-width would put
+ * `supabase` at slot 0 with confidence (the plausible wrong reading, which
+ * the first version of this collector took one nesting level down: an inline
+ * literal that met such a spread returned what it had and the OUTER walk
+ * carried on, so `[...[...others], supabase]` still read `supabase` at 0).
+ * The end propagates out of every nested literal now. Read as an ITERATION
+ * — for `for…of`, where the variable takes EVERY element in turn — an
+ * unexpandable spread is passed over and the elements after it are still
+ * reached, because `for (const db of [...others, supabase])` binds
+ * `supabase` on some pass whatever `others` holds; the positional rule
+ * applied there was a MISS on a shape the pre-round-65 reader got right
+ * (measured, both directions).
+ */
+function literalElements(arr: ts.ArrayLiteralExpression, positional: boolean): ts.Expression[] {
+  const out: ts.Expression[] = [];
+  collectElements(arr, positional, out);
+  return out;
+}
+
+/** Appends `arr`'s readable elements to `out`; false once positions stopped being knowable. */
+function collectElements(arr: ts.ArrayLiteralExpression, positional: boolean, out: ts.Expression[]): boolean {
+  for (const el of arr.elements) {
+    if (ts.isSpreadElement(el)) {
+      const inner = unwrapTransparent(el.expression);
+      if (ts.isArrayLiteralExpression(inner)) {
+        if (!collectElements(inner, positional, out)) return false;
+      } else if (positional) return false;
+    } else out.push(el);
+  }
+  return true;
+}
+
+/**
+ * The readable entries of an object literal, LAST definition winning, with an
+ * inline literal spread expanded in place — `{ ...{ db: supabase } }` supplies
+ * `db` (Codex, PR #94, round 65). An accessor or a method defines its key with
+ * a function body, so it overrides an earlier value with nothing this reader
+ * can hold. A spread of anything but an inline literal, or a member whose key
+ * this reader cannot read, may define ANY key, so it ERASES every entry before
+ * it — `{ db: supabase, ...others }` and `{ db: supabase, [k]: other }` hold
+ * nothing readable, while `{ ...others, db: supabase }` still holds `db`,
+ * the last definition winning as the language has it. That is the mirror of
+ * the positional rule in `literalElements`: an unreadable member makes
+ * unknown whatever it could affect, which for an array is every position
+ * after it and for an object every key before it. The first version of this
+ * reader left the earlier entries standing, the over-inclusion direction,
+ * which disagreed with the array reader one function up and with
+ * `resolveProperty`'s own erasing rule for the same question.
+ *
+ * One map, shared down the recursion, so an erasure inside a nested inline
+ * literal (`{ db: supabase, ...{ ...others } }`) reaches the entries the
+ * outer literal had already read.
+ */
+function literalEntries(obj: ts.ObjectLiteralExpression): Map<string, ts.Expression | null> {
+  const entries = new Map<string, ts.Expression | null>();
+  collectEntries(obj, entries);
+  return entries;
+}
+
+function collectEntries(obj: ts.ObjectLiteralExpression, entries: Map<string, ts.Expression | null>): void {
+  for (const p of obj.properties) {
+    if (ts.isSpreadAssignment(p)) {
+      const inner = unwrapTransparent(p.expression);
+      if (ts.isObjectLiteralExpression(inner)) collectEntries(inner, entries);
+      else entries.clear();
+      continue;
+    }
+    if (ts.isShorthandPropertyAssignment(p)) {
+      entries.set(p.name.text, p.name);
+      continue;
+    }
+    const key = propertyKey(p.name);
+    if (key === null) {
+      entries.clear();
+      continue;
+    }
+    if (ts.isPropertyAssignment(p)) entries.set(key, p.initializer);
+    else if (definesWithoutValue(p)) entries.set(key, null);
+  }
 }
 
 /** Array-pattern positions → the identifier bound there, or null (a rest, a nested pattern, a hole). */
@@ -1021,8 +1134,29 @@ function isGlobal(sf: ts.SourceFile, id: ts.Identifier, name: "Object" | "global
   let perFile = GLOBAL_HOLDERS.get(sf);
   if (!perFile) GLOBAL_HOLDERS.set(sf, (perFile = new Map()));
   let holders = perFile.get(name);
-  if (!holders) perFile.set(name, (holders = holdersOf(sf, [name])));
+  if (!holders) {
+    // The global `Object` has a second spelling, `globalThis.Object`, so a
+    // name bound to THAT holds it too: `const O = globalThis.Object;
+    // O.assign(m, …)` was read as no mutation because the source is a member
+    // access and not an identifier (Codex, PR #94, round 65). `globalThis`
+    // itself has no second spelling.
+    const also = name === "Object" ? (e: ts.Expression) => isGlobalObjectMember(sf, e) : undefined;
+    perFile.set(name, (holders = holdersOf(sf, [name], also)));
+  }
   return holders.has(id.text);
+}
+
+/**
+ * `globalThis.Object` / `globalThis["Object"]`, on the global `globalThis` or
+ * on any name that holds it. One reader for that spelling, consumed by the
+ * receiver test AND by the holders of `Object`, so the two cannot disagree
+ * about what reaches the built-in.
+ */
+function isGlobalObjectMember(sf: ts.SourceFile, e: ts.Expression): boolean {
+  const outer = memberAccess(unwrapTransparent(e));
+  if (!outer || outer.name !== "Object") return false;
+  const base = unwrapTransparent(outer.receiver);
+  return ts.isIdentifier(base) && isGlobal(sf, base, "globalThis");
 }
 
 /**
@@ -1245,18 +1379,10 @@ function objectBuiltinMember(access: ts.Node): string | null | undefined {
   if (!hop) return undefined;
   const sf = access.getSourceFile();
   const receiver = unwrapTransparent(hop.receiver);
-  let builtin = false;
-  if (ts.isIdentifier(receiver)) {
-    builtin = isGlobal(sf, receiver, "Object");
-  } else {
-    // `globalThis.Object.assign` and `globalThis["Object"]["assign"]` are the
-    // same call; the receiver is read by the same helper for the same reason.
-    const outer = memberAccess(receiver);
-    if (outer && outer.name === "Object") {
-      const base = unwrapTransparent(outer.receiver);
-      builtin = ts.isIdentifier(base) && isGlobal(sf, base, "globalThis");
-    }
-  }
+  // `Object.assign`, `globalThis.Object.assign`, `globalThis["Object"]["assign"]`
+  // and every alias of either spelling are the same call; the receiver is read
+  // by the same two helpers the holders set is built from.
+  const builtin = ts.isIdentifier(receiver) ? isGlobal(sf, receiver, "Object") : isGlobalObjectMember(sf, receiver);
   if (!builtin) return undefined;
   return member ? member.name : null;
 }

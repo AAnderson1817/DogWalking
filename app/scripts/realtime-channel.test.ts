@@ -867,6 +867,28 @@ describe("the walk channel is the only channel, and it is private on both sides"
       `let db: typeof supabase; [db] = [supabase]; ${KEY}db[key]("walk:public");`,
       `let db: typeof supabase; ({ db } = { db: supabase }); ${KEY}db[key]("walk:public");`,
       `for (const db of [supabase]) { ${KEY}db[key]("walk:public"); }`,
+      // …including through an inline literal SPREAD, which supplies the
+      // part exactly as the literal around it does — and the last definition
+      // of a key wins, as the language has it (Codex, PR #94, round 65).
+      `const { db } = { ...{ db: supabase } }; ${KEY}db[key]("walk:public");`,
+      `const { db } = { ...{ ...{ db: supabase } } }; ${KEY}db[key]("walk:public");`,
+      `const { db } = { db: other, ...{ db: supabase } }; ${KEY}db[key]("walk:public");`,
+      `const [db] = [...[supabase]]; ${KEY}db[key]("walk:public");`,
+      `for (const db of [...[supabase]]) { ${KEY}db[key]("walk:public"); }`,
+      // …and where a spread this reader CANNOT expand sits beside the part:
+      // a position before it and a key after it are still known, and an
+      // iteration binds every readable element whatever the spread holds —
+      // `for (const db of [...others, supabase])` was a MISS on the first
+      // round-65 reader, which applied the positional rule to a loop (a
+      // shape the reader before it got right; measured, both directions).
+      `const [db] = [supabase, ...others]; ${KEY}db[key]("walk:public");`,
+      `const { db } = { ...others, db: supabase }; ${KEY}db[key]("walk:public");`,
+      `const { db } = { [k]: other, db: supabase }; ${KEY}db[key]("walk:public");`,
+      `const { db } = { ...{ ...others, db: supabase } }; ${KEY}db[key]("walk:public");`,
+      `const { db } = { db: supabase, ...{ x: other } }; ${KEY}db[key]("walk:public");`,
+      `for (const db of [supabase, ...others]) { ${KEY}db[key]("walk:public"); }`,
+      `for (const db of [...others, supabase]) { ${KEY}db[key]("walk:public"); }`,
+      `for (const db of [...[...others, supabase]]) { ${KEY}db[key]("walk:public"); }`,
     ]) {
       const got = verdicts(body);
       expect(got, body).toHaveLength(1);
@@ -895,6 +917,29 @@ describe("the walk channel is the only channel, and it is private on both sides"
     expect(verdicts('const { data } = await supabase.from("walks").select("id"); const row = data[i]; void row;')).toEqual([]);
     expect(verdicts(`const ch = supabase.channel(t, ${OPTS}); ch[k]("x");`)).toEqual(["private"]);
     expect(verdicts('for (const row of rows) { const v = row[k]; void v; }')).toEqual([]);
+    // `for…in` binds KEYS, never the values: `db` is the string "0" here, and
+    // reading it as the client refused an unrelated computed string access on
+    // healthy code (Codex, PR #94, round 65).
+    expect(verdicts('for (const db in [supabase]) { const key: keyof string = "length"; void db[key]; }')).toEqual([]);
+    expect(verdicts('for (const db in { a: supabase }) { const key: keyof string = "length"; void db[key]; }')).toEqual([]);
+    // A later definition REPLACES the part: `db` holds `other`, not the client.
+    expect(verdicts(`const { db } = { ...{ db: supabase }, db: other }; ${KEY}(db as never)[key]("walk:public");`)).toEqual([]);
+    expect(verdicts(`const { db } = { db: supabase, get db() { return other; } }; ${KEY}(db as never)[key]("walk:public");`)).toEqual([]);
+    // A spread this reader cannot expand, or a key it cannot read, makes
+    // UNKNOWN every part it could affect — every position after it in an
+    // array, every key before it in an object — and not knowing is not
+    // evidence that the name holds the client. The stated miss direction,
+    // pinned so that changing it is a decision; each row is one the plausible
+    // wrong reading answers with confidence: a zero-width spread puts
+    // `supabase` at slot 0, and a skipped one leaves `db` standing.
+    expect(verdicts(`const [db] = [...others, supabase]; ${KEY}(db as never)[key]("walk:public");`)).toEqual([]);
+    expect(verdicts(`const [db] = [...[...others], supabase]; ${KEY}(db as never)[key]("walk:public");`)).toEqual([]);
+    expect(verdicts(`const [db] = [...[...others, supabase]]; ${KEY}(db as never)[key]("walk:public");`)).toEqual([]);
+    expect(verdicts(`for (const db of [...others]) { ${KEY}(db as never)[key]("walk:public"); }`)).toEqual([]);
+    expect(verdicts(`const { db } = { db: supabase, ...others }; ${KEY}(db as never)[key]("walk:public");`)).toEqual([]);
+    expect(verdicts(`const { db } = { db: supabase, ...{ ...others } }; ${KEY}(db as never)[key]("walk:public");`)).toEqual([]);
+    expect(verdicts(`const { db } = { db: supabase, [k]: other }; ${KEY}(db as never)[key]("walk:public");`)).toEqual([]);
+    expect(verdicts(`const { db } = { db: supabase, get [k]() { return other; } }; ${KEY}(db as never)[key]("walk:public");`)).toEqual([]);
   });
 
   it("classifies a channel call through every transparent receiver spelling", () => {
@@ -1500,6 +1545,26 @@ describe("the walk channel is the only channel, and it is private on both sides"
     expect(muts('const O = Object;\nconst m = { private: true };\nconst f = O.assign;'))
       .toEqual([expect.stringContaining("referenced without being called")]);
     expect(muts('const g = globalThis;\nconst m = { private: true };\ng.Object.assign(m, { private: false });')).toHaveLength(1);
+    // …and an alias of the built-in's OTHER spelling, `globalThis.Object`,
+    // which is a member access rather than an identifier and so was not a
+    // source the holders set could read (Codex, PR #94, round 65).
+    expect(muts('const O = globalThis.Object;\nconst m = { private: true };\nO.assign(m, { private: false });')).toHaveLength(1);
+    expect(muts('const O = globalThis["Object"];\nconst m = { private: true };\nO.assign(m, { private: false });')).toHaveLength(1);
+    expect(muts('const g = globalThis;\nconst O = g.Object;\nconst m = { private: true };\nO.assign(m, { private: false });')).toHaveLength(1);
+    expect(muts('let O: typeof Object;\nO = globalThis.Object;\nconst m = { private: true };\nO.assign(m, { private: false });')).toHaveLength(1);
+    expect(muts('const O = globalThis.Object;\nconst m = { private: true };\nconst k: "assign" = "assign"; O[k](m, { private: false });'))
+      .toEqual([expect.stringContaining("a computed member of Object")]);
+    expect(muts('const O = globalThis.Object;\nconst m = { private: true };\nconst f = O.assign;'))
+      .toEqual([expect.stringContaining("referenced without being called")]);
+    // …through an iteration, which binds every readable element whatever an
+    // unexpandable spread beside it holds — and NOT through a key an
+    // unfollowable spread after it may replace: not knowing is not evidence
+    // that `O` is the built-in, the same rule the client set follows.
+    expect(muts('for (const O of [...others, Object]) {\nconst m = { private: true };\nO.assign(m, { private: false });\n}')).toHaveLength(1);
+    expect(muts('const { O } = { O: Object, ...others };\nconst m = { private: true };\nO.assign(m, { private: false });')).toEqual([]);
+    // …and not `.Object` on something that is NOT the global `globalThis`.
+    expect(muts('const g = { Object: { assign(_a: unknown, _b: unknown) {} } };\nconst O = g.Object;\nconst m = { private: true };\nO.assign(m, { private: false });')).toEqual([]);
+    expect(muts('const globalThis = { Object: { assign(_a: unknown, _b: unknown) {} } };\nconst O = globalThis.Object;\nconst m = { private: true };\nO.assign(m, { private: false });')).toEqual([]);
     // …and not on a receiver that is NOT the built-in: a bound `Object`, a
     // bound `globalThis`, somebody else's object. A computed member of those
     // is ordinary code.
