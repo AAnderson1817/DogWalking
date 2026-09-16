@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import ts from "typescript";
 import { afterEach, describe, expect, it } from "vitest";
+import { literalText, propertyKey, unwrapTransparent } from "./lib/static-object.ts";
 
 /**
  * Review M4: the production deploy asserted nothing, so a function that
@@ -407,6 +408,55 @@ function sourceFiles(dir: string): string[] {
  * a conditional wrapper is exactly a function somebody should read and record
  * a `contract_for` case for. "It is at module scope" is not "it runs".
  */
+/**
+ * Does this `serveFunction(…)` call still answer 405 to a production GET?
+ *
+ * The wrapper's read-only argument is not "it is behind `serveFunction`" — it
+ * is that `handleRequest` returns 405 BEFORE the handler for a method the call
+ * does not allow (`_lib/http.ts`), and `ServeOptions.methods` widens exactly
+ * that. `verify-deployment.sh` probes production with an unauthenticated GET,
+ * so a GET-enabled handler taking the DEFAULT contract would have its body
+ * EXECUTED by the check — measured: a planted `{ methods: ["GET", "POST"] }`
+ * function passed 14 of 14 with no bespoke case (Codex, PR #94).
+ *
+ * Requiring the wrapper and not what makes it read-only is the enumerate-
+ * instead-of-require shape this file's round-four fix was itself about.
+ *
+ * REFUSES anything it cannot read — a `methods` it cannot resolve is not
+ * evidence of POST-only — so such a call needs a reviewed `contract_for` case,
+ * which is what `unsubscribe` already carries.
+ */
+function refusesGet(call: ts.CallExpression): boolean {
+  const opts = call.arguments[1];
+  // No options at all is the DEFAULT, which is POST-only.
+  if (!opts) return true;
+  const lit = unwrapTransparent(opts);
+  if (!ts.isObjectLiteralExpression(lit)) return false;
+  let methods: ts.Expression | undefined;
+  let readable = true;
+  for (const p of lit.properties) {
+    if (ts.isPropertyAssignment(p)) {
+      const key = propertyKey(p.name);
+      if (key === null) readable = false;
+      else if (key === "methods") methods = p.initializer;
+      continue;
+    }
+    // A spread, a shorthand, an accessor: could carry or replace `methods`.
+    readable = false;
+  }
+  if (!readable) return false;
+  if (!methods) return true;
+  const arr = unwrapTransparent(methods);
+  if (!ts.isArrayLiteralExpression(arr)) return false;
+  const names: string[] = [];
+  for (const el of arr.elements) {
+    const text = literalText(unwrapTransparent(el));
+    if (text === null) return false;
+    names.push(text);
+  }
+  return !names.includes("GET");
+}
+
 function serveFunctionLines(file: string): number[] {
   const text = readFileSync(file, "utf8");
   const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -456,14 +506,14 @@ function serveFunctionLines(file: string): number[] {
     const c = unwrap(e);
     if (!ts.isCallExpression(c)) return false;
     const callee = unwrap(c.expression);
-    if (ts.isIdentifier(callee)) return bound.has(callee.text);
-    // `http.serveFunction(…)` through a namespace import of the same module.
-    return (
-      ts.isPropertyAccessExpression(callee) &&
-      callee.name.text === "serveFunction" &&
-      ts.isIdentifier(callee.expression) &&
-      namespaces.has(callee.expression.text)
-    );
+    const named = ts.isIdentifier(callee)
+      ? bound.has(callee.text)
+      // `http.serveFunction(…)` through a namespace import of the same module.
+      : ts.isPropertyAccessExpression(callee)
+        && callee.name.text === "serveFunction"
+        && ts.isIdentifier(callee.expression)
+        && namespaces.has(callee.expression.text);
+    return named && refusesGet(c);
   };
 
   const lines: number[] = [];
@@ -590,6 +640,15 @@ describe("verify-deployment: the read-only argument", () => {
     // spelling exists to say "I am deliberately not awaiting this".
     put("omicron", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nvoid serveFunction(handle);\n');
     put("pi", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nvoid (await serveFunction(handle));\n');
+    // Housed with an explicit POST-only list — the default, spelled out.
+    put("tau", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { methods: ["POST"] });\n');
+    // NOT housed: the wrapper admits GET, so it does NOT answer 405 before the
+    // handler and `verify-deployment.sh`'s production GET would run the body.
+    put("upsilon", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { methods: ["GET", "POST"] });\n');
+    // NOT housed: a `methods` this reader cannot resolve is not evidence of
+    // POST-only, so it needs a reviewed contract like any bypasser.
+    put("phi", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { methods: ALLOWED });\n');
+    put("chi", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { ...opts });\n');
     // Housed through a NAMESPACE import of the same module.
     put("rho", "index.ts", 'import * as http from "../_lib/http.ts";\nhttp.serveFunction(handle);\n');
     // NOT housed: the same spelling on a namespace of a DIFFERENT module is
@@ -626,6 +685,10 @@ describe("verify-deployment: the read-only argument", () => {
       pi: true,
       rho: true,
       sigma: false,
+      tau: true,
+      upsilon: false,
+      phi: false,
+      chi: false,
     });
   });
 

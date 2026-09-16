@@ -213,7 +213,13 @@ def _command(body: str) -> str:
     read as unreadable on this rule's first run.
     """
     words = "|".join(re.escape(w) for w in SHELL_RESERVED if w.isalpha())
-    boundary = r'(?:^|(?<=\n)|(?<=[;&|(){}])|(?<=\s!)|(?:(?:^|(?<=\n)|(?<=\s))(?:%s)\s+))' % words
+    # A reserved word itself begins at a command position, so the SAME set of
+    # places must precede it — `cmd;if run "…"` and `(if run "…"` are ordinary
+    # bash, and a rule that admitted a reserved word only after whitespace or a
+    # newline read neither, in both directions: neither runnable nor unreadable
+    # (measured, Codex on PR #94).
+    at = r'(?:^|(?<=\n)|(?<=[;&|(){}])|(?<=\s))'
+    boundary = r'(?:^|(?<=\n)|(?<=[;&|(){}])|(?<=\s!)|(?:%s(?:%s)\s+))' % (at, words)
     # `VAR=value` and `>file` / `2>&1` / `<in`, repeated, with the spacing bash
     # allows. Nothing here is captured; the command word follows.
     #
@@ -367,6 +373,11 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('  run "1. indented" cmd', ["1. indented"]),
     ('if run "1. control" cmd; then :; fi', ["1. control"]),
     ('cmd; run "1. after-separator" x', ["1. after-separator"]),
+    # A reserved word begins at a command position too, so every separator that
+    # can precede a command can precede one of these.
+    ('cmd;if run "1. separator-then-reserved" true; then :; fi', ["1. separator-then-reserved"]),
+    ('cmd&&if run "1. and-then-reserved" true; then :; fi', ["1. and-then-reserved"]),
+    ('(if run "1. paren-then-reserved" true; then :; fi)', ["1. paren-then-reserved"]),
     ('MODE=ci run "1. assignment" x', ["1. assignment"]),
     # A quoted assignment value holds the whitespace a bare word may not. The
     # reader stopped at the space and the `run` after it was invisible in both

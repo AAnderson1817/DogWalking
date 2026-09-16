@@ -444,6 +444,25 @@ function isDefiniteRebinding(kind: ts.SyntaxKind): boolean {
   return isAssignmentOperator(kind);
 }
 
+/**
+ * An object-literal member that DEFINES a property without a readable value:
+ * `get x() {…}`, `set x(v) {…}`, `x() {…}`.
+ *
+ * A getter overrides whatever a spread before it supplied, and what it returns
+ * is a function body rather than a literal — so a reader that skips these
+ * reports the SPREAD's value for a key the object no longer carries, which is
+ * a confidently wrong answer rather than an absent one (Codex, PR #94:
+ * `{ ...base, get private() { return false; } }` read as private).
+ *
+ * The two gates differ only in how they say "no answer", so this names the
+ * shape and each records its own marker.
+ */
+export function definesWithoutValue(
+  p: ts.ObjectLiteralElementLike,
+): p is ts.GetAccessorDeclaration | ts.SetAccessorDeclaration | ts.MethodDeclaration {
+  return ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p) || ts.isMethodDeclaration(p);
+}
+
 /** Every assignment operator, `=` and the compound ones alike. */
 export function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
   return (

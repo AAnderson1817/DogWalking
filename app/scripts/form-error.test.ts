@@ -5,6 +5,7 @@ import ts from "typescript";
 import {
   declaredObjects,
   literalText,
+  definesWithoutValue,
   propertyKey,
   unwrapTransparent,
 } from "./lib/static-object.js";
@@ -117,6 +118,14 @@ function objectLiteralProperty(
     if (ts.isShorthandPropertyAssignment(prop)) {
       // `{ role }` carries a reference this gate cannot resolve.
       if (prop.name.text === name) value = null;
+      continue;
+    }
+    if (definesWithoutValue(prop)) {
+      // The channel reader's rule, in the file that has to agree with it:
+      // `{ ...base, get role() { … } }` defines `role` and answers a function
+      // body, so the spread's value must not survive as the answer.
+      const accessor = propertyKey(prop.name);
+      if (accessor === null || accessor === name) value = null;
       continue;
     }
     if (!ts.isPropertyAssignment(prop)) continue;
@@ -334,6 +343,18 @@ describe("every error message renders through FormError or StateField", () => {
     expect(role('const b = { role: "alert" };\nconst a = b;\nb.role = "status";\n<span {...a} />')).toBeNull();
     // A cycle terminates rather than resolving or hanging.
     expect(role("let b = a;\nlet a = b;\n<span {...a} />")).toBeNull();
+    // An accessor or method DEFINES the property and answers a function body,
+    // so it overrides an earlier spread rather than falling through it — the
+    // channel reader's rule, in the file that has to agree with it.
+    expect(role('const b = { role: "alert" };\n<span {...{ ...b, get role() { return "status"; } }} />'))
+      .toBeNull();
+    expect(role('const b = { role: "alert" };\n<span {...{ ...b, set role(v) {} }} />')).toBeNull();
+    expect(role('const b = { role: "alert" };\n<span {...{ ...b, role() { return "status"; } }} />'))
+      .toBeNull();
+    // A computed accessor name could be this one.
+    expect(role('<span {...{ role: "alert", get [k]() { return "status"; } }} />')).toBeNull();
+    // An accessor on an unrelated key leaves the answer alone.
+    expect(role('<span {...{ role: "alert", get other() { return 1; } }} />')).toBe("alert");
   });
 
   // Preconditions. An assertion that only forbids is satisfied by a scanner

@@ -7,6 +7,7 @@ import {
   isAssignmentOperator,
   isObjectAssignCall,
   propertyKey,
+  definesWithoutValue,
   unwrapTransparent,
 } from "./lib/static-object.js";
 import { describe, expect, it } from "vitest";
@@ -362,6 +363,16 @@ function effectiveProps(
       // `topic`, where presence is the question; not fine for `private`, which
       // is why the value is recorded as unreadable rather than as true.
       props.set(p.name.text, "<shorthand, unreadable>");
+      continue;
+    }
+    if (definesWithoutValue(p)) {
+      // `get private() { … }` DEFINES the property, overriding an earlier
+      // spread, and what it answers is a function body. Falling through every
+      // branch left the spread's value standing for a key the object no longer
+      // carries — a confidently wrong answer (Codex, PR #94).
+      const key = propertyKey(p.name);
+      if (key !== null) props.set(key, "<accessor or method, unreadable>");
+      else markAll("<computed accessor, unreadable>");
     }
   }
   return props;
@@ -738,6 +749,19 @@ describe("the walk channel is the only channel, and it is private on both sides"
       .toEqual(["true"]);
     expect(read("let c = { private: true };\nc &&= other;\nsend({ topic, ...c });"))
       .toEqual(["<unresolvable spread `c`>"]);
+    // An accessor or a method DEFINES the property and answers a function
+    // body, so it must override a spread rather than fall through it.
+    expect(read("const b = { private: true };\nsend({ topic, ...b, get private() { return false; } });"))
+      .toEqual(["<accessor or method, unreadable>"]);
+    expect(read("const b = { private: true };\nsend({ topic, ...b, set private(v) {} });"))
+      .toEqual(["<accessor or method, unreadable>"]);
+    expect(read("const b = { private: true };\nsend({ topic, ...b, private() { return false; } });"))
+      .toEqual(["<accessor or method, unreadable>"]);
+    // …and one whose NAME is computed could be any of them.
+    expect(read("const b = { private: true };\nsend({ topic, ...b, get [k]() { return false; } });"))
+      .toEqual(["<computed accessor, unreadable>"]);
+    // An accessor on an unrelated key leaves the answer alone.
+    expect(read("send({ topic, private: true, get other() { return 1; } });")).toEqual(["true"]);
     // PINNED REFUSAL, not an accident: an alias rebound BEFORE it is mutated
     // still invalidates the original. Dropping the stale edge needs to know
     // which assignment ran first — flow sensitivity — and the mirror of this
