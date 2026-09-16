@@ -5,8 +5,8 @@ import ts from "typescript";
 import {
   declaredObjects,
   literalText,
-  definesWithoutValue,
   propertyKey,
+  resolveProperty,
   unwrapTransparent,
 } from "./lib/static-object.js";
 import { describe, expect, it } from "vitest";
@@ -47,10 +47,19 @@ import { describe, expect, it } from "vitest";
 const APP_SRC = fileURLToPath(new URL("../src", import.meta.url));
 
 /**
- * The one file that legitimately puts a live region on a raw element, because
- * it IS the approved component. Named rather than pattern-matched, so the
- * exception is editable only here and only in the same commit as the thing it
- * excuses (the `no-raw-hex.test.ts` shape).
+ * The raw live regions this gate allows, by FILE AND COMPONENT.
+ *
+ * It was by file alone, and a file is not a component: `components/fields.tsx`
+ * also exports `Input`, `Textarea` and `Select`, so a bare
+ * `<span role="alert">` added to any of them passed the gate that exists to
+ * forbid it — measured, by planting one inside `Input` and again as a new
+ * export, both green (Codex, PR #94). The gate BLESSING what it forbids,
+ * which is the worse of the two directions.
+ *
+ * Named rather than pattern-matched, so the exception is editable only here
+ * and only in the same commit as the thing it excuses (the `no-raw-hex.test.ts`
+ * shape), and SPENT rather than merely offered: an entry matching no site is
+ * itself a failure, because a stale exception excuses a real check forever.
  *
  * `StateField.tsx` is deliberately NOT listed. Its `role={role}` is an
  * expression, not the literal `"alert"`, so this scan does not see it at all —
@@ -59,7 +68,9 @@ const APP_SRC = fileURLToPath(new URL("../src", import.meta.url));
  * ever writes `role="alert"` literally onto its `<section>`, this gate will
  * say so, and that is the right outcome: the decision should be visible.
  */
-const OWNS_A_LIVE_REGION = "components/fields.tsx";
+const APPROVED_LIVE_REGIONS: ReadonlyArray<readonly [string, string]> = [
+  ["components/fields.tsx", "FormError"],
+];
 
 function tsxFiles(dir: string): string[] {
   const out: string[] = [];
@@ -74,8 +85,44 @@ function tsxFiles(dir: string): string[] {
 interface Site {
   file: string;
   line: number;
+  /** The nearest NAMED declaration around the element, or "" at module scope. */
+  component: string;
   tag: string;
   why: string;
+}
+
+/**
+ * The name of the nearest enclosing declaration, which is the component a JSX
+ * element belongs to.
+ *
+ * Read from the declaration rather than from the file, because the exemption
+ * this feeds is about one component and a file holds several. A function
+ * expression or arrow assigned to a name takes that name (`const FormError =
+ * () => …`), which is how a React component is as often written as with
+ * `function`. An element at module scope, or inside an anonymous callback
+ * with no named declaration above it, answers "" and is therefore never
+ * exempt — the refusing direction, since an unnamed site is one nobody
+ * approved.
+ */
+function enclosingComponent(node: ts.Node): string {
+  for (let n: ts.Node | undefined = node.parent; n; n = n.parent) {
+    if (ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n) || ts.isMethodDeclaration(n)) {
+      if (n.name && ts.isIdentifier(n.name)) return n.name.text;
+      continue;
+    }
+    if (ts.isFunctionExpression(n) || ts.isArrowFunction(n) || ts.isClassExpression(n)) {
+      const owner = n.parent;
+      if (owner && ts.isVariableDeclaration(owner) && ts.isIdentifier(owner.name)) {
+        return owner.name.text;
+      }
+      if (owner && ts.isPropertyAssignment(owner)) {
+        const key = propertyKey(owner.name);
+        if (key !== null) return key;
+      }
+      continue;
+    }
+  }
+  return "";
 }
 
 /**
@@ -94,48 +141,25 @@ interface Site {
  * property that is absent leaves an earlier answer standing, while one that
  * is present but dynamic replaces it with "no answer".
  */
+/**
+ * The literal text of `name` on an object literal, or null when a member may
+ * define it and this reader cannot read it, or undefined when none does.
+ *
+ * The ORDER rule and every member kind live in `resolveProperty`, which
+ * `verify-deployment.test.ts` reads too, so the two cannot drift about what a
+ * later member does to an earlier one. What is local here is the DIRECTION:
+ * a spread this reader cannot follow leaves the answer alone, because
+ * refusing to un-flag is the safe direction for a question about a live
+ * region — `<span role="alert" {...rest} />` must stay flagged.
+ */
 function objectLiteralProperty(
   obj: ts.ObjectLiteralExpression,
   name: string,
-  depth = 0,
   declared: Map<string, ts.ObjectLiteralExpression> = new Map(),
 ): string | null | undefined {
-  let value: string | null | undefined;
-  for (const prop of obj.properties) {
-    if (ts.isSpreadAssignment(prop)) {
-      if (depth >= 8) continue;
-      const inner = unwrapTransparent(prop.expression);
-      const from = ts.isObjectLiteralExpression(inner)
-        ? inner
-        : ts.isIdentifier(inner)
-          ? declared.get(inner.text)
-          : undefined;
-      if (!from) continue;
-      const nested = objectLiteralProperty(from, name, depth + 1, declared);
-      if (nested !== undefined) value = nested;
-      continue;
-    }
-    if (ts.isShorthandPropertyAssignment(prop)) {
-      // `{ role }` carries a reference this gate cannot resolve.
-      if (prop.name.text === name) value = null;
-      continue;
-    }
-    if (definesWithoutValue(prop)) {
-      // The channel reader's rule, in the file that has to agree with it:
-      // `{ ...base, get role() { … } }` defines `role` and answers a function
-      // body, so the spread's value must not survive as the answer.
-      const accessor = propertyKey(prop.name);
-      if (accessor === null || accessor === name) value = null;
-      continue;
-    }
-    if (!ts.isPropertyAssignment(prop)) continue;
-    const key = propertyKey(prop.name);
-    if (key === name) value = literalText(prop.initializer);
-    // A key the reader cannot resolve could be THIS name, so it replaces the
-    // answer with "no answer" rather than being passed over.
-    else if (key === null) value = null;
-  }
-  return value;
+  const value = resolveProperty(obj, name, declared, false);
+  if (value === undefined) return undefined;
+  return value === null ? null : literalText(value);
 }
 
 /**
@@ -182,7 +206,7 @@ function literalAttribute(
           ? declared.get(spread.text)
           : undefined;
       if (!target) continue;
-      const found = objectLiteralProperty(target, name, 0, declared);
+      const found = objectLiteralProperty(target, name, declared);
       if (found !== undefined) value = found;
       continue;
     }
@@ -227,6 +251,7 @@ function scan(files: string[]): Site[] {
             found.push({
               file: rel,
               line: source.getLineAndCharacterOfPosition(node.getStart()).line + 1,
+              component: enclosingComponent(node),
               tag,
               why: role === "alert" ? 'role="alert"' : `className "${cls}"`,
             });
@@ -286,8 +311,15 @@ describe("every error message renders through FormError or StateField", () => {
     expect(role("<span {...rest} />")).toBeNull();
     expect(role("<span {...{ role: computeRole() }} />")).toBeNull();
     // An unreadable spread does not ERASE evidence already found: refusing to
-    // un-flag is the safe direction for a question about a live region.
+    // un-flag is the safe direction for a question about a live region. Both
+    // positions matter — the JSX attribute list has its own rule, and the
+    // second row is the one that reaches the shared reader's direction knob.
     expect(role('<span role="alert" {...rest} />')).toBe("alert");
+    expect(role('<span {...{ role: "alert", ...rest }} />')).toBe("alert");
+    // A shorthand naming ANOTHER key never touched this one, and it comes
+    // AFTER: the row that tells "names a different key" apart from "any
+    // uncertain member erases".
+    expect(role('<span {...{ role: "alert", other }} />')).toBe("alert");
     expect(role("<span />")).toBeNull();
     // Transparent TypeScript wrappers: React gets the same literal.
     expect(role('<span role={"alert" as const} />')).toBe("alert");
@@ -363,22 +395,65 @@ describe("every error message renders through FormError or StateField", () => {
     expect(files.length).toBeGreaterThan(20);
   });
 
-  it("finds the raw live region in the file that owns it", () => {
-    // The file and the shape, never the line: a precondition pinned to a line
-    // number goes red the first time somebody edits a comment above it, which
-    // is a gate red on a healthy tree. The line is in the failure message,
-    // which is where a reader wants it.
+  it("finds the raw live region in the component that owns it", () => {
+    // The file, the COMPONENT and the shape, never the line: a precondition
+    // pinned to a line number goes red the first time somebody edits a comment
+    // above it, which is a gate red on a healthy tree. The line is in the
+    // failure message, which is where a reader wants it.
     expect(
-      sites.map((s) => `${s.file} <${s.tag}> ${s.why}`),
+      sites.map((s) => `${s.file} ${s.component} <${s.tag}> ${s.why}`),
       "the parser found no raw live region at all — it is not reading tags or attributes",
-    ).toContain('components/fields.tsx <span> role="alert"');
+    ).toContain('components/fields.tsx FormError <span> role="alert"');
   });
 
-  it("has no bare error element outside that file", () => {
-    const offenders = sites.filter((s) => s.file !== OWNS_A_LIVE_REGION);
+  it("has no bare error element outside the approved components", () => {
+    const approved = new Set(APPROVED_LIVE_REGIONS.map(([f, c]) => `${f} ${c}`));
+    const offenders = sites.filter((s) => !approved.has(`${s.file} ${s.component}`));
     expect(
-      offenders.map((s) => `${s.file}:${s.line} <${s.tag}> ${s.why}`),
+      offenders.map((s) => `${s.file}:${s.line} ${s.component || "<module scope>"} <${s.tag}> ${s.why}`),
       'a raw element carries an error live region — render it through <FormError /> or <StateField role="alert" />',
     ).toEqual([]);
+  });
+
+  it("spends every approved exemption", () => {
+    // A stale exception excuses a real check forever, so an entry matching no
+    // site fails here rather than sitting unnoticed — the same rule
+    // `verify-deployment.sh`'s `contract_for` carries.
+    const unspent = APPROVED_LIVE_REGIONS.filter(
+      ([file, component]) => !sites.some((s) => s.file === file && s.component === component),
+    );
+    expect(
+      unspent.map(([f, c]) => `${f} ${c}`),
+      "an approved live region no longer exists — remove the entry or restore the component",
+    ).toEqual([]);
+  });
+
+  it("reads the enclosing component in every declaration spelling", () => {
+    // Pinned on fixtures as well as on the tree, because the tree holds one
+    // site and a reader that answered "" to everything would pass the
+    // exemption check for the wrong reason — and would then exempt nothing,
+    // which is a gate red on a healthy tree the day somebody writes the
+    // component with an arrow instead of `function`.
+    const at = (src: string): string => {
+      const sf = ts.createSourceFile("f.tsx", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+      let out = "<none>";
+      const visit = (n: ts.Node): void => {
+        if (ts.isJsxSelfClosingElement(n)) out = enclosingComponent(n);
+        ts.forEachChild(n, visit);
+      };
+      visit(sf);
+      return out;
+    };
+
+    expect(at('function FormError() { return <span role="alert" />; }')).toBe("FormError");
+    expect(at('const FormError = () => <span role="alert" />;')).toBe("FormError");
+    expect(at('const FormError = function () { return <span role="alert" />; };')).toBe("FormError");
+    expect(at('const ui = { FormError: () => <span role="alert" /> };')).toBe("FormError");
+    expect(at('class C { render() { return <span role="alert" />; } }')).toBe("render");
+    // A nested anonymous callback belongs to the named declaration above it.
+    expect(at('function FormError() { return xs.map(() => <span role="alert" />); }')).toBe("FormError");
+    // Nothing named it: never exempt, which is the refusing direction.
+    expect(at('const e = <span role="alert" />;')).toBe("");
+    expect(at('export default () => <span role="alert" />;')).toBe("");
   });
 });

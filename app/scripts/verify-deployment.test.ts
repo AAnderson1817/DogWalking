@@ -6,9 +6,10 @@ import { join, relative, resolve } from "node:path";
 import ts from "typescript";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  declaredObjects,
   isExplicitUndefined,
   literalText,
-  propertyKey,
+  resolveProperty,
   unwrapTransparent,
 } from "./lib/static-object.ts";
 
@@ -431,7 +432,7 @@ function sourceFiles(dir: string): string[] {
  * evidence of POST-only — so such a call needs a reviewed `contract_for` case,
  * which is what `unsubscribe` already carries.
  */
-function refusesGet(call: ts.CallExpression): boolean {
+function refusesGet(call: ts.CallExpression, sf: ts.SourceFile): boolean {
   const opts = call.arguments[1];
   // No options at all is the DEFAULT, which is POST-only — and so is an
   // EXPLICIT `undefined`, because the parameter carries a default initializer
@@ -440,19 +441,20 @@ function refusesGet(call: ts.CallExpression): boolean {
   if (!opts || isExplicitUndefined(opts)) return true;
   const lit = unwrapTransparent(opts);
   if (!ts.isObjectLiteralExpression(lit)) return false;
-  let methods: ts.Expression | undefined;
-  let readable = true;
-  for (const p of lit.properties) {
-    if (ts.isPropertyAssignment(p)) {
-      const key = propertyKey(p.name);
-      if (key === null) readable = false;
-      else if (key === "methods") methods = p.initializer;
-      continue;
-    }
-    // A spread, a shorthand, an accessor: could carry or replace `methods`.
-    readable = false;
-  }
-  if (!readable) return false;
+  // Resolved in SOURCE ORDER by the shared reader, which is the fix for a
+  // walk that collected uncertainty in a flag and consulted it at the end:
+  // `{ ...shared, methods: ["POST"] }` really does carry `["POST"]`
+  // (measured in node) and was refused, along with an earlier computed key,
+  // an earlier accessor on another key and a shorthand naming another key —
+  // six healthy shapes, each then demanding a bespoke production contract
+  // (Codex, PR #94). A member AFTER a readable `methods` still erases it,
+  // which is the same rule facing the other way and stays refused.
+  //
+  // A spread this reader CANNOT follow erases too, because not knowing is
+  // not evidence of POST-only: such a call needs a reviewed `contract_for`
+  // case, exactly as `unsubscribe` carries one.
+  const methods = resolveProperty(lit, "methods", declaredObjects(sf));
+  if (methods === null) return false;
   // An absent `methods` is the default list, and `options.methods ??
   // DEFAULT_METHODS` (`_lib/http.ts:294`) makes an explicit `undefined` the
   // same thing — the sibling of the argument position above, and the review
@@ -525,7 +527,7 @@ function serveFunctionLines(file: string): number[] {
         && callee.name.text === "serveFunction"
         && ts.isIdentifier(callee.expression)
         && namespaces.has(callee.expression.text);
-    return named && refusesGet(c);
+    return named && refusesGet(c, sf);
   };
 
   const lines: number[] = [];
@@ -698,6 +700,44 @@ describe("verify-deployment: the read-only argument", () => {
     // POST-only, so it needs a reviewed contract like any bypasser.
     put("phi", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { methods: ALLOWED });\n');
     put("chi", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { ...opts });\n');
+    // Housed: the members resolve in SOURCE ORDER, so a LATER static `methods`
+    // replaces an earlier uncertainty — measured in node, `{ ...shared,
+    // methods: ["POST"] }` really does carry `["POST"]`. A flag consulted at
+    // the end answered the same thing for this and for `chi2` below, and only
+    // the second is uncertain (Codex, PR #94: red on a healthy tree, and the
+    // reviewer's example was one of six shapes that shared the hole).
+    put("phi2", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { ...shared, methods: ["POST"] });\n');
+    // …and the same rule for the other three member kinds, each naming a
+    // DIFFERENT key, which therefore never touched `methods` at all.
+    put("phi3", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { other, methods: ["POST"] });\n');
+    put("phi4", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { [k]: v, methods: ["POST"] });\n');
+    put("phi5", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { get other() { return 1; }, methods: ["POST"] });\n');
+    // Housed: a duplicate key is the plain case of the same rule.
+    put("phi6", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { methods: ["GET"], methods: ["POST"] });\n');
+    // Housed: a spread this reader CAN resolve is read rather than refused —
+    // an inline literal, and a name bound to one. The sibling readers have
+    // followed both since the round that gave them spreads.
+    put("phi7", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { ...({ methods: ["POST"] }) });\n');
+    put("phi8", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nconst SHARED = { methods: ["POST"] };\nserveFunction(handle, { ...SHARED });\n');
+    // NOT housed, and these are what stop the fix becoming "never refuse":
+    // the same members AFTER a readable `methods` really can replace it, so
+    // order cuts both ways (all measured in node).
+    put("chi2", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { methods: ["POST"], ...shared });\n');
+    put("chi3", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { methods: ["POST"], [k]: v });\n');
+    put("chi4", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { methods: ["POST"], get methods() { return ["GET"]; } });\n');
+    put("chi5", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { methods: ["POST"], methods: ["GET"] });\n');
+    // Housed: a shorthand naming ANOTHER key never touched `methods` at all,
+    // and it comes AFTER — which is the row that tells "this member names a
+    // different key" apart from "any uncertain member erases", since a
+    // shorthand before a readable `methods` is covered by the order rule
+    // whichever way that is decided.
+    put("phi9", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { methods: ["POST"], other });\n');
+    // Housed: an accessor naming ANOTHER key, also AFTER, for the same reason.
+    put("phi10", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { methods: ["POST"], get other() { return 1; } });\n');
+    // NOT housed: a shorthand NAMING this key carries a reference, and a
+    // followed spread that admits GET is read as admitting it.
+    put("chi6", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { methods });\n');
+    put("chi7", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nconst SHARED = { methods: ["GET", "POST"] };\nserveFunction(handle, { ...SHARED });\n');
     // Housed through a NAMESPACE import of the same module.
     put("rho", "index.ts", 'import * as http from "../_lib/http.ts";\nhttp.serveFunction(handle);\n');
     // NOT housed: the same spelling on a namespace of a DIFFERENT module is
@@ -738,6 +778,21 @@ describe("verify-deployment: the read-only argument", () => {
       upsilon: false,
       phi: false,
       chi: false,
+      phi2: true,
+      phi3: true,
+      phi4: true,
+      phi5: true,
+      phi6: true,
+      phi7: true,
+      phi8: true,
+      chi2: false,
+      chi3: false,
+      chi4: false,
+      chi5: false,
+      phi9: true,
+      phi10: true,
+      chi6: false,
+      chi7: false,
       psi: true,
       psi2: true,
       omega: true,

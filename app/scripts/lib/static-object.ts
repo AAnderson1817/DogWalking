@@ -472,6 +472,93 @@ export function definesWithoutValue(
 }
 
 /**
+ * The effective value of `name` on an object literal, resolved in SOURCE
+ * ORDER — the last member that defines the key wins, exactly as the language
+ * does it.
+ *
+ *   undefined   no member defines it
+ *   null        a member may define it and this reader cannot say what
+ *   Expression  the last readable definition
+ *
+ * THE ORDER IS THE POINT. A reader that collects uncertainty in a flag and
+ * consults it at the end answers the same thing for `{ ...shared, methods: [
+ * "POST"] }` and `{ methods: ["POST"], ...shared }`, and only the second of
+ * those is uncertain — measured in node, the first really does carry
+ * `["POST"]`. `verify-deployment.test.ts`'s `refusesGet` was the last reader
+ * in this family doing that, and it refused six healthy shapes: an earlier
+ * spread, an earlier computed key, an earlier accessor on another key, and a
+ * shorthand naming another key (Codex, PR #94 — a gate red on a healthy tree,
+ * the worst shape these files record). Its two siblings already resolved in
+ * order, which is what said the defect was confined to one of them, and this
+ * is the walk they now share so there is no third copy to forget.
+ *
+ * `spreadErases` is the one genuine difference between the callers and it is
+ * a difference of DIRECTION, not of order. A spread this reader cannot follow
+ * could define anything:
+ *
+ *   - Asking "does this refuse GET?", not knowing is not evidence of POST-only,
+ *     so it must erase an earlier answer (true, the default).
+ *   - Asking "is this a raw live region?", not knowing must not UN-FLAG an
+ *     element already carrying `role="alert"` — refusing to un-flag is the
+ *     safe direction there (false, which `form-error.test.ts` passes).
+ *
+ * A member that NAMES the key is uncertain for both callers whichever way
+ * that knob is set: a shorthand carries a reference, an accessor answers a
+ * function body, and a computed key this reader cannot read could BE this
+ * name. Only the blanket case differs.
+ *
+ * `realtime-channel.test.ts` keeps its own walk and is the stated residual:
+ * `effectiveProps` answers four keys at once, tracks which of them a member
+ * NAMED, and carries a typed marker per cause into its failure messages, so
+ * it is a different question rather than a second copy of this one. It has
+ * resolved in source order since the round that gave it spreads, and both
+ * files pin that with fixtures.
+ */
+export function resolveProperty(
+  obj: ts.ObjectLiteralExpression,
+  name: string,
+  declared: Map<string, ts.ObjectLiteralExpression> = new Map(),
+  spreadErases = true,
+  depth = 0,
+): ts.Expression | null | undefined {
+  let value: ts.Expression | null | undefined;
+  for (const p of obj.properties) {
+    if (ts.isSpreadAssignment(p)) {
+      const inner = unwrapTransparent(p.expression);
+      const from = ts.isObjectLiteralExpression(inner)
+        ? inner
+        : ts.isIdentifier(inner)
+          ? declared.get(inner.text)
+          : undefined;
+      if (from && depth < 8) {
+        const nested = resolveProperty(from, name, declared, spreadErases, depth + 1);
+        if (nested !== undefined) value = nested;
+      } else if (spreadErases) value = null;
+      continue;
+    }
+    if (ts.isShorthandPropertyAssignment(p)) {
+      // `{ methods }` carries a reference this reader cannot resolve — and
+      // one naming ANOTHER key does not touch this one, which the flag-based
+      // reader could not say.
+      if (p.name.text === name) value = null;
+      continue;
+    }
+    if (definesWithoutValue(p)) {
+      const key = propertyKey(p.name);
+      if (key === null || key === name) value = null;
+      continue;
+    }
+    if (!ts.isPropertyAssignment(p)) continue;
+    const key = propertyKey(p.name);
+    if (key === name) value = p.initializer;
+    // A key this reader cannot resolve could BE this name, so it replaces the
+    // answer with "no answer" rather than being passed over.
+    else if (key === null) value = null;
+  }
+  return value;
+}
+
+/**
  * Does this expression statically evaluate to `undefined`?
  *
  * An optional parameter with a DEFAULT INITIALIZER treats an explicit

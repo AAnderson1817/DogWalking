@@ -244,7 +244,7 @@ def _command(body: str) -> str:
     # `{ :; } run "…" true` is a bash SYNTAX ERROR (measured), so a separator
     # always stands between a group's closer and whatever follows it.
     words = "|".join(
-        re.escape(w) for w in SHELL_RESERVED if w not in ("!", "}")
+        re.escape(w) for w in SHELL_RESERVED if w not in ("!", "}", "time")
     )
     # A reserved word itself begins at a command position, so the SAME set of
     # places must precede it — `cmd;if run "…"` and `(if run "…"` are ordinary
@@ -281,7 +281,29 @@ def _command(body: str) -> str:
     # The separators themselves are `_BOUNDARY_CHARS` below, enumerated by
     # `_find_commands` rather than written here as a lookbehind, so that the
     # match can be tried at each one independently.
-    chain = r'(?:[ \t]*(?:(?:%s)[ \t]+|![ \t]*))*' % words
+    # `time` is the ONE reserved word that takes OPTIONS, and bash's grammar
+    # for them was read off the shell rather than guessed: at most one `-p`,
+    # then at most one `--`, in that order, each separated by blanks. Every
+    # cell measured — `time -p`, `time --` and `time -p -- ` all run the
+    # pipeline, while `time -- -p`, `time -p -p`, `time -p -- --`, `time -pv`,
+    # `time -x` and `time -` each make that word the COMMAND instead, and a
+    # quoted `time "-p"` or escaped `time \-p` does the same.
+    #
+    # Without this the chain expected the command word immediately after
+    # `time`, so `time -p run "13. new check" true` — which bash runs
+    # (measured) — was read by NEITHER this reader nor `shell_unreadable_calls`:
+    # invisible in BOTH directions, so a timed local gate could have no CI
+    # counterpart while lockstep reported success (Codex, PR #94). Ten
+    # spellings shared that hole, including `time --`, `time -p --`, the tab
+    # spelling, `skip_gate`, and `time -p` after a separator, inside `if`,
+    # before `!`, before an assignment prefix and before a redirection.
+    #
+    # ANCHORED TO `time` rather than allowed loose in the chain: a bare `-p`
+    # before a command is an ordinary argument, so `foo -p run "13. fake" true`
+    # and `echo -p run "13. fake" true` invoke no gate (measured) and a
+    # free-floating option would have invented a PHANTOM out of each.
+    timespec = r'time[ \t]+(?:-p[ \t]+)?(?:--[ \t]+)?'
+    chain = r'(?:[ \t]*(?:%s|(?:%s)[ \t]+|![ \t]*))*' % (timespec, words)
     # `VAR=value` and `>file` / `2>&1` / `<in`, repeated, with the spacing bash
     # allows. Nothing here is captured; the command word follows.
     #
@@ -509,6 +531,27 @@ _SUBST_REGION = _subst_region(2)
 # while the reader reported the label: the same phantom one construct over).
 _BARE_WORD = re.compile(r"([A-Za-z]+)(?=[\s;&|()<>]|$)")
 
+# The option words bash's `time` accepts, with `_BARE_WORD`'s terminator set so
+# that a word merely STARTING with one is not read as it: `time -pv`, `time -x`
+# and `time --p` each make that word the COMMAND (measured), and only `-p` and
+# `--` are options at all.
+#
+# NO BEHAVIOURAL ROW PINS THE LOOKAHEAD, and saying so is better than implying
+# one does. `_command`'s own grammar requires a blank after the option, so the
+# label reader refuses `time -pv run "…"` whatever this says; the lookahead
+# reaches only `at_cmd`, whose single consumer is the `case` marker — and for
+# that to differ the word after the option would have to be `case` at a
+# command position, which it cannot be once the option-like word IS the
+# command, since `case a in a)` in an ARGUMENT position is a bash syntax
+# error. Measured over 35 constructed inputs: the ten that answer differently
+# are all files bash refuses to parse (exit 2), where neither answer is right
+# because nothing runs.
+#
+# Kept because the rule belongs in both places: without it this and
+# `_command`'s `-p[ \t]+` would mean different things by "an option", which is
+# the one-rule-two-scopes disagreement these rounds keep finding.
+_TIME_OPTION = re.compile(r"(-p|--)(?=[\s;&|()<>]|$)")
+
 
 def _heredoc_delimiter(text: str, i: int) -> tuple[str, bool, bool]:
     """The word after `<<`: its text, whether any of it was quoted, and
@@ -690,6 +733,11 @@ def _lex_shell(
     # nothing else, so an imprecision in it can only add or drop a `case`
     # marker — it never moves the boundaries the gate reads.
     at_cmd = True
+    # Where we stand in `time`'s option list — "" outside one, "opt" when `-p`
+    # and `--` are both still available, "ign" when only `--` is. The words
+    # keep the command position open, which is what stops `-p` clearing
+    # `at_cmd` and hiding a `case` from the marker rule above.
+    time_opt = ""
     # An unquoted backtick is the other spelling of `$( )`: what follows it is
     # a command position (`echo `run "13. x" y`` runs `run` — measured, and the
     # reader found NOTHING for it, invisible in both directions), and the word
@@ -1276,13 +1324,34 @@ def _lex_shell(
                 # branch above reaches here.
                 word = _BARE_WORD.match(text, i)
                 name = word.group(1) if word else ""
-                at_cmd = name in SHELL_RESERVED
-                if name == "case":
-                    parens.append("case")
-                elif name == "esac" and "case" in parens:
-                    # Back to and including the nearest `case`; a well-formed
-                    # script leaves nothing above it.
-                    del parens[len(parens) - 1 - parens[::-1].index("case"):]
+                # `time`'s options keep the command position open, which the
+                # `_command` grammar above says in its own language. This is
+                # the same rule in the LEXER, and it is load-bearing for a
+                # different reason: with `-p` read as an ordinary word the
+                # flag was cleared, `case` was then not recognised as reserved,
+                # no marker was pushed, and the pattern's `)` popped the
+                # enclosing substitution — so `echo $(time -p case a in a)
+                # :;; esac) run "1. fake" true` reported a PHANTOM gate for a
+                # word bash passes to `echo`, and the same line with a real
+                # gate inside the `case` was MISSED (both measured). Round
+                # thirty's defect, reached through `time`.
+                topt = _TIME_OPTION.match(text, i) if time_opt else None
+                opt = topt.group(1) if topt else ""
+                if opt == "-p" and time_opt == "opt":
+                    time_opt = "ign"
+                    at_cmd = True
+                elif opt == "--":
+                    time_opt = ""
+                    at_cmd = True
+                else:
+                    time_opt = "opt" if name == "time" else ""
+                    at_cmd = name in SHELL_RESERVED
+                    if name == "case":
+                        parens.append("case")
+                    elif name == "esac" and "case" in parens:
+                        # Back to and including the nearest `case`; a
+                        # well-formed script leaves nothing above it.
+                        del parens[len(parens) - 1 - parens[::-1].index("case"):]
             out.append(ch)
             # `>|` is the noclobber override, one operator: its `|` is not a
             # pipe and opens no command. Without this, `>| run "1. fake" true`
@@ -1579,6 +1648,51 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('{ ! run "1. group-then-bang" true; }', ["1. group-then-bang"]),
     ('{ if run "1. group-then-reserved" true; then :; fi; }',
      ["1. group-then-reserved"]),
+    # `time` is the one reserved word with OPTIONS, and every cell below was
+    # measured against bash. The positives were invisible in BOTH directions
+    # before this rule — neither runnable nor unreadable — so a timed local
+    # gate could have no CI counterpart while lockstep reported success.
+    ('time -p run "1. time-p" true', ["1. time-p"]),
+    ('time -- run "1. time-ign" true', ["1. time-ign"]),
+    ('time -p -- run "1. time-p-ign" true', ["1. time-p-ign"]),
+    ('time\t-p run "1. time-tab" true', ["1. time-tab"]),
+    ('true; time -p run "1. time-after-separator" true',
+     ["1. time-after-separator"]),
+    ('if time -p run "1. time-in-if" true; then :; fi', ["1. time-in-if"]),
+    ('time -p ! run "1. time-then-bang" true', ["1. time-then-bang"]),
+    ('! time -p run "1. bang-then-time" true', ["1. bang-then-time"]),
+    ('time -p MODE=ci run "1. time-then-assignment" true',
+     ["1. time-then-assignment"]),
+    ('time -p >/dev/null run "1. time-then-redirect" true',
+     ["1. time-then-redirect"]),
+    ('echo $(time -p run "1. time-in-subst" true)', ["1. time-in-subst"]),
+    ('{ time -p run "1. time-in-group" true; }', ["1. time-in-group"]),
+    # …and the words that are NOT options, each of which bash makes the
+    # COMMAND instead, so no gate runs and none may be reported.
+    ('time -- -p run "1. fake" true', []),
+    ('time -p -p run "1. fake" true', []),
+    ('time -p -- -- run "1. fake" true', []),
+    ('time -pv run "1. fake" true', []),
+    ('time -x run "1. fake" true', []),
+    ('time - run "1. fake" true', []),
+    ('time --p run "1. fake" true', []),
+    ('time "-p" run "1. fake" true', []),
+    ('time \\-p run "1. fake" true', []),
+    # The option is anchored to `time`: loose in the chain it would have
+    # invented a PHANTOM out of every ordinary `-p` argument.
+    ('foo -p run "1. fake" true', []),
+    ('echo -p run "1. fake" true', []),
+    ('timeout -p run "1. fake" true', []),
+    # `time` in an ARGUMENT is an ordinary word and opens no command position.
+    ('echo time -p run "1. fake" true', []),
+    # The lexer half of the same rule. With `-p` read as an ordinary word the
+    # command-position flag was cleared, `case` was not recognised, no marker
+    # was pushed, and the pattern's `)` popped the substitution — a PHANTOM
+    # for a word bash passes to `echo`, and a MISS for the real gate beside
+    # it. Round thirty's defect, reached through `time`.
+    ('echo $(time -p case a in a) run "1. time-case-in-subst" true;; esac)',
+     ["1. time-case-in-subst"]),
+    ('echo $(time -p case a in a) :;; esac) run "1. fake" true', []),
     # A command position opens inside every substitution, and after a bare `(`
     # and a case pattern's `)` — all four measured, and all four must survive
     # the rule that stops a substitution's CLOSER being one.
@@ -2223,6 +2337,14 @@ _UNREADABLE_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     # so both spellings are correctly silent for the same reason.
     ('run=1\na[1 +\nrun]=2', []),
     ('echo a[1 +\nrun]=2', []),
+    # `time`'s options open a command position, so an unreadable call behind
+    # one is refused BY NAME rather than passed over — the other half of the
+    # invisible-in-both-directions hole (Codex, PR #94).
+    ('time -p run $label true', ['run $label true']),
+    ('time -- run $label true', ['run $label true']),
+    # …and a word that is NOT an option makes itself the command, so there is
+    # no invocation to refuse.
+    ('time -pv run $label true', []),
     # A quoted body keeps its continuation, so a real unreadable call after the
     # terminator is still seen rather than swallowed with the rest of the file.
     ('cat <<\'EOF\'\nlast \\\nEOF\nrun $label true\n', ['run $label true']),
