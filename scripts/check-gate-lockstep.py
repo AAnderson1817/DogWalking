@@ -230,9 +230,21 @@ def _command(body: str) -> str:
     # the `run` after it was then neither at a recognised command boundary nor
     # reported as unreadable — invisible in both directions, so a local gate
     # could lack a CI counterpart while lockstep reported success (measured,
-    # Codex on PR #94). The three branches are disjoint by their first
-    # character, so the nesting cannot backtrack pathologically.
-    word = r"""(?:[^\s;&|'"]|'[^']*'|"(?:[^"\\]|\\.)*")*"""
+    # Codex on PR #94).
+    #
+    # An unquoted BACKSLASH escapes the next character, so `MODE=ci\ mode run
+    # "13. new check" true` is one prefix and one command to bash (measured),
+    # and a bare branch that merely excludes whitespace stopped at the escaped
+    # space — invisible in both directions again, the same defect one grammar
+    # over from the comment stripper's, which learnt the same rule one round
+    # earlier. The escape branch is FIRST and `\\` is excluded from the bare
+    # branch, so the four branches stay disjoint by their first character and
+    # the nesting still cannot backtrack pathologically. That ordering is a
+    # BACKTRACKING property and not a matching one — measured: with the escape
+    # branch last and `\\` left in the bare branch the engine backtracks into
+    # it and every spelling still reads, so no matrix row can pin the order.
+    # What the rows pin is that the branch exists at all.
+    word = r"""(?:\\[\s\S]|[^\s;&|'"\\]|'[^']*'|"(?:[^"\\]|\\.)*")*"""
     prefixes = r'(?:[ \t]*(?:[A-Za-z_][A-Za-z0-9_]*=%s|[0-9]*[<>]{1,2}&?%s)[ \t]+)*' % (word, word)
     return r'%s[ \t]*%s(?P<cmd>%s)' % (boundary, prefixes, body)
 
@@ -425,6 +437,16 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('MODE=a"b c"d run "1. mixed-word" x', ["1. mixed-word"]),
     ('A=1 B="x y" run "1. two-prefixes" x', ["1. two-prefixes"]),
     ('>"my file" run "1. redirect" x', ["1. redirect"]),
+    # An unquoted backslash escapes the next character, so each of these is
+    # one prefix and one command to bash (measured). The bare branch stopped
+    # at the escaped character and the gate saw nothing (Codex, PR #94).
+    ('MODE=ci\\ mode run "1. escaped-space-prefix" x', ["1. escaped-space-prefix"]),
+    ('MODE=a\\;b run "1. escaped-separator-prefix" x', ["1. escaped-separator-prefix"]),
+    ('>my\\ file run "1. escaped-redirect-target" x', ["1. escaped-redirect-target"]),
+    # Ties the comment stripper's backslash rule to this grammar, and is red
+    # under a sabotage of EITHER: the escaped space keeps the `#` mid-word so
+    # the stripper must not blank the line, and the word must carry both.
+    ('MODE=a\\ #b run "1. escaped-space-then-hash" x', ["1. escaped-space-then-hash"]),
     ('run \\\n  "1. continuation" x', ["1. continuation"]),
     # `#` opens a comment only at the START OF A WORD. Stripping every
     # unquoted one blanked the rest of the line, so a gate after an ordinary
