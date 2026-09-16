@@ -324,7 +324,14 @@ function effectiveProps(
 ): Map<string, ts.Expression | string> {
   // The names this file asks about, at any depth: an unreadable spread has to
   // invalidate each of them, since it could carry any of them.
-  const ASKED = ["topic", "private", "config"];
+  //
+  // `messages` is in the list because `messageElements` asks THIS reader for
+  // it. It used to walk the properties itself and therefore disagreed with
+  // this one about every rule below — a computed key it could not read, an
+  // accessor, a spread it could not follow — so a request object could define
+  // `messages` twice and the naive reader kept the safe one (Codex, PR #94).
+  // One reader, so there is no sibling to forget.
+  const ASKED = ["topic", "private", "config", "messages"];
   const props = new Map<string, ts.Expression | string>();
   const markAll = (mark: string) => { for (const k of ASKED) props.set(k, mark); };
 
@@ -438,35 +445,72 @@ function isLiteralTrue(v: ts.Expression | string | undefined): boolean {
  * a conditional, a spread of an array — anything else is REFUSED by name. That
  * is not a dataflow analysis; it is reading the expression that is actually
  * sent, which is what the rest of this file already does one level in.
+ *
+ * WHICH `messages` gets sent is `effectiveProps`' question, not this one's.
+ * This half used to walk the properties itself, so the two readers disagreed
+ * about every rule that one already had — later-wins, spreads, accessors,
+ * computed keys — and a request object could define `messages` twice while
+ * this one kept the safe array. Asking the shared reader deletes the sibling
+ * rather than teaching it the same rules a second time.
  */
 function messageElements(sf: ts.SourceFile): { found: boolean; values: string[] } {
   const declared = declaredObjects(sf);
   const values: string[] = [];
   let found = false;
   const visit = (n: ts.Node): void => {
-    // `propertyKey`, not `isIdentifier`: `{ "messages": [...] }` is the same
-    // object, and reading only the bare spelling made the precondition fail on
-    // a behaviour-preserving refactor — red on a healthy tree (Codex, PR #94).
-    if (ts.isPropertyAssignment(n) && propertyKey(n.name) === "messages") {
-      found = true;
-      const arr = n.initializer;
-      if (!ts.isArrayLiteralExpression(arr)) {
-        values.push(`<\`messages\` is not an array literal: ${arr.getText().split("\n")[0]}>`);
+    // `effectiveProps`, not a property walk of this function's own: which
+    // property is SENT is the question `effectiveProps` already answers for
+    // `private`, and this half asked it differently and got a different
+    // answer. Measured on the shipped reader, all four the same class:
+    //
+    //   { messages: [private], [key]: [publicMessage()] }      -> ["true"]
+    //   { messages: [private], get messages() { … } }          -> ["true"]
+    //   { messages: [private], messages() { … } }              -> ["true"]
+    //   { messages: [private], ...imported }                   -> ["true"]
+    //
+    // Each of those is a LATER definition of the same key — the language sends
+    // it and this reader kept the safe array — so the gate blessed exactly what
+    // it forbids. `effectiveProps` resolves later-wins, follows a spread it can
+    // and marks the key unreadable when it cannot, and reads a computed key
+    // that is a string literal while refusing one it cannot resolve. A marker
+    // is pushed as the value, so the caller's filter fails it by name.
+    if (ts.isObjectLiteralExpression(n)) {
+      const sent = effectiveProps(n, declared).get("messages");
+      if (sent === undefined) {
+        // Not a request object as far as this reader can tell.
+      } else if (typeof sent === "string") {
+        // The marker names what could not be read — a computed key, an
+        // accessor, a shorthand reference, a spread that could not be
+        // followed. Pushed as the value so the caller fails it by name.
+        found = true;
+        values.push(sent);
       } else {
-        for (const el of arr.elements) {
-          const e = unwrapTransparent(el);
-          const lit = ts.isObjectLiteralExpression(e)
-            ? e
-            : ts.isIdentifier(e)
-              ? declared.get(e.text)
-              : undefined;
-          if (!lit) {
-            values.push(`<unreadable message element: ${el.getText().split("\n")[0]}>`);
-            continue;
+        found = true;
+        // UNWRAPPED, because `messages: ([{ topic, private: true }] as const)`
+        // is the same array: `as`, `satisfies`, parentheses and `!` all left
+        // this reporting "not an array literal" and failing the gate on healthy
+        // code (Codex, PR #94) — the worse direction. The element loop below
+        // has unwrapped since the round that taught this file the rule; this
+        // was the one position that had not.
+        const arr = unwrapTransparent(sent);
+        if (!ts.isArrayLiteralExpression(arr)) {
+          values.push(`<\`messages\` is not an array literal: ${arr.getText().split("\n")[0]}>`);
+        } else {
+          for (const el of arr.elements) {
+            const e = unwrapTransparent(el);
+            const lit = ts.isObjectLiteralExpression(e)
+              ? e
+              : ts.isIdentifier(e)
+                ? declared.get(e.text)
+                : undefined;
+            if (!lit) {
+              values.push(`<unreadable message element: ${el.getText().split("\n")[0]}>`);
+              continue;
+            }
+            values.push(privateValue(effectiveProps(lit, declared).get("private")));
           }
-          values.push(privateValue(effectiveProps(lit, declared).get("private")));
+          if (arr.elements.length === 0) values.push("<`messages` is empty>");
         }
-        if (arr.elements.length === 0) values.push("<`messages` is empty>");
       }
     }
     ts.forEachChild(n, visit);
@@ -894,6 +938,55 @@ describe("the walk channel is the only channel, and it is private on both sides"
     // And the precondition: a file with no `messages:` at all is not read, so
     // `found` is false and the caller fails rather than reporting agreement.
     expect(sent("post({ other: 1 });").found).toBe(false);
+
+    // A TRANSPARENT WRAPPER around the array is the same array. All four of
+    // these reported "not an array literal" and failed the gate on healthy
+    // code (Codex, PR #94) — the worse direction, since a gate red on a
+    // correct tree is the one somebody deletes to ship something unrelated.
+    for (const wrapped of [
+      "post({ messages: ([{ topic, private: true }] as const) });",
+      "post({ messages: ([{ topic, private: true }]) });",
+      "post({ messages: ([{ topic, private: true }] satisfies unknown[]) });",
+      "post({ messages: ([{ topic, private: true }]!) });",
+    ]) {
+      expect(sent(wrapped).values, wrapped).toEqual(["true"]);
+    }
+
+    // A LATER definition of the same key is what gets sent. Each of these read
+    // `["true"]` on the shipped reader while the language sent the override —
+    // the gate blessing what it forbids (Codex, PR #94, and three siblings it
+    // did not name). The rules are `effectiveProps`' and are shared with the
+    // `private` half now, so the two cannot disagree about them again.
+    const OVERRIDES: Array<[string, string]> = [
+      ["computed key", "const key = 'messages';\npost({ messages: [{ topic, private: true }], [key]: [publicMessage(t)] });"],
+      ["accessor", "post({ messages: [{ topic, private: true }], get messages() { return 1; } });"],
+      ["method", "post({ messages: [{ topic, private: true }], messages() { return 1; } });"],
+      ["computed accessor", "post({ messages: [{ topic, private: true }], get ['mess'+'ages']() { return 1; } });"],
+      ["unfollowable spread", "post({ messages: [{ topic, private: true }], ...imported });"],
+    ];
+    for (const [label, code] of OVERRIDES) {
+      const r = sent(code);
+      expect(r.found, label).toBe(true);
+      expect(r.values.filter((v) => v === "true"), label).toEqual([]);
+    }
+
+    // …and the other direction, which is what stops that becoming "refuse any
+    // computed key" or "refuse any spread". A computed key that is a string
+    // literal names exactly one property and the override IS read, so the
+    // public array is caught rather than the file being refused wholesale…
+    expect(sent("post({ messages: [{ topic, private: true }], ['messages']: [{ topic, private: false }] });").values)
+      .toEqual(["false"]);
+    // …and a spread this reader CAN follow carries a real array through.
+    expect(sent("const o = { messages: [{ topic, private: true }] };\npost({ ...o });").values
+      .filter((v) => v !== "true")).toEqual([]);
+
+    // A SHORTHAND `messages` is a reference to an array, which this reader has
+    // no machinery to resolve — refused BY NAME rather than left to fail the
+    // caller's precondition, whose message says the file carries no `messages`
+    // at all. A red that misdescribes itself is its own defect.
+    const short = sent("const messages = [{ topic, private: false }];\npost({ messages });");
+    expect(short.found).toBe(true);
+    expect(short.values).toEqual(["<shorthand, unreadable>"]);
   });
 
   it("sees a mutation that would make reading literals unsound", () => {
