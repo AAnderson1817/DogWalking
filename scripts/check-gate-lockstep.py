@@ -212,7 +212,13 @@ def _command(body: str) -> str:
     not the keyword in front of it. Getting that wrong made eighteen real gates
     read as unreadable on this rule's first run.
     """
-    words = "|".join(re.escape(w) for w in SHELL_RESERVED if w.isalpha())
+    # `!` has a branch of its own below, because it may be written with no
+    # space after it. `}` is excluded outright: it never precedes a command —
+    # `{ :; } run "…" true` is a bash SYNTAX ERROR (measured), so a separator
+    # always stands between a group's closer and whatever follows it.
+    words = "|".join(
+        re.escape(w) for w in SHELL_RESERVED if w not in ("!", "}")
+    )
     # A reserved word itself begins at a command position, so the SAME set of
     # places must precede it — `cmd;if run "…"` and `(if run "…"` are ordinary
     # bash, and a rule that admitted a reserved word only after whitespace or a
@@ -233,7 +239,19 @@ def _command(body: str) -> str:
     # `if ! run "…"`, `cmd; then run "…"`. `!` takes the same place in the
     # chain rather than a lookbehind of its own, which is also the first thing
     # that pins it — the `(?<=\s!)` it replaces had no row in the matrix.
-    sep = r'(?:^|(?<=\n)|(?<=[;&|(){}]))'
+    #
+    # A BRACE is a reserved word rather than a metacharacter, so it belongs in
+    # the chain and not in this set. Matching the character itself said "a
+    # command can start here" wherever one appeared, including in the middle
+    # of an ordinary word: `echo x{ run "13. fake" true`, `echo x} run …`,
+    # `echo a{b,c} run …` and `echo ${HOME} run …` all run only `echo`
+    # (measured), while the reader returned the label as a runnable gate — a
+    # PHANTOM local gate, which satisfies a ci.yml mapping and keeps the
+    # reverse check happy after the real gate has been deleted (measured,
+    # Codex on PR #94). In the chain a `{` has to stand alone at a command
+    # position, which is exactly bash's own rule: `{run "…" true; }` is a
+    # syntax error (measured).
+    sep = r'(?:^|(?<=\n)|(?<=[;&|()]))'
     chain = r'(?:[ \t]*(?:(?:%s)[ \t]+|![ \t]*))*' % words
     boundary = sep + chain
     # `VAR=value` and `>file` / `2>&1` / `<in`, repeated, with the spacing bash
@@ -299,7 +317,13 @@ _SUBST_CLOSE = "\x02"
 # reserved words `case` and `esac`. It must END at a metacharacter or the text,
 # so `casex` and `case=1` are ordinary words; a quoted or escaped first
 # character is handled by branches above this one and never reaches it.
-_BARE_WORD = re.compile(r"([A-Za-z]+)(?=[\s;&|(){}<>]|$)")
+# A brace does not end it, for the same reason it is not a word break above:
+# `case{` is the ordinary word `case{` and not the reserved word `case` —
+# measured, bash tries to run a command by that name — so reading one as
+# reserved pushed a `case` marker that then stopped a substitution's closer
+# being a boundary (`echo $(case{ ; :) run "1. x" true` runs only `echo`,
+# while the reader reported the label: the same phantom one construct over).
+_BARE_WORD = re.compile(r"([A-Za-z]+)(?=[\s;&|()<>]|$)")
 
 
 def _lex_shell(text: str) -> tuple[str, str]:
@@ -449,6 +473,27 @@ def _lex_shell(text: str) -> tuple[str, str]:
             skel.append(_SUBST_CLOSE if in_backtick else "(")
             at_word_start = not in_backtick
             in_backtick = not in_backtick
+        elif ch in "{}":
+            # A brace is a RESERVED WORD, not a metacharacter: it counts only
+            # where it stands alone at a command position, so `echo x{ …` and
+            # `echo ${HOME} …` carry no boundary (measured). Even standing
+            # alone only `{` opens a command position — `{ :; } run` is a
+            # syntax error (measured), so something else always separates a
+            # group's closer from the next command.
+            #
+            # This flag's only consumer is the `case` marker, so an imprecision
+            # here can add or drop one; the boundaries themselves are decided
+            # by `_command`, which carries the same rule in its chain.
+            opens = (
+                ch == "{"
+                and at_word_start
+                and at_cmd
+                and (i + 1 >= len(text) or text[i + 1] in _WORD_BREAK)
+            )
+            out.append(ch)
+            skel.append(ch)
+            at_word_start = opens
+            at_cmd = opens
         else:
             if at_word_start and at_cmd and not ch.isspace():
                 # The word about to start decides whether the NEXT one is also
@@ -469,7 +514,7 @@ def _lex_shell(text: str) -> tuple[str, str]:
             out.append(ch)
             skel.append(ch)
             at_word_start = ch in _WORD_BREAK
-            if ch in ";&|{}\n":
+            if ch in ";&|\n":
                 at_cmd = True
         i += 1
     clean, skeleton = "".join(out), "".join(skel)
@@ -617,6 +662,18 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('cmd;if run "1. separator-then-reserved" true; then :; fi', ["1. separator-then-reserved"]),
     ('cmd&&if run "1. and-then-reserved" true; then :; fi', ["1. and-then-reserved"]),
     ('(if run "1. paren-then-reserved" true; then :; fi)', ["1. paren-then-reserved"]),
+    # A `{` is a reserved word, so a GROUP opens a command position wherever
+    # one may start — and it chains with the others exactly as they chain with
+    # each other. All seven measured against bash.
+    ('{ run "1. group" true; }', ["1. group"]),
+    ('echo a; { run "1. group-after-separator" true; }',
+     ["1. group-after-separator"]),
+    ('f() { run "1. group-in-function" true; }; f', ["1. group-in-function"]),
+    ('echo a | { run "1. group-after-pipe" true; }', ["1. group-after-pipe"]),
+    ('true && { run "1. group-after-and" true; }', ["1. group-after-and"]),
+    ('{ ! run "1. group-then-bang" true; }', ["1. group-then-bang"]),
+    ('{ if run "1. group-then-reserved" true; then :; fi; }',
+     ["1. group-then-reserved"]),
     # A command position opens inside every substitution, and after a bare `(`
     # and a case pattern's `)` — all four measured, and all four must survive
     # the rule that stops a substitution's CLOSER being one.
@@ -744,6 +801,31 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('echo if run "1. reserved-as-argument" true', []),
     ('echo while run "1. reserved-as-argument-2" true', []),
     ('printf "%s" then run "1. reserved-as-argument-3" true', []),
+    # …and a BRACE is reserved only when it stands alone, so one inside an
+    # ordinary word carries no boundary at all. Bash runs only `echo` for each
+    # of these (measured), while a reader that matched the character returned
+    # the label as a runnable gate — the same phantom, reachable from four
+    # spellings the reviewer's own example is only the first of.
+    ('echo x{ run "1. brace-opens-word" true', []),
+    ('echo x} run "1. brace-closes-word" true', []),
+    ('echo a{b,c} run "1. brace-expansion" true', []),
+    ('echo ${HOME} run "1. parameter-expansion" true', []),
+    # The same rule one construct over: `case{` is the ordinary word `case{`
+    # and not the reserved word, so reading it as reserved pushed a `case`
+    # marker, the substitution's closer stopped being a boundary, and the
+    # argument after it was reported as a gate (measured — `run` does not
+    # execute here). This row is what pins `_BARE_WORD`'s terminator set; the
+    # four above are all satisfied by the boundary fix alone.
+    ('echo $(case{ ; :) run "1. brace-after-case" true', []),
+    # The lexer carries the same rule for its own command-position flag, whose
+    # only consumer is the `case` marker: a brace inside a word must not make
+    # the next word reserved (bash runs only `echo` here — measured), and a
+    # standalone one must, or a group's `case` goes unseen and the pattern
+    # closer inside it stops being the boundary it is (measured, `run` does
+    # execute there).
+    ('echo $(echo x{ case) run "1. lexer-brace" true', []),
+    ('echo $({ case a in a) run "1. group-case" true;; esac; })',
+     ["1. group-case"]),
     ('run() {\n  :\n}', []),
 )
 
