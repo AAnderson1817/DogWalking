@@ -93,18 +93,46 @@ export function unwrapTransparent(e: ts.Expression): ts.Expression {
  * a call" — which is the posture the rest of these gates already take.
  */
 export function calleeCall(node: ts.Node): ts.CallExpression | null {
-  let cur: ts.Node = node;
+  const outer = outward(node);
+  const parent: ts.Node | undefined = outer.parent;
+  if (!parent || !ts.isCallExpression(parent)) return null;
+  return parent.expression === outer ? parent : null;
+}
+
+/**
+ * This node with the transparent wrappers around it climbed — the UPWARD
+ * inverse of `unwrapTransparent`, and what a reader must ask before it looks
+ * at `.parent`.
+ *
+ * `unwrapTransparent` answers "what value is this", so a reader that goes
+ * DOWN through a wrapper was fixed once (Codex, PR #94). The parent side is
+ * the same rule facing the other way: `(x.m)(…)` invokes `x.m` and
+ * `(r).error` reads `r.error`, so a check written against the SYNTACTIC
+ * parent sees a wrapper where the language sees the consumer — which read an
+ * invoked builder method as uncalled and a handled `.error` as never read,
+ * both gates red on a healthy tree, while a wrapped `.auth` hop went
+ * unclassified and its discarded error was missed entirely. One helper, so
+ * the five readers that ask about a parent cannot answer it five ways.
+ *
+ * `parent.expression === cur` is defence in depth and NO behavioural row
+ * pins it, which is measured rather than assumed: walking every node of the
+ * five wrapper kinds, the only child for which it is false is the TypeNode
+ * of an `as`, `satisfies` or `<T>x` — and none of the readers here ever
+ * holds one, since an identifier inside a type has the TypeReference as its
+ * parent. It stays because this is a general helper in a shared module and
+ * the next caller may pass a type node.
+ */
+export function outward(n: ts.Node): ts.Node {
+  let cur: ts.Node = n;
   for (let i = 0; i < 8; i += 1) {
     const parent: ts.Node | undefined = cur.parent;
-    if (!parent) return null;
-    if (ts.isCallExpression(parent)) return parent.expression === cur ? parent : null;
-    if (isTransparentWrapper(parent) && parent.expression === cur) {
+    if (parent && isTransparentWrapper(parent) && parent.expression === cur) {
       cur = parent;
       continue;
     }
-    return null;
+    return cur;
   }
-  return null;
+  return cur;
 }
 
 /**

@@ -7,6 +7,7 @@ import {
   calleeOf,
   isTransparentWrapper,
   memberAccess as sharedMemberAccess,
+  outward,
   unwrapTransparent,
 } from "./lib/static-object.js";
 import { describe, expect, it } from "vitest";
@@ -360,11 +361,18 @@ function outermost(node: ts.Node): Chain {
     const p: ts.Node = n.parent;
     const m = memberAccess(p);
     if (m && m.receiver === n) {
-      const next = p.parent;
-      const invoked = ts.isCallExpression(next) && next.expression === p;
+      // Both questions are asked of the member as the LANGUAGE sees it. A
+      // transparent wrapper between a member and what holds it must not make
+      // an invoked method look uncalled: `db.from("x").select!("id")` runs
+      // exactly as the bare spelling does, and reporting it failed a healthy
+      // file — a gate red on a healthy tree (Codex, PR #94; all five wrappers
+      // and a link deeper in the chain measured the same way).
+      const outer = outward(p);
+      const next = outer.parent;
+      const invoked = calleeCall(p) !== null;
       // A namespace hop — `.auth.admin.createUser(…)`, `.auth.mfa.…` — is a
       // property, not a method, and the call comes one link later.
-      const hop = memberAccess(next)?.receiver === p;
+      const hop = memberAccess(next)?.receiver === outer;
       if (!invoked && !hop) return { top: p, uncalled: m.name };
       if (invoked && THENABLE.has(m.name)) return { top: p, thenable: m.name };
       if (invoked && REJECTING_MODIFIERS.has(m.name)) rejects = true;
@@ -404,7 +412,12 @@ function isBlockScoped(list: ts.VariableDeclarationList): boolean {
 
 /** Is this arrow function an argument of a call — a callback whose consumer the gate cannot see? */
 function inlineCallback(fn: ts.ArrowFunction): boolean {
-  return ts.isCallExpression(fn.parent) && fn.parent.arguments.includes(fn);
+  // Through the shared helper for consistency with every other parent reader
+  // here rather than as a fix: no constructed input changes a verdict, since
+  // a wrapped callback's own body reaches this by a path that answers the
+  // same either way (measured, PR #94).
+  const outer = outward(fn);
+  return ts.isCallExpression(outer.parent) && outer.parent.arguments.some((arg) => arg === outer);
 }
 
 /**
@@ -779,8 +792,7 @@ function visiblyInvoked(fn: ts.Node, container: ts.Node, checker: ts.TypeChecker
   const callSites: ts.Node[] = [];
   const visit = (n: ts.Node) => {
     if (ts.isIdentifier(n) && n !== name && symbolOf(checker, n) === sym) {
-      let t: ts.Node = n;
-      while (t.parent && isTransparent(t.parent, t)) t = t.parent;
+      const t = outward(n);
       if (ts.isCallExpression(t.parent) && t.parent.expression === t) callSites.push(t.parent);
     }
     ts.forEachChild(n, visit);
@@ -953,8 +965,12 @@ function usesOf(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node): ts
 
 /** `r.error` / `r["error"]` on this identifier, or null. */
 function errorAccess(u: ts.Identifier): ts.Expression | null {
-  const m = memberAccess(u.parent);
-  return m && m.receiver === u && m.name === "error" ? (u.parent as ts.Expression) : null;
+  // `(r).error` and `r!.error` are the same read, and asking the syntactic
+  // parent reported both as an envelope whose error is never read — a gate
+  // red on a healthy tree (Codex, PR #94, the sibling of the chain finding).
+  const outer = outward(u);
+  const m = memberAccess(outer.parent);
+  return m && m.receiver === outer && m.name === "error" ? (outer.parent as ts.Expression) : null;
 }
 
 /** Is this `.error` access being WRITTEN (`r.error = null`, `r.error ??= x`, `delete r.error`) rather than read? */
@@ -1328,7 +1344,10 @@ function followEnvelopeVar(ctx: Ctx, nameNode: ts.Identifier, at: ts.Node): Site
   // `console.log(r)` / `JSON.stringify(r)` / `helper(r)`: the gate cannot see
   // what the callee does with it, and a debug print beside `return r.data`
   // must not turn a discard into a pass (adversarial review on PR #92).
-  const passedToCall = uses.find((u) => ts.isCallExpression(u.parent) && u.parent.arguments.includes(u));
+  const passedToCall = uses.find((u) => {
+    const outer = outward(u);
+    return ts.isCallExpression(outer.parent) && outer.parent.arguments.some((arg) => arg === outer);
+  });
   if (passedToCall) {
     return [site(ctx, at, "UNCLASSIFIED", `envelope in \`${name}\` passed to a call — its consumer is not visible${via(passedToCall)}`)];
   }
@@ -1757,10 +1776,14 @@ function classifyFile(program: ts.Program, sf: ts.SourceFile, file: string): Sit
       }
     } else {
       const auth = memberAccess(n);
+      const authOuter = outward(n);
       if (
         auth && auth.name === "auth" &&
-        // The namespace, `.auth.<member>` — a bare `.auth` is a value being read.
-        memberAccess(n.parent)?.receiver === n
+        // The namespace, `.auth.<member>` — a bare `.auth` is a value being
+        // read. Asked of the wrapped node, because `(db.auth).getUser(…)` is
+        // the same namespace hop and the syntactic parent is the wrapper: a
+        // discarded error on it was MISSED entirely (Codex, PR #94).
+        memberAccess(authOuter.parent)?.receiver === authOuter
       ) {
         // `auth` is also a plain FIELD in this tree (the push encryption
         // secret), and `sub.auth.length` is a healthy read of it. So the
@@ -3139,6 +3162,64 @@ async function f(db: any) { log((await db.from("a").select("id")).error); }`).ve
 }`);
     expect(s.verdict).toBe("UNCLASSIFIED");
     expect(s.reason).toMatch(/passed to a call/);
+  });
+
+  it("a transparent wrapper around a PARENT is the same consumer (Codex, PR #94)", () => {
+    // The parent side of the same rule. A wrapper between a member and what
+    // holds it made an INVOKED builder method read as uncalled, so a healthy
+    // file failed the gate — every one of these runs and handles its error.
+    for (const expr of [
+      'db.from("walks").select!("id")',
+      '(db.from("walks").select)("id")',
+      '(db.from("walks").select as any)("id")',
+      '(db.from("walks").select satisfies unknown as any)("id")',
+      '(<any>db.from("walks").select)("id")',
+      // …and a link DEEPER in the chain, not only the one after the root.
+      'db.from("walks").select("id").eq!("x", 1)',
+    ]) {
+      expect(
+        one(`async function f(db: any) { const { data, error } = await ${expr}; if (error) throw error; return data; }`).verdict,
+        expr,
+      ).toBe("OK");
+    }
+    // …and the other direction, which is what stops the fix becoming "a
+    // method is always called": a reference that really is never invoked
+    // still runs nothing, and an ordinary discard is still a discard.
+    expect(one('function f(db: any) { const g = db.from("walks").select; return g; }').verdict).toBe("UNCLASSIFIED");
+    expect(one('async function f(db: any) { const { data } = await db.from("walks").select("id"); return data; }').verdict).toBe("DISCARDED");
+
+    // A wrapped NAMESPACE hop is the same hop — and this one was a MISS
+    // rather than a false red: `(db.auth).getUser(…)` with its error thrown
+    // away left 69 of 69 green, on the auth path.
+    expect(one(`const db = adminClient();
+async function f(token: string) { const { data } = await (db.auth).getUser(token); return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`const db = adminClient();
+async function f(token: string) { const { data, error } = await (db.auth).getUser(token); if (error) throw error; return data; }`).verdict).toBe("OK");
+    expect(one(`const db = adminClient();
+async function f() { const { data, error } = await (db.auth.admin).getUserById("x"); if (error) throw error; return data; }`).verdict).toBe("OK");
+
+    // …and an envelope's `.error` read through a wrapper is the same read.
+    for (const read of ["(r).error", "r!.error", "((r)).error"]) {
+      expect(
+        one(`async function f(db: any) { const r = await db.from("walks").select("id"); if (${read}) throw ${read}; return r.data; }`).verdict,
+        read,
+      ).toBe("OK");
+    }
+    // …while an envelope nothing reads is still discarded.
+    expect(one('async function f(db: any) { const r = await db.from("walks").select("id"); return r.data; }').verdict).toBe("DISCARDED");
+
+    // An envelope handed to a call through a wrapper is still handed to a
+    // call. Both spellings are red either way, so what the syntactic parent
+    // cost here is the REASON: `log((r))` reported "`.error` is never read"
+    // for an envelope whose consumer is simply not visible, and a red that
+    // misdescribes itself is its own defect.
+    for (const arg of ["r", "(r)", "(r as any)"]) {
+      expect(
+        one(`declare function log(v: unknown): void;
+async function f(db: any) { const r = await db.from("walks").select("id"); log(${arg}); return r.data; }`).verdict,
+        arg,
+      ).toBe("UNCLASSIFIED");
+    }
   });
 
   it("a transparent wrapper around a callee or a receiver is the same call (Codex, PR #94)", () => {
