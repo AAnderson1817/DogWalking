@@ -280,6 +280,21 @@ _WORD_BREAK = " \t\n|&;()<>"
 _MASK = "\x01"
 
 
+# What the CLOSING character of a command substitution becomes in the skeleton.
+# `)` is a metacharacter and a command boundary — but not when it closes a
+# substitution: bash runs only `echo` for `echo $(printf x) run "13. fake"
+# true`, and the same for `$((…))` and `<(…)` (measured), while a reader that
+# saw every `)` as a separator returned `13. fake` — a PHANTOM local gate, the
+# quoted-span defect one construct over (measured, Codex on PR #94). A word
+# also CONTINUES through such a closer (`echo $(printf a)#b` prints `a#b`,
+# where `(printf b)#c` prints `b` — the closer of a SUBSHELL does end a word),
+# so the `#` after one is literal and a gate later on that line survives.
+#
+# Distinct from `_MASK` only so the two reasons stay legible; both are inert to
+# every scan here.
+_SUBST_CLOSE = "\x02"
+
+
 def _lex_shell(text: str) -> tuple[str, str]:
     """Return (clean, skeleton): comments blanked, and quoted contents masked.
 
@@ -332,6 +347,18 @@ def _lex_shell(text: str) -> tuple[str, str]:
 
     quote = None
     at_word_start = True
+    # One entry per open `(`, True when it opened a command, arithmetic or
+    # process substitution (`$(`, `$((`, `<(`, `>(`) rather than a subshell or
+    # a case pattern's group. Only a substitution's closer stops being a
+    # command boundary; `case a in a) run "…" x;; esac` and `(run "…" x)` are
+    # both real command positions and stay ones (measured). A `)` with nothing
+    # on the stack is a case pattern's, so it stays a boundary too.
+    parens: list[bool] = []
+    # An unquoted backtick is the other spelling of `$( )`: what follows it is
+    # a command position (`echo `run "13. x" y`` runs `run` — measured, and the
+    # reader found NOTHING for it, invisible in both directions), and the word
+    # continues through the closing one exactly as it does through `)`.
+    in_backtick = False
     i = 0
     while i < len(text):
         ch = text[i]
@@ -373,6 +400,26 @@ def _lex_shell(text: str) -> tuple[str, str]:
             skel.append(" " * (end - i))
             i = end
             continue
+        elif ch == "(":
+            # `$`, `<` or `>` immediately before it opens a substitution.
+            # `\$(` cannot reach here as anything else: bash refuses it
+            # outright ("syntax error near unexpected token `('", measured).
+            parens.append(i > 0 and text[i - 1] in "$<>")
+            out.append(ch)
+            skel.append(ch)
+            at_word_start = True
+        elif ch == ")":
+            substitution = parens.pop() if parens else False
+            out.append(ch)
+            skel.append(_SUBST_CLOSE if substitution else ch)
+            at_word_start = not substitution
+        elif ch == "`":
+            out.append(ch)
+            # Opening: a command starts after it, so the skeleton carries the
+            # boundary `(` already spells. Closing: inert, and the word runs on.
+            skel.append(_SUBST_CLOSE if in_backtick else "(")
+            at_word_start = not in_backtick
+            in_backtick = not in_backtick
         else:
             out.append(ch)
             skel.append(ch)
@@ -523,6 +570,13 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('cmd;if run "1. separator-then-reserved" true; then :; fi', ["1. separator-then-reserved"]),
     ('cmd&&if run "1. and-then-reserved" true; then :; fi', ["1. and-then-reserved"]),
     ('(if run "1. paren-then-reserved" true; then :; fi)', ["1. paren-then-reserved"]),
+    # A command position opens inside every substitution, and after a bare `(`
+    # and a case pattern's `)` — all four measured, and all four must survive
+    # the rule that stops a substitution's CLOSER being one.
+    ('(run "1. subshell" x)', ["1. subshell"]),
+    ('echo $(run "1. inside-subst" x)', ["1. inside-subst"]),
+    ('case a in a) run "1. case-pattern" x;; esac', ["1. case-pattern"]),
+    ('echo `run "1. backtick" x`', ["1. backtick"]),
     # `!` is a reserved word too and sits in the same chain. Nothing pinned the
     # lookbehind this replaced, so these are the first rows it has had.
     ('if ! run "1. negated" x; then :; fi', ["1. negated"]),
@@ -594,6 +648,22 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     # of `echo` and not a command (measured against bash).
     ('echo "a"#b run "1. hash-after-quote" x', []),
     ('npm --prefix app run lint', []),
+    # A `)` that CLOSES A SUBSTITUTION is not a command boundary: bash runs
+    # only `echo` for each of these three (measured), while a reader that saw
+    # every `)` as a separator returned the label as a runnable gate.
+    ('echo $(printf x) run "1. subst-closer" true', []),
+    ('echo $((1+2)) run "1. arith-closer" true', []),
+    ('echo <(printf x) run "1. proc-closer" true', []),
+    # …and the word CONTINUES through one, so the `#` after it is literal and
+    # the gate later on the line survives (`echo $(printf a)#b` prints `a#b`).
+    ('echo $(printf a)#b; run "1. after-subst-hash" x',
+     ["1. after-subst-hash"]),
+    ('echo `printf a`#b; run "1. after-backtick-hash" x',
+     ["1. after-backtick-hash"]),
+    # The SUBSHELL closer is the other side of that rule and must keep ending
+    # a word: `(printf b)#c; run "…" x` prints `b` and runs nothing else
+    # (measured), because `#c` opens a comment that swallows the rest.
+    ('(printf b)#c; run "1. after-subshell-hash" x', []),
     # A reserved word is reserved only WHERE A COMMAND CAN START. In an
     # argument it is an ordinary word, so bash runs only `echo` here (measured
     # for all three), while a rule that accepted a reserved word after any
