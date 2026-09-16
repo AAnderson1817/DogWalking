@@ -5,8 +5,10 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import {
+  calleeCall,
   declaredObjects,
   isAssignmentOperator,
+  isEscapedObjectAssign,
   isObjectAssignCall,
   propertyKey,
   definesWithoutValue,
@@ -158,32 +160,60 @@ function channelCallsIn(source: ts.SourceFile, rel: string): ChannelCall[] {
     const clients = clientNames(source);
     const declared = declaredObjects(source);
     const visit = (node: ts.Node): void => {
-      // Every `.channel(…)` call is looked at, and its receiver is then
+      // Every reference to `channel` is looked at, and its receiver is then
       // CLASSIFIED — a receiver this file cannot resolve to the client is
       // reported rather than skipped, because "cannot say" is not "not a
-      // channel". Measured on the healthy tree: one `.channel(` in app/src,
-      // on the client, so refusing the unresolvable is not a red on healthy
-      // code. The day something unrelated grows a `.channel` method, somebody
-      // decides here rather than the gate quietly stopping looking.
-      if (
-        ts.isCallExpression(node) &&
-        ((ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "channel") ||
-          (ts.isElementAccessExpression(node.expression) &&
-            ts.isStringLiteralLike(node.expression.argumentExpression) &&
-            node.expression.argumentExpression.text === "channel"))
-      ) {
+      // channel". Measured on the healthy tree: one `.channel` in app/src, on
+      // the client, and it is a direct call, so neither refusal below is a red
+      // on healthy code. The day something unrelated grows a `.channel`
+      // method, somebody decides here rather than the gate quietly stopping
+      // looking.
+      //
+      // A REFERENCE to the method, in any position — the call is then found by
+      // walking UP. Keying on the call instead matched the method in exactly
+      // one position while every other position still opens a channel:
+      // `supabase.channel.call(supabase, "walk:public")` left all 11 tests
+      // green (Codex, PR #94), and so did `.bind`, `Reflect.apply`, `.apply`,
+      // `const ch = supabase.channel; ch(t)` and a bare `register(
+      // supabase.channel)` — five spellings the finding did not name, which is
+      // why the fix is the POSITION and not a list of them.
+      const access = ts.isPropertyAccessExpression(node) && node.name.text === "channel"
+        ? node
+        : ts.isElementAccessExpression(node)
+            && ts.isStringLiteralLike(node.argumentExpression)
+            && node.argumentExpression.text === "channel"
+          ? node
+          : null;
+      if (access) {
         // The receiver goes through the same transparent unwrapping the
         // alias resolver uses. `(supabase).channel(…)` is behaviour-preserving
         // and left the receiver a `ParenthesizedExpression`, so an
         // identifier-only test reported a correctly private call as
         // unresolvable — a gate RED ON A HEALTHY TREE, this log's worst shape
         // (Codex, PR #94). Measured on the real call before the fix.
-        const receiver = unwrapTransparent(node.expression.expression);
+        const receiver = unwrapTransparent(access.expression);
         const onClient = ts.isIdentifier(receiver) && clients.has(receiver.text);
+        const accessLine = source.getLineAndCharacterOfPosition(access.getStart()).line + 1;
+        const call = calleeCall(access);
         if (!onClient) {
+          // A bare READ of somebody else's `.channel` opens nothing, and
+          // reporting every one of them would turn this gate red the first
+          // time an unrelated object grows a property of that name — the
+          // worse failure shape. So the refusal stays where HEAD had it, on
+          // a CALL, which is the shape that can open a topic.
+          //
+          // Stated residual, on the precedent `isObjectAssignCall` sets three
+          // paragraphs over: a reference that is BOTH on a receiver this file
+          // cannot resolve AND escaped is not reported. That needs an alias
+          // the resolver missed and an escape in one file, where each refusal
+          // above needs only one of the two.
+          if (!call) {
+            ts.forEachChild(node, visit);
+            return;
+          }
           found.push({
             file: rel,
-            line: source.getLineAndCharacterOfPosition(node.getStart()).line + 1,
+            line: accessLine,
             private: false,
             why: `\`${receiver.getText()}.channel(…)\` — this check cannot resolve that receiver to the `
               + `Supabase client, so it cannot say the topic is private. Classify it here.`,
@@ -191,8 +221,23 @@ function channelCallsIn(source: ts.SourceFile, rel: string): ChannelCall[] {
           ts.forEachChild(node, visit);
           return;
         }
-        const line = source.getLineAndCharacterOfPosition(node.getStart()).line + 1;
-        const opts = node.arguments[1];
+        // The client's `channel` handed somewhere rather than invoked here.
+        // Whatever receives it can open a topic with whatever options it
+        // likes, and none of that is readable from this reference — so it is
+        // REPORTED, the same answer an unresolvable receiver gets, rather
+        // than passed over because the shape is unfamiliar.
+        if (!call) {
+          found.push({
+            file: rel,
+            line: accessLine,
+            private: false,
+            why: "the client's `channel` method is referenced without being called here, so whatever "
+              + "receives it can open a topic this check cannot read — call it directly, or classify it here.",
+          });
+          ts.forEachChild(node, visit);
+          return;
+        }
+        const opts = call.arguments[1];
         let isPrivate = false;
         let why = "no options argument";
         if (!opts) {
@@ -227,10 +272,58 @@ function channelCallsIn(source: ts.SourceFile, rel: string): ChannelCall[] {
             } else why = `config.private is \`${shownAs(priv)}\`, not the literal true`;
           }
         }
-        found.push({ file: rel, line, private: isPrivate, why });
+        found.push({ file: rel, line: accessLine, private: isPrivate, why });
+      }
+      // The client DESTRUCTURED. `const { channel } = supabase; channel(t)`
+      // opens a topic with no receiver left for the rule above to resolve, and
+      // it too left all 11 tests green on the shipped gate (measured; one of
+      // the spellings the finding did not name). It is the same escape one
+      // syntactic shape over, so it gets the same answer: reported.
+      if (ts.isVariableDeclaration(node) && node.initializer
+        && ts.isObjectBindingPattern(node.name)) {
+        reportDestructure(node.name.elements, node.initializer,
+          source.getLineAndCharacterOfPosition(node.getStart()).line + 1);
+      }
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+        && ts.isObjectLiteralExpression(node.left)) {
+        reportDestructure(node.left.properties, node.right,
+          source.getLineAndCharacterOfPosition(node.getStart()).line + 1);
       }
       ts.forEachChild(node, visit);
     };
+
+    // One rule for both spellings of taking `channel` off the client: the
+    // declaration form and the assignment form. A REST element carries the
+    // method with everything else, so it counts too.
+    function reportDestructure(
+      elements: ts.NodeArray<ts.BindingElement | ts.ObjectLiteralElementLike>,
+      init: ts.Expression,
+      line: number,
+    ): void {
+      const src = unwrapTransparent(init);
+      if (!ts.isIdentifier(src) || !clients.has(src.text)) return;
+      for (const el of elements) {
+        let takes = false;
+        if (ts.isBindingElement(el)) {
+          if (el.dotDotDotToken) takes = true;
+          else if (el.propertyName) takes = propertyKey(el.propertyName) === "channel";
+          else takes = ts.isIdentifier(el.name) && el.name.text === "channel";
+        } else if (ts.isSpreadAssignment(el)) takes = true;
+        else if (ts.isShorthandPropertyAssignment(el)) takes = el.name.text === "channel";
+        else if (ts.isPropertyAssignment(el)) takes = propertyKey(el.name) === "channel";
+        if (!takes) continue;
+        found.push({
+          file: rel,
+          line,
+          private: false,
+          why: "the client's `channel` method is taken off it by a destructuring, so the call that "
+            + "follows has no receiver this check can resolve — call `<client>.channel(…)` directly, "
+            + "or classify it here.",
+        });
+        return;
+      }
+    }
+
     visit(source);
   }
   return found;
@@ -275,6 +368,15 @@ function mutations(sf: ts.SourceFile): string[] {
     // test (Codex, PR #94).
     if (isObjectAssignCall(n)) {
       out.push(`${n.getText().split("\n")[0]} (line ${at(n)})`);
+    }
+    // …and a reference to it that is NOT invoked here. `Object.assign.call(
+    // null, message, { private: false })` mutates exactly as the direct call
+    // does and named no target the reader above could collect, so this file
+    // reported no mutation and read a stale literal — the SIBLING of the
+    // channel finding, in this file's own predicate (Codex, PR #94; `.apply`,
+    // `.bind` and `Reflect.apply` measured the same way).
+    if (isEscapedObjectAssign(n)) {
+      out.push(`${n.getText().split("\n")[0]} — referenced without being called (line ${at(n)})`);
     }
     if (ts.isDeleteExpression(n)) out.push(`${n.getText()} (line ${at(n)})`);
     // `c.private--` writes to a property exactly as `c.private = 0` does, and
@@ -670,6 +772,61 @@ describe("the walk channel is the only channel, and it is private on both sides"
       "config.private is `false`, not the literal true",
     ]);
     expect(verdicts("supabase.channel(t, { config: {} });")).toEqual(["`config` carries no `private`"]);
+
+    // The method INVOKED through every other spelling. Each of these opens a
+    // channel and each left all 11 tests green on the shipped gate, because it
+    // matched the method in one position only (Codex, PR #94, and five
+    // spellings the finding did not name).
+    for (const escaped of [
+      'supabase.channel.call(supabase, "walk:public");',
+      'supabase.channel.apply(supabase, ["walk:public"]);',
+      'const f = supabase.channel.bind(supabase); f("walk:public");',
+      'Reflect.apply(supabase.channel, supabase, ["walk:public"]);',
+      'const ch = supabase.channel; ch("walk:public");',
+      "register(supabase.channel);",
+      "[1].forEach(supabase.channel);",
+      'new supabase.channel("walk:public");',
+      'supabase["channel"].call(supabase, "walk:public");',
+    ]) {
+      expect(verdicts(escaped), escaped).toEqual([
+        "the client's `channel` method is referenced without being called here, so whatever "
+          + "receives it can open a topic this check cannot read — call it directly, or classify it here.",
+      ]);
+    }
+
+    // …and the DESTRUCTURING spelling, which takes the method off the client
+    // and leaves the call that follows with no receiver to resolve.
+    for (const taken of [
+      'const { channel } = supabase; channel("walk:public");',
+      'const { channel: ch } = supabase; ch("walk:public");',
+      'const { ["channel"]: ch } = supabase; ch("walk:public");',
+      'const { ...rest } = supabase; rest.channel("walk:public");',
+      'let channel; ({ channel } = supabase); channel("walk:public");',
+      'let ch; ({ channel: ch } = supabase); ch("walk:public");',
+    ]) {
+      expect(verdicts(taken)[0], taken).toMatch(/taken off it by a destructuring/);
+    }
+
+    // The OTHER direction, which is what stops either rule becoming "refuse
+    // anything unfamiliar": every spelling that really does invoke it here.
+    for (const ok of [
+      `supabase["channel"](t, ${OPTS});`,
+      `supabase.channel?.(t, ${OPTS});`,
+      `(supabase.channel)(t, ${OPTS});`,
+      `(supabase.channel as never)(t, ${OPTS});`,
+      `(supabase.channel!)(t, ${OPTS});`,
+    ]) {
+      expect(verdicts(ok), ok).toEqual(["private"]);
+    }
+
+    // …and a bare READ of somebody else's `.channel` opens nothing. Reporting
+    // it would turn this gate red the first time an unrelated object grows a
+    // property of that name, so the unresolvable-receiver refusal stays on the
+    // CALL, where it was. The two halves are separate assertions because they
+    // are separate rules.
+    expect(verdicts("const port = { channel: 2 }; void port.channel;")).toEqual([]);
+    expect(verdicts("const other = { channel: 1 }; const { channel } = other; void channel;")).toEqual([]);
+    expect(verdicts(`other.channel(t, ${OPTS});`)[0]).toMatch(/cannot resolve that receiver/);
   });
 
   // The message reader, pinned on fixtures. `serverPrivate()` reads one real
@@ -760,6 +917,13 @@ describe("the walk channel is the only channel, and it is private on both sides"
     expect(read("const c = { private: true };\ndelete c.private;\nsend({ topic, ...c });"))
       .toEqual(["<unresolvable spread `c`>"]);
     expect(read("const c = { private: true };\nObject.assign(c, { private: false });\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    // An escaped `Object.assign` names no target at all, so the conservative
+    // answer is that NO literal in the file is known to be current — the
+    // reader cannot say which object was written (Codex, PR #94, sibling).
+    expect(read("const c = { private: true };\nObject.assign.call(null, other, {});\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read("const c = { private: true };\nconst f = Object.assign;\nsend({ topic, ...c });"))
       .toEqual(["<unresolvable spread `c`>"]);
     // `++`/`--` writes too, and its operand decides what it writes: a member
     // or element access mutates the object, where an identifier rebinds the
@@ -1071,6 +1235,27 @@ describe("the walk channel is the only channel, and it is private on both sides"
     expect(muts("const m = { private: true };\nm.private = false;")).toHaveLength(1);
     expect(muts('const m = { private: true };\nm["private"] = false;')).toHaveLength(1);
     expect(muts("const m = { private: true };\nObject.assign(m, { private: false });")).toHaveLength(1);
+    // …and a reference to it that is NOT invoked here. Each of these mutates
+    // exactly as the direct call does while naming no target the root
+    // collector could see, so `mutations()` reported nothing and the reader
+    // above kept a stale literal — the SIBLING of the channel finding, in
+    // this file's own predicate (Codex, PR #94).
+    for (const escaped of [
+      "const m = { private: true };\nObject.assign.call(null, m, { private: false });",
+      "const m = { private: true };\nObject.assign.apply(null, [m, { private: false }]);",
+      "const m = { private: true };\nconst f = Object.assign.bind(null); f(m, {});",
+      "const m = { private: true };\nReflect.apply(Object.assign, null, [m, {}]);",
+      "const m = { private: true };\nconst assign = Object.assign; assign(m, {});",
+      "const m = { private: true };\nrun(Object.assign);",
+    ]) {
+      expect(muts(escaped), escaped).toHaveLength(1);
+    }
+    // …and the other direction: a module that BINDS the name calls its own,
+    // so neither the call nor a reference to it is the built-in. Reporting it
+    // would be red on healthy code, which is why the receiver is resolved
+    // rather than matched — one predicate, both positions.
+    expect(muts("const Object = { assign(_v: unknown) {} };\nconst m = { private: true };\nrun(Object.assign);")).toEqual([]);
+    expect(muts("const m = { private: true };\nrun(registry.assign);")).toEqual([]);
     // The receiver decides. `metrics.assign({…})` is somebody else's method.
     expect(muts("const m = { private: true };\nmetrics.assign({ topic });")).toEqual([]);
     // …and so does what the receiver's NAME refers to: a module that binds

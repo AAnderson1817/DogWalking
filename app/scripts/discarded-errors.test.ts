@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import ts from "typescript";
+import { calleeCall } from "./lib/static-object.js";
 import { describe, expect, it } from "vitest";
 
 /**
@@ -226,6 +227,19 @@ const REJECTS_REASON = "carries `.throwOnError()`, which rejects with a raw Post
 /** `q.delete().throwOnError` / `db.from("x").select`: a method named and never invoked. */
 function uncalledReason(what: string, member: string): string {
   return `${what}: \`.${member}\` is referenced and never called — nothing runs`;
+}
+
+/**
+ * `db.from.call(db, "x")`, `const f = db.rpc`: the query method handed away.
+ *
+ * Deliberately NOT `uncalledReason`'s sentence. There the method genuinely
+ * never runs; here it runs through a route this gate cannot follow, so the
+ * envelope exists and nobody classified it. A red that misdescribes itself is
+ * its own defect, so the two say different things.
+ */
+function escapedQueryReason(member: string): string {
+  return `query: \`.${member}\` is handed somewhere rather than called here, so the envelope it `
+    + `produces is never classified — call \`<client>.${member}(…)\` directly`;
 }
 
 const COMPILER_OPTIONS: ts.CompilerOptions = {
@@ -1690,10 +1704,37 @@ function classifyFile(program: ts.Program, sf: ts.SourceFile, file: string): Sit
     sites.push(...classifyTop(ctx, chain.top));
   };
 
+  /** A `<client>.from` / `<client>.rpc` reference that is not invoked here. */
+  const escapedQueryMethod = (n: ts.Node): boolean => {
+    const acc = memberAccess(n);
+    return acc !== null && QUERY_METHODS.has(acc.name) && calleeCall(n) === null;
+  };
+
   const visit = (n: ts.Node) => {
     const member = ts.isCallExpression(n) ? memberAccess(n.expression) : null;
     if (member && QUERY_METHODS.has(member.name)) {
       seen(n, member.receiver, member.token);
+    } else if (escapedQueryMethod(n)) {
+      // The query method REFERENCED and not invoked here. `db.from.call(db,
+      // "walks").select("id")` runs the query exactly as `db.from("walks")`
+      // does, and `const f = db.from` hands the builder to a name this gate
+      // cannot follow — so the envelope it produces is never classified and a
+      // discarded error is invisible: 67 of 67 green with the error dropped
+      // (measured). The SIBLING of the channel finding, in the reader beside
+      // it, and the same hole `.throwOnError` already has a rule for at the
+      // OTHER end of a chain (`uncalledReason`).
+      //
+      // Positive client evidence is required, exactly as the `.auth` branch
+      // below requires it and for the same reason: `from` is an ordinary
+      // property name, `receiverKind` calls every lowercase identifier a
+      // client, and reporting `range.from` or `msg.from` would be a gate red
+      // on a healthy tree. Measured: zero non-call `.from`/`.rpc` references
+      // in supabase/functions today.
+      const acc = memberAccess(n)!;
+      const ctx: Ctx = { sf, checker, file, queryLine: lineOf(sf, acc.token), followed };
+      if (declaredAsClient(ctx, acc.receiver) === "client") {
+        sites.push(site(ctx, n, "UNCLASSIFIED", escapedQueryReason(acc.name)));
+      }
     } else {
       const auth = memberAccess(n);
       if (
@@ -1882,6 +1923,37 @@ describe("classifySource", () => {
     const sites = classifySource(`const suppress = async (t: string) => await adminClient().rpc("fn_x", { p: t });
 function g(db: any) { return db.from("clients").select("id"); }`, "fixture.ts");
     expect(sites.map((s) => s.verdict)).toEqual(["PASSED_ON", "PASSED_ON"]);
+  });
+
+  it("a query method handed away rather than called is UNCLASSIFIED", () => {
+    // `db.from.call(db, "walks")` runs the query exactly as `db.from("walks")`
+    // does, and the scan keyed on the method's ONE position — as the immediate
+    // callee — so the envelope was never classified and a discarded error was
+    // invisible: 67 of 67 green with the error dropped (measured). The SIBLING
+    // of the channel finding, in the reader beside it (Codex, PR #94).
+    for (const escaped of [
+      'async function f() { const db = adminClient(); const { data } = await db.from.call(db, "walks").select("id"); return data; }',
+      'async function f() { const db = adminClient(); const { data } = await db.from.apply(db, ["walks"]).select("id"); return data; }',
+      'async function f() { const db = adminClient(); const call = db.rpc; const { data } = await call.apply(db, ["fn_x", {}]); return data; }',
+      'function f() { const db = adminClient(); register(db.from); }',
+      'async function f() { const db = adminClient(); const { data } = await db["from"].call(db, "walks").select("id"); return data; }',
+    ]) {
+      const s = classifySource(escaped, "f.ts").filter((x) => /handed somewhere/.test(x.reason));
+      expect(s.map((x) => x.verdict), escaped).toEqual(["UNCLASSIFIED"]);
+    }
+
+    // The other direction, and it is the one that keeps this off a healthy
+    // tree: `from` is an ordinary property name and `receiverKind` calls every
+    // lowercase identifier a client, so the rule demands POSITIVE client
+    // evidence — the same test the `.auth` branch uses, for the same reason.
+    expect(classifySource('function g(msg: { from: string }) { return msg.from; }', "f.ts")).toEqual([]);
+    expect(classifySource('const xs = [[1]].map(Uint8Array.from);', "f.ts")).toEqual([]);
+    expect(classifySource('function g(range: { from: number; to: number }) { return range.from + range.to; }', "f.ts")).toEqual([]);
+    // …and a direct call is still classified as it always was.
+    expect(classifySource(
+      'async function f() { const db = adminClient(); const { data, error } = await db.from("walks").select("id"); if (error) throw error; return data; }',
+      "f.ts",
+    ).map((s) => s.verdict)).toEqual(["OK"]);
   });
 
   it("receivers: a capitalised global is not a query; anything unrecognised is UNCLASSIFIED", () => {

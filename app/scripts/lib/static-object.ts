@@ -55,6 +55,50 @@ export function unwrapTransparent(e: ts.Expression): ts.Expression {
   return cur;
 }
 
+/**
+ * The call this node is the DIRECT CALLEE of — `x.m(…)` — or null when the
+ * reference is handed somewhere else instead.
+ *
+ * A method matched by its immediate callee is a method matched in exactly ONE
+ * position, and every other position still invokes it.
+ * `supabase.channel.call(supabase, "walk:public")` opens a channel and
+ * `Object.assign.call(null, c, {})` mutates an object; neither is a call whose
+ * callee is the method, so a reader keyed on that position sees neither and
+ * the gate BLESSES what it forbids (Codex, PR #94 — with `.bind`,
+ * `Reflect.apply`, `.apply`, a plain alias and a bare callback measured the
+ * same way, so the hole is the position and not the three spellings named).
+ *
+ * Transparent wrappers are climbed on the way UP, because `(x.m)(…)` invokes
+ * exactly as `x.m(…)` does and reading the wrapper would be a gate red on
+ * healthy code — the same rule `unwrapTransparent` applies going down.
+ *
+ * Everything else is the function ESCAPING into a value this module does not
+ * follow: an argument, an initialiser, a `new x.m()`, a tagged template. The
+ * caller reports it rather than skipping it, because "cannot say" is not "not
+ * a call" — which is the posture the rest of these gates already take.
+ */
+export function calleeCall(node: ts.Node): ts.CallExpression | null {
+  let cur: ts.Node = node;
+  for (let i = 0; i < 8; i += 1) {
+    const parent: ts.Node | undefined = cur.parent;
+    if (!parent) return null;
+    if (ts.isCallExpression(parent)) return parent.expression === cur ? parent : null;
+    if (
+      (ts.isParenthesizedExpression(parent) ||
+        ts.isAsExpression(parent) ||
+        ts.isSatisfiesExpression(parent) ||
+        ts.isNonNullExpression(parent) ||
+        ts.isTypeAssertionExpression(parent)) &&
+      parent.expression === cur
+    ) {
+      cur = parent;
+      continue;
+    }
+    return null;
+  }
+  return null;
+}
+
 /** The text of a statically readable string, or null for a dynamic one. */
 export function literalText(e: ts.Expression): string | null {
   const cur = unwrapTransparent(e);
@@ -144,6 +188,13 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
   // which nothing has touched.
   const rebound = new Set<string>();
   const mutated = new Set<string>();
+  // A reference to `Object.assign` that is not invoked HERE names no target,
+  // so there is no root to collect: `Object.assign.call(null, c, {})` writes
+  // into `c` and `const f = Object.assign` hands the mutator away entirely.
+  // Nothing here can say which object, so nothing here may claim a literal is
+  // still current (Codex, PR #94 — the sibling of the channel finding, in the
+  // predicate this module shares with the channel gate).
+  let escapedMutator = false;
   // `const b = a` makes the two names one object, so a mutation of either is a
   // mutation of both. Undirected, and closed transitively below.
   const aliases = new Map<string, Set<string>>();
@@ -293,6 +344,7 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
       const target = n.arguments[0];
       if (target) collectMutatedRoots(target, mutated, true);
     }
+    if (isEscapedObjectAssign(n)) escapedMutator = true;
 
     ts.forEachChild(n, visit);
   };
@@ -339,6 +391,7 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
   };
 
   const out = new Map<string, ts.ObjectLiteralExpression>();
+  if (escapedMutator) return out;
   for (const [name, lit] of seen) {
     if (rebound.has(name) || mutated.has(name)) continue;
     const resolved = lit ?? aliasLiteral(name);
@@ -798,11 +851,11 @@ export function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
  * only the shadow. No file either gate reads binds either name today (294
  * scanned, 0 hits), so the rule costs nothing now.
  */
-export function isObjectAssignCall(n: ts.Node): n is ts.CallExpression {
-  if (!ts.isCallExpression(n) || !ts.isPropertyAccessExpression(n.expression)) return false;
-  if (n.expression.name.text !== "assign") return false;
-  const sf = n.getSourceFile();
-  const receiver = unwrapTransparent(n.expression.expression);
+export function isObjectAssignAccess(access: ts.Node): boolean {
+  if (!ts.isPropertyAccessExpression(access)) return false;
+  if (access.name.text !== "assign") return false;
+  const sf = access.getSourceFile();
+  const receiver = unwrapTransparent(access.expression);
   if (ts.isIdentifier(receiver)) {
     return receiver.text === "Object" && !bindsName(sf, "Object");
   }
@@ -813,6 +866,24 @@ export function isObjectAssignCall(n: ts.Node): n is ts.CallExpression {
     receiver.expression.text === "globalThis" &&
     !bindsName(sf, "globalThis")
   );
+}
+
+export function isObjectAssignCall(n: ts.Node): n is ts.CallExpression {
+  return ts.isCallExpression(n) && isObjectAssignAccess(n.expression);
+}
+
+/**
+ * A reference to the built-in `Object.assign` that is NOT invoked here.
+ *
+ * `Object.assign.call(null, c, {})` mutates `c` exactly as the direct call
+ * does, and `const f = Object.assign` hands the mutator to a name this module
+ * cannot follow. Either way SOME object may be written and nothing here can
+ * say which, so the caller invalidates every literal rather than reading one
+ * that may already be stale — the same conservative answer a mutation through
+ * an unresolved name gets.
+ */
+export function isEscapedObjectAssign(n: ts.Node): boolean {
+  return isObjectAssignAccess(n) && calleeCall(n) === null;
 }
 
 /**
