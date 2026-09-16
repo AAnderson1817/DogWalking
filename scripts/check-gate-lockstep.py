@@ -828,7 +828,21 @@ def _lex_shell(
     # popped the enclosing substitution — the same phantom by the opposite
     # route (both measured). Round thirty's defect, reached through `function`
     # as round forty-six reached it through `time` and forty-seven through `!`.
-    fn_name = False
+    # "" outside a definition, "next" when the word about to start is the
+    # function's NAME, and "in" while that word is being read. The third state
+    # is what makes the rule WORD-SCOPED, which a brace forced: a brace is
+    # legal anywhere in a name (`function {f`, `function f{g`, `function f}`
+    # all run, measured) and the brace branch below sits ABOVE the word-start
+    # logic, so it answered first — computing `opens` as false (a name
+    # character follows, not a word break), CLEARING `at_cmd`, and leaving the
+    # flag armed. Two defects from that one root, both measured: the body's `{`
+    # then opened no command position, so a `case` inside it went unrecognised
+    # and its pattern's `)` popped the enclosing substitution; and the still-
+    # armed flag ate the NEXT command word as a name, which does the same one
+    # statement later. Round thirty's defect, reached through a brace in a
+    # name, as rounds forty-six to forty-eight reached it through `time`, `!`
+    # and `function` itself (Codex, PR #94).
+    fn_name = ""
     # An unquoted backtick is the other spelling of `$( )`: what follows it is
     # a command position (`echo `run "13. x" y`` runs `run` — measured, and the
     # reader found NOTHING for it, invisible in both directions), and the word
@@ -970,6 +984,14 @@ def _lex_shell(
                 i = eol
                 continue
         ch = text[i]
+        # The name word ends at the first word-break character, WHEREVER it is
+        # handled — a space and a `;` reach the final branch, while `(` and `)`
+        # are taken by the parenthesis branch above it, and `function f(){ … }`
+        # is legal bash (measured). Clearing here rather than inside one branch
+        # is what keeps "in" scoped to the word rather than to whichever branch
+        # happens to consume its last character.
+        if fn_name == "in" and ch in _WORD_BREAK:
+            fn_name = ""
         # An ESCAPED `\$(` or ``\` `` is literal and opens nothing (measured),
         # and the backslash is consumed by the quote branch below before this
         # test ever sees the character after it.
@@ -1352,7 +1374,7 @@ def _lex_shell(
             # (`x=${UNSET:-a; b}; run "…" true` runs `run`, measured).
             at_word_start = False
             at_cmd = False
-        elif ch in "{}":
+        elif ch in "{}" and not fn_name:
             # A brace is a RESERVED WORD, not a metacharacter: it counts only
             # where it stands alone at a command position, so `echo x{ …` and
             # `echo ${HOME} …` carry no boundary (measured). Even standing
@@ -1434,14 +1456,14 @@ def _lex_shell(
                 elif opt == "--":
                     time_opt = ""
                     at_cmd = True
-                elif fn_name:
+                elif fn_name == "next":
                     # The function's NAME. It is not a reserved word whatever
                     # it says, and the command position SURVIVES it, because
                     # what follows is the body — whose `{` opens one of its own
                     # only while `at_cmd` still holds (the `{` branch above
                     # requires it). `time_opt` cannot be live here: the word
                     # that set `fn_name` cleared it.
-                    fn_name = False
+                    fn_name = "in"
                     at_cmd = True
                 elif _BANG.match(text, i):
                     # `!` negates a pipeline, so a command position survives it
@@ -1472,7 +1494,7 @@ def _lex_shell(
                     time_opt = ""
                     at_cmd = True
                 else:
-                    fn_name = name == "function"
+                    fn_name = "next" if name == "function" else ""
                     time_opt = "opt" if name == "time" else ""
                     at_cmd = name in SHELL_RESERVED
                     if name == "case":
@@ -1910,6 +1932,35 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('echo $(function f { case a in a) :;; esac; }) run "1. fake" true', []),
     ('echo $(function f { case a in a) run "1. function-case-in-body" true;; esac; }; f)',
      ["1. function-case-in-body"]),
+    # A brace is legal ANYWHERE in a function's name, and the brace branch in
+    # the lexer sits above the word-start logic, so it answered first: the
+    # command position was cleared, the body's `case` went unrecognised, and
+    # its pattern's `)` popped the enclosing substitution. Four positives, each
+    # measured against bash — Codex's own spelling, a brace in the MIDDLE of
+    # the name, one at its end, and the LATENT flag, which stayed armed and ate
+    # the next command word as a name one statement later.
+    ('echo $(function {f { case a in a) run "1. function-brace-name" true;; esac; }; {f)',
+     ["1. function-brace-name"]),
+    ('echo $(function f{g { case a in a) run "1. function-brace-midname" true;; esac; }; f{g)',
+     ["1. function-brace-midname"]),
+    ('echo $(function f} { case a in a) run "1. function-brace-endname" true;; esac; }; f})',
+     ["1. function-brace-endname"]),
+    ('echo $(function {f { :; }; case a in a) run "1. function-brace-latent" true;; esac)',
+     ["1. function-brace-latent"]),
+    ('function {f { run "1. function-brace-name-body" true; }; {f',
+     ["1. function-brace-name-body"]),
+    # …and their mirrors, each a word bash passes to `echo`.
+    ('echo $(function {f { case a in a) :;; esac; }) run "1. fake" true', []),
+    ('echo $(function f{g { case a in a) :;; esac; }) run "1. fake" true', []),
+    ('echo $(function {f { :; }; case a in a) :;; esac) run "1. fake" true', []),
+    # The two paren spellings read ALREADY — the `(` ends the name word for
+    # them — and are here because the word-scoped rule must not break them:
+    # the name ends at the first word-break character wherever it is handled,
+    # and these two are taken by the parenthesis branch rather than the last.
+    ('echo $(function f(){ case a in a) run "1. function-paren-tight" true;; esac; }; f)',
+     ["1. function-paren-tight"]),
+    ('echo $(function f() { case a in a) run "1. function-paren-spaced" true;; esac; }; f)',
+     ["1. function-paren-spaced"]),
     # A command position opens inside every substitution, and after a bare `(`
     # and a case pattern's `)` — all four measured, and all four must survive
     # the rule that stops a substitution's CLOSER being one.
