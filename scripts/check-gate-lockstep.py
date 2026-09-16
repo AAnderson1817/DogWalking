@@ -823,6 +823,8 @@ def _lex_shell(
     at_word_start = True
     # One entry per open construct: "subst" for a command, arithmetic or
     # process substitution (`$(`, `$((`, `<(`, `>(`), "paren" for a subshell,
+    # "glob" for an extglob group, which is part of a word rather than a
+    # subshell and is therefore inert at both ends,
     # and "case-pat"/"case-body" for a `case … esac`, whose pattern closers
     # carry no `(` of their own.
     #
@@ -1265,6 +1267,81 @@ def _lex_shell(
             # arrives and mask the rest of the file, losing every gate after it
             # silently.
             if (
+                bool(skel)
+                and (
+                    skel[-1] in "?*+@"
+                    or (
+                        skel[-1] == "!"
+                        and bool(parens)
+                        and parens[-1] in ("case-pat", "glob")
+                    )
+                )
+            ):
+                # No `not opens_subst`/`not arith_open` guard, unlike every
+                # sibling branch here, and that is measured rather than
+                # assumed: both are decided by the RAW characters around the
+                # `(` — a preceding `$`, `<` or `>`, or a doubled `(` — while
+                # this rule reads the SKELETON, where no value is ever one of
+                # `?*+@`. The two can therefore never hold together. Checked
+                # across 100 constructed inputs (every operator before `$(`,
+                # `<(`, `>(` and `((`, at command, argument, assignment and
+                # pattern positions, with extglob and without): not one answer
+                # moved with either guard removed. A guard no input can pin is
+                # a rule with nothing behind it, so the measurement is here
+                # instead.
+                #
+                # An EXTGLOB GROUP — `?(`, `*(`, `+(`, `@(`, `!(` — which is
+                # part of a WORD and never a subshell, so its closer ends
+                # nothing and opens no command position. Without this the `)`
+                # was a boundary, which went wrong in both directions: inside a
+                # case PATTERN `shopt -s extglob` + `case xrun in @(x)run) :;;
+                # esac` invokes nothing (measured) while
+                # `shell_unreadable_calls` refused `run) :` — a gate red on a
+                # healthy tree (Codex PR #94) — and in an ORDINARY word `echo
+                # @(x) run "1. fake" true` passes every word to `echo` and ran
+                # NOTHING while the label reader returned `1. fake`, a PHANTOM
+                # gate. The sibling CONSTRUCT is the worse direction, which is
+                # why this is scoped to a word rather than to a case pattern:
+                # one rule covers both, and a pattern IS a word.
+                #
+                # `!` is narrowed to a case PATTERN (or a group already
+                # inside one) and that is a DECIDABILITY line, not caution.
+                # The other four are syntax errors without extglob in every
+                # position (measured), so they have exactly one reading. `!(`
+                # is the one spelling that is also valid shell without it, and
+                # means something else: `!(run "…" true)` at a command
+                # position NEGATES A SUBSHELL and really invokes the gate
+                # (measured), while with extglob the identical text is one
+                # glob word bash cannot execute (measured, exit 127, nothing
+                # run). Which one it is depends on a `shopt` this reader
+                # cannot know — it can be set conditionally, in a sourced
+                # file, or through `BASHOPTS` — so knowing the POSITION does
+                # not resolve it, and reading it as a glob would LOSE a real
+                # gate. Inside a pattern there is no such conflict: a pattern
+                # is never a command position, and `case y in !(x)) …` is a
+                # syntax error without extglob (measured). Outside one, `!(`
+                # keeps the subshell reading it has always had; the phantom
+                # that leaves at an ARGUMENT position is pre-existing and
+                # pinned as a row below rather than left to be rediscovered.
+                #
+                # The operator is read off the SKELETON, so an escaped or
+                # quoted one is not one — `\@(x)` and `"@"(x)` are bash syntax
+                # errors (measured), and a masked character is not in the set.
+                # Without extglob every spelling but `!(` is a syntax error too
+                # (measured), so the only files this changes are ones bash will
+                # actually run.
+                kind = "glob"
+                parens.append(kind)
+                exp_resume_at.append(
+                    (len(parens) - 1, exp_depth, arith_depth, hd)
+                )
+                out.append(ch)
+                skel.append(_MASK)
+                at_word_start = False
+                at_cmd = False
+                i += 1
+                continue
+            if (
                 not opens_subst
                 and not arith_open
                 and parens
@@ -1308,7 +1385,7 @@ def _lex_shell(
             # so it pushes like any other and is masked like everything else
             # here; one entry per character, so `))` needs no pair matching and
             # `$(( (1+2)))` stays balanced.
-            inert = kind == "arith" or arith_depth > 0
+            inert = kind in ("arith", "glob") or arith_depth > 0
             skel.append(_MASK if inert else ch)
             at_word_start = not inert
             at_cmd = not inert
@@ -1329,7 +1406,12 @@ def _lex_shell(
                 at_cmd = False
                 i += 1
                 continue
-            if parens and parens[-1].startswith("case"):
+            if parens and parens[-1] == "glob":
+                # An extglob group's closer: pattern text in the middle of a
+                # WORD, so it is inert below — no boundary, no command
+                # position, and the word runs on through it.
+                closed = parens.pop()
+            elif parens and parens[-1].startswith("case"):
                 # A case pattern's closer: a real command position (`case a in
                 # a) run "…" x;; esac` runs `run`, measured) that closes no
                 # `(`, so the construct beneath it stays open. It ends the
@@ -1347,7 +1429,7 @@ def _lex_shell(
             # passes `run` to `echo` (measured). `arith_depth` itself is
             # restored by the resume loop below, which every push records an
             # entry for.
-            inert = closed == "arith" or arith_depth > 0
+            inert = closed in ("arith", "glob") or arith_depth > 0
             skel.append(
                 _SUBST_CLOSE if substitution else (_MASK if inert else ch)
             )
@@ -1644,13 +1726,31 @@ def _lex_shell(
             pattern_alt = (
                 ch == "|" and bool(parens) and parens[-1] == "case-pat"
             )
+            # Inside an extglob group `|`, `;`, `&` and a newline are all
+            # PATTERN TEXT, not boundaries: `echo @(a;b)`, `@(a&b)` and
+            # `@(a\nb)` each print themselves and invoke nothing (measured),
+            # while `echo @(a|run) "1. fake" true` passes every word to `echo`
+            # — so an unmasked `|` there is the same phantom the group rule
+            # above closes, one character in. The body stays LIVE rather than
+            # wholly masked, because a substitution inside a group really does
+            # run: `echo @($(run "…" true; printf x))` invokes the gate
+            # (measured, and the backtick spelling too), so masking the body
+            # would be a MISS — the worse direction.
+            glob_text = (
+                ch in ";&|\n" and bool(parens) and parens[-1] == "glob"
+            )
             skel.append(
                 _NOCLOBBER
                 if noclobber
-                else (_MASK if pattern_alt else ch)
+                else (_MASK if pattern_alt or glob_text else ch)
             )
             at_word_start = ch in _WORD_BREAK
-            if ch in ";&|\n" and not noclobber and not pattern_alt:
+            if (
+                ch in ";&|\n"
+                and not noclobber
+                and not pattern_alt
+                and not glob_text
+            ):
                 at_cmd = True
             if (
                 ch == "\n"
@@ -2793,6 +2893,93 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('echo `case a in (a) run "1. bt-lparen-body" true;; esac`',
      ["1. bt-lparen-body"]),
     ('echo `printf x | run "1. bt-pipe" true`', ["1. bt-pipe"]),
+    # An EXTGLOB GROUP — `?(`, `*(`, `+(`, `@(`, `!(` — is part of a WORD, so
+    # its closer is not a boundary. Codex named the case PATTERN, where the
+    # early `)` made `shell_unreadable_calls` refuse a healthy clause; the
+    # sibling CONSTRUCT is the worse direction and is what these rows are
+    # about: in an ORDINARY word the closer opened a command position, so
+    # `echo @(x) run "1. fake" true` passed every word to `echo` and ran
+    # NOTHING (measured) while this reader returned the label — a PHANTOM
+    # gate, which satisfies a ci.yml mapping and keeps the reverse check happy
+    # after the real local gate has been deleted.
+    ('shopt -s extglob\necho @(x) run "1. fake" true', []),
+    ('shopt -s extglob\necho ?(x) run "1. fake" true', []),
+    ('shopt -s extglob\necho *(x) run "1. fake" true', []),
+    ('shopt -s extglob\necho +(x) run "1. fake" true', []),
+    ('shopt -s extglob\ncase a in a) echo @(x) run "1. fake" true;; esac', []),
+    # `|`, `;`, `&` and a newline INSIDE a group are pattern text: each of
+    # these prints itself and invokes nothing (measured).
+    ('shopt -s extglob\necho @(a|run "1. fake" true)', []),
+    ('shopt -s extglob\necho @(a;run "1. fake" true)', []),
+    ('shopt -s extglob\necho @(a&run "1. fake" true)', []),
+    ('shopt -s extglob\necho @(a\nrun "1. fake" true)', []),
+    # The other direction — a real gate in the clause BODY must still read,
+    # for every operator, with an alternation, nested, behind the optional
+    # leading parenthesis, in a second clause, and inside both spellings of a
+    # substitution.
+    ('shopt -s extglob\ncase xrun in @(x)run) run "1. eg-at" true;; esac',
+     ["1. eg-at"]),
+    ('shopt -s extglob\ncase xrun in ?(x)run) run "1. eg-q" true;; esac',
+     ["1. eg-q"]),
+    ('shopt -s extglob\ncase xrun in *(x)run) run "1. eg-star" true;; esac',
+     ["1. eg-star"]),
+    ('shopt -s extglob\ncase xrun in +(x)run) run "1. eg-plus" true;; esac',
+     ["1. eg-plus"]),
+    ('shopt -s extglob\ncase yrun in !(x)run) run "1. eg-bang" true;; esac',
+     ["1. eg-bang"]),
+    ('shopt -s extglob\ncase xrun in @(x|y)run) run "1. eg-alt" true;; esac',
+     ["1. eg-alt"]),
+    ('shopt -s extglob\ncase xrun in @(@(x))run) run "1. eg-nested" true;; esac',
+     ["1. eg-nested"]),
+    ('shopt -s extglob\ncase xrun in (@(x)run) run "1. eg-lparen" true;; esac',
+     ["1. eg-lparen"]),
+    ('shopt -s extglob\ncase zrun in @(x)run) :;; @(z)run) run "1. eg-second" true;; esac',
+     ["1. eg-second"]),
+    ('shopt -s extglob\necho $(case xrun in @(x)run) run "1. eg-subst" true;; esac)',
+     ["1. eg-subst"]),
+    ('shopt -s extglob\necho `case xrun in @(x)run) run "1. eg-bt" true;; esac`',
+     ["1. eg-bt"]),
+    # The body of a group stays LIVE rather than wholly masked, because a
+    # substitution inside one really does run (measured, both spellings).
+    # Masking it would be a MISS — the worse direction.
+    ('shopt -s extglob\necho @($(run "1. eg-inner" true; printf x))',
+     ["1. eg-inner"]),
+    ('shopt -s extglob\necho @(`run "1. eg-inner-bt" true; printf x`)',
+     ["1. eg-inner-bt"]),
+    # `!` counts as an extglob operator only inside a case PATTERN, because
+    # that is where its reading is decidable. Elsewhere it keeps the SUBSHELL
+    # reading it has always had, and these three are what that protects:
+    # `!(run "…" true)` at a command position negates a subshell and really
+    # invokes the gate (measured, exit 1 from the negation), so reading it as
+    # a glob would LOSE a real gate. The sabotage that adds `!` to the
+    # unconditional set turns exactly these red.
+    ('!(run "1. bang-subshell" true)', ["1. bang-subshell"]),
+    ('true; !(run "1. bang-semi-subshell" true)', ["1. bang-semi-subshell"]),
+    ('if !(run "1. bang-if-subshell" true); then :; fi',
+     ["1. bang-if-subshell"]),
+    ('!(true)\nrun "1. bang-cmd" true', ["1. bang-cmd"]),
+    ('shopt -s extglob\n!(true)\nrun "1. bang-cmd-eg" true', ["1. bang-cmd-eg"]),
+    ('shopt -s extglob\ntrue && !(false)\nrun "1. bang-and" true', ["1. bang-and"]),
+    ('shopt -s extglob\necho !(zzz) ; run "1. bang-arg" true', ["1. bang-arg"]),
+    # THE RESIDUAL, pinned rather than left to be rediscovered: with extglob
+    # ON, `!(zzz)` in an ARGUMENT is one glob word and bash passes every word
+    # here to `echo`, running nothing — so this label is a PHANTOM. That
+    # position is decidable (a subshell is not a legal argument: `echo (x)` is
+    # a syntax error, measured), but reading it would need lexer state the
+    # command-position half above cannot use, and the phantom is pre-existing
+    # rather than introduced by this round. Changing this row is a decision,
+    # not a bug fix.
+    ('shopt -s extglob\necho !(zzz) run "1. fake" true', ["1. fake"]),
+    # Inside a PATTERN `!` is decidable and does count — and the `"glob"` half
+    # of that tuple is what this row pins: with only `"case-pat"` there, the
+    # `(` of a group nested inside another falls through to a real subshell
+    # and its closer becomes a boundary again, so `echo @(!(x)run "1. fake"
+    # true)` — one literal word bash passes to `echo`, running nothing
+    # (measured) — reported the label.
+    ('shopt -s extglob\necho @(!(x)run "1. fake" true)', []),
+    ('shopt -s extglob\ncase yrun in @(!(x))run) run "1. nested-bang" true;; esac',
+     ["1. nested-bang"]),
+    ('shopt -s extglob\n@(zzz) ; run "1. cmd-at" true', ["1. cmd-at"]),
 )
 
 
@@ -2817,6 +3004,28 @@ _UNREADABLE_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('echo $(case x in (run) :;; esac) run "1. fake" true', []),
     ('case x in a|run) :;; esac', []),
     ('case x in (a|run) :;; esac', []),
+    # An extglob group's closer is not the clause's, so it ends no pattern:
+    # `shopt -s extglob` + `case xrun in @(x)run) :;; esac` invokes nothing
+    # (measured) and this reader refused `run) :` — Codex's own example, and a
+    # gate RED ON A HEALTHY TREE. The `skip_gate` spelling and both
+    # substitution spellings are the same rule; the last three are the sibling
+    # CONSTRUCT, where a group in an ORDINARY word did it too.
+    ('shopt -s extglob\ncase xrun in @(x)run) :;; esac', []),
+    ('shopt -s extglob\ncase xrun in (@(x)run) :;; esac', []),
+    ('shopt -s extglob\ncase xrun in @(x|y)run) :;; esac', []),
+    ('shopt -s extglob\ncase xskip_gate in @(x)skip_gate) :;; esac', []),
+    ('shopt -s extglob\necho $(case xrun in @(x)run) :;; esac)', []),
+    ('shopt -s extglob\necho `case xrun in @(x)run) :;; esac`', []),
+    ('shopt -s extglob\necho @(x) run', []),
+    ('shopt -s extglob\necho @(x) skip_gate', []),
+    ('shopt -s extglob\necho @(a|run)', []),
+    # `!` inside a pattern, which is where its reading is decidable: without
+    # it in the set the `(` falls to the leading-parenthesis branch, the
+    # clause flips to its body one `)` early, and this reader refuses a
+    # healthy clause exactly as it did for the other four operators.
+    ('shopt -s extglob\ncase yrun in !(x)run) :;; esac', []),
+    ('shopt -s extglob\ncase yskip_gate in !(x)skip_gate) :;; esac', []),
+    ('shopt -s extglob\ncase yrun in (!(x)run) :;; esac', []),
     ('case x in a|skip_gate) :;; esac', []),
     ('echo `case x in (run) :;; esac`', []),
     ('echo `case x in a|run) :;; esac`', []),
