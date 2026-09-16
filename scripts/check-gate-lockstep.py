@@ -237,15 +237,40 @@ def _command(body: str) -> str:
     return r'%s[ \t]*%s(?P<cmd>%s)' % (boundary, prefixes, body)
 
 
-def _strip_shell_comments(text: str) -> str:
-    """Blank out `#` comments, respecting single and double quotes.
+# Bash's METACHARACTERS, which are what terminate a word — read from the
+# grammar rather than from the cases in front of me, and each measured: after
+# any of these a `#` opens a comment, and after anything else it does not.
+# `{` and `}` are reserved WORDS rather than metacharacters, so they are
+# deliberately absent: `echo x}#y` is the single word `x}#y` (measured), and
+# including them would blank a real gate on a line that mentions a brace.
+_WORD_BREAK = " \t\n|&;()<>"
 
-    A command-position reader that did not do this would read `# run "x"` as a
-    gate — the mention-versus-use distinction this repository has paid for
-    before. Lengths are preserved so every offset still lines up.
+
+def _strip_shell_comments(text: str) -> str:
+    """Blank out `#` comments, respecting quotes AND word boundaries.
+
+    A command-position reader that did not strip comments would read
+    `# run "x"` as a gate — the mention-versus-use distinction this repository
+    has paid for before. Lengths are preserved so every offset still lines up.
+
+    `#` opens a comment only at the START OF A WORD. Stripping every unquoted
+    occurrence was the same defect facing the other way: `MODE=ci#local run
+    "13. new check" true` invokes `run` (measured), while this blanked the rest
+    of the line, so the gate was in neither the runnable nor the unreadable set
+    — invisible in both directions, and a local gate could then lack a CI
+    counterpart while lockstep reported success (measured, Codex on PR #94).
+    An ordinary word carrying a `#` anywhere earlier on the line did the same
+    to every gate after it.
+
+    A word begins at the start of input and after an unquoted metacharacter;
+    it CONTINUES through a closing quote (`echo "a"#b` prints `a#b`) and
+    through a backslash escape, so `\\#` is a literal and an escaped space does
+    not open a new word (`echo \\ #x` prints ` #x`) — all measured against bash
+    rather than reasoned about.
     """
     out = []
     quote = None
+    at_word_start = True
     i = 0
     while i < len(text):
         ch = text[i]
@@ -257,10 +282,22 @@ def _strip_shell_comments(text: str) -> str:
                 continue
             if ch == quote:
                 quote = None
+                at_word_start = False
+        elif ch == "\\":
+            # An unquoted backslash escapes the next character, whatever it is,
+            # and the word continues through both.
+            out.append(ch)
+            if i + 1 < len(text):
+                out.append(text[i + 1])
+                i += 2
+                at_word_start = False
+                continue
+            at_word_start = False
         elif ch in "'\"":
             quote = ch
             out.append(ch)
-        elif ch == "#":
+            at_word_start = False
+        elif ch == "#" and at_word_start:
             # To the end of the line, replaced by spaces.
             end = text.find("\n", i)
             end = len(text) if end == -1 else end
@@ -269,6 +306,7 @@ def _strip_shell_comments(text: str) -> str:
             continue
         else:
             out.append(ch)
+            at_word_start = ch in _WORD_BREAK
         i += 1
     return "".join(out)
 
@@ -388,8 +426,35 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('A=1 B="x y" run "1. two-prefixes" x', ["1. two-prefixes"]),
     ('>"my file" run "1. redirect" x', ["1. redirect"]),
     ('run \\\n  "1. continuation" x', ["1. continuation"]),
+    # `#` opens a comment only at the START OF A WORD. Stripping every
+    # unquoted one blanked the rest of the line, so a gate after an ordinary
+    # word carrying a `#` was invisible in both directions (Codex, PR #94).
+    ('MODE=ci#local run "1. hash-in-prefix" x', ["1. hash-in-prefix"]),
+    ('echo a#b; run "1. hash-in-word" x', ["1. hash-in-word"]),
+    ('echo \\#lit; run "1. escaped-hash" x', ["1. escaped-hash"]),
+    ('echo "a"#b; run "1. gate-after-quoted-hash" x', ["1. gate-after-quoted-hash"]),
+    # An ESCAPED space does not open a new word, so the `#` after it is
+    # literal and the gate behind it survives (`echo \\ #x` prints ` #x` —
+    # measured). Without the backslash rule the space opens a word, the `#`
+    # opens a comment and the gate after the `;` disappears.
+    ('echo \\ #x; run "1. escaped-space" y', ["1. escaped-space"]),
+    # `}` is a reserved WORD and not a metacharacter, so it does not end a
+    # word and the `#` after it is literal (`echo x}#y; run "L" z` invokes
+    # `run` — measured). Putting braces in the break set would blank the gate.
+    ('echo x}#y; run "1. brace-in-word" z', ["1. brace-in-word"]),
     # NOT invocations: a comment, an argument, and a definition.
     ('# run "1. commented" x', []),
+    ('echo x;#run "1. comment-after-separator" x', []),
+    # These two are what makes comment stripping LOAD-BEARING rather than
+    # decorative: a bare space is not a command position, so `# run "x"` is
+    # refused by the boundary alone — but a `;` or a reserved word INSIDE the
+    # comment text is a command position, and without stripping the prose
+    # would be read as a gate. Found by a sabotage that stayed green.
+    ('# cmd; run "1. separator-inside-comment" x', []),
+    ('# if run "1. reserved-inside-comment" x', []),
+    # A word CONTINUES through a closing quote, so this `run` is an argument
+    # of `echo` and not a command (measured against bash).
+    ('echo "a"#b run "1. hash-after-quote" x', []),
     ('npm --prefix app run lint', []),
     ('run() {\n  :\n}', []),
 )
