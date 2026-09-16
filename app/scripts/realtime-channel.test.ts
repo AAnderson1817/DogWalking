@@ -118,22 +118,17 @@ function clientNames(sf: ts.SourceFile): Set<string> {
     }
   }
 
-  // Parentheses, `as`, `satisfies` and `!` all hand the same value through.
-  const unwrap = (e: ts.Expression): ts.Expression => {
-    let cur = e;
-    for (;;) {
-      if (ts.isParenthesizedExpression(cur) || ts.isAsExpression(cur)
-        || ts.isSatisfiesExpression(cur) || ts.isNonNullExpression(cur)) cur = cur.expression;
-      else return cur;
-    }
-  };
+  // Parentheses, `as`, `satisfies` and `!` all hand the same value through —
+  // through `unwrapTransparent`, which is the shared implementation, because a
+  // local copy of it here is the sibling-divergence shape this file's own
+  // header is about. The copy this replaced also knew one wrapper fewer.
 
   // Fixpoint: an alias of an alias is still the client.
   for (let grew = true; grew;) {
     grew = false;
     const visit = (n: ts.Node): void => {
       if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) {
-        const init = unwrap(n.initializer);
+        const init = unwrapTransparent(n.initializer);
         if (ts.isIdentifier(init) && names.has(init.text) && !names.has(n.name.text)) {
           names.add(n.name.text);
           grew = true;
@@ -146,13 +141,19 @@ function clientNames(sf: ts.SourceFile): Set<string> {
   return names;
 }
 
-function channelCalls(files: string[]): ChannelCall[] {
+/**
+ * Classify every `.channel(…)` call in ONE source.
+ *
+ * Split out from `channelCalls` so the classification can be driven by
+ * fixtures at all: it read the real tree only, where there is exactly one
+ * call, so every rule about receivers and options was proven by sabotage and
+ * by nothing in the committed suite (Codex, PR #94).
+ */
+function channelCallsIn(source: ts.SourceFile, rel: string): ChannelCall[] {
   const found: ChannelCall[] = [];
-  for (const file of files) {
-    const source = parse(file);
+  {
     const clients = clientNames(source);
     const declared = declaredObjects(source);
-    const rel = relative(APP_SRC, file).split("\\").join("/");
     const visit = (node: ts.Node): void => {
       // Every `.channel(…)` call is looked at, and its receiver is then
       // CLASSIFIED — a receiver this file cannot resolve to the client is
@@ -168,7 +169,13 @@ function channelCalls(files: string[]): ChannelCall[] {
             ts.isStringLiteralLike(node.expression.argumentExpression) &&
             node.expression.argumentExpression.text === "channel"))
       ) {
-        const receiver = node.expression.expression;
+        // The receiver goes through the same transparent unwrapping the
+        // alias resolver uses. `(supabase).channel(…)` is behaviour-preserving
+        // and left the receiver a `ParenthesizedExpression`, so an
+        // identifier-only test reported a correctly private call as
+        // unresolvable — a gate RED ON A HEALTHY TREE, this log's worst shape
+        // (Codex, PR #94). Measured on the real call before the fix.
+        const receiver = unwrapTransparent(node.expression.expression);
         const onClient = ts.isIdentifier(receiver) && clients.has(receiver.text);
         if (!onClient) {
           found.push({
@@ -222,6 +229,14 @@ function channelCalls(files: string[]): ChannelCall[] {
       ts.forEachChild(node, visit);
     };
     visit(source);
+  }
+  return found;
+}
+
+function channelCalls(files: string[]): ChannelCall[] {
+  const found: ChannelCall[] = [];
+  for (const file of files) {
+    found.push(...channelCallsIn(parse(file), relative(APP_SRC, file).split("\\").join("/")));
   }
   return found;
 }
@@ -499,6 +514,41 @@ describe("the walk channel is the only channel, and it is private on both sides"
     expect(names('import { createClient } from "./supabase";')).toEqual([]);
     expect(names('import { supabase } from "./not-supabase-module";')).toEqual([]);
     expect(names('import { supabase } from "./supabase";\nconst c = makeThing(supabase);')).toEqual(["supabase"]);
+  });
+
+  // The CLASSIFICATION, pinned on fixtures rather than only on the one real
+  // call. Both directions again: a classifier that called everything private
+  // would pass the sabotages for the wrong reason, and one that called
+  // everything unresolvable would be red on a healthy tree — which is exactly
+  // what the identifier-only receiver test was.
+  it("classifies a channel call through every transparent receiver spelling", () => {
+    const IMP = 'import { supabase } from "./supabase";\n';
+    const OPTS = "{ config: { private: true } }";
+    const verdicts = (body: string): string[] => {
+      const sf = ts.createSourceFile("f.ts", IMP + body, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+      return channelCallsIn(sf, "f.ts").map((c) => (c.private ? "private" : c.why));
+    };
+
+    // Transparent wrappers hand the same client through; React and Realtime
+    // both receive it, so the gate must too.
+    expect(verdicts(`supabase.channel(t, ${OPTS});`)).toEqual(["private"]);
+    expect(verdicts(`(supabase).channel(t, ${OPTS});`)).toEqual(["private"]);
+    expect(verdicts(`(supabase as never).channel(t, ${OPTS});`)).toEqual(["private"]);
+    expect(verdicts(`supabase!.channel(t, ${OPTS});`)).toEqual(["private"]);
+    expect(verdicts(`(supabase satisfies object).channel(t, ${OPTS});`)).toEqual(["private"]);
+    // …and so does an alias of one, wrapped or not.
+    expect(verdicts(`const db = supabase;\n(db).channel(t, ${OPTS});`)).toEqual(["private"]);
+    // A receiver this file cannot resolve is REPORTED, never skipped.
+    expect(verdicts(`other.channel(t, ${OPTS});`)[0]).toMatch(/cannot resolve that receiver/);
+    expect(verdicts(`makeThing().channel(t, ${OPTS});`)[0]).toMatch(/cannot resolve that receiver/);
+    // The H1 defect itself, and the two ways of writing it.
+    expect(verdicts("supabase.channel(t);")).toEqual([
+      "called with no options — `private` defaults to false (H1)",
+    ]);
+    expect(verdicts("supabase.channel(t, { config: { private: false } });")).toEqual([
+      "config.private is `false`, not the literal true",
+    ]);
+    expect(verdicts("supabase.channel(t, { config: {} });")).toEqual(["`config` carries no `private`"]);
   });
 
   // The message reader, pinned on fixtures. `serverPrivate()` reads one real

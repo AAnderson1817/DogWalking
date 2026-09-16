@@ -317,6 +317,23 @@ describe("every error message renders through FormError or StateField", () => {
     expect(role('<span {...{ ...{ role: "alert" }, role }} />')).toBeNull();
     // A nested spread that mentions nothing leaves the earlier answer alone.
     expect(role('<span role="alert" {...{ ...{ className: "x" } }} />')).toBe("alert");
+    // An ALIAS of a literal carries the literal — the composition pattern one
+    // hop longer, which bound the alias to null and skipped the spread
+    // entirely (Codex, PR #94). Transitively, and through the transparent
+    // wrappers, since an alias is a value like any other.
+    expect(role('const b = { role: "alert" };\nconst a = b;\n<span {...a} />')).toBe("alert");
+    expect(role('const c = { role: "alert" };\nconst b = c;\nconst a = b;\n<span {...a} />')).toBe("alert");
+    expect(role('const b = { role: "alert" };\nconst a = (b as never);\n<span {...a} />')).toBe("alert");
+    // …and refuses when the SOURCE is not resolvable in its own right, because
+    // a rebound source leaves `seen` holding a stale literal: `a` really does
+    // hold the SECOND object, so answering from the first would be
+    // confidently wrong rather than merely incomplete.
+    expect(role('let b = { role: "status" };\nb = { role: "alert" };\nconst a = b;\n<span {...a} />')).toBeNull();
+    // A mutation through either name costs both their literal, which the alias
+    // graph already closed — stated here so the rule is pinned end to end.
+    expect(role('const b = { role: "alert" };\nconst a = b;\nb.role = "status";\n<span {...a} />')).toBeNull();
+    // A cycle terminates rather than resolving or hanging.
+    expect(role("let b = a;\nlet a = b;\n<span {...a} />")).toBeNull();
   });
 
   // Preconditions. An assertion that only forbids is satisfied by a scanner

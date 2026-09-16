@@ -216,7 +216,18 @@ def _command(body: str) -> str:
     boundary = r'(?:^|(?<=\n)|(?<=[;&|(){}])|(?<=\s!)|(?:(?:^|(?<=\n)|(?<=\s))(?:%s)\s+))' % words
     # `VAR=value` and `>file` / `2>&1` / `<in`, repeated, with the spacing bash
     # allows. Nothing here is captured; the command word follows.
-    prefixes = r'(?:[ \t]*(?:[A-Za-z_][A-Za-z0-9_]*=(?:[^\s;&|]*)|[0-9]*[<>]{1,2}&?[^\s;&|]*)[ \t]+)*'
+    #
+    # The value is a shell WORD, not a run of non-blank characters: a quoted
+    # section may contain the whitespace and separators a bare character may
+    # not, so `MODE="ci mode" run "13. new check"` is one prefix and one
+    # command. The first version stopped at the space inside the quotes, and
+    # the `run` after it was then neither at a recognised command boundary nor
+    # reported as unreadable — invisible in both directions, so a local gate
+    # could lack a CI counterpart while lockstep reported success (measured,
+    # Codex on PR #94). The three branches are disjoint by their first
+    # character, so the nesting cannot backtrack pathologically.
+    word = r"""(?:[^\s;&|'"]|'[^']*'|"(?:[^"\\]|\\.)*")*"""
+    prefixes = r'(?:[ \t]*(?:[A-Za-z_][A-Za-z0-9_]*=%s|[0-9]*[<>]{1,2}&?%s)[ \t]+)*' % (word, word)
     return r'%s[ \t]*%s(?P<cmd>%s)' % (boundary, prefixes, body)
 
 
@@ -336,7 +347,88 @@ def validate_labels() -> tuple[set[str], set[str], list[str], list[str]]:
     return runnable, skipped, duplicate, unreadable
 
 
+# The command-position reader's SPELLING MATRIX, asserted on every run.
+#
+# `validate_labels()` reads one real file, so every rule about boundaries,
+# prefixes and quoting was proven under sabotage and by nothing that runs
+# again afterwards — the "rule written down and connected to nothing" shape
+# this repository records more than any other. Five consecutive Codex rounds
+# landed in this reader; each is a row here now.
+#
+# Both directions, because a reader that matched everything would satisfy the
+# left column and a reader that matched nothing would satisfy the right.
+#
+# When `validate.sh --list-gates` lands (backlog item 1) the shell parses the
+# shell and this reader goes away — this matrix becomes the test of the
+# lister's output rather than being deleted.
+_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
+    ('run "1. plain" cmd', ["1. plain"]),
+    ("run '1. single' cmd", ["1. single"]),
+    ('  run "1. indented" cmd', ["1. indented"]),
+    ('if run "1. control" cmd; then :; fi', ["1. control"]),
+    ('cmd; run "1. after-separator" x', ["1. after-separator"]),
+    ('MODE=ci run "1. assignment" x', ["1. assignment"]),
+    # A quoted assignment value holds the whitespace a bare word may not. The
+    # reader stopped at the space and the `run` after it was invisible in both
+    # directions — neither runnable nor unreadable (Codex, PR #94).
+    ('MODE="ci mode" run "1. quoted-assignment" x', ["1. quoted-assignment"]),
+    ("MODE='ci mode' run \"1. sq-assignment\" x", ["1. sq-assignment"]),
+    ('MODE=a"b c"d run "1. mixed-word" x', ["1. mixed-word"]),
+    ('A=1 B="x y" run "1. two-prefixes" x', ["1. two-prefixes"]),
+    ('>"my file" run "1. redirect" x', ["1. redirect"]),
+    ('run \\\n  "1. continuation" x', ["1. continuation"]),
+    # NOT invocations: a comment, an argument, and a definition.
+    ('# run "1. commented" x', []),
+    ('npm --prefix app run lint', []),
+    ('run() {\n  :\n}', []),
+)
+
+
+def _self_check() -> list[str]:
+    """Drive the command-position reader over `_SPELLINGS`.
+
+    With its own blindness precondition, because a matrix that iterates
+    nothing reports success having verified nothing — measured, by emptying
+    it: this file printed PASS. Both directions must be represented too, since
+    a matrix of only-positive rows is satisfied by a reader that matches
+    everything and a matrix of only-negative rows by one that matches nothing.
+    """
+    quoted = r'%s +(?P<q>["\'])(?P<label>.+?)(?P=q)'
+    pattern = re.compile(_command(quoted % "run"))
+    bad = []
+    # Counted INSIDE the loop, so the precondition speaks for what was
+    # actually driven rather than for what the list happens to hold: an
+    # emptied `_SPELLINGS` and a loop that iterates something else both fail
+    # here, and only one of those is caught by reading the list.
+    positive = negative = 0
+    for src, expected in _SPELLINGS:
+        if expected:
+            positive += 1
+        else:
+            negative += 1
+        code = _strip_shell_comments(re.sub(r"\\\n[ \t]*", " ", src))
+        got = [m.group("label") for m in pattern.finditer(code)]
+        if got != expected:
+            bad.append(
+                f"the command-position reader answers {got!r} for {src!r}, expected {expected!r}"
+            )
+    if positive < 2 or negative < 2:
+        bad.append(
+            f"the command-position spelling matrix drove {positive} invocations and "
+            f"{negative} non-invocations — it cannot prove the reader in both directions"
+        )
+    return bad
+
+
 def main() -> int:
+    # The reader is proven before it is believed: a matrix that cannot fail
+    # would let every other assertion here pass for the wrong reason.
+    spelling = _self_check()
+    if spelling:
+        for s in spelling:
+            print(f"FAIL: {s}")
+        return 2
+
     steps, unnamed, duplicate = ci_steps()
     if not steps:
         print("FAIL: read no named run-steps out of ci.yml — this check is blind")

@@ -156,8 +156,24 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
   };
   const { linkBinding, linkNames } = makeLinkBinding(link);
 
-  const bind = (name: string, lit: ts.ObjectLiteralExpression | null) => {
-    seen.set(name, seen.has(name) ? null : lit);
+  // `const attrs = base` — the name holds whatever `base` holds. Recorded
+  // here and resolved after the walk, because the source may be declared
+  // later in the file; `null` marks a name bound twice, which is unresolvable
+  // whichever binding carried the literal.
+  const aliasSource = new Map<string, string | null>();
+
+  const bind = (
+    name: string,
+    lit: ts.ObjectLiteralExpression | null,
+    aliasOf: string | null = null,
+  ) => {
+    if (seen.has(name)) {
+      seen.set(name, null);
+      aliasSource.set(name, null);
+      return;
+    }
+    seen.set(name, lit);
+    if (aliasOf) aliasSource.set(name, aliasOf);
   };
   const bindPattern = (nm: ts.BindingName): void => {
     if (ts.isIdentifier(nm)) {
@@ -171,8 +187,10 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
     if (ts.isVariableDeclaration(n)) {
       if (ts.isIdentifier(n.name)) {
         const init = n.initializer ? unwrapTransparent(n.initializer) : undefined;
-        bind(n.name.text, init && ts.isObjectLiteralExpression(init) ? init : null);
-        if (init && ts.isIdentifier(init)) link(n.name.text, init.text);
+        const lit = init && ts.isObjectLiteralExpression(init) ? init : null;
+        const aliasOf = init && ts.isIdentifier(init) ? init.text : null;
+        bind(n.name.text, lit, aliasOf);
+        if (aliasOf) link(n.name.text, aliasOf);
       } else bindPattern(n.name);
       linkBinding(n.name, n.initializer);
     } else if (ts.isParameter(n) || ts.isBindingElement(n)) {
@@ -286,9 +304,37 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
     }
   }
 
+  // An ALIAS carries the object, so it carries the literal: `const base = {…};
+  // const attrs = base; <span {...attrs} />` bound `attrs` to null, the spread
+  // was skipped as unresolvable and the JSX gate MISSED the element — the
+  // ordinary composition pattern, one hop longer (Codex, PR #94).
+  //
+  // The source must be resolvable in its own right. Following a REBOUND one
+  // would answer confidently and wrongly: `let base = {a}; base = {b}; const
+  // attrs = base;` gives `attrs` the second object while `seen` still holds
+  // the first, which is the hazard this whole map exists to avoid. Mutation is
+  // already closed over the alias graph, so a mutated source has already cost
+  // every name for that object its literal; the test is kept here so the rule
+  // reads as one rule rather than two halves in different places.
+  const aliasLiteral = (name: string): ts.ObjectLiteralExpression | undefined => {
+    const guard = new Set<string>([name]);
+    let cur = aliasSource.get(name) ?? null;
+    for (let i = 0; cur && i < 16; i += 1) {
+      if (guard.has(cur)) return undefined;
+      guard.add(cur);
+      if (rebound.has(cur) || mutated.has(cur)) return undefined;
+      const lit = seen.get(cur);
+      if (lit) return lit;
+      cur = aliasSource.get(cur) ?? null;
+    }
+    return undefined;
+  };
+
   const out = new Map<string, ts.ObjectLiteralExpression>();
   for (const [name, lit] of seen) {
-    if (lit && !rebound.has(name) && !mutated.has(name)) out.set(name, lit);
+    if (rebound.has(name) || mutated.has(name)) continue;
+    const resolved = lit ?? aliasLiteral(name);
+    if (resolved) out.set(name, resolved);
   }
   return out;
 }
