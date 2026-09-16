@@ -212,14 +212,14 @@ function channelCallsIn(source: ts.SourceFile, rel: string): ChannelCall[] {
           const config = effectiveProps(
             unwrapTransparent(opts) as ts.ObjectLiteralExpression,
             declared,
-          ).get("config");
+          ).props.get("config");
           const configLit = typeof config === "object" ? unwrapTransparent(config) : undefined;
           if (config === undefined) why = "options carry no `config`";
           else if (typeof config === "string") why = `\`config\` is ${config}`;
           else if (!configLit || !ts.isObjectLiteralExpression(configLit))
             why = "`config` is not an object literal, so this check cannot read it";
           else {
-            const priv = effectiveProps(configLit, declared).get("private");
+            const priv = effectiveProps(configLit, declared).props.get("private");
             if (priv === undefined) why = "`config` carries no `private`";
             else if (isLiteralTrue(priv)) {
               isPrivate = true;
@@ -317,11 +317,36 @@ function mutations(sf: ts.SourceFile): string[] {
  * `true` from a line that is not what gets sent. Measured: 6 of 6 green while
  * `broadcast.ts` published a public message.
  */
+interface EffectiveProps {
+  /** Key to the value SENT, or to a marker naming what could not be read. */
+  props: Map<string, ts.Expression | string>;
+  /**
+   * The keys some member of this object explicitly NAMES.
+   *
+   * A blanket mark is not one of them, and that distinction is the whole
+   * point of this set. `markAll` means "an unreadable member could define any
+   * of these", which is the right answer for an object already known to be
+   * the one being read — and NOT evidence that it is that object. The two
+   * whole-file scans below asked `props.has("topic")` and
+   * `sent !== undefined`, so any unrelated literal carrying an unfollowable
+   * spread or an unreadable computed key — `const opts = { ...imported }` in
+   * `broadcast.ts` — answered yes to both and their markers failed the
+   * assertion on healthy code (Codex, PR #94; measured, one marker before
+   * round 44 and two after, so the literal scan had it first).
+   *
+   * A followable spread contributes its own names, because `{ ...message }`
+   * genuinely carries what `message` names — that rule is what lets the
+   * public literal in `messages: [{ ...message, private: false }]` be found
+   * at all.
+   */
+  names: Set<string>;
+}
+
 function effectiveProps(
   obj: ts.ObjectLiteralExpression,
   declared: Map<string, ts.ObjectLiteralExpression>,
   depth = 0,
-): Map<string, ts.Expression | string> {
+): EffectiveProps {
   // The names this file asks about, at any depth: an unreadable spread has to
   // invalidate each of them, since it could carry any of them.
   //
@@ -333,6 +358,7 @@ function effectiveProps(
   // One reader, so there is no sibling to forget.
   const ASKED = ["topic", "private", "config", "messages"];
   const props = new Map<string, ts.Expression | string>();
+  const names = new Set<string>();
   const markAll = (mark: string) => { for (const k of ASKED) props.set(k, mark); };
 
   for (const p of obj.properties) {
@@ -345,10 +371,12 @@ function effectiveProps(
       // disagree about it again.
       const spread = unwrapTransparent(p.expression);
       const inline = ts.isObjectLiteralExpression(spread) ? spread : undefined;
-      const named = ts.isIdentifier(spread) ? declared.get(spread.text) : undefined;
-      const from = inline ?? named;
+      const byName = ts.isIdentifier(spread) ? declared.get(spread.text) : undefined;
+      const from = inline ?? byName;
       if (from && depth < 8) {
-        for (const [k, v] of effectiveProps(from, declared, depth + 1)) props.set(k, v);
+        const inner = effectiveProps(from, declared, depth + 1);
+        for (const [k, v] of inner.props) props.set(k, v);
+        for (const k of inner.names) names.add(k);
       } else {
         // Cannot follow it, so cannot say what it carries — and ORDER is why
         // this has to overwrite rather than merely add a note: a spread AFTER
@@ -373,7 +401,7 @@ function effectiveProps(
         && (ts.isStringLiteral(name.expression) || ts.isNoSubstitutionTemplateLiteral(name.expression))) {
         key = name.expression.text;
       }
-      if (key !== null) props.set(key, p.initializer);
+      if (key !== null) { props.set(key, p.initializer); names.add(key); }
       else markAll("<computed key, unreadable>");
       continue;
     }
@@ -382,6 +410,7 @@ function effectiveProps(
       // `topic`, where presence is the question; not fine for `private`, which
       // is why the value is recorded as unreadable rather than as true.
       props.set(p.name.text, "<shorthand, unreadable>");
+      names.add(p.name.text);
       continue;
     }
     if (definesWithoutValue(p)) {
@@ -390,11 +419,11 @@ function effectiveProps(
       // branch left the spread's value standing for a key the object no longer
       // carries — a confidently wrong answer (Codex, PR #94).
       const key = propertyKey(p.name);
-      if (key !== null) props.set(key, "<accessor or method, unreadable>");
+      if (key !== null) { props.set(key, "<accessor or method, unreadable>"); names.add(key); }
       else markAll("<computed accessor, unreadable>");
     }
   }
-  return props;
+  return { props, names };
 }
 
 /**
@@ -475,7 +504,15 @@ function messageElements(sf: ts.SourceFile): { found: boolean; values: string[] 
     // that is a string literal while refusing one it cannot resolve. A marker
     // is pushed as the value, so the caller's filter fails it by name.
     if (ts.isObjectLiteralExpression(n)) {
-      const sent = effectiveProps(n, declared).get("messages");
+      // NAMES, not `props.has`: a blanket mark says an unreadable member could
+      // define `messages`, which is the right answer for the request object
+      // and is not evidence that this IS it. Asking `props` made every
+      // unrelated literal carrying an unfollowable spread a request object and
+      // pushed its marker into the assertion — red on healthy code (Codex, PR
+      // #94). An object that genuinely names `messages` and then cannot be
+      // read is still refused, below.
+      const { props, names } = effectiveProps(n, declared);
+      const sent = names.has("messages") ? props.get("messages") : undefined;
       if (sent === undefined) {
         // Not a request object as far as this reader can tell.
       } else if (typeof sent === "string") {
@@ -507,7 +544,7 @@ function messageElements(sf: ts.SourceFile): { found: boolean; values: string[] 
               values.push(`<unreadable message element: ${el.getText().split("\n")[0]}>`);
               continue;
             }
-            values.push(privateValue(effectiveProps(lit, declared).get("private")));
+            values.push(privateValue(effectiveProps(lit, declared).props.get("private")));
           }
           if (arr.elements.length === 0) values.push("<`messages` is empty>");
         }
@@ -519,31 +556,48 @@ function messageElements(sf: ts.SourceFile): { found: boolean; values: string[] 
   return { found, values };
 }
 
-function serverPrivate(): { found: boolean; values: string[]; mutations: string[] } {
-  const source = parse(BROADCAST);
-  const declared = declaredObjects(source);
+/**
+ * `private`, for every message literal in the file — the BACKSTOP reading.
+ *
+ * `topic` alone is what makes this a message object — NOT `topic` AND
+ * `private`. Requiring both excluded exactly the literal that matters:
+ * `messages: [{ topic, event, payload }, { topic, event, payload, private:
+ * true }]` shipped a PUBLIC message and the sibling satisfied the assertion,
+ * measured green. That is review H1's whole point — `private` DEFAULTS to
+ * false, so omitting it is not a smaller mistake than writing `false`, it is
+ * the same one — so an omitted `private` is recorded as `<absent>` and fails
+ * like any other non-`true` value.
+ *
+ * Read through SPREADS, in source order, because a literal's direct properties
+ * are not what it carries: `{ ...message, private: false }` has no direct
+ * `topic` and was skipped entirely while its base supplied a `true` from a
+ * line that is not what gets sent.
+ *
+ * Extracted so `serverPrivate` and the fixtures below run the SAME reader:
+ * they were two copies of this loop, which is the divergence this file keeps
+ * paying for — and the round that found the `names` defect found it in the
+ * copy, where no fixture could have.
+ */
+function messageLiterals(sf: ts.SourceFile): string[] {
+  const declared = declaredObjects(sf);
   const values: string[] = [];
   const visit = (node: ts.Node): void => {
     if (ts.isObjectLiteralExpression(node)) {
-      // `topic` alone is what makes this a message object — NOT `topic` AND
-      // `private`. Requiring both excluded exactly the literal that matters:
-      // `messages: [{ topic, event, payload }, { topic, event, payload,
-      // private: true }]` shipped a PUBLIC message and the sibling satisfied
-      // the assertion, measured green. That is review H1's whole point —
-      // `private` DEFAULTS to false, so omitting it is not a smaller mistake
-      // than writing `false`, it is the same one — so an omitted `private` is
-      // recorded as `<absent>` and fails like any other non-`true` value.
-      //
-      // Read through SPREADS, in source order, because a literal's direct
-      // properties are not what it carries: `{ ...message, private: false }`
-      // has no direct `topic` and was skipped entirely while its base supplied
-      // a `true` from a line that is not what gets sent.
-      const props = effectiveProps(node, declared);
-      if (props.has("topic")) values.push(privateValue(props.get("private")));
+      const { props, names } = effectiveProps(node, declared);
+      // NAMES, not `props.has`: see `EffectiveProps.names`. This half had the
+      // defect first — an unrelated `const opts = { ...imported }` anywhere in
+      // the file answered yes here and pushed its marker into the assertion.
+      if (names.has("topic")) values.push(privateValue(props.get("private")));
     }
     ts.forEachChild(node, visit);
   };
-  visit(source);
+  visit(sf);
+  return values;
+}
+
+function serverPrivate(): { found: boolean; values: string[]; mutations: string[] } {
+  const source = parse(BROADCAST);
+  const values = messageLiterals(source);
   // Both readings, unioned. The array is the RULE — it is what gets posted —
   // and the literal scan is the backstop that still catches a public message
   // built somewhere this array reader does not look.
@@ -622,20 +676,8 @@ describe("the walk channel is the only channel, and it is private on both sides"
   // file, so every rule about spreads and ordering would otherwise be proven
   // only under sabotage and by nothing in the committed suite.
   it("reads a message literal through spreads, in source order", () => {
-    const read = (src: string): string[] => {
-      const sf = ts.createSourceFile("b.ts", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-      const declared = declaredObjects(sf);
-      const out: string[] = [];
-      const visit = (n: ts.Node): void => {
-        if (ts.isObjectLiteralExpression(n)) {
-          const props = effectiveProps(n, declared);
-          if (props.has("topic")) out.push(privateValue(props.get("private")));
-        }
-        ts.forEachChild(n, visit);
-      };
-      visit(sf);
-      return out;
-    };
+    const read = (src: string): string[] =>
+      messageLiterals(ts.createSourceFile("b.ts", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS));
 
     expect(read("send({ topic, event, private: true });")).toEqual(["true"]);
     expect(read("send({ topic, event });")).toEqual(["<absent>"]);
@@ -912,6 +954,25 @@ describe("the walk channel is the only channel, and it is private on both sides"
     // A spread of a WRAPPED literal is the same object. Reading the wrapper
     // made this gate red on healthy code.
     expect(read("send({ topic, ...({ private: true } as const) });")).toEqual(["true"]);
+
+    // An UNRELATED literal is not a message literal. A blanket mark says an
+    // unreadable member could define `topic`, which is not evidence that this
+    // object is one — and asking `props.has` made every such literal a message
+    // whose marker then failed the assertion on healthy code (Codex, PR #94).
+    for (const unrelated of [
+      "const opts = { ...imported };",
+      "const opts = { [key]: 1 };",
+      "const opts = { get [k]() { return 1; } };",
+      "fetch(url, { ...imported, method: 'POST' });",
+    ]) {
+      expect(read(unrelated + "\nsend({ topic, private: true });"), unrelated).toEqual(["true"]);
+    }
+    // …and the other direction, which is what stops that becoming "a marker
+    // never refuses": an object that NAMES `topic` and then cannot be read is
+    // still reported, because there the blanket mark is about the very object
+    // being read.
+    expect(read("send({ topic, private: true, ...imported });"))
+      .toEqual(["<unresolvable spread `imported`>"]);
   });
 
   it("reads every element of the messages array, and refuses what it cannot", () => {
@@ -987,6 +1048,20 @@ describe("the walk channel is the only channel, and it is private on both sides"
     const short = sent("const messages = [{ topic, private: false }];\npost({ messages });");
     expect(short.found).toBe(true);
     expect(short.values).toEqual(["<shorthand, unreadable>"]);
+
+    // An UNRELATED literal is not a request object either — the same rule one
+    // reader over, and the one that round 44 introduced by putting `messages`
+    // in `ASKED`. Each of these reported its marker beside the healthy
+    // `["true"]`, so the assertion failed on correct code (Codex, PR #94).
+    for (const unrelated of [
+      "const opts = { ...imported };",
+      "const opts = { [key]: 1 };",
+      "const opts = { get [k]() { return 1; } };",
+    ]) {
+      const r = sent(unrelated + "\npost({ messages: [{ topic, private: true }] });");
+      expect(r.found, unrelated).toBe(true);
+      expect(r.values, unrelated).toEqual(["true"]);
+    }
   });
 
   it("sees a mutation that would make reading literals unsound", () => {
