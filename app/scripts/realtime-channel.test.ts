@@ -1,4 +1,6 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
@@ -694,6 +696,34 @@ describe("the walk channel is the only channel, and it is private on both sides"
     // `Object.assign`, and reading it as one was red on healthy code.
     expect(read("const c = { private: true };\nregistry.assign(c);\nsend({ topic, ...c });"))
       .toEqual(["true"]);
+    // …and neither is a call on a LOCAL `Object`. The receiver rule above was
+    // still matched by NAME, so a module that binds the global — which
+    // TypeScript accepts in every form, unlike `undefined` — had an unchanged
+    // literal invalidated by a call that reaches no global at all: red on a
+    // healthy tree (Codex, PR #94). Every binding branch of the scan is pinned
+    // here, because each one is what makes its own form resolve.
+    expect(read("const Object = { assign(_v: unknown) {} };\nconst c = { private: true };\nObject.assign(c);\nsend({ topic, ...c });"))
+      .toEqual(["true"]);
+    expect(read("class Object { static assign(_v: unknown) {} }\nconst c = { private: true };\nObject.assign(c);\nsend({ topic, ...c });"))
+      .toEqual(["true"]);
+    expect(read("const c = { private: true };\ntry { use(c); } catch (Object) { Object.assign(c); }\nsend({ topic, ...c });"))
+      .toEqual(["true"]);
+    // The `globalThis.Object` spelling is the same defect one identifier over,
+    // and its OWN binding is what decides it: a local `Object` cannot shadow a
+    // property of the global object.
+    expect(read("const globalThis = { Object: { assign(_v: unknown) {} } };\nconst c = { private: true };\nglobalThis.Object.assign(c);\nsend({ topic, ...c });"))
+      .toEqual(["true"]);
+    // …while a local `Object` leaves `globalThis.Object` alone, so the two
+    // resolutions are not one rule wearing two names.
+    expect(read("const Object = { assign(_v: unknown) {} };\nconst c = { private: true };\nglobalThis.Object.assign(c, {});\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    // The RESIDUAL, pinned so that changing it is a decision somebody makes.
+    // The scan is file-wide, so a NESTED binding beside a genuine built-in
+    // call under-reports the mutation. Closing it needs a scope model this
+    // module deliberately does not have, and it is the narrower hazard: the
+    // red above needs only a shadow, this needs a shadow AND a real call.
+    expect(read("function f(Object: { assign(v: unknown): void }) { Object.assign(1); }\nconst c = { private: true };\nObject.assign(c, { private: false });\nsend({ topic, ...c });"))
+      .toEqual(["true"]);
     // A mutation through an ALIAS is a mutation of the same object, whichever
     // name it was written through, and transitively along a chain of them.
     expect(read("const c = { private: true };\nconst a = c;\na.private = false;\nsend({ topic, ...c });"))
@@ -845,6 +875,13 @@ describe("the walk channel is the only channel, and it is private on both sides"
     expect(muts("const m = { private: true };\nObject.assign(m, { private: false });")).toHaveLength(1);
     // The receiver decides. `metrics.assign({…})` is somebody else's method.
     expect(muts("const m = { private: true };\nmetrics.assign({ topic });")).toEqual([]);
+    // …and so does what the receiver's NAME refers to: a module that binds
+    // `Object` calls its own, and reading that as the built-in made this
+    // reader refuse a file it has no business refusing (Codex, PR #94). The
+    // SIBLING reader in `static-object.ts` shares the predicate, so one fix
+    // covers both — which is why it is a predicate and not a copy of the test.
+    expect(muts("const Object = { assign(_v: unknown) {} };\nconst m = { private: true };\nObject.assign(m);")).toEqual([]);
+    expect(muts("const globalThis = { Object: { assign(_v: unknown) {} } };\nconst m = { private: true };\nglobalThis.Object.assign(m);")).toEqual([]);
     expect(muts("const m = { private: true };\ndelete m.private;")).toHaveLength(1);
     expect(muts("let n = 0;\nn += 1;\nconst m = { private: true };\nm.count += 1;")).toHaveLength(1);
     // The sibling hole, fixed in the same commit: `++`/`--` on a member is a
@@ -921,4 +958,64 @@ describe("the walk channel is the only channel, and it is private on both sides"
         "message is enough to put a walk's live position on a topic anyone can join",
     ).toEqual([]);
   });
+
+  // `isObjectAssignCall` RESOLVES its receiver rather than matching the name,
+  // and this is the measurement that makes that worth doing: unlike
+  // `undefined`, whose declaration forms the compiler refuses outright,
+  // TypeScript accepts every ordinary way of binding `Object` and
+  // `globalThis`. So the shadow is REACHABLE in the very files these gates
+  // read, and a name-only test invalidates an unchanged literal there — red on
+  // a healthy tree.
+  //
+  // If a future compiler starts refusing one of these, the resolution is
+  // carrying weight it no longer needs for that form and whoever notices
+  // decides; it fails here rather than going quietly stale.
+  it("tsc ACCEPTS every form of binding `Object` and `globalThis`", () => {
+    const dir = mkdtempSync(join(tmpdir(), "objshadow-"));
+    writeFileSync(join(dir, "dep.ts"), "export const helper = { assign(_v: unknown) {} };\n");
+
+    const forms: Record<string, string> = {
+      constDecl: "const Object = { assign(_v: unknown) {} };",
+      letDecl: "let Object = { assign(_v: unknown) {} };",
+      varDecl: "var Object = { assign(_v: unknown) {} };",
+      funcDecl: "function Object(_v: unknown) {}",
+      classDecl: "class Object { static assign(_v: unknown) {} }",
+      enumDecl: "enum Object { A }",
+      namespaceDecl: "namespace Object { export function assign(_v: unknown) {} }",
+      importAlias: 'import { helper as Object } from "./dep.ts";',
+      paramDecl: "export function f(Object: { assign(v: unknown): void }) { Object.assign(1); }",
+      catchClause: "export function g(): void { try { f0(); } catch (Object) { Object; } }",
+      globalThisDecl: "const globalThis = { Object: { assign(_v: unknown) {} } };",
+    };
+
+    const files = Object.entries(forms).map(([name, binding]) => {
+      const file = join(dir, `${name}.ts`);
+      writeFileSync(file, `declare function f0(): void;\n${binding}\nexport const used = 1;\n`);
+      return file;
+    });
+
+    let status = 0;
+    let output = "";
+    try {
+      output = execFileSync(
+        join(APP_SRC, "..", "node_modules", ".bin", "tsc"),
+        [
+          "--noEmit", "--ignoreConfig", "--target", "es2022", "--module", "esnext",
+          "--moduleResolution", "bundler", "--allowImportingTsExtensions", "--strict",
+          ...files,
+        ],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+      );
+    } catch (err) {
+      const e = err as { status?: number; stdout?: string; stderr?: string };
+      status = e.status ?? -1;
+      output = `${e.stdout ?? ""}${e.stderr ?? ""}`;
+    }
+
+    expect(
+      status,
+      "tsc now refuses one of the shadow forms `isObjectAssignCall` resolves. Re-measure before "
+        + `trusting the rest of that comment — the compiler said:\n${output}`,
+    ).toBe(0);
+  }, 30_000);
 });

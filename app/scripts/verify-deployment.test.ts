@@ -734,15 +734,23 @@ describe("verify-deployment: the read-only argument", () => {
   // `isExplicitUndefined` RESOLVES the identifier rather than matching its
   // name, and this is why. The first version of that helper asserted the
   // compiler refuses to bind `undefined` at all — measured here, that claim is
-  // false in one direction that matters: an IMPORT ALIAS is accepted, and a
-  // `.ts` specifier is exactly how these Deno functions import. A name-only
-  // check called the GET-admitting options object the POST-only default.
+  // false: an IMPORT ALIAS is accepted, and a `.ts` specifier is exactly how
+  // these Deno functions import. A name-only check called the GET-admitting
+  // options object the POST-only default.
   //
-  // Both directions are pinned. If the declaration forms ever stop being
-  // refused nothing breaks (the resolver already covers them); if the import
-  // form ever starts being refused, the shadow scan is carrying weight it no
-  // longer needs to and whoever notices decides.
-  it("tsc refuses a declared `undefined` and ACCEPTS an imported one", () => {
+  // The SECOND version of the claim was wrong the other way, and this test is
+  // what was measuring it wrongly: it said the declaration spellings are
+  // refused, and its fixture had no import or export — a SCRIPT, which
+  // declares into the global scope, where `let undefined` really does collide.
+  // Every file this gate reads is a MODULE, and there the same declaration is
+  // ACCEPTED. So the fixtures carry an `export` on purpose now, and both
+  // contexts are measured rather than one standing in for the other.
+  //
+  // If a declaration form stops being accepted in a module nothing breaks (the
+  // resolver already covers it); if the import form ever starts being refused,
+  // the shadow scan is carrying weight it no longer needs to and whoever
+  // notices decides.
+  it("tsc accepts a module-scope `undefined` binding, declared or imported", () => {
     const dir = mkdtempSync(join(tmpdir(), "undef-"));
     writeFileSync(join(dir, "dep.ts"), 'export const wideOpen = { methods: ["GET"] };\n');
 
@@ -750,9 +758,17 @@ describe("verify-deployment: the read-only argument", () => {
       + "declare function serveFunction(h: () => void, options?: ServeOptions): void;\n";
     const TAIL = "serveFunction(() => {}, undefined);\n";
 
-    const check = (name: string, binding: string): { status: number; output: string } => {
+    // `module` appends an `export`, which is what makes the file a module —
+    // the shape every function this gate reads has. A `script` fixture has
+    // neither an import nor an export and declares into the global scope.
+    const check = (
+      name: string,
+      binding: string,
+      kind: "module" | "script" = "module",
+    ): { status: number; output: string } => {
       const file = join(dir, `${name}.ts`);
-      writeFileSync(file, `${HEAD}${binding}\n${TAIL}`);
+      const tail = kind === "module" ? `${TAIL}export const used = 1;\n` : TAIL;
+      writeFileSync(file, `${HEAD}${binding}\n${tail}`);
       try {
         const output = execFileSync(
           join(REPO, "app", "node_modules", ".bin", "tsc"),
@@ -769,21 +785,37 @@ describe("verify-deployment: the read-only argument", () => {
       }
     };
 
-    const declared = check("declared", 'let undefined: ServeOptions = { methods: ["GET"] };');
+    const DECL = 'let undefined: ServeOptions = { methods: ["GET"] };';
+
+    const declared = check("declared", DECL);
     expect(
       declared.status,
-      "tsc accepted a module-scope `let undefined`. Harmless on its own — the "
-        + "resolver covers it — but the comment in `isExplicitUndefined` names this "
-        + "as measured, so re-measure before trusting the rest of it.",
-    ).not.toBe(0);
-    expect(declared.output).toContain("TS2397");
+      "tsc now REFUSES a module-scope `let undefined`. That is one of the forms the shadow scan "
+        + "exists for, so if the compiler bars it the scan may be carrying weight it no longer "
+        + `needs. Decide, do not assume — the compiler said:\n${declared.output}`,
+    ).toBe(0);
 
-    const imported = check("imported", 'import { wideOpen as undefined } from "./dep.ts";');
+    // The same declaration in a SCRIPT, which is where the refusal everyone
+    // remembers comes from. Pinned so the distinction cannot quietly collapse
+    // back into "tsc refuses a declared `undefined`", which is what this test
+    // used to assert while reading a script and describing a module.
+    const script = check("script", DECL, "script");
+    expect(
+      script.status,
+      "tsc now ACCEPTS a global-scope `let undefined`. Harmless — the resolver covers it either "
+        + "way — but `isExplicitUndefined` names the script/module split as measured, so "
+        + "re-measure before trusting the rest of that comment.",
+    ).not.toBe(0);
+    expect(script.output).toContain("TS2397");
+
+    // An import makes the file a module by definition, so this form has no
+    // script counterpart to measure.
+    const imported = check("imported", 'import { wideOpen as undefined } from "./dep.ts";', "script");
     expect(
       imported.status,
-      "tsc now REFUSES an import aliased to `undefined`. That is the one form "
-        + "that made the shadow scan necessary; if the compiler bars it, the scan "
-        + "may be carrying weight it no longer needs. Decide, do not assume.",
+      "tsc now REFUSES an import aliased to `undefined`. That is the form that made the shadow "
+        + "scan necessary; if the compiler bars it, the scan may be carrying weight it no longer "
+        + "needs. Decide, do not assume.",
     ).toBe(0);
   }, 30_000);
 

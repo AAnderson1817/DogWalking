@@ -491,21 +491,29 @@ export function definesWithoutValue(
  *
  * THE IDENTIFIER IS RESOLVED, not matched by name. `undefined` is not a
  * reserved word, and the claim this first shipped with — that TypeScript
- * refuses to bind it at all — is FALSE. Measured across every module-scope
- * form: the DECLARATION spellings are refused (`let`/`var`/`const`, object and
- * array destructuring, a defaulted binding element, `function`, `class`,
- * `enum`, `namespace` — TS2397, TS2414, TS2431), and an IMPORT ALIAS is
- * ACCEPTED:
+ * refuses to bind it at all — is FALSE:
  *
  *     import { wideOpen as undefined } from "./opts.ts";
  *     serveFunction(handle, undefined);   // admits GET
  *
  * That typechecks, and a `.ts` specifier is exactly how these Deno functions
  * import, so the form is reachable in the very files this reads (Codex, PR
- * #94 — its own example, a destructuring binding, is refused, but the general
- * point held). A name-only check called that the POST-only default and the
- * deploy probe would then fire an unauthenticated production GET at a handler
- * that runs: the gate blessing what it forbids, the worse direction.
+ * #94). A name-only check called that the POST-only default and the deploy
+ * probe would then fire an unauthenticated production GET at a handler that
+ * runs: the gate blessing what it forbids, the worse direction.
+ *
+ * The second version of this comment then over-corrected, and that is worth
+ * recording because it is the same mistake one step down: it said the
+ * DECLARATION spellings are refused, which is true only in a SCRIPT. A file
+ * with no import or export declares into the global scope, where `let
+ * undefined` really does collide (TS2397) — but every file these gates read is
+ * a MODULE, and there `let`, `const`, `var`, `function`, `namespace` and both
+ * destructuring forms are all ACCEPTED (measured, both contexts). Only `class`
+ * (TS2414) and `enum` (TS2431) are refused, and those are refused in a module
+ * too, because the restriction is on the NAME rather than on redeclaring a
+ * global. So the import alias is not the one reachable form, it is merely the
+ * one that is reachable in both; the resolution below already covered the
+ * rest, and only the account of why was wrong.
  *
  * So a file that binds the name anywhere gets no answer here, which sends its
  * function to a reviewed `contract_for` case. Conservative by construction:
@@ -521,27 +529,52 @@ export function isExplicitUndefined(e: ts.Expression): boolean {
   const cur = unwrapTransparent(e);
   if (ts.isVoidExpression(cur)) return true;
   if (!ts.isIdentifier(cur) || cur.text !== "undefined") return false;
-  return !bindsUndefined(cur.getSourceFile());
+  return !bindsName(cur.getSourceFile(), "undefined");
 }
 
-const SHADOWS_UNDEFINED = new WeakMap<ts.SourceFile, boolean>();
+const SHADOWED = new WeakMap<ts.SourceFile, Map<string, boolean>>();
 
-/** Does anything in this file bind the name `undefined`? */
-function bindsUndefined(sf: ts.SourceFile): boolean {
-  const cached = SHADOWS_UNDEFINED.get(sf);
+/**
+ * Does anything in this file bind `name` as a VALUE?
+ *
+ * One scan for every global these gates read by name, because a name-only test
+ * for one of them was wrong for the same reason as a name-only test for the
+ * next: `undefined` (the POST-only default) and `Object` (the built-in
+ * `assign`) are both ordinary identifiers a module may bind, and a gate that
+ * asks the name alone answers about a global the file cannot even reach.
+ *
+ * TYPE space is deliberately not a binding here: `interface Object {}` and
+ * `import type { X as Object }` declare no value, so counting them would stop
+ * a real `Object.assign` being seen — a MISS, which is the direction that
+ * matters for the mutation rule below.
+ *
+ * The forms are the set `bindingSources` enumerates, plus the import clause,
+ * which binds a value name with no in-file source expression. A CATCH CLAUSE
+ * binds one too — `catch (Object) {}` typechecks, measured — and needs no
+ * branch of its own: `CatchClause.variableDeclaration` IS a
+ * `VariableDeclaration` and `forEachChild` walks into it, so the first branch
+ * already sees it. Measured, and a branch for it added and then deleted when
+ * removing it changed no verdict: a guard nothing can distinguish from its
+ * absence is a rule with nothing behind it. The fixture for the form stays,
+ * because what must keep holding is the ANSWER, not the route to it.
+ */
+function bindsName(sf: ts.SourceFile, name: string): boolean {
+  let perFile = SHADOWED.get(sf);
+  if (!perFile) SHADOWED.set(sf, (perFile = new Map()));
+  const cached = perFile.get(name);
   if (cached !== undefined) return cached;
 
   let found = false;
   const names = new Set<string>();
   const named = (n: ts.Node | undefined): boolean =>
-    !!n && ts.isIdentifier(n) && n.text === "undefined";
+    !!n && ts.isIdentifier(n) && n.text === name;
 
   const visit = (n: ts.Node): void => {
     if (found) return;
     if (ts.isVariableDeclaration(n) || ts.isParameter(n) || ts.isBindingElement(n)) {
       names.clear();
       bindPatternNames(n.name, names);
-      if (names.has("undefined")) {
+      if (names.has(name)) {
         found = true;
         return;
       }
@@ -566,7 +599,7 @@ function bindsUndefined(sf: ts.SourceFile): boolean {
   };
 
   visit(sf);
-  SHADOWS_UNDEFINED.set(sf, found);
+  perFile.set(name, found);
   return found;
 }
 
@@ -584,20 +617,44 @@ export function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
  * The receiver matters, and the first version of this rule ignored it: any
  * `.assign(…)` counted, so an unrelated `registry.assign(channelConfig)` made
  * an immutable literal unresolvable and the gate red on healthy code (Codex,
- * PR #94). `Object` and `globalThis.Object` only — and, deliberately, not a
- * local shadow of the name, because a file that shadows `Object` is beyond
- * what this catches and refusing on the name alone is the defect being fixed.
+ * PR #94).
+ *
+ * `Object` and `globalThis` are then RESOLVED rather than matched by name, for
+ * the reason `isExplicitUndefined` resolves its own: both are ordinary
+ * identifiers a module may bind, and TypeScript accepts every form of it —
+ * `const`/`let`/`var`, `function`, `class`, `enum`, `namespace`, an import
+ * alias, a parameter and a catch clause, all measured, where the same forms
+ * for `undefined` are refused. A module that binds one, say
+ * `const Object = { assign(_value: unknown) {} }`, calls something of its own
+ * and reaches no global at all, and reading that as the built-in invalidated
+ * an unchanged private-channel literal: the gate RED ON A HEALTHY TREE, the
+ * worst shape this file records (Codex, PR #94). The `globalThis.Object`
+ * spelling is the same defect one identifier over — `const globalThis = { … }`
+ * typechecks too — and its own binding is the one that decides it, since a
+ * local `Object` cannot shadow a PROPERTY of the global object.
+ *
+ * The residual is stated rather than chased: the scan is file-wide, so a file
+ * that binds the name in a NESTED scope and calls the real built-in outside it
+ * under-reports that mutation. That needs a scope model, which this module
+ * deliberately does not have, and it is the narrower hazard of the two — it
+ * takes a shadow AND a genuine built-in call in one file, where the red needs
+ * only the shadow. No file either gate reads binds either name today (294
+ * scanned, 0 hits), so the rule costs nothing now.
  */
 export function isObjectAssignCall(n: ts.Node): n is ts.CallExpression {
   if (!ts.isCallExpression(n) || !ts.isPropertyAccessExpression(n.expression)) return false;
   if (n.expression.name.text !== "assign") return false;
+  const sf = n.getSourceFile();
   const receiver = unwrapTransparent(n.expression.expression);
-  if (ts.isIdentifier(receiver)) return receiver.text === "Object";
+  if (ts.isIdentifier(receiver)) {
+    return receiver.text === "Object" && !bindsName(sf, "Object");
+  }
   return (
     ts.isPropertyAccessExpression(receiver) &&
     receiver.name.text === "Object" &&
     ts.isIdentifier(receiver.expression) &&
-    receiver.expression.text === "globalThis"
+    receiver.expression.text === "globalThis" &&
+    !bindsName(sf, "globalThis")
   );
 }
 
