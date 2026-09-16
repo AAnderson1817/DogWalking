@@ -277,7 +277,7 @@ def _command(body: str) -> str:
     words = "|".join(
         re.escape(w)
         for w in SHELL_RESERVED
-        if w not in ("!", "}", "time", "function")
+        if w not in ("!", "}", "time", "function", "coproc")
         and w not in SHELL_WORD_TAKING
     )
     # A reserved word itself begins at a command position, so the SAME set of
@@ -387,9 +387,29 @@ def _command(body: str) -> str:
     # it for a MISS on a legal spelling, which is the defect this whole rule
     # is about.
     funcspec = r'function[ \t]+[^ \t\n|&;()<>$%s]+[ \t]+' % re.escape(_MASK)
-    chain = r'(?:[ \t]*(?:%s|%s|(?:%s)[ \t]+|![ \t]+))*' % (
+    # `coproc` is the third reserved word that may be followed by something
+    # other than a command: an OPTIONAL name, and only then the body. Left in
+    # the plain set, the chain read the name as the command and stopped, so
+    # the body's `{` was reachable from no boundary and `coproc checks { run
+    # "13. new check" true; }` — which bash runs — was read by NEITHER reader:
+    # invisible in both directions, a local gate with no CI counterpart while
+    # lockstep reported success (Codex, PR #94). The same hole for a tab
+    # before the brace, a redirection after the group, a `$NAME` and a quoted
+    # name, and a gate at the HEAD of a named `until`/`if` — and the OTHER
+    # direction one word over: `coproc run { run "…" true; }` names the
+    # coprocess `run`, and the chain read that name as an unlabelled
+    # invocation, so `shell_unreadable_calls` refused a healthy file by name.
+    #
+    # The name is admitted only where `_COPROC_NAME` says bash reads one —
+    # before a compound-command opener, across blanks and never a newline —
+    # which is what keeps `coproc checks run "1. fake" true` (a command called
+    # `checks`) from being read as a gate. The lexer carries the same rule so
+    # the command position survives the name and the body's `{` opens one.
+    coprocspec = r'coproc[ \t]+(?:%s)?' % _COPROC_NAME.pattern
+    chain = r'(?:[ \t]*(?:%s|%s|%s|(?:%s)[ \t]+|![ \t]+))*' % (
         timespec,
         funcspec,
+        coprocspec,
         words,
     )
     # `VAR=value` and `>file` / `2>&1` / `<in`, repeated, with the spacing bash
@@ -661,6 +681,30 @@ _BANG = re.compile(r"!(?=[ \t])")
 # the one-rule-two-scopes disagreement these rounds keep finding.
 _TIME_OPTION = re.compile(r"(-p|--)(?=[\s;&|()<>]|$)")
 
+# `coproc [NAME] command`: the word after `coproc` is a NAME exactly when what
+# follows IT opens a compound command — bash's own rule, read off the shell
+# rather than the manual (`help coproc` gives the grammar and says nothing
+# about how the two readings are told apart): `coproc checks { run "…" true;
+# }` runs `run`, and so do the `(`, `((`, `[[`, `while`, `until`, `for`, `if`
+# and `case` heads after a name, with a tab or several blanks, with the `(`
+# glued (`checks(`), with a quoted name and with a `$NAME` one — while `coproc
+# checks run "…" true` runs a command CALLED `checks` and hands it `run` as an
+# argument, and so do `coproc checks time run …` and `coproc checks X=1 run …`
+# (all measured, bash 5.2). A NEWLINE ends the question: `coproc checks`⏎`{
+# run "…" true; }` is a coproc of `checks` followed by a group in the main
+# shell, so the lookahead crosses blanks and nothing else. A reserved word in
+# the name position stays reserved (`coproc if …` is an unnamed coproc of the
+# `if`; `coproc fi {` is a syntax error), so this is consulted only for a bare
+# word that is not one. The name's own class is a shell WORD, quotes, masks
+# and `$` included, because bash validates the identifier only at RUN time —
+# and, as with a function name, a name bash then refuses reads a gate that
+# never runs, which is a phantom in a file bash rejects and is the stated
+# residual rather than a miss on a legal spelling.
+_COPROC_NAME = re.compile(
+    r"[^ \t\n|&;()<>]+"
+    r"(?:[ \t]*(?=\()|[ \t]+(?=(?:\{|\[\[|while|until|for|if|case|select)(?:[ \t\n;&|()<>]|$)))"
+)
+
 
 def _heredoc_delimiter(text: str, i: int) -> tuple[str, bool, bool]:
     """The word after `<<`: its text, whether any of it was quoted, and
@@ -898,6 +942,18 @@ def _lex_shell(
     # name, as rounds forty-six to forty-eight reached it through `time`, `!`
     # and `function` itself (Codex, PR #94).
     fn_name = ""
+    # "next" when the word about to start may be a coprocess NAME — the word
+    # after `coproc`. It is one exactly when a compound command follows it
+    # (`_COPROC_NAME`), and then the command position SURVIVES it, as it does
+    # a function's name, so the body's `{` opens one and a `case` inside is
+    # recognised; read as an ordinary command word instead, the name cleared
+    # `at_cmd`, the brace opened nothing, and a `case` pattern's `)` inside
+    # the body popped the enclosing substitution — `echo $(coproc checks {
+    # case a in a) :;; esac; }) run "1. fake" true` reported a PHANTOM for a
+    # word bash passes to `echo`. Round thirty's defect, reached through
+    # `coproc` as it was reached through `time`, `!` and `function` (Codex,
+    # PR #94).
+    coproc_name = ""
     # An unquoted backtick is the other spelling of `$( )`: what follows it is
     # a command position (`echo `run "13. x" y`` runs `run` — measured, and the
     # reader found NOTHING for it, invisible in both directions), and the word
@@ -1587,6 +1643,8 @@ def _lex_shell(
             skel.append(ch)
             at_word_start = opens
             at_cmd = opens
+            # `coproc { …` has no name: the brace is the body.
+            coproc_name = ""
         elif exp_depth or arith_depth or hd is not None:
             # Data: a separator, a newline, a reserved word, a `#` — none of
             # them is a command boundary inside a parameter expansion
@@ -1657,6 +1715,20 @@ def _lex_shell(
                     # that set `fn_name` cleared it.
                     fn_name = "in"
                     at_cmd = True
+                elif (
+                    coproc_name == "next"
+                    and name not in SHELL_RESERVED
+                    and _COPROC_NAME.match(text, i)
+                ):
+                    # A coprocess NAME. Not a command, and the position
+                    # survives it because what follows is the body — the
+                    # `function` rule, one reserved word over. A reserved word
+                    # here is still reserved (`coproc if …`, `coproc time {`)
+                    # and takes the branch below, and a word the lookahead
+                    # refuses (`coproc checks run "…"`, a newline after the
+                    # name) is the command it is to bash.
+                    coproc_name = ""
+                    at_cmd = True
                 elif _BANG.match(text, i):
                     # `!` negates a pipeline, so a command position survives it
                     # — and `_BARE_WORD` matches letters only, so this branch
@@ -1688,6 +1760,7 @@ def _lex_shell(
                 else:
                     fn_name = "next" if name == "function" else ""
                     time_opt = "opt" if name == "time" else ""
+                    coproc_name = "next" if name == "coproc" else ""
                     at_cmd = (
                         name in SHELL_RESERVED
                         and name not in SHELL_WORD_TAKING
@@ -2862,6 +2935,67 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('case a in a) run "1. case-body" true;; esac', ["1. case-body"]),
     ('for case; do :; done; run "1. for-noin" true', ["1. for-noin"]),
     ('coproc run "1. coproc-command" true\nwait', ["1. coproc-command"]),
+    # `coproc [NAME] command`: the word after `coproc` is a NAME when a
+    # compound command follows it, and the body runs. The chain read the name
+    # as the command and stopped, so the body's `{` was reachable from no
+    # boundary: `coproc checks { run "…" true; }` — which bash runs — was read
+    # by NEITHER reader (Codex, PR #94), and so were the tab, the redirection
+    # after the group, an identifier with `_` and a digit, a quoted name, a
+    # `$NAME`, the glued `(`, and a gate at the HEAD of a named `until` or
+    # `if` (all measured against bash 5.2, and all missed by the shipped
+    # reader). A gate INSIDE a substitution is real, so the coproc there
+    # reads too.
+    ('coproc checks { run "1. coproc-name-group" true; }; wait',
+     ["1. coproc-name-group"]),
+    ('coproc checks\t{ run "1. coproc-name-tab" true; }; wait',
+     ["1. coproc-name-tab"]),
+    ('coproc checks { run "1. coproc-name-redirect" true; } </dev/null; wait',
+     ["1. coproc-name-redirect"]),
+    ('coproc my_checks2 { run "1. coproc-name-ident" true; }; wait',
+     ["1. coproc-name-ident"]),
+    ('coproc "checks" { run "1. coproc-name-quoted" true; }; wait',
+     ["1. coproc-name-quoted"]),
+    ('N=checks; coproc $N { run "1. coproc-name-expanded" true; }; wait',
+     ["1. coproc-name-expanded"]),
+    ('coproc checks( run "1. coproc-name-glued-paren" true ); wait',
+     ["1. coproc-name-glued-paren"]),
+    ('coproc checks until run "1. coproc-name-until-head" true; do break; done; wait',
+     ["1. coproc-name-until-head"]),
+    ('coproc checks if run "1. coproc-name-if-head" true; then :; fi; wait',
+     ["1. coproc-name-if-head"]),
+    ('echo $(coproc checks { run "1. coproc-name-in-subst" true; }); wait',
+     ["1. coproc-name-in-subst"]),
+    # The name may itself be `run`: the coprocess is called `run` and the body
+    # invokes the gate once. Read as a command, the name was an unlabelled
+    # invocation and `shell_unreadable_calls` refused a healthy file by name —
+    # that direction is pinned in the unreadable matrix below.
+    ('coproc run { run "1. coproc-name-is-run" true; }; wait',
+     ["1. coproc-name-is-run"]),
+    # The LEXER's half: the command position survives the name, so the body's
+    # `{` opens one and a `case` inside it is recognised. Without that the
+    # pattern's `)` popped the enclosing substitution and the tail became
+    # top-level — a PHANTOM for a word bash passes to `echo` (measured; round
+    # thirty's defect, reached through `coproc`). The chain alone cannot see
+    # this row, and the lexer alone cannot see the rows above.
+    ('echo $(coproc checks { case a in a) :;; esac; }) run "1. fake" true', []),
+    ('coproc checks { case a in a) run "1. coproc-name-case-body" true;; esac; }; wait',
+     ["1. coproc-name-case-body"]),
+    # The other direction, which is what stops the fix becoming "every word
+    # after `coproc` is a name": a word followed by anything but a compound
+    # command is the COMMAND, and `run` after it is that command's argument —
+    # `coproc checks run "1. fake" true` runs a command called `checks`
+    # (measured), and so do the `time` and assignment-prefix spellings. A
+    # newline after the name ends the question: `coproc checks`⏎`{ … }` is a
+    # coproc of `checks` and a group in the main shell, whose gate is real.
+    ('coproc checks run "1. fake" true; wait', []),
+    ('coproc checks time run "1. fake" true; wait', []),
+    ('coproc checks X=1 run "1. fake" true; wait', []),
+    ('echo $(coproc checks { :; }) run "1. fake" true; wait', []),
+    ('echo coproc checks { run "1. fake" true', []),
+    ('coproc checks\n{ run "1. coproc-name-newline-group" true; }; wait',
+     ["1. coproc-name-newline-group"]),
+    ('coproc checks\nrun "1. coproc-name-newline-run" true; wait',
+     ["1. coproc-name-newline-run"]),
     # A case pattern may carry an OPTIONAL leading parenthesis, which is not a
     # subshell. Reading it as one left a command position open, so a pattern
     # spelled `case` or `esac` was taken for the reserved word: the marker it
@@ -3070,6 +3204,19 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
 # failure direction is the worse one: off the raw text `echo 'note; run'` was
 # reported as an unreadable gate (measured), a gate red on a healthy tree.
 _UNREADABLE_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
+    # A coprocess NAME is not an invocation: `coproc run { run "…" true; }`
+    # names the coprocess `run` and the shipped chain refused it by name — a
+    # gate red on a healthy tree (measured; Codex, PR #94, the finding's
+    # other direction). An unreadable call INSIDE a named body is refused,
+    # where before it was invisible; and the name question ends at a newline,
+    # so `coproc run`⏎ is a coproc of an UNLABELLED `run`, refused as such.
+    # `coproc checks run` is a command called `checks`, and its argument is
+    # not a call.
+    ('coproc run { run "1. x" true; }; wait', []),
+    ('coproc checks { run $LABEL true; }; wait', ["run $LABEL true"]),
+    ('coproc checks { skip_gate $LABEL; }; wait', ["skip_gate $LABEL"]),
+    ('coproc run\n{ run "1. x" true; }; wait', ["run"]),
+    ('coproc checks run; wait', []),
     # A case PATTERN is not a command, so neither its optional leading
     # parenthesis nor its alternation `|` is a boundary. Both were, so an
     # ordinary pattern spelled like the gate helper was refused BY NAME —
