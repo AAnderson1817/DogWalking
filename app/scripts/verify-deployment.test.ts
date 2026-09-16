@@ -672,6 +672,22 @@ describe("verify-deployment: the read-only argument", () => {
     // NOT housed either: the shadow is what disqualifies the file, so a local
     // binding of the name does it too, even where the call reads the global.
     put("beta2", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nfor (const undefined of []) { void undefined; }\nserveFunction(handle, undefined);\n');
+    // Housed, and this is the other side of that rule: a TYPE-ONLY import
+    // binds a name for the CHECKER and emits nothing, so the runtime
+    // `undefined` is still the global and the call is still the POST-only
+    // default. Refusing it demanded a bespoke production contract for a
+    // healthy call — a gate red on a healthy tree (Codex, PR #94), and
+    // `import type` is used throughout the trees these gates read.
+    put("gamma2", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nimport type { Wide as undefined } from "./opts.ts";\nserveFunction(handle, undefined);\n');
+    writeFileSync(join(dir, "gamma2", "opts.ts"), 'export type Wide = { methods: string[] };\n');
+    // …and the inline `{ type X as … }` spelling, which carries `isTypeOnly`
+    // on the SPECIFIER rather than on the clause.
+    put("delta2", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nimport { type Wide as undefined } from "./opts.ts";\nserveFunction(handle, undefined);\n');
+    writeFileSync(join(dir, "delta2", "opts.ts"), 'export type Wide = { methods: string[] };\n');
+    // Housed: `declare` binds for the checker and emits nothing either, so the
+    // same reasoning applies — measured by compiling a module that carries one
+    // and running the output, where the global is what the call reaches.
+    put("epsilon2", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\ndeclare const undefined: { methods: string[] };\nserveFunction(handle, undefined);\n');
     // Housed: `void <anything>` is undefined whatever the operand does.
     put("psi2", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, void 0);\n');
     // NOT housed: `null` is NOT undefined — a default initializer does not
@@ -728,6 +744,9 @@ describe("verify-deployment: the read-only argument", () => {
       omega2: false,
       alpha2: false,
       beta2: false,
+      gamma2: true,
+      delta2: true,
+      epsilon2: true,
     });
   });
 

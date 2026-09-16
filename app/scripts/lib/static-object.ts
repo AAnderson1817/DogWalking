@@ -543,10 +543,38 @@ const SHADOWED = new WeakMap<ts.SourceFile, Map<string, boolean>>();
  * `assign`) are both ordinary identifiers a module may bind, and a gate that
  * asks the name alone answers about a global the file cannot even reach.
  *
- * TYPE space is deliberately not a binding here: `interface Object {}` and
- * `import type { X as Object }` declare no value, so counting them would stop
- * a real `Object.assign` being seen — a MISS, which is the direction that
- * matters for the mutation rule below.
+ * TYPE space is not a binding here, and the first version of this comment said
+ * so while the code counted it anyway (Codex, PR #94). `interface Object {}`
+ * and `type Object = …` were never in the branch list; a TYPE-ONLY IMPORT was,
+ * so `import type { Helper as Object } from "./dep.ts"` — which typechecks, and
+ * `import type` appears throughout the trees these gates read — made a real
+ * `Object.assign(config, …)` invisible as a mutation and left the realtime gate
+ * reading a stale `private: true`: the gate blessing what it forbids. The same
+ * alias named `undefined` refuses a healthy `serveFunction(handle, undefined)`
+ * and demands a bespoke production contract for it: a gate red on a healthy
+ * tree. Both measured against the shipped predicate, all four spellings —
+ * a type-only clause, an inline `{ type X as … }` specifier, a type-only
+ * default, a type-only namespace.
+ *
+ * An AMBIENT declaration is the same class and was found by checking the
+ * sibling rather than the site reported: `declare const Object: …` and
+ * `declare function Object(…)` bind a name for the CHECKER and emit nothing,
+ * so the runtime `Object` is still the global. Measured by emit rather than
+ * reasoned about — the compiled module calls the global and mutating through
+ * it really does change the object (`{"private":false}` when run). Neither
+ * form is skipped merely by name: the scan stops descending into it, because
+ * everything inside an ambient declaration is ambient too.
+ *
+ * RESIDUAL, stated rather than chased: a namespace whose body declares only
+ * types emits nothing either (measured — `namespace Object { export type A = 1 }`
+ * compiles away, while a namespace with a function emits a real binding), and
+ * this still counts it as a binding. Deciding otherwise means implementing
+ * TypeScript's "instantiated module" rule, including declaration merging, for
+ * a form that occurs NOWHERE in the trees these gates read (measured: zero
+ * `namespace`/`module`/`declare` in `app/src` and `supabase/functions`) — the
+ * epicycle this repository's stopping rule is about. It is pinned as a test so
+ * that changing it is a decision somebody makes, and the direction is named
+ * rather than called conservative: it errs toward a MISS on the mutation rule.
  *
  * The forms are the set `bindingSources` enumerates, plus the import clause,
  * which binds a value name with no in-file source expression. A CATCH CLAUSE
@@ -571,6 +599,11 @@ function bindsName(sf: ts.SourceFile, name: string): boolean {
 
   const visit = (n: ts.Node): void => {
     if (found) return;
+    // Declares no VALUE, so the runtime name is whatever it was — the global,
+    // for the two this scan is asked about. Both stop the descent as well as
+    // the binding: a type-only clause's specifiers and an ambient block's
+    // contents are type-only and ambient in turn.
+    if (declaresNoValue(n)) return;
     if (ts.isVariableDeclaration(n) || ts.isParameter(n) || ts.isBindingElement(n)) {
       names.clear();
       bindPatternNames(n.name, names);
@@ -601,6 +634,43 @@ function bindsName(sf: ts.SourceFile, name: string): boolean {
   visit(sf);
   perFile.set(name, found);
   return found;
+}
+
+/**
+ * Does this node introduce a name the CHECKER knows and the runtime does not?
+ *
+ * Two forms, each measured rather than reasoned about (see `bindsName`): a
+ * type-only import, and any declaration carrying `declare`. `ImportClause`,
+ * `ImportSpecifier` and `ImportEqualsDeclaration` each carry their own
+ * `isTypeOnly`; a `NamespaceImport` does not, and needs none, because its
+ * clause is skipped before the walk reaches it.
+ */
+function declaresNoValue(n: ts.Node): boolean {
+  if (
+    (ts.isImportClause(n) || ts.isImportSpecifier(n) || ts.isImportEqualsDeclaration(n))
+    && n.isTypeOnly
+  ) {
+    return true;
+  }
+  return isDeclarationLike(n)
+    && (ts.getCombinedModifierFlags(n) & ts.ModifierFlags.Ambient) !== 0;
+}
+
+/** The declaration kinds `bindsName` inspects, narrowed for `getCombinedModifierFlags`. */
+function isDeclarationLike(n: ts.Node): n is ts.Declaration {
+  return ts.isVariableDeclaration(n)
+    || ts.isParameter(n)
+    || ts.isBindingElement(n)
+    || ts.isFunctionDeclaration(n)
+    || ts.isFunctionExpression(n)
+    || ts.isClassDeclaration(n)
+    || ts.isClassExpression(n)
+    || ts.isEnumDeclaration(n)
+    || ts.isModuleDeclaration(n)
+    || ts.isImportClause(n)
+    || ts.isImportSpecifier(n)
+    || ts.isNamespaceImport(n)
+    || ts.isImportEqualsDeclaration(n);
 }
 
 /** Every assignment operator, `=` and the compound ones alike. */

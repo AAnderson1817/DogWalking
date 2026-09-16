@@ -717,6 +717,36 @@ describe("the walk channel is the only channel, and it is private on both sides"
     // resolutions are not one rule wearing two names.
     expect(read("const Object = { assign(_v: unknown) {} };\nconst c = { private: true };\nglobalThis.Object.assign(c, {});\nsend({ topic, ...c });"))
       .toEqual(["<unresolvable spread `c`>"]);
+    // A TYPE-ONLY import binds a name for the CHECKER and emits nothing, so the
+    // runtime `Object` is still the global and this IS the built-in mutation.
+    // Reading it as a shadow left the literal reading `private: true` while the
+    // program had already made it false — the gate blessing what it forbids,
+    // and `import type` appears throughout the trees these gates read (Codex,
+    // PR #94). Both spellings: `isTypeOnly` sits on the clause in the first and
+    // on the specifier in the second.
+    expect(read('import type { Helper as Object } from "./dep.ts";\nconst c = { private: true };\nObject.assign(c, { private: false });\nsend({ topic, ...c });'))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read('import { type Helper as Object } from "./dep.ts";\nconst c = { private: true };\nObject.assign(c, { private: false });\nsend({ topic, ...c });'))
+      .toEqual(["<unresolvable spread `c`>"]);
+    // `declare` is the same class, found by checking the sibling rather than
+    // the site reported: it emits nothing, so the call reaches the global.
+    // Measured by compiling and RUNNING a module that carries one.
+    expect(read("declare const Object: { assign(t: unknown, s: unknown): void };\nconst c = { private: true };\nObject.assign(c, { private: false });\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    // …while a VALUE import still binds, so the rule did not become
+    // "an import never shadows".
+    expect(read('import { helper as Object } from "./dep.ts";\nconst c = { private: true };\nObject.assign(c);\nsend({ topic, ...c });'))
+      .toEqual(["true"]);
+    // A SECOND residual, pinned rather than modelled: a namespace whose body
+    // declares only types emits nothing either (measured — it compiles away,
+    // while one carrying a function emits a real binding), and this still
+    // reads it as a shadow, so the mutation below is MISSED. The direction is
+    // named rather than called conservative. Deciding otherwise means
+    // implementing TypeScript's instantiated-module rule for a form that
+    // occurs nowhere in the trees these gates read (measured: zero
+    // `namespace`/`module`/`declare` in app/src and supabase/functions).
+    expect(read("namespace Object { export type A = 1; }\nconst c = { private: true };\nObject.assign(c, { private: false });\nsend({ topic, ...c });"))
+      .toEqual(["true"]);
     // The RESIDUAL, pinned so that changing it is a decision somebody makes.
     // The scan is file-wide, so a NESTED binding beside a genuine built-in
     // call under-reports the mutation. Closing it needs a scope model this
@@ -882,6 +912,12 @@ describe("the walk channel is the only channel, and it is private on both sides"
     // covers both — which is why it is a predicate and not a copy of the test.
     expect(muts("const Object = { assign(_v: unknown) {} };\nconst m = { private: true };\nObject.assign(m);")).toEqual([]);
     expect(muts("const globalThis = { Object: { assign(_v: unknown) {} } };\nconst m = { private: true };\nglobalThis.Object.assign(m);")).toEqual([]);
+    // …and a TYPE-ONLY alias of the name binds nothing at runtime, so the
+    // call is the built-in and this reader must still report it. The SIBLING
+    // reader in `static-object.ts` shares the predicate, so one fix covers
+    // both — which is why it is a predicate and not a copy of the test.
+    expect(muts('import type { Helper as Object } from "./dep.ts";\nconst m = { private: true };\nObject.assign(m, { private: false });')).toHaveLength(1);
+    expect(muts("declare const Object: { assign(t: unknown, s: unknown): void };\nconst m = { private: true };\nObject.assign(m, { private: false });")).toHaveLength(1);
     expect(muts("const m = { private: true };\ndelete m.private;")).toHaveLength(1);
     expect(muts("let n = 0;\nn += 1;\nconst m = { private: true };\nm.count += 1;")).toHaveLength(1);
     // The sibling hole, fixed in the same commit: `++`/`--` on a member is a
@@ -972,7 +1008,12 @@ describe("the walk channel is the only channel, and it is private on both sides"
   // decides; it fails here rather than going quietly stale.
   it("tsc ACCEPTS every form of binding `Object` and `globalThis`", () => {
     const dir = mkdtempSync(join(tmpdir(), "objshadow-"));
-    writeFileSync(join(dir, "dep.ts"), "export const helper = { assign(_v: unknown) {} };\n");
+    writeFileSync(
+      join(dir, "dep.ts"),
+      "export type Helper = { assign(v: unknown): void };\n"
+        + "export const helper = { assign(_v: unknown) {} };\n"
+        + "export default helper;\n",
+    );
 
     const forms: Record<string, string> = {
       constDecl: "const Object = { assign(_v: unknown) {} };",
@@ -986,6 +1027,15 @@ describe("the walk channel is the only channel, and it is private on both sides"
       paramDecl: "export function f(Object: { assign(v: unknown): void }) { Object.assign(1); }",
       catchClause: "export function g(): void { try { f0(); } catch (Object) { Object; } }",
       globalThisDecl: "const globalThis = { Object: { assign(_v: unknown) {} } };",
+      // Type-only and ambient forms typecheck too, which is what makes the
+      // OTHER half of the rule reachable: these bind a name for the checker
+      // and emit nothing, so the runtime name is still the global.
+      typeOnlyClause: 'import type { Helper as Object } from "./dep.ts";',
+      typeOnlySpecifier: 'import { type Helper as Object } from "./dep.ts";',
+      typeOnlyDefault: 'import type Object from "./dep.ts";',
+      typeOnlyNamespace: 'import type * as Object from "./dep.ts";',
+      ambientConst: "declare const Object: { assign(v: unknown): void };",
+      ambientFunction: "declare function Object(v?: unknown): void;",
     };
 
     const files = Object.entries(forms).map(([name, binding]) => {
