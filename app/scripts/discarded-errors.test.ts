@@ -6,6 +6,7 @@ import {
   calleeCall,
   calleeOf,
   computedAccess,
+  isAliasFormingAssignment,
   isTransparentWrapper,
   memberAccess as sharedMemberAccess,
   memberRoot,
@@ -1709,9 +1710,18 @@ function declaredAsClient(ctx: Ctx, recv: ts.Expression, seen = new Set<ts.Symbo
     // can read is one.
     const sources: Declared[] = decl.initializer ? [byExpression(decl.initializer)] : [];
     if (ts.isVariableDeclaration(decl)) {
+      // Every alias-forming spelling, not `=` alone: `db2 ??= db` assigns the
+      // client when it runs, and reading only `EqualsToken` left a computed
+      // call on `db2` with no site and a discarded `.auth` call on it refused
+      // as "neither a client nor a value" (measured; Codex, PR #94, round 64
+      // — the channel gate's assignment-alias finding, in this reader). The
+      // left side goes through the transparent wrappers, as every other
+      // target read in this family does.
       const visit = (n: ts.Node) => {
-        if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(n.left) &&
-          symbolOf(ctx.checker, n.left) === sym) sources.push(byExpression(n.right));
+        if (ts.isBinaryExpression(n) && isAliasFormingAssignment(n.operatorToken.kind)) {
+          const left = unwrapTransparent(n.left);
+          if (ts.isIdentifier(left) && symbolOf(ctx.checker, left) === sym) sources.push(byExpression(n.right));
+        }
         ts.forEachChild(n, visit);
       };
       visit(ctx.sf);
@@ -3314,6 +3324,30 @@ async function f(token: string) { const { data, error } = await ${nine("db.auth"
     }
     expect(one(`async function f(token: string) { const db = ${nine("adminClient")}(); const { data, error } = await db.auth.getUser(token); if (error) throw error; return data; }`).verdict).toBe("OK");
     expect(one(`async function f(token: string) { const db = ${nine("adminClient")}(); const { data } = await db.auth.getUser(token); return data; }`).verdict).toBe("DISCARDED");
+  });
+
+  it("a client alias formed by any assignment spelling is a client (Codex, PR #94)", () => {
+    const CLIENT = "declare function adminClient(): any;\n";
+    const computedMember = /is a computed member reached from a client/;
+    // `db2 ??= db` assigns the client when it runs. The rule read `=` alone,
+    // so the computed call produced no site and the discarded `.auth` call
+    // was refused as declared "neither a client nor a value" — the wrong
+    // sentence for a receiver that IS one (both measured on the shipped gate).
+    for (const src of [
+      `${CLIENT}async function f() { const db = adminClient(); let db2: any; db2 ??= db; const key: "from" = "from"; const { data } = await db2[key]("walks").select("id"); return data; }`,
+      `${CLIENT}async function f() { const db = adminClient(); let db2: any; db2 ||= db; const key: "from" = "from"; const { data } = await db2[key]("walks").select("id"); return data; }`,
+      `${CLIENT}async function f() { const db = adminClient(); let db2: any = 1; db2 &&= db; const key: "from" = "from"; const { data } = await db2[key]("walks").select("id"); return data; }`,
+      // …and a wrapped target, which is the same assignment.
+      `${CLIENT}async function f() { const db = adminClient(); let db2: any; (db2) = db; const key: "from" = "from"; const { data } = await db2[key]("walks").select("id"); return data; }`,
+    ]) {
+      const site = one(src);
+      expect(site.verdict, src).toBe("UNCLASSIFIED");
+      expect(site.reason, src).toMatch(computedMember);
+    }
+    const auth = one(`${CLIENT}async function f() { const db = adminClient(); let db2: any; db2 ||= db; const { data } = await db2.auth.getUser("t"); return data; }`);
+    expect(auth.verdict).toBe("DISCARDED");
+    // An assignment from something that is NOT a client gives no client.
+    expect(classifySource('async function f(other: { from: number }, k: "from") { let db2: any; db2 ??= other; const v = db2[k]; return v; }', "fixture.ts")).toEqual([]);
   });
 
   it("a computed member reached from a client is refused by name (Codex, PR #94)", () => {

@@ -367,8 +367,6 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
     aliases.get(a)!.add(b);
     aliases.get(b)!.add(a);
   };
-  const { linkBinding, linkNames } = makeLinkBinding(link);
-
   // `const attrs = base` — the name holds whatever `base` holds. Recorded
   // here and resolved after the walk, because the source may be declared
   // later in the file; `null` marks a name bound twice, which is unresolvable
@@ -403,15 +401,9 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
         const lit = init && ts.isObjectLiteralExpression(init) ? init : null;
         const aliasOf = init && ts.isIdentifier(init) ? init.text : null;
         bind(n.name.text, lit, aliasOf);
-        if (aliasOf) link(n.name.text, aliasOf);
       } else bindPattern(n.name);
-      linkBinding(n.name, n.initializer);
     } else if (ts.isParameter(n) || ts.isBindingElement(n)) {
       bindPattern(n.name);
-      // A DEFAULT is a source expression like any other: `function m(alias =
-      // config)` and `const { a = config } = o` both let `alias` hold the same
-      // object, so a mutation through it reaches `config`.
-      linkBinding(n.name, n.initializer);
     } else if (
       (ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n) ||
         ts.isEnumDeclaration(n) || ts.isModuleDeclaration(n) ||
@@ -436,27 +428,14 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
     if (ts.isBinaryExpression(n) && isDefiniteRebinding(n.operatorToken.kind)) {
       collectAssignmentTargets(n.left, rebound);
     }
-    // ALIASING is a separate question from rebinding and therefore a separate
-    // block, which the first version of this got wrong by nesting one inside
-    // the other: excluding `??=` from rebinding then silently excluded it from
-    // the alias graph too, so `let a; a ??= config; a.private = false;` stopped
-    // invalidating `config` — caught by this file's own fixtures rather than by
-    // review, which is what they are for.
-    //
-    // `a = config` makes the two names one object from here on, and so does
-    // `[a] = [config]` or `({ a } = { a: config })`. Rather than match a
-    // destructuring pattern positionally (the right side can be any
-    // expression, so the matching is not always possible), every target is
-    // linked to every identifier the right side mentions. That OVER-links,
-    // which is the conservative direction: it can refuse a name nothing
-    // touched, never miss one that was mutated.
-    if (ts.isBinaryExpression(n) && isAliasFormingAssignment(n.operatorToken.kind)) {
-      const targets = new Set<string>();
-      collectAssignmentTargets(n.left, targets);
-      const sources = new Set<string>();
-      collectIdentifiers(n.right, sources);
-      for (const target of targets) for (const source of sources) link(target, source);
-    }
+    // ALIASING is a separate question from rebinding: `let a; a ??= config;
+    // a.private = false;` must still invalidate `config`, and the first
+    // version of this rule nested one predicate inside the other and lost
+    // exactly that (caught by this file's own fixtures). The alias edges are
+    // no longer formed here at all — they come from `bindingSources`, the one
+    // enumeration of every form that binds a name to a value, consumed below
+    // after the walk (round 64: the channel gate's own alias resolver had a
+    // partial copy of this list and missed every form but a declaration).
     if (
       (ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) &&
       (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken)
@@ -476,21 +455,11 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
     // BinaryExpression at all, so `for (x of […])` slipped past the rule above.
     // Only the bare-identifier form matters: `for (const x of …)` declares a
     // fresh binding, which the declaration branch already sees.
-    if (ts.isForOfStatement(n) || ts.isForInStatement(n)) {
-      if (!ts.isVariableDeclarationList(n.initializer)) {
-        collectAssignmentTargets(n.initializer, rebound);
-        const targets = new Set<string>();
-        collectAssignmentTargets(n.initializer, targets);
-        linkNames(targets, n.expression);
-      } else {
-        // `for (const alias of [config])` declares a FRESH binding — so it
-        // does not shadow-invalidate `config`, which the declaration branch
-        // already handles — but `alias` holds the same object, so a mutation
-        // through it must still reach `config`.
-        const targets = new Set<string>();
-        for (const d of n.initializer.declarations) bindPatternNames(d.name, targets);
-        linkNames(targets, n.expression);
-      }
+    // (`for (const alias of [config])` declares a FRESH binding, which the
+    // declaration branch already sees; the alias edge for either loop form is
+    // formed by `bindingSources` below.)
+    if ((ts.isForOfStatement(n) || ts.isForInStatement(n)) && !ts.isVariableDeclarationList(n.initializer)) {
+      collectAssignmentTargets(n.initializer, rebound);
     }
     // And MUTATING what the name holds. The caller reads the object, so
     // `channelConfig.private = false` changes the answer exactly as rebinding
@@ -515,6 +484,20 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
     ts.forEachChild(n, visit);
   };
   visit(sf);
+
+  // The alias graph, from the ONE enumeration of binding forms. Every target
+  // is linked to every identifier its source mentions — `[a] = [config]` and
+  // `({ a } = { a: config })` are not matched positionally, because the right
+  // side can be any expression and the matching is not always possible. That
+  // OVER-links, which is the conservative direction for THIS question: it can
+  // refuse a name nothing touched, never miss one that was mutated.
+  // (`holdersOf`, the directed consumer of the same list, is the precise one,
+  // because its consumers report on a positive answer.)
+  for (const b of bindingSources(sf)) {
+    const sources = new Set<string>();
+    collectIdentifiers(b.source, sources);
+    for (const target of b.targets) for (const source of sources) link(target, source);
+  }
 
   // Close MUTATION over the alias graph: whichever name it was written
   // through, every name for the same object loses its literal. Rebinding is
@@ -574,26 +557,216 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
 }
 
 /**
- * Link every name a binding introduces to every identifier its SOURCE mentions.
+ * Every place a name receives a value from an in-file expression.
  *
  * This is the one place that answers "what can this name come to hold?", and
  * it is deliberately the COMPLETE set of TypeScript constructs that bind a
  * name together with a value expression, because four consecutive review
  * rounds found this rule one form short — a parameter, then an assignment,
- * then a destructuring declaration, then a parameter DEFAULT. The set is:
+ * then a destructuring declaration, then a parameter DEFAULT — and a fifth
+ * then found the channel gate's alias resolver carrying a PARTIAL copy of it
+ * (declarations only), so `let db; db = supabase; db[key](…)` opened a public
+ * topic past it (Codex, PR #94, round 64). The set is:
  *
  *   VariableDeclaration   `const a = …`         initializer
  *   Parameter             `(a = …)`             initializer (the default)
  *   BindingElement        `{ a = … }`           initializer (the default)
  *   ForOf / ForIn         `for (a of …)`        the iterable
- *   assignment `=`        `a = …`               the right-hand side
+ *   assignment            `a = …`, `a ??= …`,   the right-hand side
+ *                         `a ||= …`, `a &&= …`  (`isAliasFormingAssignment`)
  *
  * Nothing else in the language introduces a binding with an in-file source
  * expression: a class field, a catch clause and an import bind a name with
- * nothing here to link it to. Conservative by construction — every target to
- * every identifier the source mentions, not a positional match — so it can
- * refuse a name nothing touched and can never miss one that was mutated.
+ * nothing here to link it to.
+ *
+ * Two consumers, two readings of the same list. `declaredObjects` links every
+ * target to every identifier the source mentions (conservative: it may refuse
+ * a name nothing touched, never miss a mutated one). `holdersOf` is directed
+ * and precise, because its consumers REPORT on a positive answer and a false
+ * positive there is a gate red on healthy code.
  */
+export type BindingSource = {
+  /** The names bound. A `whole` binding has exactly one. */
+  targets: Set<string>;
+  /** The expression the value comes from. */
+  source: ts.Expression;
+  /**
+   * true when the one target holds the VALUE of `source` — `const a = e`,
+   * `a = e`, a default `a = e` — and false when the targets hold PARTS of it
+   * (a destructuring pattern) or its ELEMENTS (a loop).
+   */
+  whole: boolean;
+  /** The pattern, for a destructuring binding, so a consumer can match it against a literal. */
+  pattern?: ts.BindingName | ts.Expression;
+  /** A `for…of` / `for…in` binding: the targets hold elements of `source`. */
+  loop?: boolean;
+};
+
+export function bindingSources(sf: ts.SourceFile): BindingSource[] {
+  const out: BindingSource[] = [];
+  const add = (name: ts.BindingName, source: ts.Expression | undefined) => {
+    if (!source) return;
+    const targets = new Set<string>();
+    bindPatternNames(name, targets);
+    if (targets.size === 0) return;
+    out.push(ts.isIdentifier(name) ? { targets, source, whole: true } : { targets, source, whole: false, pattern: name });
+  };
+  const visit = (n: ts.Node): void => {
+    if (ts.isVariableDeclaration(n) || ts.isParameter(n) || ts.isBindingElement(n)) {
+      add(n.name, n.initializer);
+    } else if (ts.isBinaryExpression(n) && isAliasFormingAssignment(n.operatorToken.kind)) {
+      const targets = new Set<string>();
+      collectAssignmentTargets(n.left, targets);
+      const left = unwrapTransparent(n.left);
+      if (targets.size > 0) {
+        out.push(ts.isIdentifier(left)
+          ? { targets, source: n.right, whole: true }
+          : { targets, source: n.right, whole: false, pattern: n.left });
+      }
+    } else if (ts.isForOfStatement(n) || ts.isForInStatement(n)) {
+      const targets = new Set<string>();
+      if (ts.isVariableDeclarationList(n.initializer)) {
+        for (const d of n.initializer.declarations) bindPatternNames(d.name, targets);
+      } else collectAssignmentTargets(n.initializer, targets);
+      if (targets.size > 0) out.push({ targets, source: n.expression, whole: false, loop: true });
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return out;
+}
+
+/**
+ * The names that can come to HOLD one of `seeds` — the client, the global
+ * `Object` — followed through every binding form, directed and transitive.
+ *
+ * A name holds the seed when it is bound to the seed's identifier (through the
+ * transparent wrappers) by a WHOLE binding: a declaration, an assignment in
+ * any alias-forming spelling, a parameter default or a binding-element
+ * default. A pattern's names hold PARTS of the source and a loop variable
+ * holds ELEMENTS, so those are followed only where the part is visible — a
+ * literal aggregate written in place, matched by position or by key, one
+ * level deep: `const [db] = [supabase]`, `({ db } = { db: supabase })`,
+ * `for (const db of [supabase])`. A part taken from anything else — `const {
+ * data } = await supabase.from(…)` — is NOT the seed, and saying otherwise
+ * would put every query result on the client's side of a gate that reports.
+ *
+ * Name-based and file-wide, like `declaredObjects`: a name bound to the seed
+ * anywhere in the file holds it everywhere, which over-includes a name that
+ * is later rebound or shadowed. That is the reporting direction — a computed
+ * member on such a name is refused rather than blessed — and every reader
+ * that consumes this set states it.
+ */
+export function holdersOf(sf: ts.SourceFile, seeds: Iterable<string>): Set<string> {
+  const names = new Set(seeds);
+  const bindings = bindingSources(sf);
+  const holds = (e: ts.Expression): boolean => {
+    const v = unwrapTransparent(e);
+    return ts.isIdentifier(v) && names.has(v.text);
+  };
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const b of bindings) {
+      const gained = b.whole ? (holds(b.source) ? b.targets : []) : partsHolding(b, holds);
+      for (const t of gained) {
+        if (!names.has(t)) {
+          names.add(t);
+          grew = true;
+        }
+      }
+    }
+  }
+  return names;
+}
+
+/**
+ * The pattern names (or loop targets) that receive a seed out of a LITERAL
+ * aggregate source, one level deep. Anything the reader cannot match is not
+ * followed — the miss direction, stated in `holdersOf`.
+ */
+function partsHolding(b: BindingSource, holds: (e: ts.Expression) => boolean): Set<string> {
+  const out = new Set<string>();
+  const src = unwrapTransparent(b.source);
+  if (b.loop) {
+    if (ts.isArrayLiteralExpression(src) && src.elements.some((el) => !ts.isSpreadElement(el) && holds(el))) {
+      for (const t of b.targets) out.add(t);
+    }
+    return out;
+  }
+  const pat = b.pattern;
+  if (!pat) return out;
+  if (ts.isArrayLiteralExpression(src)) {
+    const slots = arraySlots(pat);
+    for (let i = 0; i < src.elements.length && i < slots.length; i++) {
+      const el = src.elements[i]!;
+      if (ts.isSpreadElement(el)) break; // indices shift past a spread; not followed
+      const name = slots[i];
+      if (name && holds(el)) out.add(name);
+    }
+  } else if (ts.isObjectLiteralExpression(src)) {
+    const byKey = objectSlots(pat);
+    for (const p of src.properties) {
+      let key: string | null = null;
+      let value: ts.Expression | null = null;
+      if (ts.isPropertyAssignment(p)) {
+        key = propertyKey(p.name);
+        value = p.initializer;
+      } else if (ts.isShorthandPropertyAssignment(p)) {
+        key = p.name.text;
+        value = p.name;
+      }
+      if (key === null || !value || !holds(value)) continue;
+      const name = byKey.get(key);
+      if (name) out.add(name);
+    }
+  }
+  return out;
+}
+
+/** Array-pattern positions → the identifier bound there, or null (a rest, a nested pattern, a hole). */
+function arraySlots(pat: ts.BindingName | ts.Expression): (string | null)[] {
+  const slots: (string | null)[] = [];
+  if (ts.isArrayBindingPattern(pat)) {
+    for (const el of pat.elements) {
+      if (ts.isBindingElement(el) && !el.dotDotDotToken && ts.isIdentifier(el.name)) slots.push(el.name.text);
+      else if (ts.isBindingElement(el) && el.dotDotDotToken) break;
+      else slots.push(null);
+    }
+  } else if (ts.isArrayLiteralExpression(pat)) {
+    for (const el of pat.elements) {
+      const target = ts.isBinaryExpression(el) && el.operatorToken.kind === ts.SyntaxKind.EqualsToken
+        ? unwrapTransparent(el.left)
+        : unwrapTransparent(el);
+      if (ts.isSpreadElement(el)) break;
+      slots.push(ts.isIdentifier(target) ? target.text : null);
+    }
+  }
+  return slots;
+}
+
+/** Object-pattern keys → the identifier bound to each (a rest or a nested pattern is skipped). */
+function objectSlots(pat: ts.BindingName | ts.Expression): Map<string, string> {
+  const byKey = new Map<string, string>();
+  if (ts.isObjectBindingPattern(pat)) {
+    for (const el of pat.elements) {
+      if (el.dotDotDotToken || !ts.isIdentifier(el.name)) continue;
+      const key = el.propertyName ? propertyKey(el.propertyName) : el.name.text;
+      if (key !== null) byKey.set(key, el.name.text);
+    }
+  } else if (ts.isObjectLiteralExpression(pat)) {
+    for (const p of pat.properties) {
+      if (ts.isShorthandPropertyAssignment(p)) byKey.set(p.name.text, p.name.text);
+      else if (ts.isPropertyAssignment(p)) {
+        const key = propertyKey(p.name);
+        const target = ts.isBinaryExpression(p.initializer) && p.initializer.operatorToken.kind === ts.SyntaxKind.EqualsToken
+          ? unwrapTransparent(p.initializer.left)
+          : unwrapTransparent(p.initializer);
+        if (key !== null && ts.isIdentifier(target)) byKey.set(key, target.text);
+      }
+    }
+  }
+  return byKey;
+}
 
 /** The names a binding pattern introduces. */
 function bindPatternNames(nm: ts.BindingName, into: Set<string>): void {
@@ -602,30 +775,6 @@ function bindPatternNames(nm: ts.BindingName, into: Set<string>): void {
     return;
   }
   for (const el of nm.elements) if (ts.isBindingElement(el)) bindPatternNames(el.name, into);
-}
-
-/** Link a binding's names to the identifiers its source expression mentions. */
-function makeLinkBinding(
-  link: (a: string, b: string) => void,
-): {
-  linkBinding: (name: ts.BindingName, source: ts.Expression | undefined) => void;
-  linkNames: (targets: Set<string>, source: ts.Expression) => void;
-} {
-  const linkNames = (targets: Set<string>, source: ts.Expression) => {
-    if (targets.size === 0) return;
-    const sources = new Set<string>();
-    collectIdentifiers(source, sources);
-    for (const target of targets) for (const s of sources) link(target, s);
-  };
-  return {
-    linkNames,
-    linkBinding: (name, source) => {
-      if (!source) return;
-      const targets = new Set<string>();
-      bindPatternNames(name, targets);
-      linkNames(targets, source);
-    },
-  };
 }
 
 /** Every identifier an expression mentions, however deeply. */
@@ -647,7 +796,7 @@ function collectIdentifiers(e: ts.Expression, into: Set<string>): void {
  * predicate for both, which is the defect the comment described (Codex,
  * PR #94).
  */
-function isAliasFormingAssignment(kind: ts.SyntaxKind): boolean {
+export function isAliasFormingAssignment(kind: ts.SyntaxKind): boolean {
   return (
     kind === ts.SyntaxKind.EqualsToken ||
     kind === ts.SyntaxKind.QuestionQuestionEqualsToken ||
@@ -856,6 +1005,25 @@ export function isExplicitUndefined(e: ts.Expression): boolean {
 }
 
 const SHADOWED = new WeakMap<ts.SourceFile, Map<string, boolean>>();
+const GLOBAL_HOLDERS = new WeakMap<ts.SourceFile, Map<string, Set<string>>>();
+
+/**
+ * Is this identifier the GLOBAL `name` — spelled as itself, or as a name that
+ * came to hold it? `const O = Object; O.assign(m, …)` mutates `m` exactly as
+ * `Object.assign` does, and a receiver matched by its spelling alone kept the
+ * literal readable and stale, in every alias form (measured; Codex, PR #94,
+ * round 64 — the channel gate's assignment-alias finding, in this predicate).
+ * The global must be unbound in the file, whichever spelling reaches it.
+ */
+function isGlobal(sf: ts.SourceFile, id: ts.Identifier, name: "Object" | "globalThis"): boolean {
+  if (bindsName(sf, name)) return false;
+  if (id.text === name) return true;
+  let perFile = GLOBAL_HOLDERS.get(sf);
+  if (!perFile) GLOBAL_HOLDERS.set(sf, (perFile = new Map()));
+  let holders = perFile.get(name);
+  if (!holders) perFile.set(name, (holders = holdersOf(sf, [name])));
+  return holders.has(id.text);
+}
 
 /**
  * Does anything in this file bind `name` as a VALUE?
@@ -1079,14 +1247,14 @@ function objectBuiltinMember(access: ts.Node): string | null | undefined {
   const receiver = unwrapTransparent(hop.receiver);
   let builtin = false;
   if (ts.isIdentifier(receiver)) {
-    builtin = receiver.text === "Object" && !bindsName(sf, "Object");
+    builtin = isGlobal(sf, receiver, "Object");
   } else {
     // `globalThis.Object.assign` and `globalThis["Object"]["assign"]` are the
     // same call; the receiver is read by the same helper for the same reason.
     const outer = memberAccess(receiver);
     if (outer && outer.name === "Object") {
       const base = unwrapTransparent(outer.receiver);
-      builtin = ts.isIdentifier(base) && base.text === "globalThis" && !bindsName(sf, "globalThis");
+      builtin = ts.isIdentifier(base) && isGlobal(sf, base, "globalThis");
     }
   }
   if (!builtin) return undefined;

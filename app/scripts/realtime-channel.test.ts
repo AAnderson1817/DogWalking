@@ -17,6 +17,7 @@ import {
   memberTarget,
   propertyKey,
   definesWithoutValue,
+  holdersOf,
   unwrapTransparent,
 } from "./lib/static-object.js";
 import { describe, expect, it } from "vitest";
@@ -128,27 +129,21 @@ function clientNames(sf: ts.SourceFile): Set<string> {
     }
   }
 
-  // Parentheses, `as`, `satisfies` and `!` all hand the same value through —
-  // through `unwrapTransparent`, which is the shared implementation, because a
-  // local copy of it here is the sibling-divergence shape this file's own
-  // header is about. The copy this replaced also knew one wrapper fewer.
-
-  // Fixpoint: an alias of an alias is still the client.
-  for (let grew = true; grew;) {
-    grew = false;
-    const visit = (n: ts.Node): void => {
-      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) {
-        const init = unwrapTransparent(n.initializer);
-        if (ts.isIdentifier(init) && names.has(init.text) && !names.has(n.name.text)) {
-          names.add(n.name.text);
-          grew = true;
-        }
-      }
-      ts.forEachChild(n, visit);
-    };
-    visit(sf);
-  }
-  return names;
+  // Every name that can come to HOLD the client, through every binding form
+  // — a declaration, an assignment in any alias-forming spelling, a parameter
+  // or binding-element default, a literal aggregate taken apart — followed by
+  // the SHARED `holdersOf`, transitively and through the transparent wrappers.
+  // This function used to carry its own fixpoint over declarations alone, a
+  // partial copy of the shared module's binding-form list, so `let db: typeof
+  // supabase; db = supabase; db[key]("walk:public")` opened a public topic
+  // past it — and so did the escaped, destructured, logical-assignment,
+  // parameter-default and binding-default spellings, all measured green on
+  // the shipped gate (Codex, PR #94, round 64). Name-based and file-wide, so a
+  // name rebound away from the client afterwards still counts, which is the
+  // reporting direction; a part taken from a non-literal source (`const
+  // { data } = await supabase.from(…)`) is NOT the client, and that is what
+  // keeps this from turning every query result into a red.
+  return holdersOf(sf, names);
 }
 
 /**
@@ -842,6 +837,66 @@ describe("the walk channel is the only channel, and it is private on both sides"
     ]);
   });
 
+  it("follows every form of alias to the client, and only those (Codex, PR #94)", () => {
+    const IMP = 'import { supabase } from "./supabase";\n';
+    const OPTS = "{ config: { private: true } }";
+    const verdicts = (body: string): string[] => {
+      const sf = ts.createSourceFile("f.ts", IMP + body, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+      return channelCallsIn(sf, "f.ts").map((c) => (c.private ? "private" : c.why));
+    };
+    const computedMember = /a computed member reached from the Supabase client/;
+    const KEY = 'const key: "channel" = "channel"; ';
+    // Codex's case — an alias formed by ASSIGNMENT rather than by a
+    // declaration — then every other form a name can come to hold the client
+    // by. Each was green on the shipped gate with the computed call planted in
+    // the real hook.
+    for (const body of [
+      `let db: typeof supabase; db = supabase; ${KEY}db[key]("walk:public");`,
+      `let db: typeof supabase | undefined; db ??= supabase; ${KEY}db![key]("walk:public");`,
+      `let db: typeof supabase | undefined; db ||= supabase; ${KEY}db![key]("walk:public");`,
+      `let db: typeof supabase | undefined = supabase; db &&= supabase; ${KEY}db![key]("walk:public");`,
+      `let db: typeof supabase; (db) = supabase as never; ${KEY}db[key]("walk:public");`,
+      `const open = (db: typeof supabase = supabase) => { ${KEY}db[key]("walk:public"); }; open();`,
+      `const { db = supabase } = {} as { db?: typeof supabase }; ${KEY}db[key]("walk:public");`,
+      // …an alias of an assignment alias, and an assignment from an alias.
+      `let db: typeof supabase; db = supabase; const db2 = db; ${KEY}db2[key]("walk:public");`,
+      `const db = supabase; let db2: typeof supabase; db2 = db; ${KEY}db2[key]("walk:public");`,
+      // …and the client taken by POSITION out of a literal aggregate.
+      `const [db] = [supabase]; ${KEY}db[key]("walk:public");`,
+      `const { db } = { db: supabase }; ${KEY}db[key]("walk:public");`,
+      `let db: typeof supabase; [db] = [supabase]; ${KEY}db[key]("walk:public");`,
+      `let db: typeof supabase; ({ db } = { db: supabase }); ${KEY}db[key]("walk:public");`,
+      `for (const db of [supabase]) { ${KEY}db[key]("walk:public"); }`,
+    ]) {
+      const got = verdicts(body);
+      expect(got, body).toHaveLength(1);
+      expect(got[0], body).toMatch(computedMember);
+    }
+    // The same alias reaches the other two rules keyed on the client set —
+    // the escaped reference and the destructured method — which were misses
+    // too (measured, neither named by the review).
+    const escaped = verdicts('let db: typeof supabase; db = supabase; const opener = db.channel; opener("walk:public");');
+    expect(escaped).toHaveLength(1);
+    expect(escaped[0]).toMatch(/referenced without being called/);
+    const taken = verdicts('let db: typeof supabase; db = supabase; const { channel: opener } = db; opener("walk:public");');
+    expect(taken).toHaveLength(1);
+    expect(taken[0]).toMatch(/taken off it by a destructuring/);
+    // A NAMED call through the alias was already caught — as an unresolvable
+    // receiver. It is classified now, so the sentence names the real defect.
+    expect(verdicts('let db: typeof supabase; db = supabase; db.channel("walk:public");')).toEqual([
+      "called with no options — `private` defaults to false (H1)",
+    ]);
+    expect(verdicts(`let db: typeof supabase; db = supabase; db.channel(t, ${OPTS});`)).toEqual(["private"]);
+    // The other direction, which is what keeps this from being "every name is
+    // the client": an assignment from something ELSE, a part taken from a
+    // NON-literal source (every query result in the app is one), and the
+    // result of a call on the client.
+    expect(verdicts(`let db: unknown; db = other; ${KEY}(db as never)[key]("walk:public");`)).toEqual([]);
+    expect(verdicts('const { data } = await supabase.from("walks").select("id"); const row = data[i]; void row;')).toEqual([]);
+    expect(verdicts(`const ch = supabase.channel(t, ${OPTS}); ch[k]("x");`)).toEqual(["private"]);
+    expect(verdicts('for (const row of rows) { const v = row[k]; void v; }')).toEqual([]);
+  });
+
   it("classifies a channel call through every transparent receiver spelling", () => {
     const IMP = 'import { supabase } from "./supabase";\n';
     const OPTS = "{ config: { private: true } }";
@@ -1431,6 +1486,20 @@ describe("the walk channel is the only channel, and it is private on both sides"
     ]) {
       expect(muts(computedKey), computedKey).toEqual([expect.stringContaining("a computed member of Object")]);
     }
+    // The built-in reached through an ALIAS, in every form a name can come to
+    // hold it: `const O = Object; O.assign(m, …)` mutates `m` exactly as the
+    // direct call does, and a receiver matched by its spelling alone reported
+    // nothing and kept the literal readable — for the declaration, the
+    // assignment, the computed, the escaped and the `globalThis` spellings
+    // alike (measured; Codex, PR #94, round 64, the channel gate's
+    // assignment-alias finding in this predicate).
+    expect(muts('const O = Object;\nconst m = { private: true };\nO.assign(m, { private: false });')).toHaveLength(1);
+    expect(muts('let O: typeof Object;\nO = Object;\nconst m = { private: true };\nO.assign(m, { private: false });')).toHaveLength(1);
+    expect(muts('const O = Object;\nconst m = { private: true };\nconst k: "assign" = "assign"; O[k](m, { private: false });'))
+      .toEqual([expect.stringContaining("a computed member of Object")]);
+    expect(muts('const O = Object;\nconst m = { private: true };\nconst f = O.assign;'))
+      .toEqual([expect.stringContaining("referenced without being called")]);
+    expect(muts('const g = globalThis;\nconst m = { private: true };\ng.Object.assign(m, { private: false });')).toHaveLength(1);
     // …and not on a receiver that is NOT the built-in: a bound `Object`, a
     // bound `globalThis`, somebody else's object. A computed member of those
     // is ordinary code.

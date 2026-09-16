@@ -409,6 +409,9 @@ describe("every error message renders through FormError or StateField", () => {
     // the shared module). The mirror — a benign literal made `alert` by the
     // same call — stays a MISS, the dynamic-spread limit this file states.
     expect(role('const b = { role: "alert" };\nconst k: "assign" = "assign";\nObject[k](b, { role: "status" });\n<span {...b} />')).toBeNull();
+    // …and the built-in reached through an alias, which the shared predicate
+    // now follows (round 64): the literal is no longer readable.
+    expect(role('const O = Object;\nconst b = { role: "alert" };\nO.assign(b, { role: "status" });\n<span {...b} />')).toBeNull();
     // A cycle terminates rather than resolving or hanging.
     expect(role("let b = a;\nlet a = b;\n<span {...a} />")).toBeNull();
     // An accessor or method DEFINES the property and answers a function body,
