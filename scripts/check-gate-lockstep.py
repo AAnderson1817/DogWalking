@@ -907,7 +907,9 @@ def _lex_shell(
     # One entry per open construct: "subst" for a command, arithmetic or
     # process substitution (`$(`, `$((`, `<(`, `>(`), "paren" for a subshell,
     # "glob" for an extglob group, which is part of a word rather than a
-    # subshell and is therefore inert at both ends,
+    # subshell and is therefore inert at both ends, "cond" for a `[[ … ]]`
+    # conditional command, whose `&&`, `||`, `(` and `)` are expression
+    # operators rather than command boundaries (see the `[[` branch below),
     # and "case-pat"/"case-body" for a `case … esac`, whose pattern closers
     # carry no `(` of their own.
     #
@@ -1038,6 +1040,40 @@ def _lex_shell(
     # flag is only consulted where `in_backtick` already holds, so an escaped
     # backtick anywhere else stays the literal it is (measured, both spellings).
     nested_backtick = False
+    # The (in_backtick, nested_backtick) state each `parens` entry was pushed
+    # under, by stack index. A backtick pushes nothing onto `parens`, so while
+    # one is open INSIDE a region the region is still `parens[-1]`, and every
+    # rule keyed on that fired on the backtick's CONTENTS — which are real
+    # shell at a command position: `echo @(`true; run "…" true`)` and `case a
+    # in `true | run "…" true; printf a`) :;; esac` both invoke the gate
+    # (measured, and the subshell spelling of each) while the reader masked
+    # the `;`, the `|` and the `(` as pattern text and found nothing — a MISS
+    # in both directions, the worse shape. Found by measuring the sibling
+    # while the `[[ … ]]` region below was being written, which had the same
+    # hole by construction: `[[ `true; run "…" true; printf x` == x ]]` runs
+    # the gate (measured).
+    #
+    # So a region rule asks `innermost`: the entry must be on top of the
+    # stack AND the backtick state must be what it was at the push. A
+    # substitution opened inside a region needs no such record because it
+    # pushes an entry of its own; a backtick is the one construct that
+    # re-enters a command position without one. Keyed by index rather than
+    # kept as a parallel stack, because `esac` shrinks `parens` by several at
+    # once and a stale record at a vacated index is overwritten by the next
+    # push there before anything can read it — a record is only ever read
+    # through the entry that wrote it.
+    region_bt: dict[int, tuple[bool, bool]] = {}
+
+    def push(kind: str) -> None:
+        parens.append(kind)
+        region_bt[len(parens) - 1] = (in_backtick, nested_backtick)
+
+    def innermost(*kinds: str) -> bool:
+        return (
+            bool(parens)
+            and parens[-1] in kinds
+            and region_bt.get(len(parens) - 1) == (in_backtick, nested_backtick)
+        )
     # A PARAMETER EXPANSION is one word: bash does not invoke `run` for
     # `echo ${UNSET:-x; run "12. css tokens defined" true}` (measured), nor for
     # the same body carrying `|`, `&`, a newline, a bare `( … )`, a reserved
@@ -1224,8 +1260,9 @@ def _lex_shell(
         # branch and is not one of the masked separators at all, so a fix that
         # enumerated them would have missed it. A substitution inside a group
         # is real shell and pushes its own entry, so a `#` there is still a
-        # comment (measured); only the group itself is word interior.
-        if parens and parens[-1] == "glob":
+        # comment (measured); only the group itself is word interior — and so
+        # is a backtick inside one, which pushes no entry, hence `innermost`.
+        if innermost("glob"):
             at_word_start = False
         # An ESCAPED `\$(` or ``\` `` is literal and opens nothing (measured),
         # and the backslash is consumed by the quote branch below before this
@@ -1450,11 +1487,7 @@ def _lex_shell(
                 bool(skel)
                 and (
                     skel[-1] in "?*+@"
-                    or (
-                        skel[-1] == "!"
-                        and bool(parens)
-                        and parens[-1] in ("case-pat", "glob")
-                    )
+                    or (skel[-1] == "!" and innermost("case-pat", "glob"))
                 )
             ):
                 # No `not opens_subst`/`not arith_open` guard, unlike every
@@ -1511,7 +1544,7 @@ def _lex_shell(
                 # (measured), so the only files this changes are ones bash will
                 # actually run.
                 kind = "glob"
-                parens.append(kind)
+                push(kind)
                 exp_resume_at.append(
                     (len(parens) - 1, exp_depth, arith_depth, hd)
                 )
@@ -1521,12 +1554,7 @@ def _lex_shell(
                 at_cmd = False
                 i += 1
                 continue
-            if (
-                not opens_subst
-                and not arith_open
-                and parens
-                and parens[-1] == "case-pat"
-            ):
+            if not opens_subst and not arith_open and innermost("case-pat"):
                 # The pattern's optional leading parenthesis. Inert and pushing
                 # NOTHING, so the pattern's own `)` falls to the "case" rule
                 # below and balances it; `at_cmd` stays false because what
@@ -1539,8 +1567,24 @@ def _lex_shell(
                 at_cmd = False
                 i += 1
                 continue
+            if not opens_subst and not arith_open and innermost("cond"):
+                # GROUPING inside `[[ … ]]`: `[[ ( -z x || run ) && -n y ]]`
+                # invokes nothing (measured) — the parentheses group tests,
+                # and a `(a|run)` in a `=~` regex is the same character with
+                # the same meaning. Inert and pushing NOTHING, so the matching
+                # `)` falls to the "cond" rule in the branch below. The word
+                # start stays open because `#` still opens a comment there
+                # (measured) and because `]]` may follow a closer directly.
+                # A `$(`, `<(` or `((` here is what it is anywhere: the guards
+                # above hand those to the ordinary push.
+                out.append(ch)
+                skel.append(_MASK)
+                at_word_start = True
+                at_cmd = False
+                i += 1
+                continue
             kind = "arith" if arith_open else ("subst" if opens_subst else "paren")
-            parens.append(kind)
+            push(kind)
             # Always recorded, even at depth 0, so open and close stay
             # symmetric and restoring is a no-op where nothing was masked.
             exp_resume_at.append((len(parens) - 1, exp_depth, arith_depth, hd))
@@ -1583,6 +1627,17 @@ def _lex_shell(
                 out.append(ch)
                 skel.append(_MASK)
                 at_word_start = False
+                at_cmd = False
+                i += 1
+                continue
+            if innermost("cond"):
+                # A grouping's closer inside `[[ … ]]`: the rule above pushed
+                # nothing, so this pops nothing, and it opens no command
+                # position. The word start stays open for the `]]` that may
+                # follow it directly — `[[ ( -n x )]]` is legal (measured).
+                out.append(ch)
+                skel.append(_MASK)
+                at_word_start = True
                 at_cmd = False
                 i += 1
                 continue
@@ -1745,6 +1800,112 @@ def _lex_shell(
             at_cmd = opens
             # `coproc { …` has no name: the brace is the body.
             coproc_name = ""
+        elif (
+            ch == "["
+            and text.startswith("[[", i)
+            and (i + 2 >= len(text) or text[i + 2] in _WORD_BREAK)
+            and at_cmd
+            and not fn_name
+            and hd is None
+            and not innermost("case-pat")
+        ):
+            # A `[[ … ]]` CONDITIONAL COMMAND. Inside it `&&`, `||`, `(` and
+            # `)` are EXPRESSION operators and a newline is whitespace: bash
+            # runs no `run` for `[[ -z x || run ]]` (measured — `run` is the
+            # string operand of the `||`), while `shell_unreadable_calls`
+            # read the `||` as a list operator and refused `run ]]` by name —
+            # a gate RED ON A HEALTHY TREE, the worst shape this log records
+            # (Codex, PR #94). Thirteen more spellings shared it: `&&`, a
+            # grouping `( … )`, a newline after the operator, `! [[`, inside
+            # `if`, after a pipe, in a case body, in a backtick, and a `=~`
+            # regex whose `(a|run)` alternation the reader took for a subshell
+            # and a pipe. The mirror was a PHANTOM: `echo $([[ -z x || case
+            # ]]) run "1. fake" true` passes every word to `echo` (measured),
+            # while the `case` after the `||` stood at what the reader took
+            # for a command position, pushed a marker, and the substitution's
+            # own closer became a boundary. Round thirty's defect, reached
+            # through `[[` as it was reached through `time`, `!`, `function`
+            # and `coproc`.
+            #
+            # So the conditional is a REGION: its separators are masked in the
+            # branch below (`inert_sep`) and its parentheses by the two rules
+            # that push nothing, while a `$(`, `<(` or backtick inside it is
+            # real shell and still reads — `[[ $(run "…" true >&2; printf x)
+            # == x ]]` invokes the gate (measured), and so do the
+            # process-substitution and backtick spellings.
+            #
+            # A reserved word counts only AT a command position, and `[[` is
+            # one: `echo [[ -z x || run "…" true ]]` passes `[[` to `echo`
+            # and the `||` is a real list operator; `X=1 [[ …` and
+            # `>/dev/null [[ …` make `[[` an ordinary command bash cannot
+            # find, after which `|| run ]]` really runs `run`; `case a in
+            # [[)` is a pattern; `function [[ {` is a name; and inside a
+            # heredoc body it is text (all measured, each pinned). The word
+            # must be exactly `[[`: `[[x == x ]]` is a command called `[[x`
+            # (measured, not found, and the `||` after it real), and
+            # `[[:space:]]` inside a pattern is a character class. `![[` is
+            # the command `![[` (measured), which the `!` branch's own rule
+            # already clears the position for.
+            #
+            # NO `exp_depth`/`arith_depth` clause: `at_cmd` is never true
+            # inside an expansion or an arithmetic body (the `#` branch
+            # records the same of `at_word_start`), so a guard here would be
+            # a rule with nothing behind it — measured, by adding one: every
+            # row and every probe stayed green. No `at_word_start` clause for
+            # the same reason, measured the same way: `at_cmd` holds only at
+            # a word start, because a reserved word keeps it only when
+            # `_BARE_WORD` matched, which needs a break after the word —
+            # `if[[ …` and `time[[ …` clear it, and `x[[ -z x || run ]]` at a
+            # command position is to bash ONE word, a subscript-shaped name
+            # it cannot find (measured; the `run]=2` rule below records the
+            # same lexing). The `hd` clause IS pinned, because the first
+            # line of a heredoc body begins at a word start with the command
+            # position open. `coproc [[ …` needs no clause either: `[x` is
+            # "not a valid identifier" (measured) so the word is never a
+            # name, and the name state resolves itself at the first word
+            # break after `]]`, where no compound opener can legally follow
+            # (`]] {` and `]] (` are syntax errors, measured).
+            #
+            # LIMIT, the same one the heredoc and the expansion state: an
+            # UNTERMINATED `[[` masks the rest of the file. Bash refuses such
+            # a script ("unexpected EOF while looking for `]]'", measured),
+            # so it cannot be a healthy tree, and the loss is loud — the map
+            # still names the vanished gates.
+            push("cond")
+            out.append("[[")
+            skel.append("[[")
+            at_word_start = False
+            at_cmd = False
+            # As for any command word, so the chain and the lexer agree where
+            # a timespec ends.
+            time_opt = ""
+            i += 2
+            continue
+        elif (
+            ch == "]"
+            and text.startswith("]]", i)
+            and (i + 2 >= len(text) or text[i + 2] in _WORD_BREAK)
+            and at_word_start
+            and innermost("cond")
+        ):
+            # The closer, at a word start only: `x]]` is one word and a
+            # syntax error (measured), while `)]]` closes after a grouping
+            # (legal, measured) — which is why the grouping rules above leave
+            # the word start open. A `]]` inside a substitution within the
+            # conditional is that substitution's text (`[[ $(echo ]]) == "]]"
+            # ]]` runs, measured) and `innermost` says so: the substitution
+            # is the innermost construct then, and a backtick opened inside
+            # the conditional is one too. No `hd` clause: `<<` inside `[[` is
+            # a syntax error (measured), so a heredoc body cannot begin while
+            # the conditional is innermost. Nothing to resume: the region
+            # recorded no `exp_resume_at` entry, because it suspends nothing.
+            parens.pop()
+            out.append("]]")
+            skel.append("]]")
+            at_word_start = False
+            at_cmd = False
+            i += 2
+            continue
         elif exp_depth or arith_depth or hd is not None:
             # Data: a separator, a newline, a reserved word, a `#` — none of
             # them is a command boundary inside a parameter expansion
@@ -1853,7 +2014,7 @@ def _lex_shell(
                         and name not in SHELL_WORD_TAKING
                     )
                     if name == "case":
-                        parens.append("case-pat")
+                        push("case-pat")
                     elif name == "esac" and any(
                         p.startswith("case") for p in parens
                     ):
@@ -1907,9 +2068,7 @@ def _lex_shell(
             # untouched, because the pattern's `)` has flipped the clause to
             # "case-body" by then: `case a in a) printf x | run "…" true;;
             # esac` still reads (measured).
-            pattern_alt = (
-                ch == "|" and bool(parens) and parens[-1] == "case-pat"
-            )
+            pattern_alt = ch == "|" and innermost("case-pat")
             # Inside an extglob group `|`, `;`, `&` and a newline are all
             # PATTERN TEXT, not boundaries: `echo @(a;b)`, `@(a&b)` and
             # `@(a\nb)` each print themselves and invoke nothing (measured),
@@ -1919,16 +2078,24 @@ def _lex_shell(
             # wholly masked, because a substitution inside a group really does
             # run: `echo @($(run "…" true; printf x))` invokes the gate
             # (measured, and the backtick spelling too), so masking the body
-            # would be a MISS — the worse direction.
-            glob_text = (
-                ch in ";&|\n" and bool(parens) and parens[-1] == "glob"
-            )
+            # would be a MISS — the worse direction. That is also why this is
+            # `innermost` and not `parens[-1]`: a backtick inside the group
+            # pushes no entry, and `echo @(`true; run "…" true`)` runs the
+            # gate (measured).
+            #
+            # Inside a `[[ … ]]` CONDITIONAL they are expression syntax:
+            # `&&` and `||` join tests, a newline is whitespace (`[[ -n x &&⏎
+            # -n y ]]` and `[[ -n x⏎]]` both parse, measured), and a bare `;`
+            # or `&` is a syntax error there (measured) — so masking the four
+            # costs nothing on a script bash will run, and leaving any of them
+            # is the `run ]]` refusal the `[[` branch above records.
+            inert_sep = ch in ";&|\n" and innermost("glob", "cond")
             skel.append(
                 _NAME_BREAK
                 if name_break
                 else _NOCLOBBER
                 if noclobber
-                else (_MASK if pattern_alt or glob_text else ch)
+                else (_MASK if pattern_alt or inert_sep else ch)
             )
             name_break = False
             at_word_start = ch in _WORD_BREAK
@@ -1936,7 +2103,7 @@ def _lex_shell(
                 ch in ";&|\n"
                 and not noclobber
                 and not pattern_alt
-                and not glob_text
+                and not inert_sep
             ):
                 at_cmd = True
             if (
@@ -2098,8 +2265,19 @@ def shell_unreadable_calls(source: str) -> list[str]:
     #
     # A `(` is excluded by the pattern below rather than here, because
     # `run() {` is a DEFINITION and not an invocation at all.
+    #
+    # A substitution's CLOSER ends the word as a metacharacter does, and in
+    # the skeleton it is `_SUBST_CLOSE` rather than `)` or a backtick — so
+    # `echo $(run)` and `` x=`run` ``, each of which invokes an unlabelled
+    # `run` (measured), matched nothing here and were refused by neither
+    # reader: invisible in both directions, the shape this file keeps
+    # recording. Pre-existing, and found while the `[[ … ]]` rows were being
+    # written (`[[ $(run) == x ]]` is the same word one construct in). A
+    # name break (`_NAME_BREAK`) is deliberately NOT in the set: the blank
+    # after a coprocess NAME is a boundary the body is reached from, and the
+    # name itself is not an invocation (`coproc run { … }`).
     for m in _find_commands(
-        r'(?:run|skip_gate)(?=[\s;&|)<>]|$)[^\n;&|]*', skel
+        r'(?:run|skip_gate)(?=[\s;&|)<>%s]|$)[^\n;&|]*' % _SUBST_CLOSE, skel
     ):
         call = code[m.start("cmd") : m.end("cmd")].strip()
         if not re.match(r'^(?:run|skip_gate)[ \t]+(["\']).+?\1', call):
@@ -3361,6 +3539,83 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     # never sets it) — which is exactly why round fifty-two's `at_cmd`
     # exception never fired. Changing this row is a decision, not a bug fix.
     ('shopt -s extglob\necho !(a|#foo); run "1. fake" true', []),
+    # A `[[ … ]]` CONDITIONAL COMMAND is a region (the `[[` branch of
+    # `_lex_shell`): a gate after its closer reads through every spelling of
+    # what may follow one, a gate inside a substitution WITHIN one still
+    # reads, and a `case` or a `run` after a masked `||` is not at a command
+    # position — so it pushes no marker, the substitution's own closer stays
+    # a closer, and `echo $([[ -z x || case ]]) run "1. fake" true` stops
+    # reporting the PHANTOM it did (Codex, PR #94, the finding's mirror).
+    ('[[ -n x ]] && run "1. cond-and" true', ["1. cond-and"]),
+    ('[[ -z x ]] || run "1. cond-or" true', ["1. cond-or"]),
+    ('[[ -n x ]]; run "1. cond-semi" true', ["1. cond-semi"]),
+    ('[[ -n x ]]&& run "1. cond-glued-close" true', ["1. cond-glued-close"]),
+    ('[[ -n x ]] 2>&1 | run "1. cond-pipe-after" true', ["1. cond-pipe-after"]),
+    ('[[ -n x &&\n-n y ]]\nrun "1. cond-newline" true', ["1. cond-newline"]),
+    ('[[ -n x\n]] && run "1. cond-close-newline" true', ["1. cond-close-newline"]),
+    ('[[\n-n x ]] && run "1. cond-open-newline" true', ["1. cond-open-newline"]),
+    ('[[ -n x #c\n]] && run "1. cond-comment" true', ["1. cond-comment"]),
+    ('if [[ -z x || run ]]; then run "1. cond-if" true; fi', ["1. cond-if"]),
+    ('if [[ -z x || run ]]\nthen run "1. cond-if-newline" true\nfi', ["1. cond-if-newline"]),
+    ('while [[ -z x || run ]]; do run "1. cond-while" true; break; done', ["1. cond-while"]),
+    ('true | [[ -z x || run ]]; run "1. cond-after-pipe" true', ["1. cond-after-pipe"]),
+    ('case a in a) [[ -z x || run ]];; esac; run "1. cond-case-body" true', ["1. cond-case-body"]),
+    ('{ [[ -z x || run ]]; }; run "1. cond-group" true', ["1. cond-group"]),
+    ('([[ -z x || run ]]); run "1. cond-subshell" true', ["1. cond-subshell"]),
+    ('! [[ -n x || run ]]; run "1. cond-bang" true', ["1. cond-bang"]),
+    ('time [[ -z x || run ]]; run "1. cond-time" true', ["1. cond-time"]),
+    ('time -p [[ -z x || run ]]; run "1. cond-time-p" true', ["1. cond-time-p"]),
+    ('coproc [[ -z x || run ]]; wait; run "1. cond-coproc" true', ["1. cond-coproc"]),
+    ('coproc checks [[ -z x || run ]]; wait; run "1. cond-coproc-named" true', ["1. cond-coproc-named"]),
+    ('[[ ( -n x )]] && run "1. cond-grouping" true', ["1. cond-grouping"]),
+    ('[[( -n x )]] && run "1. cond-grouping-glued" true', ["1. cond-grouping-glued"]),
+    ('[[ ab =~ ^(a|run)b$ ]] && run "1. cond-regex" true', ["1. cond-regex"]),
+    ('[[ ab == @(ab|run) ]] && run "1. cond-extglob" true', ["1. cond-extglob"]),
+    ('x=$([[ -z x || run ]]); run "1. cond-assigned" true', ["1. cond-assigned"]),
+    ('[[ $(echo ]]) == "]]" ]] && run "1. cond-closer-inside" true', ["1. cond-closer-inside"]),
+    # A substitution inside one is real shell and still reads — every
+    # spelling, including a backtick, which pushes no `parens` entry and is
+    # what `innermost` exists for.
+    ('[[ $(run "1. cond-subst" true >&2; printf x) == x ]]', ["1. cond-subst"]),
+    ('[[ -f <(run "1. cond-procsub" true) ]]', ["1. cond-procsub"]),
+    ('[[ `true; run "1. cond-backtick" true; printf x` == x ]]', ["1. cond-backtick"]),
+    ('[[ `(run "1. cond-backtick-subshell" true; printf x)` == x ]]', ["1. cond-backtick-subshell"]),
+    ('[[ `[[ -n x ]] && printf x` == x ]] && run "1. cond-nested" true', ["1. cond-nested"]),
+    ('[[ `echo \\`true; run "1. cond-nested-backtick" true; printf x\\`` == x ]]', ["1. cond-nested-backtick"]),
+    # No PHANTOM: nothing inside the conditional is a command position for a
+    # word bash passes to `echo`, and the substitution's closer stays inert.
+    ('echo $([[ -z x || case ]]) run "1. fake" true', []),
+    ('echo $([[ -z x || run ]]) run "1. fake" true', []),
+    ('echo $( [[ -z x || run ]] ) run "1. fake" true', []),
+    ('echo $([[ -n x ]]) run "1. fake" true', []),
+    ('echo `[[ -z x || run ]]` run "1. fake" true', []),
+    # The reserved word counts only AT a command position, and only as the
+    # whole word: as an argument, after an assignment or redirection prefix,
+    # glued to a `!` or a letter, as a case pattern, as a function's name, in
+    # a heredoc body or in an expansion it opens nothing, and the `||` after
+    # it is a real list operator whose `run` bash invokes (each measured).
+    ('echo [[ -z x || run "1. cond-argument" true ]]', ["1. cond-argument"]),
+    ('X=1 [[ -z x || run "1. cond-assignment-prefix" true ]]', ["1. cond-assignment-prefix"]),
+    ('>/dev/null [[ -z x || run "1. cond-redirection-prefix" true ]]', ["1. cond-redirection-prefix"]),
+    ('![[ -n x ]] || run "1. cond-bang-glued" true', ["1. cond-bang-glued"]),
+    ('[[x == x || run "1. cond-glued-open" true', ["1. cond-glued-open"]),
+    ('case a in x) :;; [[) run "1. cond-pattern" true;; esac; run "2. after" true', ["1. cond-pattern", "2. after"]),
+    ('function [[ { :; }; run "1. cond-function-name" true', ["1. cond-function-name"]),
+    ('function [[ { run "1. cond-function-defined" true; }; [[ -n x ]] && run "2. after" true', ["1. cond-function-defined", "2. after"]),
+    ('cat <<EOF\n[[ -z x\nEOF\nrun "1. cond-heredoc" true', ["1. cond-heredoc"]),
+    ('${x:-[[}; run "1. cond-expansion" true', ["1. cond-expansion"]),
+    # THE SIBLING: a backtick inside an extglob group or a case pattern
+    # re-enters command context, and the group's or pattern's rules must not
+    # reach into it — bash runs every gate here (measured) and the shipped
+    # reader found none of them. The comment row is the earlier `eg-bt-
+    # comment` shape with the gate OUTSIDE the backtick as an argument: still
+    # nothing, because a group's closer opens no command position.
+    ('shopt -s extglob\necho @(`true; run "1. eg-bt-semi" true`)', ["1. eg-bt-semi"]),
+    ('shopt -s extglob\necho @(`printf x | run "1. eg-bt-pipe" true`)', ["1. eg-bt-pipe"]),
+    ('shopt -s extglob\necho @(`printf a; # run "1. fake" true\n`) run "1. fake" true', []),
+    ('case a in `true | run "1. pat-bt-pipe" true; printf a`) :;; esac', ["1. pat-bt-pipe"]),
+    ('case a in `(run "1. pat-bt-subshell" true; printf a)`) :;; esac', ["1. pat-bt-subshell"]),
+    ('case a in `[[ -z x || run ]]; printf a`) :;; esac; run "1. pat-bt-cond" true', ["1. pat-bt-cond"]),
 )
 
 
@@ -3555,6 +3810,59 @@ _UNREADABLE_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('> run bare', []),    # The SIBLING reader on the parity rule: with the delimiters left
     # literal bash invokes nothing, so neither reader may report anything.
     ('result=`echo \\\\\\`run $label true\\\\\\``', []),
+    # A `[[ … ]]` CONDITIONAL: its `&&`, `||`, `(` and `)` are expression
+    # operators, so a bare `run` after one is an OPERAND, not an invocation —
+    # bash runs nothing for `[[ -z x || run ]]` (measured) while this reader
+    # refused `run ]]` by name, a gate RED ON A HEALTHY TREE (Codex, PR #94).
+    ('[[ -z x || run ]]', []),
+    ('[[ -n x && run ]]', []),
+    ('[[ -z x||run ]]', []),
+    ('[[ -z x ||\nrun ]]', []),
+    ('[[ ( run ) ]]', []),
+    ('[[ ( -n x ) || run ]]', []),
+    ('[[ ( -z x || run ) && -n y ]]', []),
+    ('[[ ! -z x || run ]]', []),
+    ('! [[ -n x || run ]]', []),
+    ('[[ "]]" == x || run ]]', []),
+    ('[[ `echo ]]` == x || run ]]', []),
+    ('[[ ]]x == ]]x || run ]]', []),
+    ('[[ x == a]] || run ]]', []),
+    ('[[ -z x || skip_gate ]]', []),
+    ('[[ ab =~ ^(a|run)b$ ]]', []),
+    ('[[ ab =~ (a|run)b ]]', []),
+    ('if [[ -z x || run ]]; then :; fi', []),
+    ('true | [[ -z x || run ]]', []),
+    ('case a in a) [[ -z x || run ]];; esac', []),
+    ('time [[ -z x || run ]]', []),
+    ('coproc [[ -z x || run ]]; wait', []),
+    ('coproc checks [[ -z x || run ]]; wait', []),
+    ('echo $([[ -z x || run ]]) x', []),
+    ('echo `[[ -z x || run ]]` x', []),
+    # …while an unlabelled `run` bash really invokes is still refused: where
+    # `[[` is not the reserved word, and inside a substitution within one.
+    ('echo [[ -z x || run ]]', ["run ]]"]),
+    ('X=1 [[ -z x || run ]]', ["run ]]"]),
+    ('>/dev/null [[ -z x || run ]]', ["run ]]"]),
+    ('[[x == x ]] || run', ["run"]),
+    ('[[:space:]] || run', ["run"]),
+    ('[[ $(run) == x ]]', ["run) == x ]]"]),
+    ('[[ -f <(run) ]]', ["run) ]]"]),
+    ('[[ `run; printf x` == x ]]', ["run"]),
+    ('[[ `(run; printf x)` == x ]]', ["run"]),
+    # A substitution's CLOSER ends the word: `echo $(run)` invokes an
+    # unlabelled `run` (measured) and was refused by nobody, because the
+    # skeleton spells that closer `_SUBST_CLOSE` and the word-end set did not
+    # name it. Pre-existing; found writing the row above it.
+    ('echo $(run)', ["run)"]),
+    ('x=`run`', ["run`"]),
+    ('echo $(skip_gate)', ["skip_gate)"]),
+    ('echo $(run "1. x" true)', []),
+    # THE SIBLING: a backtick inside an extglob group or a case pattern
+    # re-enters command context, so a call there is refused where it was
+    # invisible (bash runs each, measured).
+    ('shopt -s extglob\necho @(`run $LABEL true; printf x`)', ["run $LABEL true"]),
+    ('case a in `run $LABEL true | tr a b`) :;; esac', ["run $LABEL true"]),
+    ('case a in `(run $LABEL true; printf a)`) :;; esac', ["run $LABEL true"]),
 )
 
 
