@@ -866,19 +866,38 @@ def _lex_shell(
             out.append(ch)
             if i + 1 < len(text):
                 out.append(text[i + 1])
-                # Inside an expansion the pair is data like everything else:
-                # `${UNSET:-\; run "…" true}` runs nothing (measured), and an
-                # unmasked `;` in the skeleton is a boundary to `_command`.
-                # Outside one the pair is kept, so `\#` stays a literal.
+                # An escape pair is DATA, both characters, everywhere. The
+                # pair used to be kept RAW outside an expansion, so
+                # `_find_commands` read the escaped character as a command
+                # boundary: bash runs only `echo` for `echo x\; run "GATE"
+                # true` (measured, and the same for an escaped `|`, `&`, `(`
+                # and `)`) while the label reader returned `GATE` — a PHANTOM
+                # local gate, which satisfies a ci.yml mapping and keeps the
+                # reverse check happy after the real gate has been deleted
+                # (Codex on PR #94). The SIBLING reader has the mirror failure
+                # and the worse direction: `echo x\; run` is an ordinary line
+                # invoking no gate and was reported as an unreadable gate
+                # INVOCATION, a gate RED ON A HEALTHY TREE.
+                #
+                # ONE branch, because keeping the backslash was measured to
+                # decide NOTHING: 408 constructed inputs — 24 escaped
+                # characters across 17 contexts, argument, assignment value,
+                # redirection target, substitution, backtick, expansion,
+                # heredoc, quoted word, arithmetic and label positions — gave
+                # the identical answer from both readers whether the backslash
+                # survived or was masked with it. So `word_piece`'s
+                # `\\[\s\S]` branch and two bare characters are the same
+                # thing here, and a rule that changes no answer is a rule with
+                # nothing behind it. Masking both also makes this the same
+                # sentence as the expansion, heredoc and arithmetic masks
+                # rather than a fourth shape.
+                #
                 # No `arith_depth` clause: a backslash inside arithmetic is a
                 # bash SYNTAX ERROR ("invalid arithmetic operator", measured,
                 # and again before a digit), so the state cannot occur in a
                 # healthy tree and a guard for it would be a rule with nothing
                 # behind it — the same call the `#` branch below records.
-                if exp_depth or hd is not None:
-                    skel.append(_MASK * 2)
-                else:
-                    skel.append(text[i : i + 2])
+                skel.append(_MASK * 2)
                 if text[i + 1] == "$":
                     # `\${` is a literal `$` and opens no expansion (measured).
                     escaped_dollar_at = i + 1
@@ -2079,6 +2098,40 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     # continues through it (round 29) and a word that began inside it cannot.
     ('echo x >>| run "1. phantom" true', []),
     ('echo $(>|case) run "1. phantom" true', []),
+    # An ESCAPED metacharacter is DATA, so it is not a command boundary.
+    # Bash runs only `echo` for every one of these (measured) while the
+    # reader returned the label — a PHANTOM local gate, which satisfies a
+    # ci.yml mapping and keeps the reverse check happy after the real gate
+    # has been deleted (Codex on PR #94, who named the `;`; the general
+    # claim is every character in `_BOUNDARY_CHARS`).
+    ('echo x\\; run "1. phantom" true', []),
+    ('echo x\\| run "1. phantom" true', []),
+    ('echo x\\& run "1. phantom" true', []),
+    ('echo x\\( run "1. phantom" true', []),
+    ('echo x\\) run "1. phantom" true', []),
+    # A leading one is the command NAME: bash reports `;: command not found`
+    # and runs no gate (measured).
+    ('\\; run "1. phantom" true', []),
+    # The same inside a substitution, inside a backtick, and as a redirection
+    # TARGET word — the constructs the review did not name, each reached by
+    # the same escape branch and each a phantom on the previous head. The
+    # redirection row runs a command called `f;` and no gate (measured).
+    ('echo $(printf a\\; run "1. phantom" true)', []),
+    ('echo `printf a\\; run "1. phantom" true`', []),
+    ('> /dev/null f\\; run "1. phantom" true', []),
+    # The MIRROR, which is what stops the fix being "an escape hides
+    # everything": an escaped BACKSLASH is a complete pair and the separator
+    # after it is real, a backslash inside SINGLE quotes is literal with no
+    # escape at all, one inside double quotes is masked with the rest of the
+    # word, and an escaped separator in the middle of a word leaves a later
+    # real one alone. Bash runs the gate in all four (measured).
+    ('echo x\\\\; run "1. escaped-backslash-then-real" true',
+     ["1. escaped-backslash-then-real"]),
+    ("echo 'x\\'; run \"1. single-quoted-backslash\" true",
+     ["1. single-quoted-backslash"]),
+    ('echo "x\\;" ; run "1. double-quoted-escape" true',
+     ["1. double-quoted-escape"]),
+    ('echo x\\;y; run "1. escape-then-real" true', ["1. escape-then-real"]),
     ('run() {\n  :\n}', []),
 )
 
@@ -2158,6 +2211,16 @@ _UNREADABLE_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('MODE+=x run bare', ['run bare']),
     ('MODE=$(printf ci) run bare', ['run bare']),
     ('MODE+x=1 run bare', []),
+    # The SIBLING reader, on the same escape rule and in the worse direction:
+    # `echo x\; run` is an ordinary line bash invokes no gate in (measured)
+    # and was reported as an unreadable gate INVOCATION — a gate RED ON A
+    # HEALTHY TREE, the worst shape this log records. Codex named only the
+    # label reader; this one shares `_find_commands` and therefore the defect.
+    ('echo x\\; run', []),
+    ('echo x\\; run $label true', []),
+    # …while a real invocation after a real separator is still refused BY
+    # NAME, so the rule is not "an escape hides everything".
+    ('echo x\\;y; run $label true', ['run $label true']),
     # The redirection grammar belongs to both readers too.
     ('2>|g.err run bare', ['run bare']),
     ('> g.a run bare', ['run bare']),
@@ -2204,6 +2267,9 @@ _HEREDOC_MASK: tuple[tuple[str, str, bool], ...] = (
     ("cat <<'EOF'\nEOF\nrun '1. after' true\n", 'EOF', True),
     ('cat <<EOF\n$(run "1. hd-sub" true)\nEOF\n', 'run', False),
     ('cat <<EOF\n`run "1. hd-bt" true`\nEOF\n', 'run', False),
+    # The escape branch's own inside-a-body path: BOTH characters masked, which
+    # is what keeps the rule one sentence rather than two.
+    ('cat <<EOF\nx\\; run "1. hd-esc" true\nEOF\n', '\\; run "1. hd-esc" true', True),
 )
 
 
@@ -2227,6 +2293,39 @@ _ARITH_MASK: tuple[tuple[str, str, bool], ...] = (
     # `masked()` decides differently inside arithmetic.
     ('echo $(( m["a\nb"] + 1 ))', '"a\nb"', True),
     ('echo $(( `run "1. unmasked-bt" true` + 1 ))', 'run', False),
+)
+
+
+# The ESCAPE rule as an INVARIANT, for the reason the three body masks are
+# invariants: the behavioural rows above pin the five characters in
+# `_BOUNDARY_CHARS` and nothing else, so a `>`, a `"`, a `$` or a `#` reaching
+# the skeleton raw is a rule no row can speak for — and enumerating the
+# characters that must be masked is how the next one is missed (the
+# `verify-photo-integrity.sh` lesson, which this file has now paid for twice).
+# One rule instead: an escape pair is masked, wherever it is written.
+#
+# Read by the SAME checker as the three body masks, in the same
+# `(source, fragment, want_masked)` shape, so there is no sibling reader to
+# forget. The `False` rows are what stop it becoming "an escape hides
+# everything": the pair is two characters and the separator AFTER it is real.
+_ESCAPE_MASK: tuple[tuple[str, str, bool], ...] = (
+    ('echo x\\; run "1. x" true', '\\;', True),
+    ('echo x\\| run "1. x" true', '\\|', True),
+    ('echo x\\( run "1. x" true', '\\(', True),
+    ('echo x\\> run "1. x" true', '\\>', True),
+    ('echo x\\" run "1. x" true', '\\"', True),
+    ("echo x\\' run '1. x' true", "\\'", True),
+    ('echo x\\$ run "1. x" true', '\\$', True),
+    ('echo x\\# run "1. x" true', '\\#', True),
+    ('echo x\\a run "1. x" true', '\\a', True),
+    ('echo $(printf a\\; run "1. x" true)', '\\;', True),
+    ('MODE=ci\\ mode run "1. x" true', '\\ ', True),
+    # An escaped BACKSLASH is a complete pair, so the separator after it is a
+    # real boundary and must reach the skeleton: bash runs the gate (measured).
+    ('echo x\\\\; run "1. x" true', ';', False),
+    # A backslash inside SINGLE quotes is not an escape at all, so the `;`
+    # after the closing quote is real too.
+    ("echo 'x\\'; run \"1. x\" true", ';', False),
 )
 
 
@@ -2272,10 +2371,31 @@ def _self_check() -> list[str]:
             f"{unreadable_neg} mentions — it cannot prove that reader in both directions"
         )
     mask_all = mask_none = 0
-    bodies = [("an expansion", r) for r in _EXPANSION_MASK]
-    bodies += [("a heredoc", r) for r in _HEREDOC_MASK]
-    bodies += [("arithmetic", r) for r in _ARITH_MASK]
-    for kind, (src, fragment, want_masked) in bodies:
+    # Named PER MATRIX as well as counted in aggregate, because the aggregate
+    # floor below is satisfied by any one of them: delete a whole matrix and
+    # its rule goes quiet while this file still prints PASS. That is the
+    # vacuous-floor shape `session-notes.md` records — an assertion with a
+    # floor needs a precondition, and here the precondition is that each
+    # matrix drove something.
+    # The third element names what the `False` rows assert stays VISIBLE, so a
+    # red says what it means: "a substitution inside a heredoc body is masked"
+    # is the right sentence for three of these and nonsense for the fourth,
+    # and a red that misdescribes itself is its own defect (`ops(deploy-gating)`).
+    matrices = (
+        ("an expansion body", _EXPANSION_MASK, "a substitution inside"),
+        ("a heredoc body", _HEREDOC_MASK, "a substitution inside"),
+        ("an arithmetic expression", _ARITH_MASK, "a substitution inside"),
+        ("an escape pair", _ESCAPE_MASK, "the separator after"),
+    )
+    bodies = []
+    for kind, rows, live in matrices:
+        if not rows:
+            bad.append(
+                f"the body-mask matrix for {kind} is empty — that rule is "
+                "written down and connected to nothing"
+            )
+        bodies += [(kind, live, r) for r in rows]
+    for kind, live, (src, fragment, want_masked) in bodies:
         at = src.find(fragment)
         if at == -1:
             bad.append(
@@ -2288,15 +2408,14 @@ def _self_check() -> list[str]:
             mask_all += 1
             if any(c != _MASK for c in span):
                 bad.append(
-                    f"{kind} body reaches the skeleton unmasked: {fragment!r} "
+                    f"{kind} reaches the skeleton unmasked: {fragment!r} "
                     f"in {src!r}"
                 )
         else:
             mask_none += 1
             if any(c == _MASK for c in span):
                 bad.append(
-                    f"a substitution inside {kind} body is masked: {fragment!r} "
-                    f"in {src!r}"
+                    f"{live} {kind} is masked: {fragment!r} in {src!r}"
                 )
     if mask_all < 1 or mask_none < 1:
         bad.append(
