@@ -397,6 +397,16 @@ def _heredoc_delimiter(text: str, i: int) -> tuple[str, bool, bool]:
                 out.append(c)
                 i += 1
             continue
+        if ch == "\\" and i + 1 < len(text) and text[i + 1] == "\n":
+            # A line CONTINUATION, not a quote: `cat <<\\<newline>EOF` is
+            # `cat <<EOF` with an UNQUOTED delimiter and bash runs the gate
+            # after the body (measured). It contributes nothing and does not
+            # make the delimiter quoted. Unreachable from the joined text this
+            # is usually given — no `\\<newline>` survives there — and
+            # load-bearing for the RAW lex `_join_continuations` runs, which is
+            # what decides where a quoted body is.
+            i += 2
+            continue
         if ch == "\\" and i + 1 < len(text):
             quoted = True
             found = True
@@ -409,7 +419,9 @@ def _heredoc_delimiter(text: str, i: int) -> tuple[str, bool, bool]:
     return "".join(out), quoted, found
 
 
-def _lex_shell(text: str) -> tuple[str, str]:
+def _lex_shell(
+    text: str, literal_heredoc: list[tuple[int, int]] | None = None
+) -> tuple[str, str]:
     """Return (clean, skeleton): comments blanked, and quoted contents masked.
 
     Both are the SAME LENGTH as the input, so a span found in one reads back
@@ -444,6 +456,12 @@ def _lex_shell(text: str) -> tuple[str, str]:
     """
     out = []
     skel = []
+    # Spans of every here-document body whose delimiter was QUOTED, for
+    # `_join_continuations`. `hd` is never suspended inside one — a quoted
+    # delimiter suppresses expansion, so the `(` and backtick branches take
+    # their literal paths — which is what makes one open and one close per
+    # body enough.
+    literal_start: int | None = None
 
     def masked(chunk: str) -> str:
         # A newline inside a quoted string is a literal newline to bash, and
@@ -609,6 +627,13 @@ def _lex_shell(text: str) -> tuple[str, str]:
         # start only, because a terminator must stand alone on its line —
         # `  EOF` indented with spaces does not terminate a plain `<<`
         # (measured), while `<<-` strips leading TABS and only tabs.
+        if literal_heredoc is not None:
+            in_literal = hd is not None and hd[2]
+            if in_literal and literal_start is None:
+                literal_start = i
+            elif not in_literal and literal_start is not None:
+                literal_heredoc.append((literal_start, i))
+                literal_start = None
         if hd is not None and (i == 0 or text[i - 1] == "\n"):
             eol = text.find("\n", i)
             eol = len(text) if eol == -1 else eol
@@ -672,13 +697,17 @@ def _lex_shell(text: str) -> tuple[str, str]:
             # NO heredoc clause here, and that is measured rather than assumed:
             # one that kept the newline changed no verdict, because the
             # terminator scan reads line starts out of the TEXT and a masked
-            # body can match nothing either way. Bash treats `\` before a
-            # newline in an UNQUOTED body as a line continuation, which makes
-            # that heredoc unterminated and earns a warning ("here-document …
-            # delimited by end-of-file", measured); this reader terminates at
-            # the raw line instead, which keeps the gates after it visible
-            # rather than masking to EOF on a script bash already complains
-            # about.
+            # body can match nothing either way.
+            #
+            # A continuation never reaches this branch inside a heredoc body
+            # anyway: `_join_continuations` removes it in an UNQUOTED body, as
+            # bash does, and KEEPS it in a quoted one, where bash does too — so
+            # `cat <<EOF` with `last \`⏎`EOF` leaves the heredoc unterminated
+            # and this reader masks to EOF exactly as bash abandons it (both
+            # measured, no later gate either way). An earlier version of this
+            # comment claimed the reader terminated at the raw line instead;
+            # that stopped being true when the join stopped inserting a space,
+            # and it is the behaviour above that was measured.
             out.append(ch)
             if i + 1 < len(text):
                 out.append(text[i + 1])
@@ -1068,13 +1097,16 @@ def _lex_shell(text: str) -> tuple[str, str]:
             dq_resume_backtick = False
             quote = '"'
         i += 1
+    if literal_heredoc is not None and literal_start is not None:
+        literal_heredoc.append((literal_start, len(text)))
     clean, skeleton = "".join(out), "".join(skel)
     assert len(clean) == len(text) and len(skeleton) == len(text)
     return clean, skeleton
 
 
 def _join_continuations(source: str) -> str:
-    r"""Remove every unescaped line continuation, as bash does.
+    r"""Remove every unescaped line continuation, as bash does — except inside
+    a here-document body whose delimiter was QUOTED, where bash keeps it.
 
     ONE definition, called by both readers, which duplicated the substitution
     and could therefore disagree about what a line is.
@@ -1082,33 +1114,64 @@ def _join_continuations(source: str) -> str:
     It removes the pair and contributes NOTHING. It used to leave a SPACE and
     to swallow the next line's indent, and both were wrong: bash JOINS the two
     halves (`ec\<newline>ho hi` runs `echo hi`, measured) and does not consume
-    the following whitespace. The space was not cosmetic — inside a quoted
-    heredoc delimiter it derived `EO F` for `<<"EO\<newline>F"`, whose real
-    terminator is `EOF` (measured), so the lexer masked the remainder of the
-    file and lost every gate after it, invisible in BOTH directions. The same
-    outcome as an escaped-quote delimiter, reached through the other door.
+    the following whitespace.
 
     A backslash at end of line is a continuation only when it is not itself
     escaped: `echo a\\` prints `a\` and the NEXT line runs (measured), so the
     run of backslashes is counted and an odd one leaves the newline standing.
 
-    Applied to the source rather than inside the lexer, so a `\<newline>`
-    between single quotes is removed where bash would keep it. That changes
-    DATA and never structure — the removal adds and removes no quote
-    character, so nothing can become a command or stop being one — and a gate
-    label cannot carry a newline in any case.
+    QUOTED-delimiter bodies are the one context where bash keeps the pair, and
+    applying the substitution there was a real loss rather than a cosmetic one:
+    a body line ending in `\` immediately before the terminator was joined to
+    it, so `last \`⏎`EOF` became `last EOF`, the terminator was never found,
+    and the lexer masked the remainder of the file — every later gate gone,
+    invisible in BOTH directions (measured against bash for `<<'EOF'` and
+    `<<"EOF"`, Codex on PR #94). An UNQUOTED body is the opposite: there the
+    pair IS a continuation (`cat <<EOF` with `body \`⏎`more` prints one line,
+    measured), so joining it matches bash, and when that lands on the
+    terminator bash leaves the heredoc unterminated and runs no later gate —
+    which is exactly what this reader then reports.
+
+    The spans come from lexing the RAW text, because that is the only reader
+    here that knows what a heredoc is; duplicating the rule in a second scanner
+    is the divergence this file keeps paying for. Stated limit: a `<<` split
+    by a continuation (`<\`⏎`<EOF`) is one operator to bash and two characters
+    to that lex, so its body is not recognised — no migration or script in this
+    tree writes one, and the failure direction is the safe one, since an
+    unrecognised body is joined exactly as today.
+
+    Still applied inside single quotes, where bash also keeps the pair. That
+    changes DATA and never structure — the removal adds and removes no quote
+    character, so nothing can become a command or stop being one, and unlike a
+    heredoc a quoted string carries no line-structural terminator.
     """
-    return re.sub(
-        r"(\\*)\\\n",
-        lambda m: m.group(1) if len(m.group(1)) % 2 == 0 else m.group(0),
-        source,
-    )
+    literal: list[tuple[int, int]] = []
+    _lex_shell(source, literal_heredoc=literal)
+
+    def inside(pos: int) -> bool:
+        return any(start <= pos < end for start, end in literal)
+
+    out: list[str] = []
+    last = 0
+    for m in re.finditer(r"(\\*)\\\n", source):
+        if len(m.group(1)) % 2:
+            # The backslash before the newline is itself escaped.
+            continue
+        if inside(m.end() - 2):
+            continue
+        out.append(source[last : m.end() - 2])
+        last = m.end()
+    out.append(source[last:])
+    return "".join(out)
 
 
-_QUOTED_LABEL = r'%s +(?P<q>["\'])(?P<label>.+?)(?P=q)'
+# A TAB separates a command from its argument exactly as a space does —
+# `run\t"1. x" true` invokes the gate (measured) — while this matched only
+# spaces, so the label reader missed it and the unreadable reader then
+# refused a real gate BY NAME: a gate red on a healthy tree. A newline is
+# not a separator here, since it ends the command.
+_QUOTED_LABEL = r'%s[ \t]+(?P<q>["\'])(?P<label>.+?)(?P=q)'
 
-# `name=`, `name+=` or `name[subscript]=` with NO space before it.
-_ASSIGNMENT = re.compile(r"^(?:run|skip_gate)(?:\[[^]]*\])?\+?=")
 
 
 def shell_gate_labels(source: str, word: str) -> list[str]:
@@ -1148,23 +1211,28 @@ def shell_unreadable_calls(source: str) -> list[str]:
     """
     code, skel = _lex_shell(_join_continuations(source))
     out = []
-    for m in re.finditer(_command(r'(?:run|skip_gate)(?![(\w])[^\n;&|]*'), skel):
+    # The command word must be EXACTLY the gate's name. Bash splits a word at
+    # metacharacters and nowhere else, so `run=1`, `run+=b`, `run[0]=1` and
+    # `run]=2` are each ONE word that is not `run`: the first three invoke
+    # nothing at all and the last invokes a command by that name, which is not
+    # this gate helper (all measured). Reading them as invocations was a gate
+    # RED ON A HEALTHY TREE, the worst shape this log records.
+    #
+    # One rule, and it subsumes the separate assignment test it replaces —
+    # which asked the narrower question "is this an assignment?" and therefore
+    # missed `run]=2`, the word bash produces when an array subscript spans
+    # lines (`a[1 +`⏎`run]=2`, measured: legal, and no `run` is invoked). The
+    # boundary is the ABSENCE of a separator, measured in both directions:
+    # `run =1` and `run == 1` really do invoke `run` with a strange argument
+    # and must stay refused.
+    #
+    # A `(` is excluded by the pattern below rather than here, because
+    # `run() {` is a DEFINITION and not an invocation at all.
+    for m in re.finditer(
+        _command(r'(?:run|skip_gate)(?=[\s;&|)<>]|$)[^\n;&|]*'), skel
+    ):
         call = code[m.start("cmd") : m.end("cmd")].strip()
-        if _ASSIGNMENT.match(call):
-            # A VARIABLE named `run`, not the function. `run=1` invokes nothing
-            # (measured) and was reported as an unreadable gate — a gate RED ON
-            # A HEALTHY TREE, the worst shape this log records, and latent only
-            # because `validate.sh` happens to carry no such assignment today
-            # (checked, not assumed). It surfaced from the setup line of the
-            # arithmetic case above, so the reviewer's own example would have
-            # stayed red after the fix they asked for.
-            #
-            # The boundary is the ABSENCE of a space, and it was measured in
-            # both directions: `run=1`, `run+=b` and `run[0]=1` are assignments
-            # bash runs nothing for, while `run =1` and `run == 1` really do
-            # invoke `run` with a strange argument and must stay refused.
-            continue
-        if not re.match(r'^(?:run|skip_gate) +(["\']).+?\1', call):
+        if not re.match(r'^(?:run|skip_gate)[ \t]+(["\']).+?\1', call):
             out.append(call)
     return out
 
@@ -1715,6 +1783,45 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
      'run "1. after-hd-arith" true\n', ["1. after-hd-arith"]),
     ('echo ${UNSET:-$((1 + 1))}\ncat <<EOF\nrun "1. phantom" true\nEOF\n'
      'run "1. after-exp-arith" true\n', ["1. after-exp-arith"]),
+    # A QUOTED delimiter keeps a `\`+newline in its body: bash reads the next
+    # line as the terminator and runs the gate after it (measured for both
+    # spellings), while joining the pair made `last \`+`EOF` into `last EOF`,
+    # so the terminator was never found and every later gate was lost —
+    # invisible in BOTH directions.
+    ('cat <<\'EOF\'\nlast \\\nEOF\nrun "1. hd-sq-cont" true\n', ["1. hd-sq-cont"]),
+    ('cat <<"EOF"\nlast \\\nEOF\nrun "1. hd-dq-cont" true\n', ["1. hd-dq-cont"]),
+    ('cat <<\'EOF\'\nrun "1. phantom" true \\\nEOF\nrun "1. hd-cont-gate" true\n',
+     ["1. hd-cont-gate"]),
+    # …while an UNQUOTED body is the opposite: there the pair IS a
+    # continuation, so the body joins and the terminator still arrives.
+    ('cat <<EOF\nbody \\\nmore\nEOF\nrun "1. hd-unq-cont" true\n', ["1. hd-unq-cont"]),
+    # …and when that lands on the terminator bash joins `last \\`+`EOF`, leaves
+    # the heredoc unterminated and runs NO later gate (measured), so exempting
+    # an unquoted body would report a PHANTOM. This is the row that
+    # distinguishes the two, since a mid-body join still reaches its
+    # terminator either way.
+    ('cat <<EOF\nlast \\\nEOF\nrun "1. phantom" true\n', []),
+    # A continuation between the operator and its delimiter is one operator to
+    # bash, with an UNQUOTED delimiter, and the gate after the body runs.
+    ('cat <<\\\nEOF\nbody\nEOF\nrun "1. hd-op-cont" true\n', ["1. hd-op-cont"]),
+    # …and the delimiter reader's own continuation rule is what keeps that
+    # body from being mistaken for a QUOTED one running to EOF, which would
+    # exempt every later continuation in the file: without it the raw lex reads
+    # the delimiter as an escaped newline plus `EOF`, and the mid-word gate
+    # after the body disappears.
+    ('cat <<\\\nEOF\nbody\nEOF\nru\\\nn "1. after-op-cont" true\n',
+     ["1. after-op-cont"]),
+    # An UNTERMINATED quoted body runs to EOF, and the span has to be closed
+    # there: joining inside it could MAKE a terminator out of two body lines
+    # (`E\\`+`OF` is not `EOF` to bash, which abandons the heredoc and runs no
+    # gate — measured) and report a phantom.
+    ('cat <<\'EOF\'\nE\\\nOF\nrun "1. phantom" true\n', []),
+    # A mid-word continuation after a quoted body must still be joined — the
+    # span ends at the terminator, so nothing later is exempt.
+    ('cat <<\'EOF\'\nx\nEOF\nru\\\nn "1. cont-after-hd" true\n', ["1. cont-after-hd"]),
+    # A TAB is a separator too (measured), so a tab-indented gate is read
+    # rather than refused by name.
+    ('run\t"1. tab-separated" true', ["1. tab-separated"]),
     ('run() {\n  :\n}', []),
 )
 
@@ -1738,6 +1845,17 @@ _UNREADABLE_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('echo "${UNSET:-$((run + 1))}"', []),
     # A newline inside arithmetic is legal and `run` after it is a VARIABLE.
     ('echo $(( 1 +\nrun ))', []),
+    # The command word must be EXACTLY the gate's name. An array subscript may
+    # span lines in an assignment, and bash then invokes nothing at all
+    # (`a[1 +`⏎`run]=2`, measured) — this reported `run]=2`, a gate RED ON A
+    # HEALTHY TREE. In an ARGUMENT position bash really does split there and
+    # run a command called `run]=2` (measured), which is not this gate helper,
+    # so both spellings are correctly silent for the same reason.
+    ('run=1\na[1 +\nrun]=2', []),
+    ('echo a[1 +\nrun]=2', []),
+    # A quoted body keeps its continuation, so a real unreadable call after the
+    # terminator is still seen rather than swallowed with the rest of the file.
+    ('cat <<\'EOF\'\nlast \\\nEOF\nrun $label true\n', ['run $label true']),
     # …and a real invocation inside one is still refused BY NAME, so the rule
     # is not "arithmetic hides everything".
     ('echo $(( $(run $label true) + 1 ))', ['run $label true) + 1 ))']),
