@@ -326,6 +326,53 @@ _SUBST_CLOSE = "\x02"
 _BARE_WORD = re.compile(r"([A-Za-z]+)(?=[\s;&|()<>]|$)")
 
 
+def _heredoc_delimiter(text: str, i: int) -> tuple[str, bool, bool]:
+    """The word after `<<`: its text, whether any of it was quoted, and
+    whether a word was there at all.
+
+    The last of those is not the same as a non-empty text. `cat <<""` is legal
+    bash and a real heredoc whose terminator is an EMPTY LINE (measured), so
+    queueing on the text alone skipped it and read its body as shell — a
+    phantom, in the guard written against one. Only `<<` with no word at all
+    queues nothing, and bash refuses that outright ("syntax error near
+    unexpected token", measured for both spellings).
+
+    Quoting ANY part of the delimiter suppresses expansion in the body, so
+    `<<E\'O\'F` is the delimiter `EOF` with no expansion (measured) — the flag
+    is about the body, not about the spelling. The word ends at whitespace or a
+    metacharacter, which is why `cat <<EOF; run "…" true` records `EOF` and
+    leaves the `;` to the caller.
+    """
+    out: list[str] = []
+    quoted = False
+    found = False
+    while i < len(text):
+        ch = text[i]
+        if ch in " \t\n|&;()<>":
+            break
+        if ch in "'\"":
+            quoted = True
+            found = True
+            end = text.find(ch, i + 1)
+            if end == -1:
+                out.append(text[i + 1 :])
+                i = len(text)
+                break
+            out.append(text[i + 1 : end])
+            i = end + 1
+            continue
+        if ch == "\\" and i + 1 < len(text):
+            quoted = True
+            found = True
+            out.append(text[i + 1])
+            i += 2
+            continue
+        out.append(ch)
+        found = True
+        i += 1
+    return "".join(out), quoted, found
+
+
 def _lex_shell(text: str) -> tuple[str, str]:
     """Return (clean, skeleton): comments blanked, and quoted contents masked.
 
@@ -374,7 +421,7 @@ def _lex_shell(text: str) -> tuple[str, str]:
         # that itself spans lines — refused by name here, read as a multi-line
         # label if masked, and both end in a red naming it. Kept as the
         # conservative reading rather than because a sabotage demanded it.
-        if exp_depth:
+        if exp_depth and hd is None:
             # Inside a parameter expansion nothing is ever read as a gate, so
             # line structure carries no meaning there and the newline is
             # masked with everything else — leaving it would make
@@ -469,11 +516,63 @@ def _lex_shell(text: str) -> tuple[str, str]:
     # than silent — the map still names the vanished gates, which this check
     # reports as `validate.sh` labels that no longer exist.
     exp_depth = 0
-    exp_resume_at: list[tuple[int, int]] = []
-    exp_resume_backtick: list[int] = []
+    # A HERE-DOCUMENT body is data, not shell: bash passes
+    # `cat <<'EOF'\nrun "12. css tokens defined" true\nEOF` to `cat` and
+    # invokes nothing (measured), while this reader carried on lexing the body
+    # and returned the label — a PHANTOM local gate, which satisfies a ci.yml
+    # mapping and lets the reverse check stay green after the real invocation
+    # is removed (nine spellings measured, Codex on PR #94). `validate.sh`
+    # HAS one, at gate 12, whose body is a Python program.
+    #
+    # `pending` is queued by the `<<` operator and consumed at the newline
+    # ENDING that line, in order, because the rest of the line is still shell:
+    # `cat <<EOF; run "…" true` runs `run` and `run "…" true <<EOF` is gate 12's
+    # own shape (both measured). Each entry is (delimiter, strip-tabs, quoted).
+    #
+    # A QUOTED delimiter (`<<'EOF'`, `<<"EOF"`, `<<\EOF`, or any partly-quoted
+    # spelling such as `<<E'O'F`) suppresses expansion, so the whole body is
+    # literal. An UNQUOTED one expands, and a `$( … )` or `` ` … ` `` inside it
+    # genuinely RUNS (measured) — so it SUSPENDS the masking exactly as one
+    # inside a parameter expansion does, and the body resumes at the closer. A
+    # terminator cannot appear inside an open substitution at all (measured:
+    # bash refuses the script), so suspending the terminator scan with it is
+    # not an approximation.
+    #
+    # LIMIT, the same one the parameter expansion states: an UNTERMINATED
+    # heredoc masks the rest of the file. Bash refuses such a script, so it
+    # cannot be a healthy tree, and the loss is loud — the map still names the
+    # vanished gates, which this check reports as labels that no longer exist.
+    # Each entry also records the NESTING LEVEL it was queued at, because a
+    # heredoc starts its body at the first newline AT THAT LEVEL. Requiring the
+    # top level instead was too strict in one direction and too loose in the
+    # other: `cat <<EOF $(echo a` must not start its body at the newline inside
+    # the substitution, while `echo $(cat <<'EOF'` must start it there — and
+    # with the latter never starting, the body was read as shell and its `)`
+    # popped the substitution's own entry, so the real closer became a command
+    # boundary and the argument after it was reported as a gate (measured).
+    pending_heredocs: list[tuple[str, bool, bool, int]] = []
+    hd: tuple[str, bool, bool] | None = None
+    exp_resume_at: list[tuple[int, int, tuple[str, bool, bool] | None]] = []
+    exp_resume_backtick: list[tuple[int, tuple[str, bool, bool] | None]] = []
     escaped_dollar_at = -1
     i = 0
     while i < len(text):
+        # A body line that IS the delimiter ends the body. Checked at a line
+        # start only, because a terminator must stand alone on its line —
+        # `  EOF` indented with spaces does not terminate a plain `<<`
+        # (measured), while `<<-` strips leading TABS and only tabs.
+        if hd is not None and (i == 0 or text[i - 1] == "\n"):
+            eol = text.find("\n", i)
+            eol = len(text) if eol == -1 else eol
+            probe = text[i:eol]
+            if hd[1]:
+                probe = probe.lstrip("\t")
+            if probe == hd[0]:
+                out.append(text[i:eol])
+                skel.append(_MASK * (eol - i))
+                hd = None
+                i = eol
+                continue
         ch = text[i]
         # An ESCAPED `\$(` or ``\` `` is literal and opens nothing (measured),
         # and the backslash is consumed by the quote branch below before this
@@ -505,16 +604,30 @@ def _lex_shell(text: str) -> tuple[str, str]:
             skel.append(("\\" + _SUBST_CLOSE) if nested_backtick else "\\(")
             at_word_start = not nested_backtick
             if nested_backtick:
-                exp_depth = exp_resume_backtick.pop() if exp_resume_backtick else 0
+                exp_depth, hd = (
+                    exp_resume_backtick.pop() if exp_resume_backtick else (0, None)
+                )
             else:
-                exp_resume_backtick.append(exp_depth)
+                exp_resume_backtick.append((exp_depth, hd))
                 exp_depth = 0
+                hd = None
             nested_backtick = not nested_backtick
             i += 2
             continue
         elif ch == "\\":
             # An unquoted backslash escapes the next character, whatever it is,
             # and the word continues through both.
+            #
+            # NO heredoc clause here, and that is measured rather than assumed:
+            # one that kept the newline changed no verdict, because the
+            # terminator scan reads line starts out of the TEXT and a masked
+            # body can match nothing either way. Bash treats `\` before a
+            # newline in an UNQUOTED body as a line continuation, which makes
+            # that heredoc unterminated and earns a warning ("here-document …
+            # delimited by end-of-file", measured); this reader terminates at
+            # the raw line instead, which keeps the gates after it visible
+            # rather than masking to EOF on a script bash already complains
+            # about.
             out.append(ch)
             if i + 1 < len(text):
                 out.append(text[i + 1])
@@ -522,7 +635,7 @@ def _lex_shell(text: str) -> tuple[str, str]:
                 # `${UNSET:-\; run "…" true}` runs nothing (measured), and an
                 # unmasked `;` in the skeleton is a boundary to `_command`.
                 # Outside one the pair is kept, so `\#` stays a literal.
-                if exp_depth:
+                if exp_depth or hd is not None:
                     skel.append(_MASK * 2)
                 else:
                     skel.append(text[i : i + 2])
@@ -534,7 +647,7 @@ def _lex_shell(text: str) -> tuple[str, str]:
                 continue
             skel.append(ch)
             at_word_start = False
-        elif ch in "'\"":
+        elif ch in "'\"" and hd is None:
             quote = ch
             out.append(ch)
             # The DELIMITERS survive masking outside an expansion, which is
@@ -543,7 +656,7 @@ def _lex_shell(text: str) -> tuple[str, str]:
             # the invariant stays one rule rather than a list of exceptions.
             skel.append(_MASK if exp_depth else ch)
             at_word_start = False
-        elif ch == "#" and at_word_start:
+        elif ch == "#" and at_word_start and hd is None:
             # No `exp_depth` clause: `at_word_start` is never true inside a
             # parameter expansion — the opening `{` clears it and every body
             # character keeps it clear — so a guard here would be a rule with
@@ -560,7 +673,26 @@ def _lex_shell(text: str) -> tuple[str, str]:
             # `$`, `<` or `>` immediately before it opens a substitution.
             # `\$(` cannot reach here as anything else: bash refuses it
             # outright ("syntax error near unexpected token `('", measured).
-            opens_subst = i > 0 and text[i - 1] in "$<>"
+            # `escaped_dollar_at` matters here for the same reason it does at
+            # `${`: inside an unquoted heredoc body `\$(run …)` is literal and
+            # bash runs nothing (measured), while the raw character one back is
+            # still a `$`. At top level bash refuses `\$(` outright ("syntax
+            # error near unexpected token `('", measured), so reading it as no
+            # substitution there costs nothing either.
+            opens_subst = (
+                i > 0 and text[i - 1] in "$<>" and escaped_dollar_at != i - 1
+            )
+            if hd is not None and (hd[2] or not opens_subst):
+                # Literal: everything under a quoted delimiter, and a bare
+                # `( … )` under an unquoted one (`cat <<EOF` with `(x)` in the
+                # body runs nothing). Nothing pushed, so the matching `)` must
+                # pop nothing either.
+                out.append(ch)
+                skel.append(_MASK)
+                at_word_start = False
+                at_cmd = False
+                i += 1
+                continue
             if exp_depth and not opens_subst:
                 # `echo ${UNSET:-x ( run "…" true )}` runs nothing (measured),
                 # and the matching `)` must not pop a construct this never
@@ -571,11 +703,20 @@ def _lex_shell(text: str) -> tuple[str, str]:
                 at_cmd = False
                 i += 1
                 continue
-            parens.append("subst" if opens_subst else "paren")
+            # A DOUBLED parenthesis is arithmetic, not a command: bash reads
+            # `$((1 << 2))` and `((1 << 2))` as a left shift (measured), so the
+            # `<<` branch below must not read a heredoc out of one — it would
+            # queue a delimiter that never appears and mask the rest of the
+            # file, losing every gate after it silently.
+            kind = "subst" if opens_subst else "paren"
+            if i > 0 and text[i - 1] == "(":
+                kind = "arith"
+            parens.append(kind)
             # Always recorded, even at depth 0, so open and close stay
             # symmetric and restoring is a no-op where nothing was masked.
-            exp_resume_at.append((len(parens) - 1, exp_depth))
+            exp_resume_at.append((len(parens) - 1, exp_depth, hd))
             exp_depth = 0
+            hd = None
             if dq_pending:
                 # The `$` one character back suspended a double quote; this is
                 # the entry whose closer resumes it.
@@ -586,6 +727,14 @@ def _lex_shell(text: str) -> tuple[str, str]:
             at_word_start = True
             at_cmd = True
         elif ch == ")":
+            if hd is not None:
+                # Nothing inside a heredoc body pushed, so nothing may pop.
+                out.append(ch)
+                skel.append(_MASK)
+                at_word_start = False
+                at_cmd = False
+                i += 1
+                continue
             if exp_depth:
                 # Nothing inside an expansion pushed, so nothing may pop.
                 out.append(ch)
@@ -605,6 +754,12 @@ def _lex_shell(text: str) -> tuple[str, str]:
             skel.append(_SUBST_CLOSE if substitution else ch)
             at_word_start = not substitution
             at_cmd = not substitution
+        elif ch == "`" and hd is not None and hd[2]:
+            # No expansion under a quoted delimiter, so a backtick is data.
+            out.append(ch)
+            skel.append(_MASK)
+            at_word_start = False
+            at_cmd = False
         elif ch == "`":
             out.append(ch)
             # Opening: a command starts after it, so the skeleton carries the
@@ -612,11 +767,64 @@ def _lex_shell(text: str) -> tuple[str, str]:
             skel.append(_SUBST_CLOSE if in_backtick else "(")
             at_word_start = not in_backtick
             if in_backtick:
-                exp_depth = exp_resume_backtick.pop() if exp_resume_backtick else 0
+                exp_depth, hd = (
+                    exp_resume_backtick.pop() if exp_resume_backtick else (0, None)
+                )
             else:
-                exp_resume_backtick.append(exp_depth)
+                exp_resume_backtick.append((exp_depth, hd))
                 exp_depth = 0
+                hd = None
             in_backtick = not in_backtick
+        elif (
+            ch == "<"
+            and text.startswith("<<", i)
+            and hd is None
+            and exp_depth == 0
+            and "arith" not in parens
+        ):
+            # The heredoc OPERATOR. A doubled parenthesis is arithmetic, so
+            # `<<` inside one is a left shift and queues nothing. The delimiter
+            # is read for the record only; the loop carries on from just after
+            # the operator so the word itself — and its quotes — lex exactly as
+            # they did before.
+            if text.startswith("<<<", i):
+                # A here-STRING takes no body. All THREE characters are
+                # consumed together, because merely declining to queue one here
+                # let the scan re-enter at the second `<`, read `<<` out of the
+                # middle of the operator and queue a heredoc whose delimiter was
+                # the here-string's own word — which masked the rest of the file
+                # and lost every gate after it (measured, found by a sabotage
+                # that stayed green).
+                out.append(text[i : i + 3])
+                skel.append(text[i : i + 3])
+                at_word_start = True
+                i += 3
+                continue
+            j = i + 2
+            strip = False
+            if j < len(text) and text[j] == "-":
+                strip = True
+                j += 1
+            k = j
+            while k < len(text) and text[k] in " \t":
+                k += 1
+            delim, delim_quoted, delim_found = _heredoc_delimiter(text, k)
+            if delim_found:
+                level = len(parens) + in_backtick + nested_backtick
+                pending_heredocs.append((delim, strip, delim_quoted, level))
+            out.append(text[i:j])
+            skel.append(text[i:j])
+            at_word_start = True
+            i = j
+            continue
+        elif ch in "{}" and hd is not None:
+            # An expansion inside a heredoc body cannot run a command, and the
+            # body is masked either way, so a brace is data like everything
+            # else — no nesting to track.
+            out.append(ch)
+            skel.append(_MASK)
+            at_word_start = False
+            at_cmd = False
         elif ch in "{}" and (
             exp_depth
             or (ch == "{" and i > 0 and text[i - 1] == "$" and escaped_dollar_at != i - 1)
@@ -654,7 +862,7 @@ def _lex_shell(text: str) -> tuple[str, str]:
             skel.append(ch)
             at_word_start = opens
             at_cmd = opens
-        elif exp_depth:
+        elif exp_depth or hd is not None:
             # Data: a separator, a newline, a reserved word, a `#` — none of
             # them is a command boundary inside a parameter expansion
             # (measured). The newline is masked too, unlike the one inside a
@@ -662,7 +870,19 @@ def _lex_shell(text: str) -> tuple[str, str]:
             # a gate, so line structure carries no meaning, and leaving it
             # would make `_command`'s `(?<=\n)` a boundary — the phantom.
             out.append(ch)
-            skel.append(_MASK)
+            # A heredoc body keeps its newlines, exactly as a quoted string
+            # does; an expansion is one word and masks them.
+            #
+            # NO ROW PINS THIS, and saying so is better than implying one does
+            # — measured, by masking them: every row stayed green. The
+            # terminator scan reads line starts out of the TEXT rather than the
+            # skeleton, and the terminator's own newline is emitted after the
+            # body has ended, so the only thing that moves is how far an
+            # unreadable-call capture runs before it stops — a failure message,
+            # not a verdict. Kept as the conservative reading, which is also
+            # what stops the skeleton disagreeing with the text about where the
+            # lines are.
+            skel.append("\n" if ch == "\n" and exp_depth == 0 else _MASK)
             at_word_start = False
             at_cmd = False
         else:
@@ -687,6 +907,18 @@ def _lex_shell(text: str) -> tuple[str, str]:
             at_word_start = ch in _WORD_BREAK
             if ch in ";&|\n":
                 at_cmd = True
+            if (
+                ch == "\n"
+                and hd is None
+                and pending_heredocs
+                and pending_heredocs[0][3] == len(parens) + in_backtick + nested_backtick
+            ):
+                # The body starts on the line AFTER the operator, and several
+                # queued on one line are consumed in order (measured). A queue
+                # entry left behind by a substitution that has since closed can
+                # never match again, which is the conservative direction: it
+                # masks nothing rather than masking the wrong lines.
+                hd = pending_heredocs.pop(0)[:3]
         # The substitution that suspended a double-quoted word has closed, so
         # the quote resumes for the rest of it. Checked after every branch
         # rather than inside the `)` one, because `esac` can shrink the stack
@@ -695,7 +927,7 @@ def _lex_shell(text: str) -> tuple[str, str]:
         # so its body is data again. Same trigger as the double quote above,
         # and for the same reason `esac` can shrink the stack too.
         while exp_resume_at and len(parens) <= exp_resume_at[-1][0]:
-            exp_depth = exp_resume_at.pop()[1]
+            _, exp_depth, hd = exp_resume_at.pop()
         while dq_resume_at and len(parens) <= dq_resume_at[-1]:
             dq_resume_at.pop()
             quote = '"'
@@ -1145,6 +1377,96 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     # nested body would have masked away.
     ('result="`echo ${UNSET:-x \\`run \'1. bt-in-exp-in-bt\' true\\` ; run \'1. masked-after\' true}`"',
      ["1. bt-in-exp-in-bt"]),
+    # A HERE-DOCUMENT body is data. Bash passes each of these to `cat` and
+    # invokes nothing (measured), while the reader lexed the body as shell and
+    # returned the label — a PHANTOM local gate, which satisfies a ci.yml
+    # mapping and lets the reverse check stay green after the real invocation
+    # is removed. The delimiter may be quoted four ways and none expands.
+    ('cat <<\'EOF\'\nrun "12. css tokens defined" true\nEOF\n', []),
+    ('cat <<EOF\nrun "1. unq-body" true\nEOF\n', []),
+    ('cat <<"EOF"\nrun "1. dq-delim" true\nEOF\n', []),
+    ('cat <<\\EOF\nrun "1. esc-delim" true\nEOF\n', []),
+    ('cat <<E\'O\'F\nrun "1. split-delim" true\nEOF\nrun "1. after-split" true\n',
+     ["1. after-split"]),
+    ('cat << EOF\nrun "1. space-delim" true\nEOF\nrun "1. after-space" true\n',
+     ["1. after-space"]),
+    ('cat <<XyZ\nrun "1. word-delim" true\nXyZ\nrun "1. after-word" true\n',
+     ["1. after-word"]),
+    # Quotes, `#` and separators inside a body are data too, so nothing in it
+    # opens a comment, a quoted span or a command position.
+    ('cat <<\'EOF\'\n# x\nrun "1. hash-body" true\nEOF\nrun "1. after-hash" true\n',
+     ["1. after-hash"]),
+    ("cat <<'EOF'\nit's; run \"1. quote-body\" true\nEOF\nrun \"1. after-quote\" true\n",
+     ["1. after-quote"]),
+    # The rest of the OPERATOR's line is still shell — which is gate 12's own
+    # shape in `validate.sh`, a real gate whose argument is a heredoc — and
+    # shell resumes after the terminator.
+    ('cat <<EOF; run "1. same-line" true\nbody\nEOF\n', ["1. same-line"]),
+    ('run "1. before-hd" true <<EOF\nrun "1. in-body" true\nEOF\n', ["1. before-hd"]),
+    ('cat <<\'EOF\'\nbody\nEOF\nrun "1. after-term" true\n', ["1. after-term"]),
+    # A terminator must stand alone on its line. `<<-` strips leading TABS and
+    # only tabs, so an indented `  EOF` under a plain `<<` terminates nothing
+    # and the body swallows the rest (measured — `run` there does not execute).
+    ('cat <<-\'EOF\'\n\trun "1. dash-body" true\n\tEOF\nrun "1. after-dash" true\n',
+     ["1. after-dash"]),
+    ('cat <<-EOF\n\tbody\n  EOF\nrun "1. dash-space" true\n\tEOF\nrun "1. after-dash-space" true\n',
+     ["1. after-dash-space"]),
+    ('cat <<\'EOF\'\nbody\n  EOF\nrun "1. not-term" true\nEOF\n', []),
+    # Several queued on one line are consumed in order.
+    ('cat <<A <<B\nrun "1. body-a" true\nA\nrun "1. body-b" true\nB\nrun "1. after-two" true\n',
+     ["1. after-two"]),
+    # An UNQUOTED delimiter expands, so a real substitution inside the body
+    # RUNS (measured, both spellings and across lines) and must stay readable —
+    # while the same text under a quoted delimiter is literal, and an escaped
+    # `\$(` is literal under either.
+    ('cat <<EOF\n$(run "1. subst-unq" true)\nEOF\n', ["1. subst-unq"]),
+    ('cat <<EOF\n`run "1. bt-unq" true`\nEOF\n', ["1. bt-unq"]),
+    ('cat <<EOF\n$(echo a\nrun "1. multiline-subst" true)\nEOF\n', ["1. multiline-subst"]),
+    # …and the body RESUMES at the closer, so what follows a substitution is
+    # data again and the terminator is still found (measured, both spellings).
+    # Nothing else distinguishes the resume: without it the body simply ends at
+    # the substitution and every row above stayed green.
+    ('cat <<EOF\n$(printf a); run "1. after-sub-in-body" true\nEOF\nrun "1. after-hd" true\n',
+     ["1. after-hd"]),
+    ('cat <<EOF\n`printf a`; run "1. after-bt-in-body" true\nEOF\nrun "1. after-bt-hd" true\n',
+     ["1. after-bt-hd"]),
+    # A newline INSIDE an open substitution is that substitution's own text, so
+    # a queued heredoc must not start its body there: bash runs both of these
+    # (measured), while popping at any newline masked the rest of the
+    # substitution and lost the gate inside it.
+    ('cat <<EOF $(echo a\nrun "1. inside-subst" true)\nbody\nEOF\nrun "1. after-pending" true\n',
+     ["1. inside-subst", "1. after-pending"]),
+    ('cat <<EOF `echo a\nrun "1. inside-bt" true`\nbody\nEOF\nrun "1. after-bt-pending" true\n',
+     ["1. inside-bt", "1. after-bt-pending"]),
+    # …and the mirror: a heredoc queued INSIDE a substitution starts its body
+    # at the newline in there. Bash runs nothing in either of these (measured):
+    # the body is data, so its parenthesis touches no stack and the real closer
+    # stays a substitution's, which is not a command boundary.
+    ('echo $(cat <<\'EOF\'\n)\nEOF\n) run "1. paren-pops-subst" true\n', []),
+    ('echo $(cat <<\'EOF\'\n(\nEOF\n) run "1. lparen-in-body" true\n', []),
+    ('echo `cat <<\'EOF\'\n)\nEOF\n` ; run "1. after-hd-bt" true\n', ["1. after-hd-bt"]),
+    ('cat <<\'EOF\'\n$(run "1. subst-q" true)\nEOF\n', []),
+    ('cat <<EOF\n\\$(run "1. escaped-subst" true)\nEOF\nrun "1. after-esc" true\n',
+     ["1. after-esc"]),
+    # …and an expansion is not a substitution: it runs no command, and the
+    # body around it stays masked.
+    ('cat <<EOF\n${HOME}\nEOF\nrun "1. after-expansion" true\n', ["1. after-expansion"]),
+    # Three things that LOOK like the operator and are not: a here-STRING takes
+    # no body, a doubled parenthesis is arithmetic (`<<` is a left shift), and
+    # a quoted or commented-out operator is text. Reading a heredoc out of any
+    # of them queues a delimiter that never arrives and masks the rest of the
+    # file, losing every gate after it in silence.
+    ('cat <<<\'run "1. herestring" true\'\n', []),
+    ('cat <<<\'x\'\nrun "1. after-herestring" true\n', ["1. after-herestring"]),
+    # An EMPTY delimiter is legal when it was quoted, and its terminator is an
+    # empty line (measured) — so the operator queues on whether a word was
+    # there, not on whether the word had characters in it.
+    ('cat <<""\nrun "1. empty-body" true\n\nrun "1. after-empty" true\n',
+     ["1. after-empty"]),
+    ('echo $((1 << 2))\nrun "1. dollar-arith" true\n', ["1. dollar-arith"]),
+    ('((1 << 2))\nrun "1. bare-arith" true\n', ["1. bare-arith"]),
+    ('echo \'<<EOF\'\nrun "1. quoted-op" true\n', ["1. quoted-op"]),
+    ('# cat <<EOF\nrun "1. hd-comment" true\n', ["1. hd-comment"]),
     ('run() {\n  :\n}', []),
 )
 
@@ -1200,6 +1522,23 @@ _EXPANSION_MASK: tuple[tuple[str, str, bool], ...] = (
 )
 
 
+# The same invariant for a HERE-DOCUMENT body, and for the same reason: the
+# behavioural rows above already fail on a phantom label, so no row can pin
+# that (say) a quote or a `#` inside a body reached the skeleton intact. The
+# fragments carry no newline, because a heredoc body KEEPS its newlines — the
+# terminator scan reads line starts, and the command after the terminator needs
+# the boundary its own newline carries.
+_HEREDOC_MASK: tuple[tuple[str, str, bool], ...] = (
+    ("cat <<'EOF'\nrun '1. hd-mask' true\nEOF\n", "run '1. hd-mask' true", True),
+    ("cat <<'EOF'\nit's; x # y\nEOF\n", "it's; x # y", True),
+    ("cat <<'EOF'\n# x\nEOF\n", "# x", True),
+    ('cat <<EOF\nrun "1. hd-unq" true\nEOF\n', 'run "1. hd-unq" true', True),
+    ("cat <<'EOF'\nEOF\nrun '1. after' true\n", 'EOF', True),
+    ('cat <<EOF\n$(run "1. hd-sub" true)\nEOF\n', 'run', False),
+    ('cat <<EOF\n`run "1. hd-bt" true`\nEOF\n', 'run', False),
+)
+
+
 def _self_check() -> list[str]:
     """Drive the command-position reader over `_SPELLINGS`.
 
@@ -1242,11 +1581,13 @@ def _self_check() -> list[str]:
             f"{unreadable_neg} mentions — it cannot prove that reader in both directions"
         )
     mask_all = mask_none = 0
-    for src, fragment, want_masked in _EXPANSION_MASK:
+    bodies = [("an expansion", r) for r in _EXPANSION_MASK]
+    bodies += [("a heredoc", r) for r in _HEREDOC_MASK]
+    for kind, (src, fragment, want_masked) in bodies:
         at = src.find(fragment)
         if at == -1:
             bad.append(
-                f"the expansion-mask matrix names a fragment {fragment!r} that is "
+                f"the body-mask matrix names a fragment {fragment!r} that is "
                 f"not in {src!r}"
             )
             continue
@@ -1255,19 +1596,19 @@ def _self_check() -> list[str]:
             mask_all += 1
             if any(c != _MASK for c in span):
                 bad.append(
-                    f"an expansion body reaches the skeleton unmasked: {fragment!r} "
+                    f"{kind} body reaches the skeleton unmasked: {fragment!r} "
                     f"in {src!r}"
                 )
         else:
             mask_none += 1
             if any(c == _MASK for c in span):
                 bad.append(
-                    f"a substitution inside an expansion is masked: {fragment!r} "
+                    f"a substitution inside {kind} body is masked: {fragment!r} "
                     f"in {src!r}"
                 )
     if mask_all < 1 or mask_none < 1:
         bad.append(
-            f"the expansion-mask matrix drove {mask_all} masked bodies and "
+            f"the body-mask matrix drove {mask_all} masked bodies and "
             f"{mask_none} suspensions — it cannot prove the mask in both directions"
         )
     if positive < 2 or negative < 2:

@@ -275,6 +275,16 @@ function mutations(sf: ts.SourceFile): string[] {
       out.push(`${n.getText().split("\n")[0]} (line ${at(n)})`);
     }
     if (ts.isDeleteExpression(n)) out.push(`${n.getText()} (line ${at(n)})`);
+    // `c.private--` writes to a property exactly as `c.private = 0` does, and
+    // the assignment branch above cannot see it because it is a unary
+    // expression. The SIBLING rule in `static-object.ts` had the same hole and
+    // is fixed in the same commit (Codex, PR #94).
+    if ((ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n))
+      && (n.operator === ts.SyntaxKind.PlusPlusToken
+        || n.operator === ts.SyntaxKind.MinusMinusToken)
+      && (ts.isPropertyAccessExpression(n.operand) || ts.isElementAccessExpression(n.operand))) {
+      out.push(`${n.getText().split("\n")[0]} (line ${at(n)})`);
+    }
     ts.forEachChild(n, visit);
   };
   visit(sf);
@@ -663,6 +673,21 @@ describe("the walk channel is the only channel, and it is private on both sides"
       .toEqual(["<unresolvable spread `c`>"]);
     expect(read("const c = { private: true };\nObject.assign(c, { private: false });\nsend({ topic, ...c });"))
       .toEqual(["<unresolvable spread `c`>"]);
+    // `++`/`--` writes too, and its operand decides what it writes: a member
+    // or element access mutates the object, where an identifier rebinds the
+    // name. The rule read identifiers only, so `c.private--` recorded neither
+    // and `c` kept a literal the program no longer holds (Codex, PR #94).
+    expect(read("const c: any = { private: true };\nc.private--;\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read("const c: any = { private: true };\n++c.private;\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read("const c: any = { private: true };\nc[\"private\"]++;\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    expect(read("const c: any = { n: { private: true } };\nc.n.private--;\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
+    // …and it travels the alias graph exactly as every other mutation does.
+    expect(read("const c: any = { private: true };\nconst a: any = c;\na.private--;\nsend({ topic, ...c });"))
+      .toEqual(["<unresolvable spread `c`>"]);
     expect(read("const c = { private: true };\nglobalThis.Object.assign(c, {});\nsend({ topic, ...c });"))
       .toEqual(["<unresolvable spread `c`>"]);
     // …but an unrelated method that happens to be called `assign` is not
@@ -822,6 +847,14 @@ describe("the walk channel is the only channel, and it is private on both sides"
     expect(muts("const m = { private: true };\nmetrics.assign({ topic });")).toEqual([]);
     expect(muts("const m = { private: true };\ndelete m.private;")).toHaveLength(1);
     expect(muts("let n = 0;\nn += 1;\nconst m = { private: true };\nm.count += 1;")).toHaveLength(1);
+    // The sibling hole, fixed in the same commit: `++`/`--` on a member is a
+    // property write the assignment branch above cannot see.
+    expect(muts("const m: any = { private: true };\nm.private--;")).toHaveLength(1);
+    expect(muts("const m: any = { private: true };\n++m.private;")).toHaveLength(1);
+    expect(muts('const m: any = { private: true };\nm["private"]++;')).toHaveLength(1);
+    // …while the same operator on a NAME rebinds it and mutates no object, so
+    // this reader — which reports property writes — stays silent.
+    expect(muts("let n = 0;\nn++;")).toEqual([]);
     // A read is not a mutation, and neither is declaring one.
     expect(muts("const m = { private: true };\nif (m.private) send(m);")).toEqual([]);
   });

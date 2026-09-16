@@ -246,10 +246,18 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
     }
     if (
       (ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) &&
-      (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken) &&
-      ts.isIdentifier(n.operand)
+      (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken)
     ) {
-      rebound.add(n.operand.text);
+      // `++`/`--` writes, and WHAT it writes depends on its operand. An
+      // identifier is rebound; a member or element access mutates the object
+      // the chain roots at, exactly as `c.private = 0` would. The rule was
+      // identifier-only, so `const c: any = { private: true }; c.private--;`
+      // recorded neither — `c` stayed resolvable to its original literal and a
+      // later `{ config: { ...c } }` read as private while Realtime receives
+      // the falsey `0` (measured, Codex on PR #94).
+      const operand = unwrapTransparent(n.operand);
+      if (ts.isIdentifier(operand)) rebound.add(operand.text);
+      else collectMutatedRoots(operand, mutated);
     }
     // A loop variable is assigned on every iteration and produces no
     // BinaryExpression at all, so `for (x of […])` slipped past the rule above.
