@@ -218,8 +218,24 @@ def _command(body: str) -> str:
     # bash, and a rule that admitted a reserved word only after whitespace or a
     # newline read neither, in both directions: neither runnable nor unreadable
     # (measured, Codex on PR #94).
-    at = r'(?:^|(?<=\n)|(?<=[;&|(){}])|(?<=\s))'
-    boundary = r'(?:^|(?<=\n)|(?<=[;&|(){}])|(?<=\s!)|(?:%s(?:%s)\s+))' % (at, words)
+    #
+    # But bash recognises a reserved word CONTEXTUALLY — only where a command
+    # can start — so "preceded by whitespace" is not the same question, and
+    # answering it that way let any reserved-word spelling in an ARGUMENT
+    # restart command parsing: `echo if run "13. fake" true` runs only `echo`
+    # (measured, and the same for `while`, `done` and `then`), while the reader
+    # returned `13. fake` — a PHANTOM local gate, which satisfies a ci.yml
+    # mapping and keeps the reverse check happy after the real gate has been
+    # deleted (measured, Codex on PR #94).
+    #
+    # So a reserved word is anchored at a genuine separator, and a CHAIN of
+    # them is allowed because a reserved word is itself a command position:
+    # `if ! run "…"`, `cmd; then run "…"`. `!` takes the same place in the
+    # chain rather than a lookbehind of its own, which is also the first thing
+    # that pins it — the `(?<=\s!)` it replaces had no row in the matrix.
+    sep = r'(?:^|(?<=\n)|(?<=[;&|(){}]))'
+    chain = r'(?:[ \t]*(?:(?:%s)[ \t]+|![ \t]*))*' % words
+    boundary = sep + chain
     # `VAR=value` and `>file` / `2>&1` / `<in`, repeated, with the spacing bash
     # allows. Nothing here is captured; the command word follows.
     #
@@ -507,6 +523,10 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('cmd;if run "1. separator-then-reserved" true; then :; fi', ["1. separator-then-reserved"]),
     ('cmd&&if run "1. and-then-reserved" true; then :; fi', ["1. and-then-reserved"]),
     ('(if run "1. paren-then-reserved" true; then :; fi)', ["1. paren-then-reserved"]),
+    # `!` is a reserved word too and sits in the same chain. Nothing pinned the
+    # lookbehind this replaced, so these are the first rows it has had.
+    ('if ! run "1. negated" x; then :; fi', ["1. negated"]),
+    ('! run "1. bang-first" x', ["1. bang-first"]),
     ('MODE=ci run "1. assignment" x', ["1. assignment"]),
     # A quoted assignment value holds the whitespace a bare word may not. The
     # reader stopped at the space and the `run` after it was invisible in both
@@ -558,17 +578,30 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
      ["1. after-multiline"]),
     ('echo "double; run \'1. phantom-dq\' true"', []),
     ('echo x;#run "1. comment-after-separator" x', []),
-    # These two are what makes comment stripping LOAD-BEARING rather than
-    # decorative: a bare space is not a command position, so `# run "x"` is
-    # refused by the boundary alone — but a `;` or a reserved word INSIDE the
-    # comment text is a command position, and without stripping the prose
-    # would be read as a gate. Found by a sabotage that stayed green.
+    # The FIRST of these is what makes comment stripping LOAD-BEARING rather
+    # than decorative: a bare space is not a command position, so `# run "x"`
+    # is refused by the boundary alone — but a `;` INSIDE the comment text is
+    # one, and without stripping the prose would be read as a gate. Found by a
+    # sabotage that stayed green.
     ('# cmd; run "1. separator-inside-comment" x', []),
+    # The second no longer distinguishes, and saying so beats implying it
+    # does: it was red under the same sabotage until a reserved word had to be
+    # at a command position itself, and `# if …` is now refused by the
+    # boundary whether or not the comment is stripped. Kept because it is
+    # still a case a reader expects to see, not as evidence for the stripper.
     ('# if run "1. reserved-inside-comment" x', []),
     # A word CONTINUES through a closing quote, so this `run` is an argument
     # of `echo` and not a command (measured against bash).
     ('echo "a"#b run "1. hash-after-quote" x', []),
     ('npm --prefix app run lint', []),
+    # A reserved word is reserved only WHERE A COMMAND CAN START. In an
+    # argument it is an ordinary word, so bash runs only `echo` here (measured
+    # for all three), while a rule that accepted a reserved word after any
+    # whitespace read a PHANTOM gate — which satisfies a ci.yml mapping and the
+    # reverse check after the real local gate has been deleted.
+    ('echo if run "1. reserved-as-argument" true', []),
+    ('echo while run "1. reserved-as-argument-2" true', []),
+    ('printf "%s" then run "1. reserved-as-argument-3" true', []),
     ('run() {\n  :\n}', []),
 )
 
