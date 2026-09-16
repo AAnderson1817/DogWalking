@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFil
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import ts from "typescript";
+import { isTransparentWrapper } from "./lib/static-object.js";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   declaredObjects,
@@ -504,14 +505,15 @@ function serveFunctionLines(file: string): number[] {
   // wrapper unconditionally, and refusing it demanded a bespoke production
   // contract for a function that has one (Codex, PR #94: a gate red on a
   // healthy tree, which this repository calls the worse failure shape).
+  // The shared set, plus the two this question needs and the shared one must
+  // not have: `await serveFunction(…)` and `void serveFunction(…)` are both
+  // the call, while `(await f)(x)` is a call whose callee is the await.
   const unwrap = (e: ts.Expression): ts.Expression => {
     let cur = e;
     for (let i = 0; i < 8; i += 1) {
-      if (ts.isAwaitExpression(cur) || ts.isParenthesizedExpression(cur)
-        || ts.isAsExpression(cur) || ts.isNonNullExpression(cur)
-        || ts.isSatisfiesExpression(cur) || ts.isTypeAssertionExpression(cur)
-        || ts.isVoidExpression(cur)) cur = cur.expression;
-      else return cur;
+      if (isTransparentWrapper(cur) || ts.isAwaitExpression(cur) || ts.isVoidExpression(cur)) {
+        cur = cur.expression;
+      } else return cur;
     }
     return cur;
   };
@@ -738,6 +740,12 @@ describe("verify-deployment: the read-only argument", () => {
     // followed spread that admits GET is read as admitting it.
     put("chi6", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, { methods });\n');
     put("chi7", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nconst SHARED = { methods: ["GET", "POST"] };\nserveFunction(handle, { ...SHARED });\n');
+    // Housed through every transparent wrapper, including the `<T>x` assertion
+    // that six copies of the set in `discarded-errors.test.ts` omitted. This
+    // file's own unwrap is the shared predicate plus `await` and `void`, so a
+    // sabotage of the predicate turns this row red too.
+    put("lambda2", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\n(serveFunction)(handle);\n');
+    put("lambda3", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\n(<typeof serveFunction>serveFunction)(handle);\n');
     // Housed through a NAMESPACE import of the same module.
     put("rho", "index.ts", 'import * as http from "../_lib/http.ts";\nhttp.serveFunction(handle);\n');
     // NOT housed: the same spelling on a namespace of a DIFFERENT module is
@@ -772,6 +780,8 @@ describe("verify-deployment: the read-only argument", () => {
       xi: true,
       omicron: true,
       pi: true,
+      lambda2: true,
+      lambda3: true,
       rho: true,
       sigma: false,
       tau: true,

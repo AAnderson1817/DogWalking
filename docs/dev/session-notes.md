@@ -111,7 +111,7 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   unstaged file from the index — silently destroying two finished edits and
   their red-first proof. Anything that writes the tree from git, the index or a
   commit is the same hazard, including `git stash`, `git clean` and
-  `git read-tree -u`. The status log records eight earlier times.
+  `git read-tree -u`. The status log records nine earlier times.
   For red-first sabotages: copy the **fixed** file to a scratch directory,
   apply the sabotage, verify the diff is non-empty, run, then restore from
   that copy. Restoring from a snapshot taken *before* the fix silently reverts
@@ -123,7 +123,15 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   code — one of them reporting a pass that meant nothing. **Name a snapshot
   for when it was taken, re-take it after every fix and before every
   sabotage**, and confirm the fix is still there (`grep -c` for a symbol the
-  fix introduced) rather than trusting the name.
+  fix introduced) rather than trusting the name. The TENTH was the same
+  mistake in a harness that is not a sabotage at all: a MEASUREMENT probe
+  which temporarily edits a tracked file to read a rule, restoring from the
+  snapshot it was handed — the pre-fix one. The measurement was right (it ran
+  against the fixed file) and the fix was gone afterwards. Any harness that
+  writes a tracked file needs the same discipline, whichever direction it is
+  measuring. One consequence worth knowing: once the file is legitimately
+  modified, `git diff --quiet` is no longer the right restore check —
+  `cmp` against the snapshot is.
 - **A GitHub check-runs snapshot goes stale; the JOB record does not.** Polling
   `pull_request_read(get_check_runs)` kept returning `in_progress` for a
   `frontend` job that had in fact finished green 76 seconds after it started —

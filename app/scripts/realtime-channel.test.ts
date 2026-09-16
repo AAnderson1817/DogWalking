@@ -11,6 +11,7 @@ import {
   isAssignmentOperator,
   isEscapedObjectAssign,
   isObjectAssignCall,
+  memberTarget,
   propertyKey,
   definesWithoutValue,
   unwrapTransparent,
@@ -356,8 +357,12 @@ function mutations(sf: ts.SourceFile): string[] {
   const out: string[] = [];
   const at = (n: ts.Node) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
   const visit = (n: ts.Node): void => {
-    if (ts.isBinaryExpression(n)
-      && (ts.isPropertyAccessExpression(n.left) || ts.isElementAccessExpression(n.left))) {
+    // The TARGET goes through the shared reader, because `(m.private) = false`
+    // assigns exactly as the bare spelling does and this branch tested the raw
+    // node — so the write went unreported, and this list is the PRECONDITION
+    // that makes reading `broadcast.ts`'s literals sound (Codex, PR #94, the
+    // callee finding's sibling one position over).
+    if (ts.isBinaryExpression(n) && memberTarget(n.left)) {
       if (isAssignmentOperator(n.operatorToken.kind)) {
         out.push(`${n.getText().split("\n")[0]} (line ${at(n)})`);
       }
@@ -387,7 +392,7 @@ function mutations(sf: ts.SourceFile): string[] {
     if ((ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n))
       && (n.operator === ts.SyntaxKind.PlusPlusToken
         || n.operator === ts.SyntaxKind.MinusMinusToken)
-      && (ts.isPropertyAccessExpression(n.operand) || ts.isElementAccessExpression(n.operand))) {
+      && memberTarget(n.operand)) {
       out.push(`${n.getText().split("\n")[0]} (line ${at(n)})`);
     }
     ts.forEachChild(n, visit);
@@ -1322,6 +1327,33 @@ describe("the walk channel is the only channel, and it is private on both sides"
     expect(muts("let n = 0;\nn++;")).toEqual([]);
     // A read is not a mutation, and neither is declaring one.
     expect(muts("const m = { private: true };\nif (m.private) send(m);")).toEqual([]);
+
+    // A TRANSPARENT WRAPPER around the CALLEE is the same call, and one around
+    // a write TARGET is the same write. Every row below read as no mutation at
+    // all on the shipped reader, so this list — the PRECONDITION that makes
+    // reading `broadcast.ts`'s literals sound — reported agreement while the
+    // object was being written (Codex, PR #94, and six spellings measured
+    // beyond the two reported).
+    for (const wrapped of [
+      "const m = { private: true };\n(Object.assign)(m, { private: false });",
+      "const m = { private: true };\n(Object.assign as typeof Object.assign)(m, { private: false });",
+      "const m = { private: true };\n(Object.assign satisfies typeof Object.assign)(m, { private: false });",
+      "const m = { private: true };\nObject.assign!(m, { private: false });",
+      "const m = { private: true };\n((Object.assign))(m, { private: false });",
+      'const m = { private: true };\n(Object["assign"])(m, { private: false });',
+      "const m = { private: true };\n(globalThis.Object.assign)(m, { private: false });",
+      "const m: any = { private: true };\n(m.private) = false;",
+      'const m: any = { private: true };\n(m["private"]) = false;',
+      "const m: any = { private: true };\n(m.private)--;",
+    ]) {
+      expect(muts(wrapped), wrapped).toHaveLength(1);
+    }
+    // …and the other direction, which is what stops the fix becoming "unwrap
+    // until something matches": the receiver is still RESOLVED through the
+    // wrapper, so a bound name and somebody else's method stay silent.
+    expect(muts("const Object = { assign(_v: unknown) {} };\nconst m = { private: true };\n(Object.assign)(m, {});")).toEqual([]);
+    expect(muts("const m = { private: true };\n(registry.assign)(m);")).toEqual([]);
+    expect(muts("const m = { private: true };\n(Object[k])(m, { private: false });")).toEqual([]);
   });
 
   // Preconditions. "No channel is public" is satisfied by a scanner that finds

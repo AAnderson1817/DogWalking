@@ -30,7 +30,28 @@ import ts from "typescript";
  */
 
 /**
- * `as`, `satisfies`, parentheses and `!` hand the same value through.
+ * The five nodes that hand the same value through: `(e)`, `e as T`,
+ * `e satisfies T`, `e!` and `<T>e`.
+ *
+ * ONE predicate, because a reader that spells the set out for itself knows
+ * only the wrappers its author happened to think of. Six copies in
+ * `discarded-errors.test.ts` each omitted the `<T>e` assertion, and two of
+ * them were gates RED ON A HEALTHY TREE — `(<SupabaseClient>db).from(…)` with
+ * its error handled read as an unrecognised receiver (Codex, PR #94,
+ * measured). `await` is deliberately NOT one: `(await f)(x)` is a call whose
+ * callee is the await and not `f`, so stepping through it would read a
+ * different program.
+ */
+export function isTransparentWrapper(
+  n: ts.Node,
+): n is ts.ParenthesizedExpression | ts.AsExpression | ts.SatisfiesExpression
+  | ts.NonNullExpression | ts.TypeAssertion {
+  return ts.isAsExpression(n) || ts.isSatisfiesExpression(n) || ts.isParenthesizedExpression(n)
+    || ts.isNonNullExpression(n) || ts.isTypeAssertionExpression(n);
+}
+
+/**
+ * A value with its transparent wrappers stripped.
  *
  * React receives the same literal through every one of them and so does
  * Realtime, so a reader that stops at the wrapper either calls a static value
@@ -40,13 +61,7 @@ import ts from "typescript";
 export function unwrapTransparent(e: ts.Expression): ts.Expression {
   let cur = e;
   for (let i = 0; i < 8; i += 1) {
-    if (
-      ts.isAsExpression(cur) ||
-      ts.isSatisfiesExpression(cur) ||
-      ts.isParenthesizedExpression(cur) ||
-      ts.isNonNullExpression(cur) ||
-      ts.isTypeAssertionExpression(cur)
-    ) {
+    if (isTransparentWrapper(cur)) {
       cur = cur.expression;
       continue;
     }
@@ -83,20 +98,55 @@ export function calleeCall(node: ts.Node): ts.CallExpression | null {
     const parent: ts.Node | undefined = cur.parent;
     if (!parent) return null;
     if (ts.isCallExpression(parent)) return parent.expression === cur ? parent : null;
-    if (
-      (ts.isParenthesizedExpression(parent) ||
-        ts.isAsExpression(parent) ||
-        ts.isSatisfiesExpression(parent) ||
-        ts.isNonNullExpression(parent) ||
-        ts.isTypeAssertionExpression(parent)) &&
-      parent.expression === cur
-    ) {
+    if (isTransparentWrapper(parent) && parent.expression === cur) {
       cur = parent;
       continue;
     }
     return null;
   }
   return null;
+}
+
+/**
+ * The CALLEE of this call, transparent wrappers stripped — the exact inverse
+ * of `calleeCall`, which climbs from a reference to the call it is the callee
+ * of.
+ *
+ * `(Object.assign)(m, { private: false })` invokes the built-in exactly as the
+ * bare spelling does, and a reader that tests `call.expression` directly sees
+ * a wrapper node where the member is. So the call is not a direct mutation —
+ * and the inner reference is not ESCAPED either, because `calleeCall`
+ * correctly climbs the wrapper and finds the call. Neither branch fires and
+ * the stale literal survives (Codex, PR #94). Six further spellings measured
+ * beyond the two reported — `satisfies`, `!`, `<T>x`, a nested paren, and a
+ * wrapper combined with each of the computed and `globalThis` receivers — and
+ * the same hole in three readers of `discarded-errors.test.ts`, where
+ * `(db.from)("walks")` with a discarded error left 68 of 68 green.
+ */
+export function calleeOf(n: ts.Node): ts.Expression | null {
+  return ts.isCallExpression(n) ? unwrapTransparent(n.expression) : null;
+}
+
+/**
+ * The member a write TARGETS — `m.private = false`, `m["private"]--`,
+ * `delete m.private` — wrappers stripped, or null when the target is not a
+ * member at all.
+ *
+ * `(m.private) = false` is legal and assigns exactly as the bare spelling
+ * does, and `mutations()` in `realtime-channel.test.ts` tested the raw node:
+ * three write spellings went unreported (measured). That list is the
+ * PRECONDITION which makes reading `broadcast.ts`'s literals sound, so a write
+ * it cannot see is one where the gate reads a stale `private: true` and calls
+ * a public message private — the callee finding's sibling, one position over
+ * (Codex, PR #94).
+ *
+ * Deliberately looser than `memberAccess`: a dynamic key still names a member,
+ * and the question here is whether an object was written rather than which
+ * property.
+ */
+export function memberTarget(e: ts.Expression): ts.Expression | null {
+  const cur = unwrapTransparent(e);
+  return ts.isPropertyAccessExpression(cur) || ts.isElementAccessExpression(cur) ? cur : null;
 }
 
 /**
@@ -119,7 +169,7 @@ export function calleeCall(node: ts.Node): ts.CallExpression | null {
  * access, the subscript for an element one.
  */
 export function memberAccess(
-  n: ts.Node | undefined,
+  n: ts.Node | null | undefined,
 ): { receiver: ts.Expression; name: string; token: ts.Node } | null {
   if (!n) return null;
   if (ts.isPropertyAccessExpression(n)) {
@@ -901,7 +951,9 @@ export function isObjectAssignAccess(access: ts.Node): boolean {
 }
 
 export function isObjectAssignCall(n: ts.Node): n is ts.CallExpression {
-  return ts.isCallExpression(n) && isObjectAssignAccess(n.expression);
+  if (!ts.isCallExpression(n)) return false;
+  const callee = calleeOf(n);
+  return callee !== null && isObjectAssignAccess(callee);
 }
 
 /**
@@ -928,7 +980,9 @@ export function isEscapedObjectAssign(n: ts.Node): boolean {
 function collectMutatedRoots(e: ts.Expression, into: Set<string>, direct = false): void {
   let cur: ts.Expression = unwrapTransparent(e);
   if (!direct) {
-    if (!ts.isPropertyAccessExpression(cur) && !ts.isElementAccessExpression(cur)) return;
+    const target = memberTarget(cur);
+    if (!target) return;
+    cur = target;
     while (ts.isPropertyAccessExpression(cur) || ts.isElementAccessExpression(cur)) {
       cur = unwrapTransparent(cur.expression);
     }

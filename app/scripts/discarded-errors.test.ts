@@ -2,7 +2,13 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import ts from "typescript";
-import { calleeCall, memberAccess as sharedMemberAccess } from "./lib/static-object.js";
+import {
+  calleeCall,
+  calleeOf,
+  isTransparentWrapper,
+  memberAccess as sharedMemberAccess,
+  unwrapTransparent,
+} from "./lib/static-object.js";
 import { describe, expect, it } from "vitest";
 
 /**
@@ -276,11 +282,19 @@ function programOver(files: Map<string, string>): ts.Program {
 type ReceiverKind = "client" | "global" | "unknown";
 
 function receiverKind(recv: ts.Expression): ReceiverKind {
-  // `(db as any).from(…)` is `db.from(…)` with a cast around the receiver.
-  let r: ts.Expression = recv;
-  while (ts.isParenthesizedExpression(r) || ts.isAsExpression(r) || ts.isNonNullExpression(r) || ts.isSatisfiesExpression(r)) r = r.expression;
+  // `(db as any).from(…)` is `db.from(…)` with a cast around the receiver, and
+  // the shared predicate is what knows the whole set — the copy that used to
+  // stand here omitted `<T>x`, so `(<SupabaseClient>db).from(…)` with its
+  // error handled was an unrecognised receiver: a gate red on a healthy tree
+  // (Codex, PR #94).
+  const r = unwrapTransparent(recv);
   if (ts.isIdentifier(r)) return /^[A-Z]/.test(r.text) ? "global" : "client";
-  if (ts.isCallExpression(r) && ts.isIdentifier(r.expression) && CLIENT_FACTORIES.has(r.expression.text)) {
+  // …and the FACTORY's own callee is a value the same wrappers reach through,
+  // so `(adminClient)().from(…)` is `adminClient().from(…)`. Reading the raw
+  // node reported it as an unrecognised receiver in BOTH directions, the
+  // handled one included (measured).
+  const callee = calleeOf(r);
+  if (callee && ts.isIdentifier(callee) && CLIENT_FACTORIES.has(callee.text)) {
     return "client";
   }
   return "unknown";
@@ -309,10 +323,9 @@ function enclosingStatement(node: ts.Node): ts.Node {
   return n;
 }
 
-/** Transparent wrappers around an expression: `(e)`, `e as T`, `e!`, `e satisfies T`. */
+/** This parent is a transparent wrapper around that child. */
 function isTransparent(p: ts.Node, child: ts.Node): boolean {
-  return (ts.isParenthesizedExpression(p) || ts.isAsExpression(p) || ts.isNonNullExpression(p) ||
-    ts.isSatisfiesExpression(p)) && p.expression === child;
+  return isTransparentWrapper(p) && p.expression === child;
 }
 
 interface Chain {
@@ -526,12 +539,8 @@ const LOGICAL_ASSIGNMENTS = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.QuestionQuestionEqualsToken,
 ]);
 
-/** An expression with its transparent wrappers stripped: `(x)`, `x as T`, `x!`, `x satisfies T`. */
-function unwrapped(e: ts.Expression): ts.Expression {
-  let r = e;
-  while (ts.isParenthesizedExpression(r) || ts.isAsExpression(r) || ts.isNonNullExpression(r) || ts.isSatisfiesExpression(r)) r = r.expression;
-  return r;
-}
+/** An expression with its transparent wrappers stripped. */
+const unwrapped = unwrapTransparent;
 
 /**
  * `box.nested.cause` — the plain name at the base and the keys from it
@@ -1510,8 +1519,7 @@ function writeOf(target: ts.Identifier): { node: ts.Node; rhs: ts.Expression | u
 
 /** The branches a value can take: through wrappers and a conditional's two arms. */
 function leaves(e: ts.Expression): ts.Expression[] {
-  let n: ts.Expression = e;
-  while (ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isNonNullExpression(n) || ts.isSatisfiesExpression(n)) n = n.expression;
+  const n: ts.Expression = unwrapTransparent(e);
   if (ts.isConditionalExpression(n)) return [...leaves(n.whenTrue), ...leaves(n.whenFalse)];
   return [n];
 }
@@ -1523,7 +1531,7 @@ function chainRoot(e: ts.Node): ts.Node {
     if (ts.isCallExpression(n)) { n = n.expression; continue; }
     const m = memberAccess(n);
     if (m) { n = m.receiver; continue; }
-    if (ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isNonNullExpression(n) || ts.isSatisfiesExpression(n)) { n = n.expression; continue; }
+    if (isTransparentWrapper(n)) { n = n.expression; continue; }
     return n;
   }
 }
@@ -1627,12 +1635,20 @@ function declaredByType(ctx: Ctx, t: ts.TypeNode | undefined): Declared {
 function declaredAsClient(ctx: Ctx, recv: ts.Expression, seen = new Set<ts.Symbol>()): Declared {
   const byExpression = (e: ts.Expression | undefined): Declared => {
     if (!e) return "unknown";
-    if (ts.isAsExpression(e) || ts.isSatisfiesExpression(e)) {
+    // A wrapper that NAMES a type answers from the type first and falls back
+    // to what it wraps. `<T>e` is one of those and was missing here.
+    if (ts.isAsExpression(e) || ts.isSatisfiesExpression(e) || ts.isTypeAssertionExpression(e)) {
       const d = declaredByType(ctx, e.type);
       return d === "unknown" ? byExpression(e.expression) : d;
     }
     if (ts.isParenthesizedExpression(e) || ts.isNonNullExpression(e) || ts.isAwaitExpression(e)) return byExpression(e.expression);
-    if (ts.isCallExpression(e) && ts.isIdentifier(e.expression) && CLIENT_FACTORIES.has(e.expression.text)) return "client";
+    // The factory's callee, wrappers stripped: `const db = (adminClient)();`
+    // read as neither a client nor a value, so a HANDLED `.auth` error on it
+    // was reported and an escaped `db.from` on it was not — a gate red on a
+    // healthy tree one way and blessing what it forbids the other (Codex,
+    // PR #94, measured both).
+    const factory = calleeOf(e);
+    if (factory && ts.isIdentifier(factory) && CLIENT_FACTORIES.has(factory.text)) return "client";
     if (ts.isIdentifier(e)) return declaredAsClient(ctx, e, seen);
     if (ts.isLiteralExpression(e) || ts.isObjectLiteralExpression(e) || ts.isArrayLiteralExpression(e) ||
       ts.isTemplateExpression(e) || e.kind === ts.SyntaxKind.TrueKeyword || e.kind === ts.SyntaxKind.FalseKeyword ||
@@ -1709,7 +1725,13 @@ function classifyFile(program: ts.Program, sf: ts.SourceFile, file: string): Sit
   };
 
   const visit = (n: ts.Node) => {
-    const member = ts.isCallExpression(n) ? memberAccess(n.expression) : null;
+    // The callee goes through the shared reader, so `(db.from)("walks")` is
+    // `db.from("walks")`: the raw node is a wrapper, the member is not found,
+    // and `escapedQueryMethod` does not fire either because `calleeCall`
+    // climbs the wrapper and finds the call — so neither branch ran and a
+    // discarded error was invisible, 68 of 68 green (Codex, PR #94, in the
+    // reader beside the one reported).
+    const member = memberAccess(calleeOf(n));
     if (member && QUERY_METHODS.has(member.name)) {
       seen(n, member.receiver, member.token);
     } else if (escapedQueryMethod(n)) {
@@ -3117,6 +3139,50 @@ async function f(db: any) { log((await db.from("a").select("id")).error); }`).ve
 }`);
     expect(s.verdict).toBe("UNCLASSIFIED");
     expect(s.reason).toMatch(/passed to a call/);
+  });
+
+  it("a transparent wrapper around a callee or a receiver is the same call (Codex, PR #94)", () => {
+    // `(db.from)("walks")` runs the query exactly as `db.from("walks")` does.
+    // The raw node is a wrapper, so the member was not found — and
+    // `escapedQueryMethod` did not fire either, because `calleeCall` climbs
+    // the wrapper and finds the call. Neither branch ran and a discarded error
+    // was invisible: 68 of 68 green, in the reader beside the one reported.
+    for (const src of [
+      'async function f(db: any) { const { data } = await (db.from)("walks").select("id"); return data; }',
+      'async function f(db: any) { const { data } = await (db.from as typeof db.from)("walks").select("id"); return data; }',
+      'async function f(db: any) { const { data } = await db.from!("walks").select("id"); return data; }',
+      'async function f(db: any) { const { data } = await (db.rpc)("fn_x", {}); return data; }',
+    ]) {
+      expect(one(src).verdict, src).toBe("DISCARDED");
+    }
+    // …and the healthy direction: the same wrapper with the error handled is
+    // silent, so the rule cannot become "a wrapper is a discard".
+    expect(one('async function f(db: any) { const { data, error } = await (db.from)("walks").select("id"); if (error) throw error; return data; }').verdict)
+      .toBe("OK");
+
+    // The FACTORY's own callee is reached through the same wrappers, and
+    // reading the raw node made `(adminClient)()` neither a client nor a
+    // value: a HANDLED `.auth` error on it was REPORTED — a gate red on a
+    // healthy tree — while an escaped `db.from` on it was not reported at all.
+    expect(one(`const db = (adminClient)();
+async function f(token: string) { const { data, error } = await db.auth.getUser(token); if (error) throw error; return data; }`).verdict).toBe("OK");
+    expect(one(`const db = (adminClient)();
+async function f(token: string) { const { data } = await db.auth.getUser(token); return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`const db = (adminClient)();
+function f() { const g = db.from; return g; }`).verdict).toBe("UNCLASSIFIED");
+    // …and inline, where `receiverKind` reads the same callee.
+    expect(one(`async function f() { const { data, error } = await (adminClient)().from("walks").select("id"); if (error) throw error; return data; }`).verdict).toBe("OK");
+
+    // `<T>x` is a transparent wrapper too, and SIX copies of the set in this
+    // file each omitted it — two of them gates red on a healthy tree. There is
+    // one predicate now, in `lib/static-object.ts`, so they cannot disagree
+    // about the set again.
+    expect(one(`interface C { from(t: string): any }
+declare const db: C;
+async function f() { const { data, error } = await (<C>db).from("walks").select("id"); if (error) throw error; return data; }`).verdict).toBe("OK");
+    expect(one(`interface C { from(t: string): any }
+declare const db: C;
+async function f() { const { data } = await (<C>db).from("walks").select("id"); return data; }`).verdict).toBe("DISCARDED");
   });
 });
 
