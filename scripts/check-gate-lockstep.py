@@ -295,6 +295,13 @@ _MASK = "\x01"
 _SUBST_CLOSE = "\x02"
 
 
+# A bare word at the point a command can start, used only to recognise the
+# reserved words `case` and `esac`. It must END at a metacharacter or the text,
+# so `casex` and `case=1` are ordinary words; a quoted or escaped first
+# character is handled by branches above this one and never reaches it.
+_BARE_WORD = re.compile(r"([A-Za-z]+)(?=[\s;&|(){}<>]|$)")
+
+
 def _lex_shell(text: str) -> tuple[str, str]:
     """Return (clean, skeleton): comments blanked, and quoted contents masked.
 
@@ -347,13 +354,27 @@ def _lex_shell(text: str) -> tuple[str, str]:
 
     quote = None
     at_word_start = True
-    # One entry per open `(`, True when it opened a command, arithmetic or
-    # process substitution (`$(`, `$((`, `<(`, `>(`) rather than a subshell or
-    # a case pattern's group. Only a substitution's closer stops being a
-    # command boundary; `case a in a) run "…" x;; esac` and `(run "…" x)` are
-    # both real command positions and stay ones (measured). A `)` with nothing
-    # on the stack is a case pattern's, so it stays a boundary too.
-    parens: list[bool] = []
+    # One entry per open construct: "subst" for a command, arithmetic or
+    # process substitution (`$(`, `$((`, `<(`, `>(`), "paren" for a subshell
+    # or a parenthesised case pattern, and "case" for a `case … esac` whose
+    # pattern closers carry no `(` of their own.
+    #
+    # Only a substitution's CLOSER stops being a command boundary. A case
+    # pattern's `)` must not consume the entry beneath it: inside a
+    # substitution, `echo $(case a in a) run "1. real" true;; esac)` runs
+    # `run` (measured) while a reader that popped there saw no command
+    # position at all, and the substitution's own closer — now unpaired —
+    # became a boundary, so `echo $(case a in a) :;; esac) run "1. fake" true`
+    # reported a PHANTOM gate for a `run` bash passes to `echo` (both
+    # measured, Codex on PR #94).
+    parens: list[str] = []
+    # `case` and `esac` are reserved words, so they count only AT a command
+    # position: `echo $(echo case) run "…" true` runs no `run` (measured), and
+    # a `case` read out of an argument would make the substitution's closer a
+    # boundary and invent exactly the phantom above. This flag is used for
+    # nothing else, so an imprecision in it can only add or drop a `case`
+    # marker — it never moves the boundaries the gate reads.
+    at_cmd = True
     # An unquoted backtick is the other spelling of `$( )`: what follows it is
     # a command position (`echo `run "13. x" y`` runs `run` — measured, and the
     # reader found NOTHING for it, invisible in both directions), and the word
@@ -404,15 +425,23 @@ def _lex_shell(text: str) -> tuple[str, str]:
             # `$`, `<` or `>` immediately before it opens a substitution.
             # `\$(` cannot reach here as anything else: bash refuses it
             # outright ("syntax error near unexpected token `('", measured).
-            parens.append(i > 0 and text[i - 1] in "$<>")
+            parens.append("subst" if i > 0 and text[i - 1] in "$<>" else "paren")
             out.append(ch)
             skel.append(ch)
             at_word_start = True
+            at_cmd = True
         elif ch == ")":
-            substitution = parens.pop() if parens else False
+            if parens and parens[-1] == "case":
+                # A case pattern's closer: a real command position (`case a in
+                # a) run "…" x;; esac` runs `run`, measured) that closes no
+                # `(`, so the construct beneath it stays open.
+                substitution = False
+            else:
+                substitution = parens.pop() == "subst" if parens else False
             out.append(ch)
             skel.append(_SUBST_CLOSE if substitution else ch)
             at_word_start = not substitution
+            at_cmd = not substitution
         elif ch == "`":
             out.append(ch)
             # Opening: a command starts after it, so the skeleton carries the
@@ -421,9 +450,27 @@ def _lex_shell(text: str) -> tuple[str, str]:
             at_word_start = not in_backtick
             in_backtick = not in_backtick
         else:
+            if at_word_start and at_cmd and not ch.isspace():
+                # The word about to start decides whether the NEXT one is also
+                # at a command position. Whitespace is still IN FRONT of that
+                # word — evaluating it would find no bare word and clear the
+                # flag before the word itself was ever looked at. Only a bare word can be reserved: a
+                # quoted `"case"` is not (bash refuses it as one), and neither
+                # branch above reaches here.
+                word = _BARE_WORD.match(text, i)
+                name = word.group(1) if word else ""
+                at_cmd = name in SHELL_RESERVED
+                if name == "case":
+                    parens.append("case")
+                elif name == "esac" and "case" in parens:
+                    # Back to and including the nearest `case`; a well-formed
+                    # script leaves nothing above it.
+                    del parens[len(parens) - 1 - parens[::-1].index("case"):]
             out.append(ch)
             skel.append(ch)
             at_word_start = ch in _WORD_BREAK
+            if ch in ";&|{}\n":
+                at_cmd = True
         i += 1
     clean, skeleton = "".join(out), "".join(skel)
     assert len(clean) == len(text) and len(skeleton) == len(text)
@@ -577,6 +624,22 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('echo $(run "1. inside-subst" x)', ["1. inside-subst"]),
     ('case a in a) run "1. case-pattern" x;; esac', ["1. case-pattern"]),
     ('echo `run "1. backtick" x`', ["1. backtick"]),
+    # A case pattern's `)` closes no `(`, so a `case` inside a substitution
+    # must not consume it: bash runs `run` here (measured) where a reader that
+    # popped saw no command position at all.
+    ('echo $(case a in a) run "1. case-in-subst" true;; esac)',
+     ["1. case-in-subst"]),
+    # …and the constructs the `case` rule must not break, all measured.
+    ('case a in (a|b) run "1. paren-pattern" x;; esac', ["1. paren-pattern"]),
+    ('case a in a) case b in b) run "1. nested-case" x;; esac;; esac',
+     ["1. nested-case"]),
+    ('case a in a) (run "1. subshell-in-case" x);; esac',
+     ["1. subshell-in-case"]),
+    # SECOND pattern of the same `case`: one marker, two closers, so a rule
+    # that merely popped the marker would pop the substitution here instead
+    # (found by a sabotage that stayed green against the rows above).
+    ('echo $(case b in a) :;; b) run "1. second-pattern" true;; esac)',
+     ["1. second-pattern"]),
     # `!` is a reserved word too and sits in the same chain. Nothing pinned the
     # lookbehind this replaced, so these are the first rows it has had.
     ('if ! run "1. negated" x; then :; fi', ["1. negated"]),
@@ -664,6 +727,15 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     # a word: `(printf b)#c; run "…" x` prints `b` and runs nothing else
     # (measured), because `#c` opens a comment that swallows the rest.
     ('(printf b)#c; run "1. after-subshell-hash" x', []),
+    # The other half of the case rule: the substitution's OWN closer must
+    # still be one, or it stays a boundary and invents a gate out of a word
+    # bash hands to `echo` (measured — `run` does not execute here).
+    ('echo $(case a in a) :;; esac) run "1. after-case-subst" true', []),
+    ('echo $(case b in a) :;; b) :;; esac) run "1. after-two-patterns" true',
+     []),
+    # And `case` counts only AT a command position: as an argument it is an
+    # ordinary word, so the closer after it is the substitution's (measured).
+    ('echo $(echo case) run "1. word-case" true', []),
     # A reserved word is reserved only WHERE A COMMAND CAN START. In an
     # argument it is an ordinary word, so bash runs only `echo` here (measured
     # for all three), while a rule that accepted a reserved word after any
