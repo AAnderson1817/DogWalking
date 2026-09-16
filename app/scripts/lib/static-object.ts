@@ -57,16 +57,19 @@ export function isTransparentWrapper(
  * Realtime, so a reader that stops at the wrapper either calls a static value
  * dynamic (a miss) or calls a private option non-private (a gate red on a
  * healthy tree, which is the worse of the two).
+ *
+ * UNBOUNDED, and the bound it used to carry is the finding: a wrapper's DEPTH
+ * is not a rule — nine parentheses hand a value through exactly as one does —
+ * and a loop that stopped after eight was not a termination guard but a wrong
+ * answer at nine. A descent through `.expression` ends at a leaf because the
+ * tree is finite, so it needs no count; with one, a receiver wrapped nine deep
+ * read as "unrecognised" (a gate red on a healthy tree) and a callee wrapped
+ * nine deep read as no call at all, so a discarded error behind it was blessed
+ * (Codex, PR #94 — measured, the downward sibling of the `outward` finding).
  */
 export function unwrapTransparent(e: ts.Expression): ts.Expression {
   let cur = e;
-  for (let i = 0; i < 8; i += 1) {
-    if (isTransparentWrapper(cur)) {
-      cur = cur.expression;
-      continue;
-    }
-    return cur;
-  }
+  while (isTransparentWrapper(cur)) cur = cur.expression;
   return cur;
 }
 
@@ -121,10 +124,17 @@ export function calleeCall(node: ts.Node): ts.CallExpression | null {
  * holds one, since an identifier inside a type has the TypeReference as its
  * parent. It stays because this is a general helper in a shared module and
  * the next caller may pass a type node.
+ *
+ * UNBOUNDED, for the reason `unwrapTransparent` is: climbing `.parent` ends at
+ * the source file because the tree is finite, so the walk needs no count. The
+ * eight this shipped with reported a named closure invoked through nine
+ * wrappers as never called, and its envelope as never read — a gate red on a
+ * healthy tree, in the helper that replaced a `while` loop which had climbed
+ * every wrapper (Codex, PR #94).
  */
 export function outward(n: ts.Node): ts.Node {
   let cur: ts.Node = n;
-  for (let i = 0; i < 8; i += 1) {
+  for (;;) {
     const parent: ts.Node | undefined = cur.parent;
     if (parent && isTransparentWrapper(parent) && parent.expression === cur) {
       cur = parent;
@@ -132,7 +142,6 @@ export function outward(n: ts.Node): ts.Node {
     }
     return cur;
   }
-  return cur;
 }
 
 /**
@@ -487,10 +496,17 @@ export function declaredObjects(sf: ts.SourceFile): Map<string, ts.ObjectLiteral
   // already closed over the alias graph, so a mutated source has already cost
   // every name for that object its literal; the test is kept here so the rule
   // reads as one rule rather than two halves in different places.
+  //
+  // The guard set is the whole termination argument — a cycle is refused on
+  // its second visit — so the walk carries no count. The sixteen it used to
+  // stop at was not a guard but a wrong answer at seventeen: a seventeen-hop
+  // alias chain resolved to nothing, which is a MISS in `form-error`'s
+  // direction and a refusal in the other two (measured; Codex, PR #94, the
+  // `outward` finding's class).
   const aliasLiteral = (name: string): ts.ObjectLiteralExpression | undefined => {
     const guard = new Set<string>([name]);
     let cur = aliasSource.get(name) ?? null;
-    for (let i = 0; cur && i < 16; i += 1) {
+    while (cur) {
       if (guard.has(cur)) return undefined;
       guard.add(cur);
       if (rebound.has(cur) || mutated.has(cur)) return undefined;
@@ -683,8 +699,18 @@ export function resolveProperty(
   name: string,
   declared: Map<string, ts.ObjectLiteralExpression> = new Map(),
   spreadErases = true,
-  depth = 0,
+  path: ReadonlySet<ts.ObjectLiteralExpression> = new Set(),
 ): ts.Expression | null | undefined {
+  // The literals this walk is already inside. A spread that re-enters one is
+  // a CYCLE — `var a: any = { ...a, methods: ["POST"] }` is legal and runs
+  // (the hoisted name is still `undefined` when the literal is evaluated, so
+  // the spread contributes nothing) — and is followed nowhere: it is
+  // unresolvable, the answer an unfollowable spread already gets. This set is
+  // the termination argument. The `depth < 8` it replaces was not one: a
+  // spread nested nine deep was refused here and MISSED in `form-error`'s
+  // direction, and a cycle terminated only by the accident of the count
+  // (measured; Codex, PR #94, the `outward` finding's class).
+  const inside = new Set(path).add(obj);
   let value: ts.Expression | null | undefined;
   for (const p of obj.properties) {
     if (ts.isSpreadAssignment(p)) {
@@ -694,8 +720,8 @@ export function resolveProperty(
         : ts.isIdentifier(inner)
           ? declared.get(inner.text)
           : undefined;
-      if (from && depth < 8) {
-        const nested = resolveProperty(from, name, declared, spreadErases, depth + 1);
+      if (from && !inside.has(from)) {
+        const nested = resolveProperty(from, name, declared, spreadErases, inside);
         if (nested !== undefined) value = nested;
       } else if (spreadErases) value = null;
       continue;

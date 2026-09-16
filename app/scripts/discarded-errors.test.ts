@@ -3222,6 +3222,67 @@ async function f(db: any) { const r = await db.from("walks").select("id"); log($
     }
   });
 
+  it("a wrapper's DEPTH is not a rule — nine are as transparent as one (Codex, PR #94)", () => {
+    // `outward` climbed at most eight wrappers, so a named closure invoked
+    // through nine reported its envelope as never read: a gate red on a
+    // healthy tree. A tree walk needs no bound (a finite tree has a finite
+    // depth), so the count was not a termination guard but a wrong answer at
+    // nine — measured on the shipped gate: eight OK, nine DISCARDED, for
+    // every wrapper kind and at forty. Codex's row is the first.
+    const wrap = (n: number, x: string) => "(".repeat(n) + x + ")".repeat(n);
+    const invoked = (call: string) =>
+      `async function f(db: any) { const r = await db.from("walks").select("id"); const check = () => { if (r.error) throw r.error; }; ${call}; return r.data; }`;
+    for (const call of [
+      `${wrap(9, "check")}()`,
+      `check${"!".repeat(9)}()`,
+      `(check${" as any".repeat(9)})()`,
+      `(check${" satisfies unknown".repeat(9)} as any)()`,
+      `(${"<any>".repeat(9)}check)()`,
+      "(((<any>(check as any)! satisfies unknown as any)!) as any)()",
+      `${wrap(40, "check")}()`,
+    ]) {
+      expect(one(invoked(call)).verdict, call).toBe("OK");
+    }
+    // …and depth is not evidence of INVOCATION: the same closure handed away
+    // forty deep still runs nothing, so what it reads is still unread.
+    expect(one(invoked(`const g = ${wrap(40, "check")}`)).verdict).toBe("DISCARDED");
+
+    // Every other parent reader at nine — each measured red, or missing, on
+    // the shipped gate: the builder link (`.select` "referenced and never
+    // called"), the `.error` read (an envelope "never read"), the call
+    // argument (the misdescribing red again), and the `.auth` hop, where a
+    // DISCARDED error was not reported at all.
+    const nine = (x: string) => wrap(9, x);
+    const env = 'const r = await db.from("walks").select("id");';
+    expect(one(`async function f(db: any) { const { data, error } = await ${nine('db.from("walks").select')}("id"); if (error) throw error; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { ${env} if (${nine("r")}.error) throw r.error; return r.data; }`).verdict).toBe("OK");
+    const passed = one(`declare function log(v: unknown): void;
+async function f(db: any) { ${env} log(${nine("r")}); return r.data; }`);
+    expect(passed.verdict).toBe("UNCLASSIFIED");
+    expect(passed.reason).toMatch(/passed to a call/);
+    expect(one(`const db = adminClient();
+async function f(token: string) { const { data } = await ${nine("db.auth")}.getUser(token); return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`const db = adminClient();
+async function f(token: string) { const { data, error } = await ${nine("db.auth")}.getUser(token); if (error) throw error; return data; }`).verdict).toBe("OK");
+
+    // The DOWNWARD sibling, `unwrapTransparent`, carried the same count. A
+    // receiver nine deep was "unrecognised" (red on a healthy tree); a callee
+    // nine deep was no call at all, so its discarded error was a MISS; a
+    // factory nine deep was "declared as neither a client nor a value", in
+    // both directions. Each pair pins both directions, so the fix cannot
+    // become "deep means fine".
+    for (const [expr, handled, discarded] of [
+      [`${nine("db")}.from("walks").select("id")`, "OK", "DISCARDED"],
+      [`${nine("db.from")}("walks").select("id")`, "OK", "DISCARDED"],
+      [`${nine("adminClient")}().auth.getUser("t")`, "OK", "DISCARDED"],
+    ] as const) {
+      expect(one(`async function f(db: any) { const { data, error } = await ${expr}; if (error) throw error; return data; }`).verdict, expr).toBe(handled);
+      expect(one(`async function f(db: any) { const { data } = await ${expr}; return data; }`).verdict, expr).toBe(discarded);
+    }
+    expect(one(`async function f(token: string) { const db = ${nine("adminClient")}(); const { data, error } = await db.auth.getUser(token); if (error) throw error; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(token: string) { const db = ${nine("adminClient")}(); const { data } = await db.auth.getUser(token); return data; }`).verdict).toBe("DISCARDED");
+  });
+
   it("a transparent wrapper around a callee or a receiver is the same call (Codex, PR #94)", () => {
     // `(db.from)("walks")` runs the query exactly as `db.from("walks")` does.
     // The raw node is a wrapper, so the member was not found — and

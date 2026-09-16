@@ -136,24 +136,24 @@ function enclosingComponent(node: ts.Node): string {
 }
 
 /**
- * `name`'s value in an object literal, spreads of object literals resolved
- * RECURSIVELY and in source order — or `undefined` when the literal does not
- * mention it at all, which is different from mentioning it dynamically.
+ * The literal text of `name` on an object literal, or null when a member may
+ * define it and this reader cannot read it, or undefined when none does.
  *
- * Recursive because one more layer of composition is still the same element:
+ * Spreads of object literals are resolved RECURSIVELY and in source order,
+ * because one more layer of composition is still the same element:
  * `{...{ ...{ role: "alert" } }}` wrote the forbidden shape straight past the
  * version of this rule that opened only the outer spread and then looked for
- * direct property assignments (measured, 4 of 4 green). Depth-capped, since a
- * literal nested eight deep is not a spelling anybody reaches for by accident
- * and this gate catches the mistake rather than the adversary.
+ * direct property assignments (measured, 4 of 4 green). NOT depth-capped: the
+ * eight it used to stop at was argued here as "not a spelling anybody reaches
+ * for by accident", and it was a MISS at nine — a raw live region blessed —
+ * and the only thing standing between a cyclic spread and a stack overflow.
+ * A count is not a termination argument. The shared reader carries the set of
+ * literals it is inside instead, so a spread that re-enters one is
+ * unresolvable and depth is no rule at all (Codex, PR #94, measured).
  *
  * `undefined` vs `null` is the distinction that makes ordering work: a
  * property that is absent leaves an earlier answer standing, while one that
  * is present but dynamic replaces it with "no answer".
- */
-/**
- * The literal text of `name` on an object literal, or null when a member may
- * define it and this reader cannot read it, or undefined when none does.
  *
  * The ORDER rule and every member kind live in `resolveProperty`, which
  * `verify-deployment.test.ts` reads too, so the two cannot drift about what a
@@ -337,6 +337,13 @@ describe("every error message renders through FormError or StateField", () => {
     expect(role('<span role={"alert" satisfies string} />')).toBe("alert");
     expect(role('<span role={("alert")!} />')).toBe("alert");
     expect(role('<span {...{ role: "alert" as const }} />')).toBe("alert");
+    // Depth is not a rule: nine wrappers hand the same literal through as one
+    // does, and `unwrapTransparent` stopped at eight — a raw live region the
+    // gate then blessed, a MISS in this file's direction (Codex, PR #94, the
+    // `outward` finding's class).
+    const nine = (x: string) => "(".repeat(9) + x + ")".repeat(9);
+    expect(role(`<span role={${nine('"alert"')}} />`)).toBe("alert");
+    expect(role(`<span {...${nine('{ role: "alert" }')}} />`)).toBe("alert");
     // A spread of a name bound to an object literal — the ordinary
     // attribute-composition pattern, and the one the channel gate's reader
     // had followed since round seven while this one had not.
@@ -368,6 +375,18 @@ describe("every error message renders through FormError or StateField", () => {
     expect(role('<span {...{ ...{ role: "alert" }, role }} />')).toBeNull();
     // A nested spread that mentions nothing leaves the earlier answer alone.
     expect(role('<span role="alert" {...{ ...{ className: "x" } }} />')).toBe("alert");
+    // Nested NINE deep, and through an alias chain of SEVENTEEN: the shared
+    // reader followed a spread to depth eight and an alias to sixteen hops,
+    // and each was a miss here — one count, two walks.
+    expect(role(`<span {...${"{ ...".repeat(9)}{ role: "alert" }${" }".repeat(9)}} />`)).toBe("alert");
+    const chain = Array.from({ length: 17 }, (_, i) => `const a${i + 1} = a${i};`).join("\n");
+    expect(role(`const a0 = { role: "alert" };\n${chain}\n<span {...a17} />`)).toBe("alert");
+    // A cyclic SPREAD terminates — `var a: any = { ...a, role: "alert" }` is
+    // legal and runs — and reads in source order: the later member is the
+    // answer, and a cycle AFTER it does not un-flag, which is this file's
+    // direction for any unfollowable spread.
+    expect(role('var a: any = { ...a, role: "alert" };\n<span {...a} />')).toBe("alert");
+    expect(role('var a: any = { role: "alert", ...a };\n<span {...a} />')).toBe("alert");
     // An ALIAS of a literal carries the literal — the composition pattern one
     // hop longer, which bound the alias to null and skipped the spread
     // entirely (Codex, PR #94). Transitively, and through the transparent

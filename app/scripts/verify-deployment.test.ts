@@ -508,12 +508,14 @@ function serveFunctionLines(file: string): number[] {
   // The shared set, plus the two this question needs and the shared one must
   // not have: `await serveFunction(…)` and `void serveFunction(…)` are both
   // the call, while `(await f)(x)` is a call whose callee is the await.
+  //
+  // Unbounded, as the shared one is: a depth is not a rule, and the eight this
+  // stopped at read `(((((((((serveFunction)))))))))(handle)` as unhoused
+  // (Codex, PR #94, the `outward` finding's class).
   const unwrap = (e: ts.Expression): ts.Expression => {
     let cur = e;
-    for (let i = 0; i < 8; i += 1) {
-      if (isTransparentWrapper(cur) || ts.isAwaitExpression(cur) || ts.isVoidExpression(cur)) {
-        cur = cur.expression;
-      } else return cur;
+    while (isTransparentWrapper(cur) || ts.isAwaitExpression(cur) || ts.isVoidExpression(cur)) {
+      cur = cur.expression;
     }
     return cur;
   };
@@ -746,6 +748,25 @@ describe("verify-deployment: the read-only argument", () => {
     // sabotage of the predicate turns this row red too.
     put("lambda2", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\n(serveFunction)(handle);\n');
     put("lambda3", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\n(<typeof serveFunction>serveFunction)(handle);\n');
+    // Housed through NINE wrappers: a depth is not a rule, and both this
+    // file's own unwrap (the callee) and the shared `unwrapTransparent` (the
+    // options) stopped at eight, so each of these read as unhoused — a gate
+    // red on a healthy tree (Codex, PR #94, the `outward` finding's class).
+    put("lambda4", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\n(((((((((serveFunction)))))))))(handle);\n');
+    put("lambda5", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(handle, ((((((((({ methods: ["POST"] }))))))))));\n');
+    // Housed through nine NESTED spreads and through an alias chain of
+    // seventeen: `resolveProperty` followed eight and `aliasLiteral` sixteen,
+    // and each refused a healthy call (measured).
+    const nested = Array.from({ length: 9 }, (_, i) => `const s${i + 1} = { ...s${i} };`).join("\n");
+    put("phi11", "index.ts", `import { serveFunction } from "../_lib/http.ts";\nconst s0 = { methods: ["POST"] };\n${nested}\nserveFunction(handle, { ...s9 });\n`);
+    const aliased = Array.from({ length: 17 }, (_, i) => `const a${i + 1} = a${i};`).join("\n");
+    put("phi12", "index.ts", `import { serveFunction } from "../_lib/http.ts";\nconst a0 = { methods: ["POST"] };\n${aliased}\nserveFunction(handle, { ...a17 });\n`);
+    // A CYCLE terminates rather than hanging — `var o: any = { ...o, methods:
+    // ["POST"] }` is legal and runs — and is unresolvable, in source order:
+    // the later `methods` wins over it, while the same spread AFTER a readable
+    // `methods` erases it, as any unfollowable spread does.
+    put("phi13", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nvar o: any = { ...o, methods: ["POST"] };\nserveFunction(handle, { ...o });\n');
+    put("chi8", "index.ts", 'import { serveFunction } from "../_lib/http.ts";\nvar o: any = { methods: ["POST"], ...o };\nserveFunction(handle, { ...o });\n');
     // Housed through a NAMESPACE import of the same module.
     put("rho", "index.ts", 'import * as http from "../_lib/http.ts";\nhttp.serveFunction(handle);\n');
     // NOT housed: the same spelling on a namespace of a DIFFERENT module is
@@ -782,6 +803,12 @@ describe("verify-deployment: the read-only argument", () => {
       pi: true,
       lambda2: true,
       lambda3: true,
+      lambda4: true,
+      lambda5: true,
+      phi11: true,
+      phi12: true,
+      phi13: true,
+      chi8: false,
       rho: true,
       sigma: false,
       tau: true,

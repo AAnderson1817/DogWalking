@@ -453,7 +453,7 @@ interface EffectiveProps {
 function effectiveProps(
   obj: ts.ObjectLiteralExpression,
   declared: Map<string, ts.ObjectLiteralExpression>,
-  depth = 0,
+  path: ReadonlySet<ts.ObjectLiteralExpression> = new Set(),
 ): EffectiveProps {
   // The names this file asks about, at any depth: an unreadable spread has to
   // invalidate each of them, since it could carry any of them.
@@ -468,6 +468,13 @@ function effectiveProps(
   const props = new Map<string, ts.Expression | string>();
   const names = new Set<string>();
   const markAll = (mark: string) => { for (const k of ASKED) props.set(k, mark); };
+  // The literals this walk is already inside — the shared reader's cycle
+  // guard, and its termination argument, in the walk this file keeps. A
+  // spread that re-enters one (`var m: any = { topic, ...m }` is legal and
+  // runs) is followed nowhere and marks what any unfollowable spread marks;
+  // the `depth < 8` this replaces refused a spread nested nine deep instead
+  // (Codex, PR #94, the `outward` finding's class).
+  const inside = new Set(path).add(obj);
 
   for (const p of obj.properties) {
     if (ts.isSpreadAssignment(p)) {
@@ -481,8 +488,8 @@ function effectiveProps(
       const inline = ts.isObjectLiteralExpression(spread) ? spread : undefined;
       const byName = ts.isIdentifier(spread) ? declared.get(spread.text) : undefined;
       const from = inline ?? byName;
-      if (from && depth < 8) {
-        const inner = effectiveProps(from, declared, depth + 1);
+      if (from && !inside.has(from)) {
+        const inner = effectiveProps(from, declared, inside);
         for (const [k, v] of inner.props) props.set(k, v);
         for (const k of inner.names) names.add(k);
       } else {
@@ -767,6 +774,15 @@ describe("the walk channel is the only channel, and it is private on both sides"
     expect(verdicts(`(supabase satisfies object).channel(t, ${OPTS});`)).toEqual(["private"]);
     // …and so does an alias of one, wrapped or not.
     expect(verdicts(`const db = supabase;\n(db).channel(t, ${OPTS});`)).toEqual(["private"]);
+    // Depth is not a rule: nine wrappers hand the client through as one does.
+    // `unwrapTransparent` stopped at eight, so this receiver "cannot resolve",
+    // these options "are not an object literal" and this `true` is "not the
+    // literal true" — three reds on a healthy tree (Codex, PR #94, the class
+    // of the `outward` finding).
+    const nine = (x: string) => "(".repeat(9) + x + ")".repeat(9);
+    expect(verdicts(`${nine("supabase")}.channel(t, ${OPTS});`)).toEqual(["private"]);
+    expect(verdicts(`supabase.channel(t, ${nine(OPTS)});`)).toEqual(["private"]);
+    expect(verdicts(`supabase.channel(t, { config: { private: ${nine("true")} } });`)).toEqual(["private"]);
     // A receiver this file cannot resolve is REPORTED, never skipped.
     expect(verdicts(`other.channel(t, ${OPTS});`)[0]).toMatch(/cannot resolve that receiver/);
     expect(verdicts(`makeThing().channel(t, ${OPTS});`)[0]).toMatch(/cannot resolve that receiver/);
@@ -879,6 +895,21 @@ describe("the walk channel is the only channel, and it is private on both sides"
     expect(read("send({ topic, private: true, ...{ private: false } });")).toEqual(["false"]);
     expect(read("send({ ...{ ...{ topic, private: false } } });"))
       .toEqual(["false", "false", "false"]);
+    // Nested NINE deep: this file's own walk followed a spread to depth eight
+    // and marked the ninth unresolvable, and the shared `aliasLiteral` stopped
+    // at sixteen hops — the same count, in two walks (Codex, PR #94, the
+    // `outward` finding's class). Ten literals carry `topic`, so ten values,
+    // each the innermost `true`; the alias row reads the source and the sent
+    // literal.
+    expect(read(`send(${"{ ...".repeat(9)}{ topic, private: true }${" }".repeat(9)});`)).toEqual(Array(10).fill("true"));
+    const chain = Array.from({ length: 17 }, (_, i) => `const m${i + 1} = m${i};`).join("\n");
+    expect(read(`const m0 = { topic, private: true };\n${chain}\nsend({ ...m17 });`)).toEqual(["true", "true"]);
+    // A CYCLE terminates, and is unresolvable rather than resolved: `var m:
+    // any = { topic, private: true, ...m }` is legal and runs. After the
+    // `true` it marks, exactly as an unfollowable spread does; BEFORE it, the
+    // later member overwrites the mark, as the language does it.
+    expect(read("var m: any = { topic, private: true, ...m };")).toEqual(["<unresolvable spread `m`>"]);
+    expect(read("var m: any = { ...m, topic, private: true };")).toEqual(["true"]);
     // `true as const` is the ordinary way to preserve a literal type and is
     // the same value — reporting it as non-private is a gate red on healthy
     // code, which this repository calls the worse of the two failure shapes.
