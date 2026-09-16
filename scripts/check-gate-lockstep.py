@@ -197,6 +197,37 @@ SHELL_RESERVED = (
     "case", "esac", "select", "function", "in", "time", "coproc", "!", "{", "}",
 )
 
+# The reserved words that take a WORD rather than a command: `for NAME`,
+# `select NAME`, the subject of a `case`, and the patterns after an `in`. Every
+# other reserved word here either precedes a command (`then`, `do`, `{`) or
+# terminates one (`fi`, `done`, `esac`), and `function`/`time` carry their own
+# grammar above.
+#
+# Treating them as command positions was wrong in BOTH directions, on files
+# bash parses and runs. A PHANTOM: `echo $(for case in x; do :; done) run
+# "G-fake" true` invokes nothing, while the name `case` was looked up, found
+# reserved, and pushed a case marker — which then consumed the substitution's
+# own closer as a pattern `)`, making it a command boundary and inventing a
+# gate out of a word bash passes to `echo` (measured, Codex on PR #94; the
+# `select` spelling and the `case`-subject one do the same, and a subject
+# spelled `esac` POPS the marker its own `case` pushed, which is the mirror).
+# And a gate RED ON A HEALTHY TREE: `for run in a; do :; done` is ordinary
+# bash, and `_command`'s chain read the loop's NAME as a gate invocation whose
+# label it could not parse, so `shell_unreadable_calls` refused it by name
+# (`run in a`) — the same for `select run in a`, `case run in *)`, and the
+# `skip_gate` spelling of each.
+#
+# Codex's own remedy was to track a name position after `for` and `select` the
+# way the lexer tracks one after `function`, where the command position
+# SURVIVES the name because the body's `{` needs it. Measured, that closes its
+# own example and opens a new phantom: with the position surviving, `in` is
+# then recognised as reserved, the command position carries into the WORD LIST,
+# and `echo $(for x in case; do :; done) run "G-fake" true` — legal bash that
+# runs nothing — reports the gate. A `for` name is not a `function` name: what
+# follows it is a word list, not a body, so the honest rule is that no command
+# position opens at all.
+SHELL_WORD_TAKING = ("for", "select", "case", "in")
+
 
 def _subst_region(depth: int) -> str:
     """A command substitution in the SKELETON, from its opening `(` to the
@@ -247,6 +278,7 @@ def _command(body: str) -> str:
         re.escape(w)
         for w in SHELL_RESERVED
         if w not in ("!", "}", "time", "function")
+        and w not in SHELL_WORD_TAKING
     )
     # A reserved word itself begins at a command position, so the SAME set of
     # places must precede it — `cmd;if run "…"` and `(if run "…"` are ordinary
@@ -1496,7 +1528,10 @@ def _lex_shell(
                 else:
                     fn_name = "next" if name == "function" else ""
                     time_opt = "opt" if name == "time" else ""
-                    at_cmd = name in SHELL_RESERVED
+                    at_cmd = (
+                        name in SHELL_RESERVED
+                        and name not in SHELL_WORD_TAKING
+                    )
                     if name == "case":
                         parens.append("case")
                     elif name == "esac" and "case" in parens:
@@ -2575,6 +2610,43 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
     ('result=`echo \\\\\\\\\\`run "1. four-period" true\\\\\\\\\\``', ['1. four-period']),
     ('result=`echo \\`run "1. mixed-period" true\\\\\\\\\\``', ['1. mixed-period']),
     ('run() {\n  :\n}', []),
+    # `for` and `select` take a NAME, `case` takes a SUBJECT word and `in`
+    # takes PATTERNS — none of them is a command, so none opens a command
+    # position. Reading them as one was a PHANTOM on files bash parses and
+    # runs: the name `case` was looked up, found reserved and pushed a case
+    # marker, which then consumed the substitution's own closer as a pattern
+    # `)` and made it a command boundary, inventing a gate out of a word bash
+    # passes to `echo` (measured, Codex on PR #94, who named `for`/`select`).
+    # A phantom label satisfies a ci.yml mapping and keeps the reverse check
+    # happy after the real local gate has been deleted.
+    ('echo $(for case in x; do :; done) run "1. fake" true', []),
+    ('echo $(select case in x; do :; done) run "1. fake" true', []),
+    ('echo $(case case in *) :;; esac) run "1. fake" true', []),
+    # The subject spelled `esac` POPS the marker its own `case` pushed, which
+    # is the same phantom reached from the other side.
+    ('echo $(case esac in *) :;; esac) run "1. fake" true', []),
+    # THE WORD LIST, which is what refutes the remedy Codex proposed — to track
+    # a name position after `for` the way the lexer tracks one after
+    # `function`, where the command position SURVIVES the name because the
+    # body's `{` needs it. Measured, that closes the row above and opens this
+    # one: with the position surviving, `in` is then recognised as reserved,
+    # the position carries into the word list, and `case` there pushes the
+    # spurious marker instead. A `for` name is not a `function` name.
+    ('echo $(for x in case; do :; done) run "1. fake" true', []),
+    ('echo $(for\tcase in x; do :; done) run "1. fake" true', []),
+    ('echo $(echo $(for case in x; do :; done) ) run "1. fake" true', []),
+    # The other direction: none of the four may stop a real gate reading. The
+    # `((` head is here because `for` no longer opens a command position and
+    # the arithmetic branch must not have been depending on one, and the
+    # `coproc` row because `coproc` DOES precede a command (`coproc run "…"
+    # true` invokes the gate, measured) and must stay in the chain.
+    ('for x in a; do run "1. for-body" true; done', ["1. for-body"]),
+    ('for case in x; do run "1. for-case-body" true; done', ["1. for-case-body"]),
+    ('for ((i=0;i<1;i++)); do run "1. for-arith-head" true; done',
+     ["1. for-arith-head"]),
+    ('case a in a) run "1. case-body" true;; esac', ["1. case-body"]),
+    ('for case; do :; done; run "1. for-noin" true', ["1. for-noin"]),
+    ('coproc run "1. coproc-command" true\nwait', ["1. coproc-command"]),
 )
 
 
@@ -2583,6 +2655,20 @@ _SPELLINGS: tuple[tuple[str, list[str]], ...] = (
 # failure direction is the worse one: off the raw text `echo 'note; run'` was
 # reported as an unreadable gate (measured), a gate red on a healthy tree.
 _UNREADABLE_SPELLINGS: tuple[tuple[str, list[str]], ...] = (
+    # A `for`/`select` loop's NAME, and a `case`'s SUBJECT, are words and not
+    # invocations — and `run` is an ordinary name for one. `for run in a; do
+    # :; done` is legal bash that invokes nothing, and the chain read the name
+    # as a gate call whose label it could not parse, so this reader refused it
+    # by name (`run in a`): a gate RED ON A HEALTHY TREE, the worst shape this
+    # gate can take, and the same for `select`, for a `case` subject and for
+    # the `skip_gate` spelling of each. Codex named the phantom in the lexer;
+    # this is the same rule read by the other reader, in the other direction.
+    ('for run in a; do :; done', []),
+    ('select run in a; do :; done', []),
+    ('case run in *) :;; esac', []),
+    ('for skip_gate in a; do :; done', []),
+    ('case skip_gate in *) :;; esac', []),
+    ('for run in "a b"; do :; done', []),
     # ARITHMETIC contains no commands, so a variable named `run` inside one is
     # not an invocation: `$((run + 1))` and `((run + 1))` invoke nothing
     # (measured) and were reported as `run + 1))` — a gate RED ON A HEALTHY
