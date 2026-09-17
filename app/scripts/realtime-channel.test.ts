@@ -10,7 +10,6 @@ import {
   declaredObjects,
   isComputedObjectAccess,
   memberAccess,
-  memberRoot,
   isAssignmentOperator,
   isEscapedObjectAssign,
   isObjectAssignCall,
@@ -117,17 +116,39 @@ interface ChannelCall {
  * alias reachable without a module hop, and a client that crosses a module
  * boundary under a new name arrives through an import this seeds from.
  */
-function clientNames(sf: ts.SourceFile): Set<string> {
+/**
+ * The two ways the client module is imported: `supabase` by NAME under some
+ * local name, and the whole module as a NAMESPACE — `import * as sb from
+ * "./supabase"`, where the client is `sb.supabase`. The second was refused
+ * as an unresolvable receiver on the named call and MISSED as a computed
+ * member, an alias and a destructuring (measured; the sibling of the
+ * `globalThis.Object` finding, Codex, PR #94, round 66): a seed reached as
+ * a member of a known base is the seed.
+ */
+function clientModuleImports(sf: ts.SourceFile): { names: Set<string>; namespaces: Set<string> } {
   const names = new Set<string>();
+  const namespaces = new Set<string>();
   for (const st of sf.statements) {
     if (!ts.isImportDeclaration(st) || !ts.isStringLiteralLike(st.moduleSpecifier)) continue;
     if (!/(^|\/)supabase$/.test(st.moduleSpecifier.text)) continue;
-    const named = st.importClause?.namedBindings;
-    if (!named || !ts.isNamedImports(named)) continue;
-    for (const el of named.elements) {
+    const bindings = st.importClause?.namedBindings;
+    if (!bindings) continue;
+    if (ts.isNamespaceImport(bindings)) namespaces.add(bindings.name.text);
+    else for (const el of bindings.elements) {
       if ((el.propertyName ?? el.name).text === "supabase") names.add(el.name.text);
     }
   }
+  return { names, namespaces };
+}
+
+/** `(receiver, key)` is the client read off a namespace import of its module: `sb.supabase`, `sb["supabase"]`, `const { supabase: db } = sb`. */
+function isClientMember(namespaces: ReadonlySet<string>, receiver: ts.Expression, key: string): boolean {
+  const base = unwrapTransparent(receiver);
+  return key === "supabase" && ts.isIdentifier(base) && namespaces.has(base.text);
+}
+
+function clientNames(sf: ts.SourceFile): Set<string> {
+  const { names, namespaces } = clientModuleImports(sf);
 
   // Every name that can come to HOLD the client, through every binding form
   // — a declaration, an assignment in any alias-forming spelling, a parameter
@@ -143,7 +164,7 @@ function clientNames(sf: ts.SourceFile): Set<string> {
   // reporting direction; a part taken from a non-literal source (`const
   // { data } = await supabase.from(…)`) is NOT the client, and that is what
   // keeps this from turning every query result into a red.
-  return holdersOf(sf, names);
+  return holdersOf(sf, names, (receiver, key) => isClientMember(namespaces, receiver, key));
 }
 
 /**
@@ -158,7 +179,30 @@ function channelCallsIn(source: ts.SourceFile, rel: string): ChannelCall[] {
   const found: ChannelCall[] = [];
   {
     const clients = clientNames(source);
+    const { namespaces } = clientModuleImports(source);
     const declared = declaredObjects(source);
+    // The client as an EXPRESSION: a name that holds it, or the `supabase`
+    // export read off a namespace import of its module. One predicate for the
+    // receiver of a named call, the chain a computed member is reached
+    // through, and the source of a destructuring, so the three cannot
+    // disagree about what the client is.
+    const isClient = (e: ts.Expression): boolean => {
+      const v = unwrapTransparent(e);
+      if (ts.isIdentifier(v)) return clients.has(v.text);
+      const m = memberAccess(v);
+      return !!m && isClientMember(namespaces, m.receiver, m.name);
+    };
+    // A chain that passes THROUGH the client at any hop: `supabase.realtime[key]`,
+    // `sb.supabase[key]`, `(db as never)[key]`.
+    const reachedFromClient = (e: ts.Expression): boolean => {
+      let cur = unwrapTransparent(e);
+      for (;;) {
+        if (isClient(cur)) return true;
+        const hop = memberAccess(cur) ?? computedAccess(cur);
+        if (!hop) return false;
+        cur = unwrapTransparent(hop.receiver);
+      }
+    };
     const visit = (node: ts.Node): void => {
       // Every reference to `channel` is looked at, and its receiver is then
       // CLASSIFIED — a receiver this file cannot resolve to the client is
@@ -192,7 +236,7 @@ function channelCallsIn(source: ts.SourceFile, rel: string): ChannelCall[] {
         // unresolvable — a gate RED ON A HEALTHY TREE, this log's worst shape
         // (Codex, PR #94). Measured on the real call before the fix.
         const receiver = unwrapTransparent(member.receiver);
-        const onClient = ts.isIdentifier(receiver) && clients.has(receiver.text);
+        const onClient = isClient(receiver);
         const accessLine = source.getLineAndCharacterOfPosition(access.getStart()).line + 1;
         const call = calleeCall(access);
         if (!onClient) {
@@ -283,20 +327,24 @@ function channelCallsIn(source: ts.SourceFile, rel: string): ChannelCall[] {
       // (Codex, PR #94), and so did eight more spellings measured beside it.
       // This check cannot say the member is not `channel`, so it cannot say
       // the topic is private: REPORTED, in every position, on a receiver
-      // whose ROOT is the client — the client itself, an alias, a wrapper,
-      // or a namespace reached from it — and left alone on any other
+      // whose chain passes THROUGH the client — the client itself, an alias,
+      // a wrapper, a namespace reached from it, or the client read off a
+      // namespace import of its module — and left alone on any other
       // receiver, where a computed member is ordinary code
       // (`handlers[type](payload)`) and reporting it would be red on a
       // healthy tree. Measured: no computed access on the client in app/src.
+      // A computed member of the namespace ITSELF is reported too: the client
+      // module exports the client and nothing else, so `sb[k]` is a read this
+      // check cannot say is not `supabase`.
       const computed = computedAccess(node);
       if (computed) {
-        const root = memberRoot(computed.receiver);
-        if (ts.isIdentifier(root) && clients.has(root.text)) {
+        const recv = unwrapTransparent(computed.receiver);
+        if (reachedFromClient(recv) || (ts.isIdentifier(recv) && namespaces.has(recv.text))) {
           found.push({
             file: rel,
             line: source.getLineAndCharacterOfPosition(node.getStart()).line + 1,
             private: false,
-            why: `\`${node.getText(source)}\` — a computed member reached from the Supabase client; `
+            why: `\`${node.getText(source)}\` — a computed member reached from the Supabase client or its module; `
               + "this check cannot say whether it is `channel`, so it cannot say the topic is "
               + "private. Name the member, or classify it here.",
           });
@@ -329,7 +377,7 @@ function channelCallsIn(source: ts.SourceFile, rel: string): ChannelCall[] {
       line: number,
     ): void {
       const src = unwrapTransparent(init);
-      if (!ts.isIdentifier(src) || !clients.has(src.text)) return;
+      if (!isClient(src)) return;
       for (const el of elements) {
         let takes = false;
         if (ts.isBindingElement(el)) {
@@ -889,6 +937,24 @@ describe("the walk channel is the only channel, and it is private on both sides"
       `for (const db of [supabase, ...others]) { ${KEY}db[key]("walk:public"); }`,
       `for (const db of [...others, supabase]) { ${KEY}db[key]("walk:public"); }`,
       `for (const db of [...[...others, supabase]]) { ${KEY}db[key]("walk:public"); }`,
+      // …a loop whose target is a PATTERN, matched against each element in
+      // turn rather than the whole element tested against the seed — Codex's
+      // `for (const [db] of [[supabase]])` bound nothing (PR #94, round 66) —
+      // in the binding and the assignment form, at a later slot, on a later
+      // element, and past an unexpandable spread an iteration still reaches.
+      `for (const [db] of [[supabase]]) { ${KEY}db[key]("walk:public"); }`,
+      `for (const { db } of [{ db: supabase }]) { ${KEY}db[key]("walk:public"); }`,
+      `let db: unknown; for ([db] of [[supabase]]) { ${KEY}(db as never)[key]("walk:public"); }`,
+      `for (const [x, db] of [[other, supabase]]) { ${KEY}db[key]("walk:public"); }`,
+      `for (const [db] of [[other], [supabase]]) { ${KEY}db[key]("walk:public"); }`,
+      `for (const [db] of [...others, [supabase]]) { ${KEY}db[key]("walk:public"); }`,
+      // …and a NESTED pattern, in either form, matched against the nested
+      // literal — a null slot to the one-level reader before it.
+      `const [[db]] = [[supabase]]; ${KEY}db[key]("walk:public");`,
+      `const { a: { db } } = { a: { db: supabase } }; ${KEY}db[key]("walk:public");`,
+      `const { a: [db] } = { a: [supabase] }; ${KEY}db[key]("walk:public");`,
+      `let db: unknown; [[db]] = [[supabase]]; ${KEY}(db as never)[key]("walk:public");`,
+      `let db: unknown; ({ a: { db } } = { a: { db: supabase } }); ${KEY}(db as never)[key]("walk:public");`,
     ]) {
       const got = verdicts(body);
       expect(got, body).toHaveLength(1);
@@ -940,6 +1006,63 @@ describe("the walk channel is the only channel, and it is private on both sides"
     expect(verdicts(`const { db } = { db: supabase, ...{ ...others } }; ${KEY}(db as never)[key]("walk:public");`)).toEqual([]);
     expect(verdicts(`const { db } = { db: supabase, [k]: other }; ${KEY}(db as never)[key]("walk:public");`)).toEqual([]);
     expect(verdicts(`const { db } = { db: supabase, get [k]() { return other; } }; ${KEY}(db as never)[key]("walk:public");`)).toEqual([]);
+    // A pattern reads its OWN slots: the second of one element, a whole
+    // element that is an array, a nested slot past the nested literal's
+    // end, and a position after a spread INSIDE the element.
+    expect(verdicts(`for (const [x, db] of [[supabase]]) { ${KEY}(db as never)[key]("walk:public"); }`)).toEqual([]);
+    expect(verdicts(`for (const db of [[supabase]]) { ${KEY}(db as never)[key]("walk:public"); }`)).toEqual([]);
+    expect(verdicts(`const [[x, db]] = [[supabase]]; ${KEY}(db as never)[key]("walk:public");`)).toEqual([]);
+    expect(verdicts(`for (const [db] of [[...others, supabase]]) { ${KEY}(db as never)[key]("walk:public"); }`)).toEqual([]);
+    // A REST binds an array or an object of what remains, never the seed.
+    expect(verdicts(`const [...rest] = [supabase]; ${KEY}(rest as never)[key]("walk:public");`)).toEqual([]);
+    expect(verdicts(`const { ...rest } = { db: supabase }; ${KEY}(rest as never)[key]("walk:public");`)).toEqual([]);
+  });
+
+  it("resolves the client through a namespace import of its module (round 66)", () => {
+    // `import * as sb from "./supabase"` makes the client `sb.supabase`: a
+    // seed reached as a member of a known base, the sibling of the
+    // `globalThis.Object` finding. Measured on the shipped gate with each
+    // planted in the real hook: the named call was REFUSED as an
+    // unresolvable receiver (the safe direction), while the computed
+    // member, the alias and the destructuring were misses.
+    const IMP = 'import * as sb from "./supabase";\n';
+    const OPTS = "{ config: { private: true } }";
+    const KEY = 'const key: "channel" = "channel"; ';
+    const verdicts = (body: string): string[] => {
+      const sf = ts.createSourceFile("f.ts", IMP + body, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+      return channelCallsIn(sf, "f.ts").map((c) => (c.private ? "private" : c.why));
+    };
+    const computedMember = /a computed member reached from the Supabase client/;
+    expect(verdicts('sb.supabase.channel("walk:public");')).toEqual([
+      "called with no options — `private` defaults to false (H1)",
+    ]);
+    expect(verdicts(`sb.supabase.channel(t, ${OPTS});`)).toEqual(["private"]);
+    expect(verdicts(`sb["supabase"].channel(t, ${OPTS});`)).toEqual(["private"]);
+    expect(verdicts(`const db = sb.supabase; db.channel(t, ${OPTS});`)).toEqual(["private"]);
+    for (const body of [
+      `${KEY}sb.supabase[key]("walk:public");`,
+      `const db = sb.supabase; ${KEY}db[key]("walk:public");`,
+      `const { supabase: db } = sb; ${KEY}db[key]("walk:public");`,
+      `${KEY}sb.supabase.realtime[key]("walk:public");`,
+      // The module exports the client alone, so a computed member of the
+      // NAMESPACE is one this check cannot say is not `supabase`.
+      `${KEY}sb[key]("walk:public");`,
+    ]) {
+      const got = verdicts(body);
+      expect(got, body).toHaveLength(1);
+      expect(got[0], body).toMatch(computedMember);
+    }
+    const escaped = verdicts('const opener = sb.supabase.channel; opener("walk:public");');
+    expect(escaped).toHaveLength(1);
+    expect(escaped[0]).toMatch(/referenced without being called/);
+    const taken = verdicts('const { channel: opener } = sb.supabase; opener("walk:public");');
+    expect(taken).toHaveLength(1);
+    expect(taken[0]).toMatch(/taken off it by a destructuring/);
+    // The other direction: a namespace of ANOTHER module, and another
+    // export's computed member (which `sb` does not carry, and which is
+    // ordinary code wherever it is written).
+    expect(verdicts(`import * as other from "./other";\n${KEY}other.supabase[key]("walk:public");`)).toEqual([]);
+    expect(verdicts(`${KEY}sb.other[key]("walk:public");`)).toEqual([]);
   });
 
   it("classifies a channel call through every transparent receiver spelling", () => {
@@ -1556,6 +1679,30 @@ describe("the walk channel is the only channel, and it is private on both sides"
       .toEqual([expect.stringContaining("a computed member of Object")]);
     expect(muts('const O = globalThis.Object;\nconst m = { private: true };\nconst f = O.assign;'))
       .toEqual([expect.stringContaining("referenced without being called")]);
+    // …and the built-in taken OFF the global by a DESTRUCTURING, which is the
+    // member read one syntactic shape over: `const { Object: O } = globalThis`
+    // went through the pattern branch, met a non-literal source and bound
+    // nothing (Codex, PR #94, round 66) — with the alias-of-`globalThis`,
+    // assignment, literal-key and loop spellings beside it, and the SHORTHAND,
+    // which binds the name `Object` itself to the global it names.
+    for (const src of [
+      'const { Object: O } = globalThis;\nconst m = { private: true };\nO.assign(m, { private: false });',
+      'const g = globalThis;\nconst { Object: O } = g;\nconst m = { private: true };\nO.assign(m, { private: false });',
+      'let O: typeof Object;\n({ Object: O } = globalThis);\nconst m = { private: true };\nO.assign(m, { private: false });',
+      'const { ["Object"]: O } = globalThis;\nconst m = { private: true };\nO.assign(m, { private: false });',
+      'const { Object } = globalThis;\nconst m = { private: true };\nObject.assign(m, { private: false });',
+      'for (const [O] of [[globalThis.Object]]) {\nconst m = { private: true };\nO.assign(m, { private: false });\n}',
+    ]) expect(muts(src), src).toHaveLength(1);
+    expect(muts('const { Object: O } = globalThis;\nconst m = { private: true };\nconst k: "assign" = "assign"; O[k](m, { private: false });'))
+      .toEqual([expect.stringContaining("a computed member of Object")]);
+    expect(muts('const { Object: O } = globalThis;\nconst m = { private: true };\nconst f = O.assign;'))
+      .toEqual([expect.stringContaining("referenced without being called")]);
+    // …and not another key, another source, a bound `globalThis`, or a
+    // spread of the global, which is unfollowable and stays the stated miss.
+    expect(muts('const { Reflect: O } = globalThis;\nconst m = { private: true };\nO.assign(m, { private: false });')).toEqual([]);
+    expect(muts('const { Object: O } = registry;\nconst m = { private: true };\nO.assign(m, { private: false });')).toEqual([]);
+    expect(muts('const globalThis = { Object: { assign(_a: unknown, _b: unknown) {} } };\nconst { Object: O } = globalThis;\nconst m = { private: true };\nO.assign(m, { private: false });')).toEqual([]);
+    expect(muts('const { Object: O } = { ...globalThis };\nconst m = { private: true };\nO.assign(m, { private: false });')).toEqual([]);
     // …through an iteration, which binds every readable element whatever an
     // unexpandable spread beside it holds — and NOT through a key an
     // unfollowable spread after it may replace: not knowing is not evidence

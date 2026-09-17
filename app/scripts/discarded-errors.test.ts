@@ -300,7 +300,7 @@ function programOver(files: Map<string, string>): ts.Program {
 
 type ReceiverKind = "client" | "global" | "unknown";
 
-function receiverKind(recv: ts.Expression): ReceiverKind {
+function receiverKind(ctx: Ctx, recv: ts.Expression): ReceiverKind {
   // `(db as any).from(…)` is `db.from(…)` with a cast around the receiver, and
   // the shared predicate is what knows the whole set — the copy that used to
   // stand here omitted `<T>x`, so `(<SupabaseClient>db).from(…)` with its
@@ -313,9 +313,7 @@ function receiverKind(recv: ts.Expression): ReceiverKind {
   // node reported it as an unrecognised receiver in BOTH directions, the
   // handled one included (measured).
   const callee = calleeOf(r);
-  if (callee && ts.isIdentifier(callee) && CLIENT_FACTORIES.has(callee.text)) {
-    return "client";
-  }
+  if (callee && isClientFactory(ctx, callee)) return "client";
   return "unknown";
 }
 
@@ -1669,6 +1667,27 @@ function declaredByType(ctx: Ctx, t: ts.TypeNode | undefined): Declared {
  *            conditional), a destructured binding with no readable client
  *            type, an import, a class member, a cycle of aliases.
  */
+/**
+ * `adminClient` / `createClient` by name, or the same export read off a
+ * NAMESPACE import — `import * as admin from "../_lib/admin.ts";
+ * admin.adminClient()`. A factory reached as a member of its module is the
+ * factory; the name-only test made a handled `.auth` error on the client it
+ * returns "declared as neither a client nor a value" (red on healthy code)
+ * and an inline `admin.adminClient().from(…)` an unrecognised receiver
+ * (measured; the `globalThis.Object` sibling in this reader, round 66). A
+ * same-named METHOD on anything else stays what it was, unknown.
+ */
+function isClientFactory(ctx: Ctx, callee: ts.Expression): boolean {
+  if (ts.isIdentifier(callee)) return CLIENT_FACTORIES.has(callee.text);
+  const m = memberAccess(callee);
+  if (!m || !CLIENT_FACTORIES.has(m.name)) return false;
+  const base = unwrapTransparent(m.receiver);
+  if (!ts.isIdentifier(base)) return false;
+  const sym = symbolOf(ctx.checker, base);
+  const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
+  return !!decl && ts.isNamespaceImport(decl);
+}
+
 function declaredAsClient(ctx: Ctx, recv: ts.Expression, seen = new Set<ts.Symbol>()): Declared {
   const byExpression = (e: ts.Expression | undefined): Declared => {
     if (!e) return "unknown";
@@ -1685,7 +1704,7 @@ function declaredAsClient(ctx: Ctx, recv: ts.Expression, seen = new Set<ts.Symbo
     // healthy tree one way and blessing what it forbids the other (Codex,
     // PR #94, measured both).
     const factory = calleeOf(e);
-    if (factory && ts.isIdentifier(factory) && CLIENT_FACTORIES.has(factory.text)) return "client";
+    if (factory && isClientFactory(ctx, factory)) return "client";
     if (ts.isIdentifier(e)) return declaredAsClient(ctx, e, seen);
     if (ts.isLiteralExpression(e) || ts.isObjectLiteralExpression(e) || ts.isArrayLiteralExpression(e) ||
       ts.isTemplateExpression(e) || e.kind === ts.SyntaxKind.TrueKeyword || e.kind === ts.SyntaxKind.FalseKeyword ||
@@ -1751,7 +1770,7 @@ function classifyFile(program: ts.Program, sf: ts.SourceFile, file: string): Sit
 
   const seen = (root: ts.Node, recv: ts.Expression, token: ts.Node) => {
     const ctx: Ctx = { sf, checker, file, queryLine: lineOf(sf, token), followed };
-    const kind = receiverKind(recv);
+    const kind = receiverKind(ctx, recv);
     if (kind === "global") return;
     if (kind === "unknown") {
       sites.push(site(ctx, root, "UNCLASSIFIED", `unrecognised receiver \`${recv.getText(sf)}\``));
@@ -2041,6 +2060,31 @@ function g(db: any) { return db.from("clients").select("id"); }`, "fixture.ts");
       'async function f() { const db = adminClient(); const { data, error } = await db.from("walks").select("id"); if (error) throw error; return data; }',
       "f.ts",
     ).map((s) => s.verdict)).toEqual(["OK"]);
+
+    // A factory read off a NAMESPACE import is the factory. The name-only
+    // test made a HANDLED `.auth` error on `admin.adminClient()`'s client
+    // "declared as neither a client nor a value" — a gate red on healthy
+    // code — and an inline call an unrecognised receiver (measured, round
+    // 66: the `globalThis.Object` finding's sibling in this reader). A
+    // same-named method on something that is NOT a namespace import stays
+    // unknown, as it always was.
+    const NS = 'import * as admin from "../_lib/admin.ts";\n';
+    expect(classifySource(
+      `${NS}async function f() { const db = admin.adminClient(); const { data, error } = await db.auth.getUser("t"); if (error) throw error; return data; }`,
+      "f.ts",
+    ).map((s) => s.verdict)).toEqual(["OK"]);
+    expect(classifySource(
+      `${NS}async function f() { const { data } = await admin.adminClient().from("walks").select("id"); return data; }`,
+      "f.ts",
+    ).map((s) => s.verdict)).toEqual(["DISCARDED"]);
+    expect(classifySource(
+      `${NS}async function f() { const db = admin.adminClient(); const { data } = await db.from("walks").select("id"); return data; }`,
+      "f.ts",
+    ).map((s) => s.verdict)).toEqual(["DISCARDED"]);
+    expect(classifySource(
+      'declare const svc: { adminClient(): unknown };\nasync function f() { const db = svc.adminClient(); const { data, error } = await db.auth.getUser("t"); if (error) throw error; return data; }',
+      "f.ts",
+    ).map((s) => s.verdict)).toEqual(["UNCLASSIFIED"]);
 
     // `db.from(…)`, `db["from"](…)` and `` db[`from`](…) `` are the same
     // member. This reader knew a string literal and not a no-substitution

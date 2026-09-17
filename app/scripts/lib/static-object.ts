@@ -596,7 +596,13 @@ export type BindingSource = {
    * (a destructuring pattern) or its ELEMENTS (a loop).
    */
   whole: boolean;
-  /** The pattern, for a destructuring binding, so a consumer can match it against a literal. */
+  /**
+   * The pattern, for a destructuring binding, so a consumer can match it
+   * against a literal — and for a LOOP whose target is one, so each element
+   * can be matched against it: `for (const [db] of [[supabase]])` binds `db`
+   * to the client, which a loop entry carrying only its names could not say
+   * (Codex, PR #94, round 66).
+   */
   pattern?: ts.BindingName | ts.Expression;
   /**
    * A loop binding. `for…of` targets hold ELEMENTS of `source`; `for…in`
@@ -629,11 +635,21 @@ export function bindingSources(sf: ts.SourceFile): BindingSource[] {
       }
     } else if (ts.isForOfStatement(n) || ts.isForInStatement(n)) {
       const targets = new Set<string>();
+      let pattern: ts.BindingName | ts.Expression | undefined;
       if (ts.isVariableDeclarationList(n.initializer)) {
-        for (const d of n.initializer.declarations) bindPatternNames(d.name, targets);
-      } else collectAssignmentTargets(n.initializer, targets);
+        for (const d of n.initializer.declarations) {
+          bindPatternNames(d.name, targets);
+          if (!ts.isIdentifier(d.name)) pattern = d.name;
+        }
+      } else {
+        collectAssignmentTargets(n.initializer, targets);
+        if (!ts.isIdentifier(unwrapTransparent(n.initializer))) pattern = n.initializer;
+      }
       if (targets.size > 0) {
-        out.push({ targets, source: n.expression, whole: false, loop: ts.isForOfStatement(n) ? "of" : "in" });
+        const loop = ts.isForOfStatement(n) ? "of" : "in";
+        out.push(pattern
+          ? { targets, source: n.expression, whole: false, loop, pattern }
+          : { targets, source: n.expression, whole: false, loop });
       }
     }
     ts.forEachChild(n, visit);
@@ -673,9 +689,14 @@ export function bindingSources(sf: ts.SourceFile): BindingSource[] {
  * never the seed (Codex, PR #94, round 65 — three findings in this reader,
  * each one of those rules).
  *
- * `alsoHolds` names a second spelling of a seed that is not an identifier —
- * `globalThis.Object` for the global `Object` — so a name bound to it holds
- * the seed too.
+ * `memberHolds(receiver, key)` names a seed reached as a MEMBER of a known
+ * base — `globalThis.Object` for the global `Object`, the `supabase` export
+ * of a namespace import of the client module for the client — and it is
+ * consulted for both spellings of that read: a member access (`const O =
+ * globalThis.Object`) and a key taken off the base by a pattern (`const {
+ * Object: O } = globalThis`). The first version knew the member access alone,
+ * so the destructured spelling went through the pattern branch, met a
+ * non-literal source and was skipped (Codex, PR #94, round 66).
  *
  * Name-based and file-wide, like `declaredObjects`: a name bound to the seed
  * anywhere in the file holds it everywhere, which over-includes a name that
@@ -686,18 +707,20 @@ export function bindingSources(sf: ts.SourceFile): BindingSource[] {
 export function holdersOf(
   sf: ts.SourceFile,
   seeds: Iterable<string>,
-  alsoHolds?: (e: ts.Expression) => boolean,
+  memberHolds?: MemberHolds,
 ): Set<string> {
   const names = new Set(seeds);
   const bindings = bindingSources(sf);
   const holds = (e: ts.Expression): boolean => {
     const v = unwrapTransparent(e);
-    return (ts.isIdentifier(v) && names.has(v.text)) || (alsoHolds?.(v) ?? false);
+    if (ts.isIdentifier(v)) return names.has(v.text);
+    const m = memberAccess(v);
+    return !!m && (memberHolds?.(m.receiver, m.name) ?? false);
   };
   for (let grew = true; grew;) {
     grew = false;
     for (const b of bindings) {
-      const gained = b.whole ? (holds(b.source) ? b.targets : []) : partsHolding(b, holds);
+      const gained = b.whole ? (holds(b.source) ? b.targets : []) : partsHolding(b, holds, memberHolds);
       for (const t of gained) {
         if (!names.has(t)) {
           names.add(t);
@@ -709,12 +732,15 @@ export function holdersOf(
   return names;
 }
 
+/** `(receiver, key)` is a spelling of the seed — see `holdersOf`. */
+export type MemberHolds = (receiver: ts.Expression, key: string) => boolean;
+
 /**
- * The pattern names (or loop targets) that receive a seed out of a LITERAL
- * aggregate source, one level deep. Anything the reader cannot match is not
- * followed — the miss direction, stated in `holdersOf`.
+ * The pattern names (or loop targets) that receive a seed out of a source.
+ * Anything the reader cannot match is not followed — the miss direction,
+ * stated in `holdersOf`.
  */
-function partsHolding(b: BindingSource, holds: (e: ts.Expression) => boolean): Set<string> {
+function partsHolding(b: BindingSource, holds: (e: ts.Expression) => boolean, memberHolds?: MemberHolds): Set<string> {
   const out = new Set<string>();
   const src = unwrapTransparent(b.source);
   if (b.loop) {
@@ -722,27 +748,120 @@ function partsHolding(b: BindingSource, holds: (e: ts.Expression) => boolean): S
     // string "0" — so nothing it binds can hold the seed; reading it as the
     // client refused an unrelated `db[key]` on healthy code (Codex, PR #94).
     // Only `for…of` yields the elements, and an inline literal spread among
-    // them is expanded like any other.
-    if (b.loop === "of" && ts.isArrayLiteralExpression(src) && literalElements(src, false).some(holds)) {
-      for (const t of b.targets) out.add(t);
+    // them is expanded like any other. A pattern target takes each element
+    // APART: `for (const [db] of [[supabase]])` binds `db` to the client on
+    // its one pass, and the first reader tested the whole element against
+    // the seed and never matched it against the pattern (Codex, PR #94,
+    // round 66) — so each element goes through the same reader a
+    // declaration's source does.
+    if (b.loop !== "of" || !ts.isArrayLiteralExpression(src)) return out;
+    for (const el of literalElements(src, false)) {
+      if (b.pattern) for (const n of patternParts(b.pattern, el, holds, memberHolds)) out.add(n);
+      else if (holds(el)) for (const t of b.targets) out.add(t);
     }
     return out;
   }
-  const pat = b.pattern;
-  if (!pat) return out;
-  if (ts.isArrayLiteralExpression(src)) {
-    const slots = arraySlots(pat);
-    const elements = literalElements(src, true);
-    for (let i = 0; i < elements.length && i < slots.length; i++) {
-      const name = slots[i];
-      if (name && holds(elements[i]!)) out.add(name);
+  return b.pattern ? patternParts(b.pattern, b.source, holds, memberHolds) : out;
+}
+
+/**
+ * The names a PATTERN binds to a part of `source` that holds the seed, at
+ * any depth: `const [[db]] = [[supabase]]` and `const { a: { db } } = { a: {
+ * db: supabase } }` reach `db` through a nested pattern matched against the
+ * nested literal, where the one-level reader before it bound nothing (a
+ * nested pattern was a null slot). A part is read off a LITERAL source by
+ * position or by key, through `literalElements` and `literalEntries` with
+ * their spread and erasure rules; a key taken off a NON-literal source is a
+ * member READ of it, and holds the seed exactly when `source.key` would —
+ * `const { Object: O } = globalThis` is `globalThis.Object` one syntactic
+ * shape over, answered by the same `memberHolds`. A position taken off a
+ * non-literal source has no such spelling and is not followed.
+ */
+function patternParts(
+  pat: ts.BindingName | ts.Expression,
+  source: ts.Expression,
+  holds: (e: ts.Expression) => boolean,
+  memberHolds?: MemberHolds,
+): Set<string> {
+  const out = new Set<string>();
+  const src = unwrapTransparent(source);
+  const elements = ts.isArrayLiteralExpression(src) ? literalElements(src, true) : null;
+  const keyed = ts.isObjectLiteralExpression(src) ? literalEntries(src) : null;
+  for (const entry of patternEntries(pat)) {
+    let value: ts.Expression | undefined;
+    if (entry.index !== undefined) {
+      if (!elements) continue;
+      value = elements[entry.index];
+    } else if (keyed) {
+      const v = keyed.get(entry.key);
+      if (!v) continue;
+      value = v;
+    } else {
+      if (typeof entry.target === "string" && memberHolds?.(src, entry.key)) out.add(entry.target);
+      continue;
     }
-  } else if (ts.isObjectLiteralExpression(src)) {
-    const byKey = objectSlots(pat);
-    for (const [key, value] of literalEntries(src)) {
-      if (!value || !holds(value)) continue;
-      const name = byKey.get(key);
-      if (name) out.add(name);
+    if (!value) continue;
+    if (typeof entry.target === "string") {
+      if (holds(value)) out.add(entry.target);
+    } else {
+      for (const n of patternParts(entry.target, value, holds, memberHolds)) out.add(n);
+    }
+  }
+  return out;
+}
+
+/** One slot of a pattern: a position or a key, bound to a name or to a nested pattern. */
+type PatternEntry =
+  | { index: number; key?: undefined; target: string | ts.BindingName | ts.Expression }
+  | { index?: undefined; key: string; target: string | ts.BindingName | ts.Expression };
+
+/**
+ * The slots of a destructuring pattern in either form — a binding pattern
+ * (`const [a, { b }] = …`) or an assignment pattern (`[a, { b }] = …`, whose
+ * elements are expressions, `a = d` carrying a default on the left). A hole
+ * is skipped; a REST binds an array or an object of what remains, never the
+ * seed, so an array rest ends the positions and an object rest is skipped;
+ * a target that is a member (`[o.x] = …`) lands on an object this reader does
+ * not follow and is skipped too.
+ */
+function patternEntries(pat: ts.BindingName | ts.Expression): PatternEntry[] {
+  const out: PatternEntry[] = [];
+  const bindingTarget = (name: ts.BindingName): string | ts.BindingName => (ts.isIdentifier(name) ? name.text : name);
+  const assignmentTarget = (el: ts.Expression): string | ts.Expression | null => {
+    const v = unwrapTransparent(el);
+    const t = ts.isBinaryExpression(v) && v.operatorToken.kind === ts.SyntaxKind.EqualsToken ? unwrapTransparent(v.left) : v;
+    if (ts.isIdentifier(t)) return t.text;
+    if (ts.isArrayLiteralExpression(t) || ts.isObjectLiteralExpression(t)) return t;
+    return null;
+  };
+  if (ts.isArrayBindingPattern(pat)) {
+    pat.elements.forEach((el, index) => {
+      if (!ts.isBindingElement(el) || el.dotDotDotToken) return;
+      out.push({ index, target: bindingTarget(el.name) });
+    });
+  } else if (ts.isObjectBindingPattern(pat)) {
+    for (const el of pat.elements) {
+      if (el.dotDotDotToken) continue;
+      const key = el.propertyName ? propertyKey(el.propertyName) : ts.isIdentifier(el.name) ? el.name.text : null;
+      if (key === null) continue;
+      out.push({ key, target: bindingTarget(el.name) });
+    }
+  } else if (ts.isArrayLiteralExpression(pat)) {
+    for (let index = 0; index < pat.elements.length; index++) {
+      const el = pat.elements[index]!;
+      if (ts.isOmittedExpression(el)) continue;
+      if (ts.isSpreadElement(el)) break;
+      const target = assignmentTarget(el);
+      if (target !== null) out.push({ index, target });
+    }
+  } else if (ts.isObjectLiteralExpression(pat)) {
+    for (const p of pat.properties) {
+      if (ts.isShorthandPropertyAssignment(p)) out.push({ key: p.name.text, target: p.name.text });
+      else if (ts.isPropertyAssignment(p)) {
+        const key = propertyKey(p.name);
+        const target = assignmentTarget(p.initializer);
+        if (key !== null && target !== null) out.push({ key, target });
+      }
     }
   }
   return out;
@@ -834,51 +953,6 @@ function collectEntries(obj: ts.ObjectLiteralExpression, entries: Map<string, ts
     if (ts.isPropertyAssignment(p)) entries.set(key, p.initializer);
     else if (definesWithoutValue(p)) entries.set(key, null);
   }
-}
-
-/** Array-pattern positions → the identifier bound there, or null (a rest, a nested pattern, a hole). */
-function arraySlots(pat: ts.BindingName | ts.Expression): (string | null)[] {
-  const slots: (string | null)[] = [];
-  if (ts.isArrayBindingPattern(pat)) {
-    for (const el of pat.elements) {
-      if (ts.isBindingElement(el) && !el.dotDotDotToken && ts.isIdentifier(el.name)) slots.push(el.name.text);
-      else if (ts.isBindingElement(el) && el.dotDotDotToken) break;
-      else slots.push(null);
-    }
-  } else if (ts.isArrayLiteralExpression(pat)) {
-    for (const el of pat.elements) {
-      const target = ts.isBinaryExpression(el) && el.operatorToken.kind === ts.SyntaxKind.EqualsToken
-        ? unwrapTransparent(el.left)
-        : unwrapTransparent(el);
-      if (ts.isSpreadElement(el)) break;
-      slots.push(ts.isIdentifier(target) ? target.text : null);
-    }
-  }
-  return slots;
-}
-
-/** Object-pattern keys → the identifier bound to each (a rest or a nested pattern is skipped). */
-function objectSlots(pat: ts.BindingName | ts.Expression): Map<string, string> {
-  const byKey = new Map<string, string>();
-  if (ts.isObjectBindingPattern(pat)) {
-    for (const el of pat.elements) {
-      if (el.dotDotDotToken || !ts.isIdentifier(el.name)) continue;
-      const key = el.propertyName ? propertyKey(el.propertyName) : el.name.text;
-      if (key !== null) byKey.set(key, el.name.text);
-    }
-  } else if (ts.isObjectLiteralExpression(pat)) {
-    for (const p of pat.properties) {
-      if (ts.isShorthandPropertyAssignment(p)) byKey.set(p.name.text, p.name.text);
-      else if (ts.isPropertyAssignment(p)) {
-        const key = propertyKey(p.name);
-        const target = ts.isBinaryExpression(p.initializer) && p.initializer.operatorToken.kind === ts.SyntaxKind.EqualsToken
-          ? unwrapTransparent(p.initializer.left)
-          : unwrapTransparent(p.initializer);
-        if (key !== null && ts.isIdentifier(target)) byKey.set(key, target.text);
-      }
-    }
-  }
-  return byKey;
 }
 
 /** The names a binding pattern introduces. */
@@ -1129,8 +1203,8 @@ const GLOBAL_HOLDERS = new WeakMap<ts.SourceFile, Map<string, Set<string>>>();
  * The global must be unbound in the file, whichever spelling reaches it.
  */
 function isGlobal(sf: ts.SourceFile, id: ts.Identifier, name: "Object" | "globalThis"): boolean {
-  if (bindsName(sf, name)) return false;
-  if (id.text === name) return true;
+  const bound = bindsName(sf, name);
+  if (!bound && id.text === name) return true;
   let perFile = GLOBAL_HOLDERS.get(sf);
   if (!perFile) GLOBAL_HOLDERS.set(sf, (perFile = new Map()));
   let holders = perFile.get(name);
@@ -1138,25 +1212,38 @@ function isGlobal(sf: ts.SourceFile, id: ts.Identifier, name: "Object" | "global
     // The global `Object` has a second spelling, `globalThis.Object`, so a
     // name bound to THAT holds it too: `const O = globalThis.Object;
     // O.assign(m, …)` was read as no mutation because the source is a member
-    // access and not an identifier (Codex, PR #94, round 65). `globalThis`
-    // itself has no second spelling.
-    const also = name === "Object" ? (e: ts.Expression) => isGlobalObjectMember(sf, e) : undefined;
-    perFile.set(name, (holders = holdersOf(sf, [name], also)));
+    // access and not an identifier (Codex, PR #94, round 65), and `const {
+    // Object: O } = globalThis` the same one shape over (round 66).
+    // `globalThis` itself has no second spelling this reader knows.
+    //
+    // The SPELLING seeds the set only while the file leaves it unbound: a
+    // file that binds `Object` has said the word means something else there
+    // (round 42), but what it bound it TO still decides — `const { Object } =
+    // globalThis` binds the name to the very global it names, and that
+    // `Object.assign(m, …)` is the built-in.
+    const member = name === "Object" ? objectMemberHolds(sf) : undefined;
+    perFile.set(name, (holders = holdersOf(sf, bound ? [] : [name], member)));
   }
   return holders.has(id.text);
 }
 
 /**
- * `globalThis.Object` / `globalThis["Object"]`, on the global `globalThis` or
- * on any name that holds it. One reader for that spelling, consumed by the
- * receiver test AND by the holders of `Object`, so the two cannot disagree
- * about what reaches the built-in.
+ * The `Object` member of the global `globalThis`, or of any name that holds
+ * it — `globalThis.Object`, `globalThis["Object"]`, `const { Object: O } =
+ * globalThis`. One predicate for that spelling, consumed by the receiver
+ * test AND by the holders of `Object` (as its `memberHolds`), so the two
+ * cannot disagree about what reaches the built-in.
  */
+function objectMemberHolds(sf: ts.SourceFile): MemberHolds {
+  return (receiver, key) => {
+    if (key !== "Object") return false;
+    const base = unwrapTransparent(receiver);
+    return ts.isIdentifier(base) && isGlobal(sf, base, "globalThis");
+  };
+}
 function isGlobalObjectMember(sf: ts.SourceFile, e: ts.Expression): boolean {
   const outer = memberAccess(unwrapTransparent(e));
-  if (!outer || outer.name !== "Object") return false;
-  const base = unwrapTransparent(outer.receiver);
-  return ts.isIdentifier(base) && isGlobal(sf, base, "globalThis");
+  return !!outer && objectMemberHolds(sf)(outer.receiver, outer.name);
 }
 
 /**
