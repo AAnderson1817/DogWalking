@@ -213,7 +213,7 @@ whole enums — on the file an engineer reads to learn which statuses exist.
 Same shape as 10a, and red for the same false reason when
 `docs/spec/01-data-model.md` is merely uncommitted.
 
-## 10f. The enum catalogue generator's proof set holds
+## 10f. The catalogue generators' proof set holds
 Reads the migrations only, so it always runs:
 ```
 python3 scripts/gen-enum-catalog-proofs.py
@@ -225,6 +225,33 @@ connected to nothing once the container is gone. The probes are committed
 now: each writes a migration into a scratch copy of the real set and asserts
 the generator either renders the expected catalogue or refuses with the
 sentence the rule names. About half a minute; a FAIL line names the rule.
+
+It covers BOTH catalogue generators. `gen-definer-catalog.py` (gate 10a) read
+migrations with the naive comment-stripping regex pair `gen-enum-catalog.py`
+had to replace, so it carries its own probes here — the file name still says
+`enum` because renaming it would cost more than it tells anyone, and the
+footer says `catalogue-generator proofs` rather than `enum`.
+
+## 10g. The three gate lists are in lockstep
+Reads four files, so it always runs:
+```
+python3 scripts/check-gate-lockstep.py
+```
+`CLAUDE.md` says to keep `ci.yml`, `SKILL.md` and `validate.sh` in lockstep,
+and nothing checked it — this repository's most-recorded defect, a rule written
+down and connected to nothing. It had already drifted three ways:
+`db-push-check.sh` was CI-only for a whole PR and `concurrency.sh` for another,
+each found only when CI refused a commit that had passed locally; §13 below
+told a fresh session that two gates existed only in CI when fifteen did; and
+the secret-leak step called itself "validate gate 7" when it is gate 11.
+
+Every named `run:` step in `ci.yml` is classified in the script as SETUP, as a
+`validate.sh` gate label, or as CI_ONLY. It fails on an unclassified step, on a
+map entry naming a step that no longer exists, on a `validate.sh` label the map
+claims and `validate.sh` does not declare, on a §13 entry with no step behind
+it, and on the CI-only count in `docs/dev/session-notes.md` disagreeing with
+the measured one. The map is an allowlist of exceptions, editable only in that
+file and only in the same commit as the step it describes.
 
 ## 11. Secret-leak grep
 ```
@@ -263,16 +290,35 @@ which is the only thing running these gates before committing is for.
 Keep this identical to `.github/workflows/ci.yml`'s step of the same name.
 
 ## 13. The rest of CI's invariant checks
-These live in `ci.yml` and are cheap to run by hand when touching their
-subject; run them when relevant, and read the workflow rather than trusting
-this list to stay complete:
+These run in `ci.yml` and NOWHERE ELSE, so a green `scripts/validate.sh` says
+nothing about them. Every entry is the `ci.yml` job and the step's exact name,
+separated by ` / `. The job is part of the identity because a display NAME is
+not — `Install` exists in two jobs, and keyed by name alone a new check reusing
+an existing name inherited that name's mapping and was classified by nobody.
 
-- invariant 1 — `credit_balance` written only by `fn_ledger_apply` (a
-  `pg_proc` catalogue assertion, not a grep over migration text)
-- errors go through `FormError`, never a bare `field__error` span
-- exactly one `<main>`, owned by `AppMain`
-- the walk channel is private, and is the only channel
-- every `new HttpError(5xx, …)` carries its cause
-- DEV fixtures absent from the production bundle
-- the build stamps its commit, and `version.json` is excluded from the SPA rewrite
-- the nightly schedule is in a migration
+`scripts/check-gate-lockstep.py` (gate 10g) fails in both directions: a CI-only
+step missing from this list, and a list entry naming a step that no longer
+exists. It checks the count in `docs/dev/session-notes.md` too, which is where
+a fresh session reads it — that number has been wrong twice already (the notes
+said two, the spec-drift audit that found it said seven), which is the argument
+for measuring it rather than writing it into prose. It is fourteen today, and
+this list is the fourteen.
+
+Run one by hand when you touch its subject; read the workflow for what each
+actually does.
+
+- `database / Invariant 1 — credit_balance written only by fn_ledger_apply`
+- `database / The nightly schedule is in a migration`
+- `e2e-today / Every e2e spec is actually run by this workflow`
+- `edge-functions / Every 5xx throw carries its cause`
+- `edge-functions / No secret logging grep (phase 01 gate)`
+- `frontend / A production build without Supabase config is refused`
+- `frontend / Behavioural tests still execute`
+- `frontend / DEV fixtures absent from the production bundle`
+- `frontend / Every test file is claimed by a vitest project`
+- `frontend / Exactly one <main>, owned by AppMain`
+- `frontend / The build stamps the commit it was built from`
+- `frontend / The built service worker is stamped, and precaches a usable shell`
+- `frontend / The deployed frontend sets its security headers`
+- `frontend / version.json is excluded from the SPA rewrite`
+

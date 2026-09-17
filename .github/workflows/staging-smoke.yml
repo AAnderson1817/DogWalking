@@ -15,17 +15,22 @@ on:
 
 # Was `{}`, which is right for a workflow that only makes outbound HTTP calls
 # and wrong the moment one of its jobs checks the repository out — on a private
-# repository `actions/checkout` needs this scope and 403s without it. The
-# `auth-posture` job gained a checkout in #48 and has not run since (every
-# staging-smoke run after it was `skipped`, because it fires on a successful
-# staging deploy and staging has not deployed), so the gap has never shown
-# itself. Found while giving the new verify-deployment workflow the same
-# treatment; read-only either way.
+# repository `actions/checkout` needs this scope and 403s without it.
+#
+# It was added for the `auth-posture` job, which has since moved to its own
+# workflow, so for a while nothing here checked anything out and the scope was
+# unexercised. `onboard-repro` checks out now: its two replay steps source
+# `scripts/staging-fixtures.sh`, and without the scope that checkout 403s and
+# the job dies before it reaches staging at all. Read-only either way.
 permissions:
   contents: read
 
-# Serialize runs: they share fixed fixture emails, so concurrent runs would
-# fight over the same throwaway users.
+# Serialize runs. The stated reason used to be that they "share fixed fixture
+# emails" and that is no longer true — every address is run-scoped since
+# `ops(smoke-identity)`, so two runs cannot collide on one. What is left is that
+# both jobs write to one project and the cleanup warnings below name a row
+# rather than a run, so interleaved runs produce diagnostics nobody can
+# attribute. Kept deliberately rather than by inertia.
 concurrency:
   group: staging-smoke
   cancel-in-progress: false
@@ -68,6 +73,18 @@ jobs:
     runs-on: ubuntu-latest
     environment: staging
     steps:
+      # Both replay steps below source `scripts/staging-fixtures.sh`, so this
+      # job needs the repository on disk. The `ref` expression is the one the
+      # deploy's own jobs use — a fixed commit rather than whatever the branch
+      # tip is by the time this job starts, falling back to `github.sha` for a
+      # manual dispatch. What lands in `workflow_run.head_sha` for a run that
+      # was itself triggered by `workflow_run` is not something this file can
+      # verify, and it does not have to be: what is sourced here is fixture
+      # housekeeping, not the artefact under test.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
       - name: Fetch API keys (masked)
         run: |
           keys=$(curl -sSf \
@@ -85,6 +102,12 @@ jobs:
       - name: Replay onboard (signup → insert operators → role select)
         run: |
           base="https://${{ secrets.SUPABASE_PROJECT_REF }}.supabase.co"
+          # `admin`, `user_id_for`, `del` and `create_fixture_user` come from
+          # one file that both replay steps source. This step used to carry its
+          # own copy, three fixes behind the copy in the claim replay below it
+          # — the script's header says what each of those fixes was.
+          . ./scripts/staging-fixtures.sh "$base"
+
           # Unique per run. A throwaway fixture has no reason to hold a
           # stable address, and a stable one makes cleanup a PRECONDITION: if
           # the previous run failed to delete its user, this run cannot even
@@ -96,22 +119,22 @@ jobs:
           # A run-scoped address makes the collision structurally impossible
           # and demotes cleanup from a precondition to housekeeping.
           email="diag-onboard-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}@sanpo.test"; pass="Diag-$(date +%s)-pw"
-          admin() { curl -sS -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY" "$@"; }
 
+          # No clients here, unlike the claim replay: this fixture never creates
+          # one, so `service_types` is the only thing that can hold the
+          # operators row down.
           cleanup() {
-            [ -z "$1" ] && return 0
-            admin -X DELETE "$base/rest/v1/service_types?operator_id=eq.$1" >/dev/null || true
-            admin -X DELETE "$base/rest/v1/operators?id=eq.$1" >/dev/null || true
-            admin -X DELETE "$base/auth/v1/admin/users/$1" >/dev/null || true
+            [ -n "$1" ] || return 0
+            del "$base/rest/v1/service_types?operator_id=eq.$1" "service_types of $1"
+            del "$base/rest/v1/operators?id=eq.$1" "operator $1"
+            del "$base/auth/v1/admin/users/$1" "auth user $1"
           }
           # remove any leftover fixture from a previous run
-          old=$(admin "$base/auth/v1/admin/users?page=1&per_page=100" \
-            | jq -r --arg e "$email" '.users[]? | select(.email==$e) | .id' | head -1)
+          old=$(user_id_for "$email")
           cleanup "$old"
 
-          uid=$(admin -X POST "$base/auth/v1/admin/users" -H "Content-Type: application/json" \
-            -d "{\"email\":\"$email\",\"password\":\"$pass\",\"email_confirm\":true}" | jq -r '.id')
-          if [ -z "$uid" ] || [ "$uid" = "null" ]; then echo "FAIL: could not create fixture user"; exit 1; fi
+          create_fixture_user "$email" "$pass" || exit 1
+          uid="$FIXTURE_UID"
           trap 'cleanup "$uid"' EXIT
           echo "fixture user: $uid"
 
@@ -150,72 +173,16 @@ jobs:
       - name: Replay invite-claim flow (fixture operator + client)
         run: |
           base="https://${{ secrets.SUPABASE_PROJECT_REF }}.supabase.co"
+          # `admin`, `user_id_for`, `del` and `create_fixture_user` — one
+          # definition, shared with the onboard step above, which carried its
+          # own three-fixes-behind copy until this commit.
+          . ./scripts/staging-fixtures.sh "$base"
+
           # Run-scoped, for the reason given in the onboard step above.
           op_email="diag-claim-op-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}@sanpo.test"
           cl_email="diag-claim-client-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}@sanpo.test"
           pass="Diag-$(date +%s)-pw"
-          admin() { curl -sS -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY" "$@"; }
 
-          # Pages until it finds the address or runs out. It used to read
-          # `page=1&per_page=100` and stop: this function's job is to find THIS
-          # RUN's leftovers so they can be deleted before the fixtures are
-          # recreated, and once staging held more than 100 auth users they fell
-          # off page 1. Cleanup then found nothing, the create collided with the
-          # row it had failed to remove, and the job failed with a message that
-          # named neither cause. The bound is there so a project with a large
-          # user table cannot spin here forever.
-          # Stops on an EMPTY page, never on a short one. The first version of
-          # this asked for `per_page=200` and stopped when a page returned
-          # fewer than 200 — but GoTrue caps the page size, so page 1 came back
-          # with 100, `100 -lt 200` was true, and it returned "not found" having
-          # read exactly one page. That is the bug it was written to fix,
-          # reintroduced by inferring the last page from the size REQUESTED
-          # rather than from what the server actually did.
-          #
-          # `seen` guards the other direction: an endpoint that ignores `page`
-          # would otherwise be rescanned to the bound and still report absence.
-          # Exit 0 with the id on stdout (empty = genuinely absent); exit 9
-          # when the LOOKUP failed — non-2xx, or a body with no users array.
-          # The distinction became load-bearing with H31: two security
-          # assertions below read this function, and a 401 body read as
-          # "absent" would pass the dead-token check while checking nothing —
-          # the green-but-empty class this repo's log records four times
-          # (adversarial review). Warnings go to stderr because stdout is the
-          # captured return value.
-          user_id_for() {
-            local page=1 code lbody id first seen=""
-            lbody=$(mktemp)
-            while [ "$page" -le 50 ]; do
-              code=$(admin -o "$lbody" -w '%{http_code}' "$base/auth/v1/admin/users?page=$page&per_page=100")
-              case "$code" in
-                2*) ;;
-                *) echo "auth user lookup failed: GET admin/users page $page -> HTTP $code" >&2; return 9 ;;
-              esac
-              jq -e '.users | type == "array"' "$lbody" >/dev/null 2>&1 \
-                || { echo "auth user lookup: page $page carried no users array" >&2; return 9; }
-              id=$(jq -r --arg e "$1" '.users[]? | select(.email==$e) | .id' "$lbody" | head -1)
-              [ -n "$id" ] && { printf '%s' "$id"; return 0; }
-              [ "$(jq -r '.users | length' "$lbody")" -eq 0 ] && return 0
-              first=$(jq -r '.users[0].id // empty' "$lbody")
-              [ -n "$first" ] && [ "$first" = "$seen" ] && return 0
-              seen=$first
-              page=$((page + 1))
-            done
-            return 0
-          }
-          # Failures are REPORTED, not swallowed. Every `|| true` here used to
-          # hide a refused delete, which is how leftovers accumulated silently
-          # until a run could no longer start. They stay non-fatal — cleanup is
-          # housekeeping now, not a precondition — but a warning means the
-          # accumulation is visible while it is still cheap to fix.
-          del() {
-            local code
-            code=$(admin -o /dev/null -w '%{http_code}' -X DELETE "$1")
-            case "$code" in
-              2*) return 0 ;;
-              *) echo "::warning title=Fixture cleanup left something behind::DELETE $2 -> HTTP $code. Rows accumulate in staging until this is fixed." ;;
-            esac
-          }
           cleanup() {
             local c
             for c in $2; do [ -n "$c" ] && del "$base/rest/v1/clients?id=eq.$c" "client $c"; done
@@ -236,36 +203,10 @@ jobs:
           old_client_row=$(admin "$base/rest/v1/clients?select=id&operator_id=eq.${old_op:-00000000-0000-4000-8000-000000000000}" | jq -r '.[].id' | tr '\n' ' ')
           cleanup "$old_op" "$old_client_row" "$old_cl"
 
-          # The body is kept, not piped straight into jq. `FAIL: fixture
-          # operator user` used to be the whole of the diagnosis — the status
-          # and GoTrue's own message went in the bin, so "already registered",
-          # "weak password" and "service key rejected" were one indistinguish-
-          # able red. Same defect as review H14, in the workflow that exists to
-          # tell us when staging is wrong.
-          mkuser=$(mktemp)
-          opcode=$(admin -o "$mkuser" -w '%{http_code}' -X POST "$base/auth/v1/admin/users" \
-            -H "Content-Type: application/json" \
-            -d "{\"email\":\"$op_email\",\"password\":\"$pass\",\"email_confirm\":true}")
-          op_uid=$(jq -r '.id // empty' "$mkuser")
-          if [ -z "$op_uid" ]; then
-            # `error_description`/`msg` only — never the whole body, and the
-            # password is this script's own throwaway, not a secret of anyone's.
-            msg=$(jq -r '.error_description // .msg // .message // "no message"' "$mkuser")
-            echo "::error title=Could not create the fixture operator::HTTP $opcode — $msg"
-            # A 422 means cleanup left the previous run's user behind. Which
-            # half failed is the next question, and the answer is one lookup:
-            # if the search CAN see it, the delete is what is broken; if it
-            # cannot, the search is. Without this the two look identical.
-            if [ "$opcode" = "422" ]; then
-              stale=$(user_id_for "$op_email")
-              if [ -n "$stale" ]; then
-                echo "::error title=Cleanup did not delete the leftover::The lookup can see $op_email as $stale, so the DELETE is what failed — most likely an operators row still references the auth user. Delete it by hand and the next run is clean."
-              else
-                echo "::error title=The lookup cannot see the leftover::GoTrue says $op_email exists but the paginated admin search does not return it, so the SEARCH is what is broken, not the delete."
-              fi
-            fi
-            exit 1
-          fi
+          # Status, GoTrue's own message and — on a 422 — which half of cleanup
+          # is broken all come from `create_fixture_user`; see the script.
+          create_fixture_user "$op_email" "$pass" || exit 1
+          op_uid="$FIXTURE_UID"
           client_row=""; cl_uid=""
           trap 'cleanup "$op_uid" "$client_row" "$cl_uid"' EXIT
 

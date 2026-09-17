@@ -168,11 +168,22 @@ enum_catalog() {
 }
 run "10e. enum catalogue" enum_catalog
 
-# 10f. The generator's own proof set: the probes from the forty-three review
-# rounds on PR #88, each a healthy migration it must read or a defect it must
-# refuse by name. They lived in a session scratchpad until they were a test.
+# 10f. The catalogue generators' own proof set: the probes from the forty-three
+# review rounds on PR #88, each a healthy migration a generator must read or a
+# defect it must refuse by name. They lived in a session scratchpad until they
+# were a test. Covers BOTH generators — 10a's definer catalogue read SQL with
+# the naive stripper 10e's had to replace, so its probes live here too, which
+# is why the label says "catalogue" where the file name still says "enum".
 # Reads the migrations only, so it always runs.
-run "10f. enum catalogue proofs" python3 scripts/gen-enum-catalog-proofs.py
+run "10f. catalogue generator proofs" python3 scripts/gen-enum-catalog-proofs.py
+
+# 10g. CLAUDE.md calls ci.yml, SKILL.md and this file a lockstep, and until now
+# nothing checked it: `db-push-check.sh` was CI-only for a whole PR and
+# `concurrency.sh` for another, each found when CI refused a commit that had
+# passed locally. This classifies every ci.yml check as mirrored here, as
+# setup, or as CI-only — and a CI-only one has to be named in SKILL.md §13,
+# which is what a person reads to learn what a green local run did not cover.
+run "10g. gate lockstep" python3 scripts/check-gate-lockstep.py
 
 # ── 11. Secret-leak grep ──────────────────────────────────────────────────
 no_secret_literals() {

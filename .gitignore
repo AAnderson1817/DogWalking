@@ -7,3 +7,9 @@ dist/
 supabase/.temp/
 supabase/.branches/
 __pycache__/
+
+# Claude Code creates a git worktree per background agent here. Each one is a
+# checkout of this same repository (its `.git` is a `gitdir:` pointer into
+# `.git/worktrees/`), so committing them would nest the repository inside
+# itself, and they are removed when the agent finishes.
+.claude/worktrees/

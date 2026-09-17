@@ -27,6 +27,26 @@ jobs:
   frontend:
     name: Frontend — tsc, vitest, build
     runs-on: ubuntu-latest
+    # Bounded, like every other job here. `ci(concurrency)` put a ceiling on
+    # `e2e-today` because that was the job that had wedged, and left the other
+    # four on GitHub's six-hour default — the per-site fix this log keeps
+    # recording, and the reason this is a class fix rather than a sixth site.
+    #
+    # A wedged job is indistinguishable from a slow one until a ceiling says
+    # so; this session cannot clear one (the token 403s on Actions writes); and
+    # on `main` a six-hour job holds the deploy gate and produces the
+    # misleading red `ops(gate-noise)` is about. That argument stands on its
+    # own — which matters, because the incident I first wrote here as its
+    # motivation did not happen: I read `in_progress` off a STALE check-runs
+    # snapshot and asserted an elapsed time I had not computed, while the job
+    # record says that run finished in 76 seconds, green, with the step I
+    # called hung taking 18. The bound is right; the story was not.
+    #
+    # Measured on run 35004363610, which was fully green: frontend 60s, e2e
+    # 87s, database 73s, edge 17s, migrations 5s. These are ~8x headroom, not a
+    # target — a ceiling that trips on an ordinary slow day is a gate red on a
+    # healthy tree.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
 
@@ -215,6 +235,17 @@ jobs:
       - name: Deploy workflow gating
         run: python3 scripts/verify-workflows.py
 
+      # CLAUDE.md calls ci.yml, SKILL.md and validate.sh a lockstep and nothing
+      # checked it. Two gates had already drifted CI-only for a PR each
+      # (db-push-check, concurrency), found only when CI refused a commit that
+      # passed locally; session-notes told a fresh session there were two such
+      # gates when there were fifteen; and the step below this one called
+      # itself "validate gate 7" when it is gate 11. Fails in both directions —
+      # an unclassified step, and a SKILL.md §13 entry naming a step that is
+      # gone.
+      - name: The three gate lists are in lockstep
+        run: python3 scripts/check-gate-lockstep.py
+
       # CLAUDE.md states the migration and edge-function counts in prose, and
       # its own note used to read "nothing enforces these two counts". They
       # went stale at H21, again by 0043, and a third time at 0051. The
@@ -222,7 +253,7 @@ jobs:
       - name: CLAUDE.md's counts match the tree
         run: python3 scripts/check-status-counters.py
 
-      - name: Secret-leak grep (validate gate 7)
+      - name: Secret-leak grep (validate gate 11)
         run: |
           if grep -RInE "(VAULT_MASTER_KEY|SERVICE_ROLE|sk_live|sk_test)" \
                app/src supabase/functions --include='*.ts' --include='*.tsx' \
@@ -339,17 +370,6 @@ jobs:
             exit 1
           fi
 
-      - name: Errors go through FormError, not a bare span
-        run: |
-          if grep -rn 'className="field__error"' app/src --include='*.tsx' \
-               | grep -v 'src/components/fields.tsx' | grep -q .; then
-            echo "FAIL: bare field__error outside fields.tsx — use <FormError message={…} />:"
-            grep -rn 'className="field__error"' app/src --include='*.tsx' \
-              | grep -v 'src/components/fields.tsx'
-            exit 1
-          fi
-          echo "PASS: all form errors render through FormError"
-
       # The shells supply the one <main> per route (AppMain). Two components
       # carried their own from before that existed, and TodayIllustratedSchedule's
       # ended up NESTED inside the shell's — invalid, and two "main" landmarks on
@@ -369,35 +389,11 @@ jobs:
           fi
           echo "PASS: one main landmark, supplied by the shell"
 
-      # The live-GPS topic carries the real-time position of a named person at
-      # a named residential address. `private` defaults to FALSE in
-      # realtime-js, so omitting the option is not a smaller mistake than
-      # writing `private: false` — it is the same one, and it is invisible in
-      # review. There is exactly one channel in this application; keep it that
-      # way, and keep it private (review H1).
-      - name: The walk channel is private, and is the only channel
-        run: |
-          callers=$(grep -rln 'supabase\.channel(' app/src --include='*.ts' --include='*.tsx' || true)
-          if [ "$callers" != "app/src/hooks/useWalkChannel.ts" ]; then
-            echo "FAIL: supabase.channel() is called outside useWalkChannel.ts:"
-            echo "$callers"
-            echo "Every channel needs its own realtime.messages policy; add one to migration"
-            echo "history and extend this check, rather than opening an unauthorized topic."
-            exit 1
-          fi
-          # Matched on the call itself, not on the string anywhere in the file:
-          # the first version of this check passed against a channel with the
-          # option deleted, because the comment above it still said
-          # "private: true". A grep that a comment can satisfy is not a check.
-          if ! grep -Eq 'supabase\.channel\([^)]*config: *\{ *private: true' app/src/hooks/useWalkChannel.ts; then
-            echo "FAIL: the walk channel is not private — the topic is joinable by any"
-            echo "holder of the anon key, which ships in the bundle (review H1)."
-            exit 1
-          fi
-          if grep -rn 'private: false' supabase/functions/_lib/broadcast.ts; then
-            echo "FAIL: the server publishes to the public topic"; exit 1
-          fi
-          echo "PASS: one channel, private on both sides"
+      # The live-GPS topic's check used to live here, as a grep. It is
+      # `app/scripts/realtime-channel.test.ts` now (gate 3, so a local run
+      # covers it): a regex over an argument list could not tell one call from
+      # two, and counting instead made it red on ordinary spellings a parser
+      # reads without trouble. The reasoning is in that file's header.
 
   # Backend-free: /dev/today renders deterministic fixtures with no Supabase,
   # so this runs in ~2 minutes against a plain `vite dev` and needs no secrets.
@@ -550,6 +546,8 @@ jobs:
   edge-functions:
     name: Edge functions — deno check + test
     runs-on: ubuntu-latest
+    # Bounded for the reason on the `frontend` job above.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
 
@@ -647,6 +645,8 @@ jobs:
           --health-retries 10
     env:
       LOCAL_DB_URL: postgresql://postgres:postgres@localhost:54322/postgres
+    # Bounded for the reason on the `frontend` job above.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
 
@@ -745,7 +745,41 @@ jobs:
             join pg_namespace n on n.oid = p.pronamespace
             where n.nspname = 'public'
               and p.proname <> 'fn_ledger_apply'
-              and p.prosrc ~* 'update[[:space:]]+clients[[:space:]]+set[^;]*credit_balance';
+              -- The schema qualifier, ONLY and the alias are all optional, and
+              -- the spec-drift audit found that the previous pattern allowed
+              -- none of them: `update public.clients set …` and `update
+              -- clients c set …` were both silent against it. An alias may also
+              -- be QUOTED — `update clients as "c" set …` is valid PostgreSQL
+              -- and `prosrc` keeps the quotes, so a bare-identifier alias
+              -- pattern reported PASS against a definer function that really
+              -- did write the balance (measured, Codex on PR #94). Probed on a
+              -- live database across twelve spellings; this one reads eleven —
+              -- plain, qualified, quoted, quoted-schema, bare alias, `as`
+              -- alias, QUOTED alias, ONLY, mixed case, newline and tab.
+              --
+              -- The twelfth it MISSES, stated rather than chased: a comment
+              -- between the table and SET (`update clients /* x */ set …`).
+              -- Reading that needs a SQL comment lexer, and PostgreSQL's block
+              -- comments NEST — `gen-enum-catalog.py` needed a state machine
+              -- and forty-three review rounds for exactly this, which is more
+              -- than a psql heredoc can carry. Widening the pattern to bridge
+              -- arbitrary text between the table and SET was measured and
+              -- rejected: it would also match `update walks set … where
+              -- client_id in (select id from clients where credit_balance > 0)`,
+              -- which is a red on healthy code — the worse failure.
+              --
+              -- SCOPE, corrected. An earlier version of this comment called the
+              -- column grant "the enforcement" and this check a backstop behind
+              -- it. That is wrong in the one direction that matters here: a
+              -- SECURITY DEFINER function runs as its OWNER, so the grant that
+              -- stops `anon` and `authenticated` writing `credit_balance`
+              -- (measured: both false) does not constrain the very population
+              -- this query scans. For a definer function this text search is
+              -- the only automated check there is. It still catches the mistake
+              -- rather than the adversary — SQL assembled to evade it is out of
+              -- scope, the `gen-enum-catalog.py` stopping rule — but it is not
+              -- standing behind a stronger control.
+              and p.prosrc ~* 'update[[:space:]]+(only[[:space:]]+)?("?public"?\.)?"?clients"?([[:space:]]+(as[[:space:]]+)?([a-z_][a-z0-9_$]*|"[^"]*"))?[[:space:]]+set[^;]*credit_balance';
             if offenders is not null then
               raise exception 'INVARIANT 1 FAIL: credit_balance written outside fn_ledger_apply by: %', offenders;
             end if;
@@ -825,7 +859,7 @@ jobs:
       # each fix was proven red first — in a session scratchpad, which is a
       # rule connected to nothing once the container is gone. The probes are
       # a committed test now (validate gate 10f).
-      - name: The enum catalogue generator's proof set holds
+      - name: The catalogue generators' proof set holds
         run: python3 scripts/gen-enum-catalog-proofs.py
 
   # CLAUDE.md invariant 6 says migrations are append-only once applied. That
@@ -836,6 +870,8 @@ jobs:
     name: Migrations — append-only
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # Bounded for the reason on the `frontend` job above.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
         with:

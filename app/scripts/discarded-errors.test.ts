@@ -1,7 +1,19 @@
 import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { join, posix, relative, resolve } from "node:path";
 import ts from "typescript";
+import {
+  type BoundValue,
+  boundValues,
+  calleeCall,
+  calleeOf,
+  computedAccess,
+  isTransparentWrapper,
+  memberAccess as sharedMemberAccess,
+  memberRoot,
+  outward,
+  unwrapTransparent,
+} from "./lib/static-object.js";
 import { describe, expect, it } from "vitest";
 
 /**
@@ -207,6 +219,33 @@ function sourceFiles(dir: string): string[] {
 
 const QUERY_METHODS = new Set(["from", "rpc"]);
 const CLIENT_FACTORIES = new Set(["adminClient", "createClient"]);
+/**
+ * The MODULES whose `adminClient` / `createClient` is the Supabase client
+ * factory. A factory is the export of a known module, not a name: any
+ * namespace import exposing a method called `createClient` counted, so
+ * `import * as oauth from "./oauth"; oauth.createClient().auth.getUser()` was
+ * read as a Supabase operation and a dropped error on an unrelated library's
+ * client was reported as a discard (Codex, PR #94, round 67) — and the
+ * NAMED-import form had carried the same hole since this gate was written,
+ * `import { createClient } from "./oauth"` being the factory by spelling
+ * alone (measured; the sibling).
+ *
+ * The house wrapper is identified by its RESOLVED path, so `../_lib/admin.ts`
+ * from a function and `./admin.ts` from a `_lib` sibling are one module and a
+ * second `admin.ts` anywhere else is not one, whatever it exports; supabase-js
+ * by its package name under Deno's spelling, where the registry prefix and
+ * the version are the same package. Measured on the tree: every factory
+ * import is one of `../_lib/admin.ts`, `./admin.ts` and
+ * `npm:@supabase/supabase-js@2`.
+ */
+const ADMIN_MODULE = relative(ROOT, join(FUNCTIONS, "_lib", "admin.ts"));
+const SUPABASE_JS = /^(npm:|jsr:)?@supabase\/supabase-js(@[^/]+)?$/;
+
+function isClientModule(file: string, spec: string): boolean {
+  if (SUPABASE_JS.test(spec)) return true;
+  if (!spec.startsWith("./") && !spec.startsWith("../")) return false;
+  return posix.normalize(posix.join(posix.dirname(file), spec)) === ADMIN_MODULE;
+}
 /** Consuming a builder through a thenable method is a shape this gate does not read. */
 const THENABLE = new Set(["then", "catch", "finally"]);
 /**
@@ -226,6 +265,34 @@ const REJECTS_REASON = "carries `.throwOnError()`, which rejects with a raw Post
 /** `q.delete().throwOnError` / `db.from("x").select`: a method named and never invoked. */
 function uncalledReason(what: string, member: string): string {
   return `${what}: \`.${member}\` is referenced and never called — nothing runs`;
+}
+
+/**
+ * `db.from.call(db, "x")`, `const f = db.rpc`: the query method handed away.
+ *
+ * Deliberately NOT `uncalledReason`'s sentence. There the method genuinely
+ * never runs; here it runs through a route this gate cannot follow, so the
+ * envelope exists and nobody classified it. A red that misdescribes itself is
+ * its own defect, so the two say different things.
+ */
+function escapedQueryReason(member: string): string {
+  return `query: \`.${member}\` is handed somewhere rather than called here, so the envelope it `
+    + `produces is never classified — call \`<client>.${member}(…)\` directly`;
+}
+
+/**
+ * `db[key](…)`, `db.auth[key](…)`: a member reached from a client that this
+ * gate cannot NAME. It may be `from`, `rpc` or a GoTrue call, so the envelope
+ * it produces is never classified — `const key: "from" = "from"; const { data }
+ * = await db[key]("walks").select("id")` type-checks, discards its error, and
+ * produced no site at all (measured; Codex, PR #94, the realtime gate's
+ * `supabase[key]` finding in this reader). Reported by name, on a receiver
+ * with positive client evidence only: a computed member of anything else is
+ * ordinary code, and `handlers[type](payload)` must stay silent.
+ */
+function computedMemberReason(text: string): string {
+  return `\`${text}\` is a computed member reached from a client — this check cannot say whether it `
+    + "is a query or a GoTrue call, so nothing it produces is classified; name the member";
 }
 
 const COMPILER_OPTIONS: ts.CompilerOptions = {
@@ -261,14 +328,20 @@ function programOver(files: Map<string, string>): ts.Program {
 
 type ReceiverKind = "client" | "global" | "unknown";
 
-function receiverKind(recv: ts.Expression): ReceiverKind {
-  // `(db as any).from(…)` is `db.from(…)` with a cast around the receiver.
-  let r: ts.Expression = recv;
-  while (ts.isParenthesizedExpression(r) || ts.isAsExpression(r) || ts.isNonNullExpression(r) || ts.isSatisfiesExpression(r)) r = r.expression;
+function receiverKind(ctx: Ctx, recv: ts.Expression): ReceiverKind {
+  // `(db as any).from(…)` is `db.from(…)` with a cast around the receiver, and
+  // the shared predicate is what knows the whole set — the copy that used to
+  // stand here omitted `<T>x`, so `(<SupabaseClient>db).from(…)` with its
+  // error handled was an unrecognised receiver: a gate red on a healthy tree
+  // (Codex, PR #94).
+  const r = unwrapTransparent(recv);
   if (ts.isIdentifier(r)) return /^[A-Z]/.test(r.text) ? "global" : "client";
-  if (ts.isCallExpression(r) && ts.isIdentifier(r.expression) && CLIENT_FACTORIES.has(r.expression.text)) {
-    return "client";
-  }
+  // …and the FACTORY's own callee is a value the same wrappers reach through,
+  // so `(adminClient)().from(…)` is `adminClient().from(…)`. Reading the raw
+  // node reported it as an unrecognised receiver in BOTH directions, the
+  // handled one included (measured).
+  const callee = calleeOf(r);
+  if (callee && isClientFactory(ctx, callee)) return "client";
   return "unknown";
 }
 
@@ -295,10 +368,9 @@ function enclosingStatement(node: ts.Node): ts.Node {
   return n;
 }
 
-/** Transparent wrappers around an expression: `(e)`, `e as T`, `e!`, `e satisfies T`. */
+/** This parent is a transparent wrapper around that child. */
 function isTransparent(p: ts.Node, child: ts.Node): boolean {
-  return (ts.isParenthesizedExpression(p) || ts.isAsExpression(p) || ts.isNonNullExpression(p) ||
-    ts.isSatisfiesExpression(p)) && p.expression === child;
+  return isTransparentWrapper(p) && p.expression === child;
 }
 
 interface Chain {
@@ -333,11 +405,18 @@ function outermost(node: ts.Node): Chain {
     const p: ts.Node = n.parent;
     const m = memberAccess(p);
     if (m && m.receiver === n) {
-      const next = p.parent;
-      const invoked = ts.isCallExpression(next) && next.expression === p;
+      // Both questions are asked of the member as the LANGUAGE sees it. A
+      // transparent wrapper between a member and what holds it must not make
+      // an invoked method look uncalled: `db.from("x").select!("id")` runs
+      // exactly as the bare spelling does, and reporting it failed a healthy
+      // file — a gate red on a healthy tree (Codex, PR #94; all five wrappers
+      // and a link deeper in the chain measured the same way).
+      const outer = outward(p);
+      const next = outer.parent;
+      const invoked = calleeCall(p) !== null;
       // A namespace hop — `.auth.admin.createUser(…)`, `.auth.mfa.…` — is a
       // property, not a method, and the call comes one link later.
-      const hop = memberAccess(next)?.receiver === p;
+      const hop = memberAccess(next)?.receiver === outer;
       if (!invoked && !hop) return { top: p, uncalled: m.name };
       if (invoked && THENABLE.has(m.name)) return { top: p, thenable: m.name };
       if (invoked && REJECTING_MODIFIERS.has(m.name)) rejects = true;
@@ -377,7 +456,12 @@ function isBlockScoped(list: ts.VariableDeclarationList): boolean {
 
 /** Is this arrow function an argument of a call — a callback whose consumer the gate cannot see? */
 function inlineCallback(fn: ts.ArrowFunction): boolean {
-  return ts.isCallExpression(fn.parent) && fn.parent.arguments.includes(fn);
+  // Through the shared helper for consistency with every other parent reader
+  // here rather than as a fix: no constructed input changes a verdict, since
+  // a wrapped callback's own body reaches this by a path that answers the
+  // same either way (measured, PR #94).
+  const outer = outward(fn);
+  return ts.isCallExpression(outer.parent) && outer.parent.arguments.some((arg) => arg === outer);
 }
 
 /**
@@ -385,15 +469,13 @@ function inlineCallback(fn: ts.ArrowFunction): boolean {
  * `r.error` or `r["error"]`; the element-access spelling is the same member
  * and must not be invisible to the scan (adversarial review and Codex on
  * PR #92).
+ *
+ * The SHARED implementation, because this copy read a string literal and not a
+ * no-substitution template, so `` db[`from`]("walks") `` with a discarded error
+ * was invisible while `db["from"]` was caught — measured, 68 of 68 green
+ * (Codex, PR #94, found by checking the sibling of the reader it named).
  */
-function memberAccess(n: ts.Node | undefined): { receiver: ts.Expression; name: string; token: ts.Node } | null {
-  if (!n) return null;
-  if (ts.isPropertyAccessExpression(n)) return { receiver: n.expression, name: n.name.text, token: n.name };
-  if (ts.isElementAccessExpression(n) && ts.isStringLiteral(n.argumentExpression)) {
-    return { receiver: n.expression, name: n.argumentExpression.text, token: n.argumentExpression };
-  }
-  return null;
-}
+const memberAccess = sharedMemberAccess;
 
 /**
  * Every identifier an assignment TARGET writes: the plain `r = …`, and the
@@ -514,12 +596,8 @@ const LOGICAL_ASSIGNMENTS = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.QuestionQuestionEqualsToken,
 ]);
 
-/** An expression with its transparent wrappers stripped: `(x)`, `x as T`, `x!`, `x satisfies T`. */
-function unwrapped(e: ts.Expression): ts.Expression {
-  let r = e;
-  while (ts.isParenthesizedExpression(r) || ts.isAsExpression(r) || ts.isNonNullExpression(r) || ts.isSatisfiesExpression(r)) r = r.expression;
-  return r;
-}
+/** An expression with its transparent wrappers stripped. */
+const unwrapped = unwrapTransparent;
 
 /**
  * `box.nested.cause` — the plain name at the base and the keys from it
@@ -758,8 +836,7 @@ function visiblyInvoked(fn: ts.Node, container: ts.Node, checker: ts.TypeChecker
   const callSites: ts.Node[] = [];
   const visit = (n: ts.Node) => {
     if (ts.isIdentifier(n) && n !== name && symbolOf(checker, n) === sym) {
-      let t: ts.Node = n;
-      while (t.parent && isTransparent(t.parent, t)) t = t.parent;
+      const t = outward(n);
       if (ts.isCallExpression(t.parent) && t.parent.expression === t) callSites.push(t.parent);
     }
     ts.forEachChild(n, visit);
@@ -932,8 +1009,12 @@ function usesOf(checker: ts.TypeChecker, sym: ts.Symbol, container: ts.Node): ts
 
 /** `r.error` / `r["error"]` on this identifier, or null. */
 function errorAccess(u: ts.Identifier): ts.Expression | null {
-  const m = memberAccess(u.parent);
-  return m && m.receiver === u && m.name === "error" ? (u.parent as ts.Expression) : null;
+  // `(r).error` and `r!.error` are the same read, and asking the syntactic
+  // parent reported both as an envelope whose error is never read — a gate
+  // red on a healthy tree (Codex, PR #94, the sibling of the chain finding).
+  const outer = outward(u);
+  const m = memberAccess(outer.parent);
+  return m && m.receiver === outer && m.name === "error" ? (outer.parent as ts.Expression) : null;
 }
 
 /** Is this `.error` access being WRITTEN (`r.error = null`, `r.error ??= x`, `delete r.error`) rather than read? */
@@ -1307,7 +1388,10 @@ function followEnvelopeVar(ctx: Ctx, nameNode: ts.Identifier, at: ts.Node): Site
   // `console.log(r)` / `JSON.stringify(r)` / `helper(r)`: the gate cannot see
   // what the callee does with it, and a debug print beside `return r.data`
   // must not turn a discard into a pass (adversarial review on PR #92).
-  const passedToCall = uses.find((u) => ts.isCallExpression(u.parent) && u.parent.arguments.includes(u));
+  const passedToCall = uses.find((u) => {
+    const outer = outward(u);
+    return ts.isCallExpression(outer.parent) && outer.parent.arguments.some((arg) => arg === outer);
+  });
   if (passedToCall) {
     return [site(ctx, at, "UNCLASSIFIED", `envelope in \`${name}\` passed to a call — its consumer is not visible${via(passedToCall)}`)];
   }
@@ -1498,8 +1582,7 @@ function writeOf(target: ts.Identifier): { node: ts.Node; rhs: ts.Expression | u
 
 /** The branches a value can take: through wrappers and a conditional's two arms. */
 function leaves(e: ts.Expression): ts.Expression[] {
-  let n: ts.Expression = e;
-  while (ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isNonNullExpression(n) || ts.isSatisfiesExpression(n)) n = n.expression;
+  const n: ts.Expression = unwrapTransparent(e);
   if (ts.isConditionalExpression(n)) return [...leaves(n.whenTrue), ...leaves(n.whenFalse)];
   return [n];
 }
@@ -1511,7 +1594,7 @@ function chainRoot(e: ts.Node): ts.Node {
     if (ts.isCallExpression(n)) { n = n.expression; continue; }
     const m = memberAccess(n);
     if (m) { n = m.receiver; continue; }
-    if (ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isNonNullExpression(n) || ts.isSatisfiesExpression(n)) { n = n.expression; continue; }
+    if (isTransparentWrapper(n)) { n = n.expression; continue; }
     return n;
   }
 }
@@ -1612,15 +1695,121 @@ function declaredByType(ctx: Ctx, t: ts.TypeNode | undefined): Declared {
  *            conditional), a destructured binding with no readable client
  *            type, an import, a class member, a cycle of aliases.
  */
+/** What an identifier is IMPORTED as, followed through plain aliases. */
+type ImportedAs = {
+  /** The module specifier as written. */
+  spec: string;
+  /** The exported name for a named import, `"default"` for a default import, null for a namespace. */
+  exported: string | null;
+};
+
+/**
+ * The import an identifier is bound to — `import { a as b }` names the
+ * export `a`, `import * as ns` names the module, `import d` names its default
+ * — followed through a plain alias (`const a = admin;`, and `a = admin` in
+ * any alias-forming spelling, as `declaredAsClient` reads a receiver's
+ * sources), so an alias of the namespace is the namespace. Null for a local
+ * declaration, a parameter, or a name the file never declares.
+ */
+function importedAs(ctx: Ctx, id: ts.Identifier, seen = new Set<ts.Symbol>()): ImportedAs | null {
+  const sym = symbolOf(ctx.checker, id);
+  if (!sym || seen.has(sym)) return null;
+  seen.add(sym);
+  const decl = sym.valueDeclaration ?? sym.declarations?.[0];
+  if (!decl) return null;
+  // A JSDoc `@import` binds a type and no value, so only a real import
+  // declaration answers.
+  const declared = (d: ts.Node, exported: string | null): ImportedAs | null =>
+    ts.isImportDeclaration(d) && ts.isStringLiteralLike(d.moduleSpecifier) ? { spec: d.moduleSpecifier.text, exported } : null;
+  if (ts.isNamespaceImport(decl)) return declared(decl.parent.parent, null);
+  if (ts.isImportSpecifier(decl)) return declared(decl.parent.parent.parent, (decl.propertyName ?? decl.name).text);
+  if (ts.isImportClause(decl)) return declared(decl.parent, "default");
+  // An ALIAS, through every binding form the shared enumeration knows — a
+  // declaration, an assignment in any alias-forming spelling, a parameter or
+  // binding-element default, a destructuring against a literal, a loop over
+  // one — filtered to THIS symbol's targets, so a same-named binding
+  // elsewhere in the file is not this one. Following the declaration
+  // initializer and the plain assignments alone was a partial copy of that
+  // list: `const [a] = [admin]; a.adminClient()` with its error handled was
+  // "declared as neither a client nor a value", a refusal on healthy code
+  // (Codex, PR #94, round 68), and the object, loop, parameter-default and
+  // nested spellings were refused the same way (measured). A key taken off a
+  // NAMESPACE import is that module's export: `const { adminClient } =
+  // admin` is `admin.adminClient` one syntactic shape over.
+  for (const b of boundValuesOf(ctx.sf)) {
+    if (symbolOf(ctx.checker, b.target) !== sym) continue;
+    const v = unwrapTransparent(b.value);
+    if (!ts.isIdentifier(v)) continue;
+    const found = importedAs(ctx, v, seen);
+    if (!found) continue;
+    if (b.key === undefined) return found;
+    if (found.exported === null) return { spec: found.spec, exported: b.key };
+  }
+  return null;
+}
+
+/** `boundValues` once per file: every reader of a binding asks the same list. */
+const BOUND_VALUES = new WeakMap<ts.SourceFile, BoundValue[]>();
+function boundValuesOf(sf: ts.SourceFile): BoundValue[] {
+  let bound = BOUND_VALUES.get(sf);
+  if (!bound) BOUND_VALUES.set(sf, (bound = boundValues(sf)));
+  return bound;
+}
+
+/**
+ * `adminClient` / `createClient` as the EXPORT of a known client module
+ * (`isClientModule`) — by name (`import { createClient } from
+ * "npm:@supabase/supabase-js@2"`, the spelling `credential-vault` uses, and
+ * renamed, `import { createClient as mk }`, is the same export), off a
+ * NAMESPACE import of one (`admin.adminClient()`), or off an alias of either
+ * (`const a = admin; a.adminClient()` with its error handled was "declared
+ * as neither a client nor a value" on the shipped gate: a refusal on healthy
+ * code, the channel gate's alias finding in this reader). A same-named
+ * export of any other module, a same-named method on anything else, and a
+ * local declaration of the name are NOT the factory: what they return is a
+ * receiver this gate cannot read, and it says so rather than reporting a
+ * discarded error on somebody else's client. An identifier the file declares
+ * no VALUE for — never declared, or declared ambiently (`declare function
+ * adminClient(): any`, which binds a type and emits nothing) — is taken by
+ * name: there is nothing to resolve, a typechecked module has none, and the
+ * fixtures here call `adminClient()` bare or under such a declaration.
+ */
+/** The file binds a value to this name: some declaration of it is not ambient. */
+function declaresValue(ctx: Ctx, id: ts.Identifier): boolean {
+  const decls = symbolOf(ctx.checker, id)?.declarations ?? [];
+  return decls.some((d) => !(ts.getCombinedModifierFlags(d) & ts.ModifierFlags.Ambient));
+}
+function isClientFactory(ctx: Ctx, callee: ts.Expression): boolean {
+  if (ts.isIdentifier(callee)) {
+    const imp = importedAs(ctx, callee);
+    if (imp) return imp.exported !== null && CLIENT_FACTORIES.has(imp.exported) && isClientModule(ctx.file, imp.spec);
+    return !declaresValue(ctx, callee) && CLIENT_FACTORIES.has(callee.text);
+  }
+  const m = memberAccess(callee);
+  if (!m || !CLIENT_FACTORIES.has(m.name)) return false;
+  const base = unwrapTransparent(m.receiver);
+  if (!ts.isIdentifier(base)) return false;
+  const imp = importedAs(ctx, base);
+  return !!imp && imp.exported === null && isClientModule(ctx.file, imp.spec);
+}
+
 function declaredAsClient(ctx: Ctx, recv: ts.Expression, seen = new Set<ts.Symbol>()): Declared {
   const byExpression = (e: ts.Expression | undefined): Declared => {
     if (!e) return "unknown";
-    if (ts.isAsExpression(e) || ts.isSatisfiesExpression(e)) {
+    // A wrapper that NAMES a type answers from the type first and falls back
+    // to what it wraps. `<T>e` is one of those and was missing here.
+    if (ts.isAsExpression(e) || ts.isSatisfiesExpression(e) || ts.isTypeAssertionExpression(e)) {
       const d = declaredByType(ctx, e.type);
       return d === "unknown" ? byExpression(e.expression) : d;
     }
     if (ts.isParenthesizedExpression(e) || ts.isNonNullExpression(e) || ts.isAwaitExpression(e)) return byExpression(e.expression);
-    if (ts.isCallExpression(e) && ts.isIdentifier(e.expression) && CLIENT_FACTORIES.has(e.expression.text)) return "client";
+    // The factory's callee, wrappers stripped: `const db = (adminClient)();`
+    // read as neither a client nor a value, so a HANDLED `.auth` error on it
+    // was reported and an escaped `db.from` on it was not — a gate red on a
+    // healthy tree one way and blessing what it forbids the other (Codex,
+    // PR #94, measured both).
+    const factory = calleeOf(e);
+    if (factory && isClientFactory(ctx, factory)) return "client";
     if (ts.isIdentifier(e)) return declaredAsClient(ctx, e, seen);
     if (ts.isLiteralExpression(e) || ts.isObjectLiteralExpression(e) || ts.isArrayLiteralExpression(e) ||
       ts.isTemplateExpression(e) || e.kind === ts.SyntaxKind.TrueKeyword || e.kind === ts.SyntaxKind.FalseKeyword ||
@@ -1634,36 +1823,43 @@ function declaredAsClient(ctx: Ctx, recv: ts.Expression, seen = new Set<ts.Symbo
   seen.add(sym);
   const decl = sym.valueDeclaration ?? sym.declarations?.[0];
   if (!decl) return "unknown";
-  if (ts.isVariableDeclaration(decl) || ts.isParameter(decl)) {
-    // Every SOURCE of the binding: its initialiser (a parameter's default
-    // included) and, for a variable, each later `db = …`. A factory anywhere
-    // WINS, even under an annotation naming something else — `const db: Db =
-    // adminClient()` is a client whatever `Db` is called (Codex on PR #92:
-    // the first version let a value-typed annotation return before the
-    // initialiser was looked at). With no visible client the annotation
+  if (ts.isVariableDeclaration(decl) || ts.isParameter(decl) || ts.isBindingElement(decl)) {
+    // Every SOURCE of the binding, through every binding form the shared
+    // enumeration knows (`boundValues`, filtered to this symbol): its
+    // initialiser or default, each later assignment in any alias-forming
+    // spelling (`db2 ??= db` assigns the client when it runs — Codex, PR
+    // #94, round 64), the part a destructuring takes off a literal and the
+    // elements a `for…of` yields. The initialiser-plus-assignments list this
+    // reader used to keep was a partial copy of that enumeration: `const
+    // [db] = [adminClient()]` with its error handled was "declared as neither
+    // a client nor a value", and with the error DROPPED it was refused the
+    // same way rather than reported (measured; the round-68 finding's
+    // sibling in this reader). A
+    // part taken by KEY off a non-literal source (`const { db } = deps`) is
+    // a member this reader cannot classify and counts as unknown. A factory
+    // anywhere WINS, even under an annotation naming something else — `const
+    // db: Db = adminClient()` is a client whatever `Db` is called (Codex on
+    // PR #92: the first version let a value-typed annotation return before
+    // the initialiser was looked at). With no visible client the annotation
     // decides; with no annotation, a value only when every source the gate
     // can read is one.
-    const sources: Declared[] = decl.initializer ? [byExpression(decl.initializer)] : [];
-    if (ts.isVariableDeclaration(decl)) {
-      const visit = (n: ts.Node) => {
-        if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(n.left) &&
-          symbolOf(ctx.checker, n.left) === sym) sources.push(byExpression(n.right));
-        ts.forEachChild(n, visit);
-      };
-      visit(ctx.sf);
+    const sources: Declared[] = [];
+    for (const b of boundValuesOf(ctx.sf)) {
+      if (symbolOf(ctx.checker, b.target) !== sym) continue;
+      sources.push(b.key === undefined ? byExpression(b.value) : "unknown");
     }
     if (sources.includes("client")) return "client";
-    const byType = declaredByType(ctx, decl.type);
-    if (byType !== "unknown") return byType;
-    return sources.length > 0 && sources.every((d) => d === "value") ? "value" : "unknown";
-  }
-  if (ts.isBindingElement(decl)) {
-    // `({ db }: Deps)` — the client is somewhere inside a type the gate
-    // cannot read; refuse loudly rather than guess either way.
+    // The annotation: on the declaration itself, or — for a destructured
+    // binding — on the parameter or variable the pattern hangs off (`({ db
+    // }: Deps)`), where the client is somewhere inside a type the gate can
+    // read only as a whole, so that type says "client" or nothing.
     let p: ts.Node = decl;
     while (ts.isBindingElement(p) || ts.isObjectBindingPattern(p) || ts.isArrayBindingPattern(p)) p = p.parent;
     const t = ts.isParameter(p) || ts.isVariableDeclaration(p) ? p.type : undefined;
-    return declaredByType(ctx, t) === "client" ? "client" : "unknown";
+    const byType = declaredByType(ctx, t);
+    if (byType === "client") return "client";
+    if (!ts.isBindingElement(decl) && byType !== "unknown") return byType;
+    return sources.length > 0 && sources.every((d) => d === "value") ? "value" : "unknown";
   }
   // An import, a class member, a function — nothing this gate can read.
   return "unknown";
@@ -1677,7 +1873,7 @@ function classifyFile(program: ts.Program, sf: ts.SourceFile, file: string): Sit
 
   const seen = (root: ts.Node, recv: ts.Expression, token: ts.Node) => {
     const ctx: Ctx = { sf, checker, file, queryLine: lineOf(sf, token), followed };
-    const kind = receiverKind(recv);
+    const kind = receiverKind(ctx, recv);
     if (kind === "global") return;
     if (kind === "unknown") {
       sites.push(site(ctx, root, "UNCLASSIFIED", `unrecognised receiver \`${recv.getText(sf)}\``));
@@ -1690,16 +1886,69 @@ function classifyFile(program: ts.Program, sf: ts.SourceFile, file: string): Sit
     sites.push(...classifyTop(ctx, chain.top));
   };
 
+  /** A `<client>.from` / `<client>.rpc` reference that is not invoked here. */
+  const escapedQueryMethod = (n: ts.Node): boolean => {
+    const acc = memberAccess(n);
+    return acc !== null && QUERY_METHODS.has(acc.name) && calleeCall(n) === null;
+  };
+
   const visit = (n: ts.Node) => {
-    const member = ts.isCallExpression(n) ? memberAccess(n.expression) : null;
+    // The callee goes through the shared reader, so `(db.from)("walks")` is
+    // `db.from("walks")`: the raw node is a wrapper, the member is not found,
+    // and `escapedQueryMethod` does not fire either because `calleeCall`
+    // climbs the wrapper and finds the call — so neither branch ran and a
+    // discarded error was invisible, 68 of 68 green (Codex, PR #94, in the
+    // reader beside the one reported).
+    const member = memberAccess(calleeOf(n));
     if (member && QUERY_METHODS.has(member.name)) {
       seen(n, member.receiver, member.token);
+    } else if (escapedQueryMethod(n)) {
+      // The query method REFERENCED and not invoked here. `db.from.call(db,
+      // "walks").select("id")` runs the query exactly as `db.from("walks")`
+      // does, and `const f = db.from` hands the builder to a name this gate
+      // cannot follow — so the envelope it produces is never classified and a
+      // discarded error is invisible: 67 of 67 green with the error dropped
+      // (measured). The SIBLING of the channel finding, in the reader beside
+      // it, and the same hole `.throwOnError` already has a rule for at the
+      // OTHER end of a chain (`uncalledReason`).
+      //
+      // Positive client evidence is required, exactly as the `.auth` branch
+      // below requires it and for the same reason: `from` is an ordinary
+      // property name, `receiverKind` calls every lowercase identifier a
+      // client, and reporting `range.from` or `msg.from` would be a gate red
+      // on a healthy tree. Measured: zero non-call `.from`/`.rpc` references
+      // in supabase/functions today.
+      const acc = memberAccess(n)!;
+      const ctx: Ctx = { sf, checker, file, queryLine: lineOf(sf, acc.token), followed };
+      if (declaredAsClient(ctx, acc.receiver) === "client") {
+        sites.push(site(ctx, n, "UNCLASSIFIED", escapedQueryReason(acc.name)));
+      }
+    } else if (computedAccess(n)) {
+      // A COMPUTED member reached from a client. `memberAccess` answers null
+      // for one, and every branch above read that null as "not a query" —
+      // so `db[key]("walks")`, `db.auth[key]("t")` and `db["auth"][key]("t")`
+      // each discarded an error and produced no site (measured; Codex, PR
+      // #94). The ROOT of the chain decides: a client, and the member is
+      // reported by name; anything else, and a computed member is ordinary
+      // code this gate has no business refusing. The `.auth` hop beneath a
+      // reported access is not re-read as a namespace, because its parent
+      // is not a member this reader can name.
+      const computed = computedAccess(n)!;
+      const root = memberRoot(computed.receiver);
+      const ctx: Ctx = { sf, checker, file, queryLine: lineOf(sf, computed.token), followed };
+      if (declaredAsClient(ctx, root) === "client") {
+        sites.push(site(ctx, n, "UNCLASSIFIED", computedMemberReason(n.getText(sf).split("\n")[0])));
+      }
     } else {
       const auth = memberAccess(n);
+      const authOuter = outward(n);
       if (
         auth && auth.name === "auth" &&
-        // The namespace, `.auth.<member>` — a bare `.auth` is a value being read.
-        memberAccess(n.parent)?.receiver === n
+        // The namespace, `.auth.<member>` — a bare `.auth` is a value being
+        // read. Asked of the wrapped node, because `(db.auth).getUser(…)` is
+        // the same namespace hop and the syntactic parent is the wrapper: a
+        // discarded error on it was MISSED entirely (Codex, PR #94).
+        memberAccess(authOuter.parent)?.receiver === authOuter
       ) {
         // `auth` is also a plain FIELD in this tree (the push encryption
         // secret), and `sub.auth.length` is a healthy read of it. So the
@@ -1884,6 +2133,201 @@ function g(db: any) { return db.from("clients").select("id"); }`, "fixture.ts");
     expect(sites.map((s) => s.verdict)).toEqual(["PASSED_ON", "PASSED_ON"]);
   });
 
+  it("a query method handed away rather than called is UNCLASSIFIED", () => {
+    // `db.from.call(db, "walks")` runs the query exactly as `db.from("walks")`
+    // does, and the scan keyed on the method's ONE position — as the immediate
+    // callee — so the envelope was never classified and a discarded error was
+    // invisible: 67 of 67 green with the error dropped (measured). The SIBLING
+    // of the channel finding, in the reader beside it (Codex, PR #94).
+    for (const escaped of [
+      'async function f() { const db = adminClient(); const { data } = await db.from.call(db, "walks").select("id"); return data; }',
+      'async function f() { const db = adminClient(); const { data } = await db.from.apply(db, ["walks"]).select("id"); return data; }',
+      'async function f() { const db = adminClient(); const call = db.rpc; const { data } = await call.apply(db, ["fn_x", {}]); return data; }',
+      'function f() { const db = adminClient(); register(db.from); }',
+      'async function f() { const db = adminClient(); const { data } = await db["from"].call(db, "walks").select("id"); return data; }',
+      'async function f() { const db = adminClient(); const { data } = await db[`from`].call(db, "walks").select("id"); return data; }',
+    ]) {
+      const s = classifySource(escaped, "f.ts").filter((x) => /handed somewhere/.test(x.reason));
+      expect(s.map((x) => x.verdict), escaped).toEqual(["UNCLASSIFIED"]);
+    }
+
+    // The other direction, and it is the one that keeps this off a healthy
+    // tree: `from` is an ordinary property name and `receiverKind` calls every
+    // lowercase identifier a client, so the rule demands POSITIVE client
+    // evidence — the same test the `.auth` branch uses, for the same reason.
+    expect(classifySource('function g(msg: { from: string }) { return msg.from; }', "f.ts")).toEqual([]);
+    expect(classifySource('const xs = [[1]].map(Uint8Array.from);', "f.ts")).toEqual([]);
+    expect(classifySource('function g(range: { from: number; to: number }) { return range.from + range.to; }', "f.ts")).toEqual([]);
+    // …and a direct call is still classified as it always was.
+    expect(classifySource(
+      'async function f() { const db = adminClient(); const { data, error } = await db.from("walks").select("id"); if (error) throw error; return data; }',
+      "f.ts",
+    ).map((s) => s.verdict)).toEqual(["OK"]);
+
+    // A factory read off a NAMESPACE import is the factory. The name-only
+    // test made a HANDLED `.auth` error on `admin.adminClient()`'s client
+    // "declared as neither a client nor a value" — a gate red on healthy
+    // code — and an inline call an unrecognised receiver (measured, round
+    // 66: the `globalThis.Object` finding's sibling in this reader). A
+    // same-named method on something that is NOT a namespace import stays
+    // unknown, as it always was.
+    // The module is identified by its RESOLVED path (round 67), so the
+    // fixture sits where a function does.
+    const PROBE = "supabase/functions/probe/index.ts";
+    const NS = 'import * as admin from "../_lib/admin.ts";\n';
+    expect(classifySource(
+      `${NS}async function f() { const db = admin.adminClient(); const { data, error } = await db.auth.getUser("t"); if (error) throw error; return data; }`,
+      PROBE,
+    ).map((s) => s.verdict)).toEqual(["OK"]);
+    expect(classifySource(
+      `${NS}async function f() { const { data } = await admin.adminClient().from("walks").select("id"); return data; }`,
+      PROBE,
+    ).map((s) => s.verdict)).toEqual(["DISCARDED"]);
+    expect(classifySource(
+      `${NS}async function f() { const db = admin.adminClient(); const { data } = await db.from("walks").select("id"); return data; }`,
+      PROBE,
+    ).map((s) => s.verdict)).toEqual(["DISCARDED"]);
+    expect(classifySource(
+      'declare const svc: { adminClient(): unknown };\nasync function f() { const db = svc.adminClient(); const { data, error } = await db.auth.getUser("t"); if (error) throw error; return data; }',
+      "f.ts",
+    ).map((s) => s.verdict)).toEqual(["UNCLASSIFIED"]);
+
+    // `db.from(…)`, `db["from"](…)` and `` db[`from`](…) `` are the same
+    // member. This reader knew a string literal and not a no-substitution
+    // TEMPLATE, so the third spelling with a discarded error was invisible —
+    // 68 of 68 green, measured (Codex, PR #94, found by checking the sibling
+    // of the reader it named). One shared implementation now.
+    for (const spelling of ["db.from", 'db["from"]', "db[`from`]"]) {
+      const s = classifySource(
+        `async function f() { const db = adminClient(); const { data } = await ${spelling}("walks").select("id"); return data; }`,
+        "f.ts",
+      );
+      expect(s.map((x) => x.verdict), spelling).toEqual(["DISCARDED"]);
+    }
+  });
+
+  it("a factory is the export of a KNOWN module — by name, by namespace, or by an alias of either (Codex, PR #94, round 67)", () => {
+    const PROBE = "supabase/functions/probe/index.ts";
+    const LIB = "supabase/functions/_lib/probe.ts";
+    const verdicts = (src: string, file = PROBE) => classifySource(src, file).map((s) => s.verdict);
+    const HANDLED = 'const { data, error } = await db.auth.getUser("t"); if (error) throw error; return data;';
+    const DROPPED = 'const { data } = await db.auth.getUser("t"); return data;';
+    const fn = (imp: string, mk: string, body: string) => `${imp}\nasync function f() { const db = ${mk}; ${body} }`;
+
+    // Codex's case: a namespace of an UNRELATED module exposing a method
+    // called `createClient`. Its client is not one this gate can read, so a
+    // dropped error on it is refused loudly rather than reported as a
+    // Supabase discard — and a handled one is refused the same way, since
+    // the receiver is the question. The named-import spelling had the same
+    // hole (measured).
+    const oauthNs = 'import * as oauth from "./oauth";';
+    const oauthNamed = 'import { createClient } from "./oauth";';
+    expect(verdicts(fn(oauthNs, "oauth.createClient()", DROPPED))).toEqual(["UNCLASSIFIED"]);
+    expect(classifySource(fn(oauthNs, "oauth.createClient()", DROPPED), PROBE)[0]?.reason).toMatch(/neither a client nor a value/);
+    expect(verdicts(fn(oauthNs, "oauth.createClient()", HANDLED))).toEqual(["UNCLASSIFIED"]);
+    expect(verdicts(fn(oauthNamed, "createClient()", DROPPED))).toEqual(["UNCLASSIFIED"]);
+    // The house wrapper by its RESOLVED path: `../_lib/admin.ts` from a
+    // function and `./admin.ts` from a `_lib` sibling are one module, and a
+    // second `admin.ts` beside a function is NOT it, whatever it exports.
+    const adminNs = 'import * as admin from "../_lib/admin.ts";';
+    const adminNamed = 'import { adminClient } from "../_lib/admin.ts";';
+    expect(verdicts(fn(adminNs, "admin.adminClient()", HANDLED))).toEqual(["OK"]);
+    expect(verdicts(fn(adminNamed, "adminClient()", DROPPED))).toEqual(["DISCARDED"]);
+    expect(verdicts(fn('import { adminClient } from "./admin.ts";', "adminClient()", HANDLED), LIB)).toEqual(["OK"]);
+    expect(verdicts(fn('import * as admin from "./admin.ts";', "admin.adminClient()", HANDLED), LIB)).toEqual(["OK"]);
+    expect(verdicts(fn('import { adminClient } from "./admin.ts";', "adminClient()", DROPPED))).toEqual(["UNCLASSIFIED"]);
+    expect(verdicts(fn('import * as admin from "./admin.ts";', "admin.adminClient()", DROPPED))).toEqual(["UNCLASSIFIED"]);
+    // supabase-js under Deno's spelling — the one `credential-vault` uses —
+    // where the registry prefix and the version are the same package, and a
+    // RENAMED import is the same export.
+    for (const spec of [
+      "npm:@supabase/supabase-js@2",
+      "jsr:@supabase/supabase-js@2",
+      "@supabase/supabase-js",
+      "npm:@supabase/supabase-js@2.45.0",
+    ]) {
+      expect(verdicts(fn(`import { createClient } from "${spec}";`, 'createClient("u", "k")', DROPPED)), spec).toEqual(["DISCARDED"]);
+      expect(verdicts(fn(`import * as sj from "${spec}";`, 'sj.createClient("u", "k")', DROPPED)), spec).toEqual(["DISCARDED"]);
+    }
+    expect(verdicts(fn('import { createClient as mk } from "npm:@supabase/supabase-js@2";', 'mk("u", "k")', DROPPED))).toEqual(["DISCARDED"]);
+    // The exported NAME decides, not the local one, and a LOCAL declaration
+    // of the name is not the export either…
+    expect(verdicts(fn('import { other as createClient } from "../_lib/admin.ts";', "createClient()", HANDLED))).toEqual(["UNCLASSIFIED"]);
+    expect(verdicts(`function createClient() { return makeThing(); }\nasync function f() { const db = createClient(); ${DROPPED} }`)).toEqual(["UNCLASSIFIED"]);
+    // …while an identifier the file never declares is taken by name, which
+    // is what every bare `adminClient()` fixture in this file relies on.
+    expect(verdicts(`async function f() { const db = adminClient(); ${DROPPED} }`, "f.ts")).toEqual(["DISCARDED"]);
+    // An ALIAS of the namespace is the namespace — by declaration, by
+    // assignment, transitively — and an alias of the named import is the
+    // import. `const a = admin; a.adminClient()` with its error handled was
+    // "declared as neither a client nor a value" on the shipped gate: a
+    // refusal on healthy code (measured; the channel gate's alias finding in
+    // this reader). An alias of something ELSE is not.
+    expect(verdicts(`${adminNs}\nasync function f() { const a = admin; const db = a.adminClient(); ${HANDLED} }`)).toEqual(["OK"]);
+    expect(verdicts(`${adminNs}\nasync function f() { const a = admin; const db = a.adminClient(); ${DROPPED} }`)).toEqual(["DISCARDED"]);
+    expect(verdicts(`${adminNs}\nasync function f() { let a; a = admin; const db = a.adminClient(); ${HANDLED} }`)).toEqual(["OK"]);
+    expect(verdicts(`${adminNs}\nasync function f() { const a = admin; const b = a; const db = b.adminClient(); ${HANDLED} }`)).toEqual(["OK"]);
+    expect(verdicts(`${adminNamed}\nasync function f() { const mk = adminClient; const db = mk(); ${HANDLED} }`)).toEqual(["OK"]);
+    expect(verdicts(`declare const other: { adminClient(): unknown };\nasync function f() { const a = other; const db = a.adminClient(); ${HANDLED} }`)).toEqual(["UNCLASSIFIED"]);
+  });
+
+  it("an alias of an import, or of a client, is followed through every binding form the shared enumeration knows (Codex, PR #94, round 68)", () => {
+    const PROBE = "supabase/functions/probe/index.ts";
+    const verdicts = (src: string) => classifySource(src, PROBE).map((s) => s.verdict);
+    const HANDLED = 'const { data, error } = await db.auth.getUser("t"); if (error) throw error; return data;';
+    const DROPPED = 'const { data } = await db.auth.getUser("t"); return data;';
+    const NS = 'import * as admin from "../_lib/admin.ts";\ndeclare const others: unknown[];';
+    const NAMED = 'import { adminClient } from "../_lib/admin.ts";';
+    // Codex's case — the namespace aliased by DESTRUCTURING — and every
+    // other binding form: each was "declared as neither a client nor a value"
+    // with its error handled on the shipped gate, a refusal on healthy code,
+    // because `importedAs` followed a declaration initializer and the plain
+    // assignments and nothing else, a partial copy of the shared enumeration.
+    for (const alias of [
+      "const [a] = [admin];",
+      "const { ns: a } = { ns: admin };",
+      "const [[a]] = [[admin]];",
+      "let a; a ??= admin;",
+      "let a; [a] = [admin];",
+      "const [a] = [...[admin]];",
+    ]) {
+      expect(verdicts(`${NS}\nasync function f() { ${alias} const db = a.adminClient(); ${HANDLED} }`), alias).toEqual(["OK"]);
+      expect(verdicts(`${NS}\nasync function f() { ${alias} const db = a.adminClient(); ${DROPPED} }`), alias).toEqual(["DISCARDED"]);
+    }
+    expect(verdicts(`${NS}\nasync function f() { for (const a of [admin]) { const db = a.adminClient(); ${HANDLED} } }`)).toEqual(["OK"]);
+    expect(verdicts(`${NS}\nasync function f(a = admin) { const db = a.adminClient(); ${HANDLED} }`)).toEqual(["OK"]);
+    expect(verdicts(`${NAMED}\nasync function f() { const [mk] = [adminClient]; const db = mk(); ${HANDLED} }`)).toEqual(["OK"]);
+    // A key taken off the NAMESPACE is that module's export — the factory
+    // itself, for supabase-js as for the house wrapper.
+    expect(verdicts(`${NS}\nasync function f() { const { adminClient: mk } = admin; const db = mk(); ${HANDLED} }`)).toEqual(["OK"]);
+    expect(verdicts(`import * as sj from "npm:@supabase/supabase-js@2";\nasync function f() { const { createClient } = sj; const db = createClient("u", "k"); ${DROPPED} }`)).toEqual(["DISCARDED"]);
+    // The rules that keep this from becoming "every destructuring is the
+    // import": a position after a spread this reader cannot expand is
+    // UNKNOWN (the `literalElements` erasure — slot 0, which the zero-width
+    // reading would hand `admin`; a later slot is unbound under either
+    // reading and pins nothing, the round-65 trap), a same-named binding
+    // elsewhere is another symbol, and a key taken off something that is
+    // not an import is nothing this reader can name.
+    expect(verdicts(`${NS}\nasync function f() { const [a] = [...others, admin]; const db = a.adminClient(); ${HANDLED} }`)).toEqual(["UNCLASSIFIED"]);
+    expect(verdicts(`${NS}\nasync function f() { const [a] = [admin]; return a; }\nasync function g(a: { adminClient(): unknown }) { const db = a.adminClient(); ${HANDLED} }`)).toEqual(["UNCLASSIFIED"]);
+    expect(verdicts(`declare const svc: { adminClient(): unknown };\nasync function f() { const { adminClient: mk } = svc; const db = mk(); ${HANDLED} }`)).toEqual(["UNCLASSIFIED"]);
+    // The SIBLING reader: a destructured client VALUE went the same way in
+    // `declaredAsClient` — the handled error refused, and the DROPPED one
+    // refused rather than reported (measured on the shipped gate).
+    for (const bind of [
+      "const [db] = [adminClient()];",
+      "const { db } = { db: adminClient() };",
+      "const [[db]] = [[adminClient()]];",
+    ]) {
+      expect(verdicts(`${NAMED}\nasync function f() { ${bind} ${HANDLED} }`), bind).toEqual(["OK"]);
+      expect(verdicts(`${NAMED}\nasync function f() { ${bind} ${DROPPED} }`), bind).toEqual(["DISCARDED"]);
+    }
+    expect(verdicts(`${NAMED}\nasync function f() { for (const db of [adminClient()]) { ${HANDLED} } }`)).toEqual(["OK"]);
+    // …while a part taken by key off a NON-literal source is still a member
+    // this reader cannot classify: refused loudly, as it always was.
+    expect(verdicts(`${NAMED}\ndeclare const deps: { db: unknown };\nasync function f() { const { db } = deps; ${HANDLED} }`)).toEqual(["UNCLASSIFIED"]);
+  });
+
   it("receivers: a capitalised global is not a query; anything unrecognised is UNCLASSIFIED", () => {
     expect(classifySource(`const b = Uint8Array.from("ab", (c) => c.charCodeAt(0)); const a = Array.from([1]);`, "f.ts")).toEqual([]);
     const s = one(`async function f(deps: any) { const { data, error } = await deps.db.from("x").select("id"); if (error) throw error; return data; }`);
@@ -1924,7 +2368,7 @@ function g(db: any) { return db.from("clients").select("id"); }`, "fixture.ts");
 }`, "f.ts")).toEqual([]);
     // A call that is not a known client factory could be either — a wrapper
     // returning a client, or a value — so it is refused loudly rather than
-    // guessed; adding a real factory to CLIENT_FACTORIES is the remedy.
+    // guessed; a real factory is one imported from a known client module.
     expect(classifySource(`function k() { return keysOf().auth.trim(); }`, "f.ts").map((s) => s.verdict)).toEqual(["UNCLASSIFIED"]);
     const s = one(`async function h() {
   const { data } = await client.auth.getUser("t");
@@ -3033,6 +3477,236 @@ async function f(db: any) { log((await db.from("a").select("id")).error); }`).ve
 }`);
     expect(s.verdict).toBe("UNCLASSIFIED");
     expect(s.reason).toMatch(/passed to a call/);
+  });
+
+  it("a transparent wrapper around a PARENT is the same consumer (Codex, PR #94)", () => {
+    // The parent side of the same rule. A wrapper between a member and what
+    // holds it made an INVOKED builder method read as uncalled, so a healthy
+    // file failed the gate — every one of these runs and handles its error.
+    for (const expr of [
+      'db.from("walks").select!("id")',
+      '(db.from("walks").select)("id")',
+      '(db.from("walks").select as any)("id")',
+      '(db.from("walks").select satisfies unknown as any)("id")',
+      '(<any>db.from("walks").select)("id")',
+      // …and a link DEEPER in the chain, not only the one after the root.
+      'db.from("walks").select("id").eq!("x", 1)',
+    ]) {
+      expect(
+        one(`async function f(db: any) { const { data, error } = await ${expr}; if (error) throw error; return data; }`).verdict,
+        expr,
+      ).toBe("OK");
+    }
+    // …and the other direction, which is what stops the fix becoming "a
+    // method is always called": a reference that really is never invoked
+    // still runs nothing, and an ordinary discard is still a discard.
+    expect(one('function f(db: any) { const g = db.from("walks").select; return g; }').verdict).toBe("UNCLASSIFIED");
+    expect(one('async function f(db: any) { const { data } = await db.from("walks").select("id"); return data; }').verdict).toBe("DISCARDED");
+
+    // A wrapped NAMESPACE hop is the same hop — and this one was a MISS
+    // rather than a false red: `(db.auth).getUser(…)` with its error thrown
+    // away left 69 of 69 green, on the auth path.
+    expect(one(`const db = adminClient();
+async function f(token: string) { const { data } = await (db.auth).getUser(token); return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`const db = adminClient();
+async function f(token: string) { const { data, error } = await (db.auth).getUser(token); if (error) throw error; return data; }`).verdict).toBe("OK");
+    expect(one(`const db = adminClient();
+async function f() { const { data, error } = await (db.auth.admin).getUserById("x"); if (error) throw error; return data; }`).verdict).toBe("OK");
+
+    // …and an envelope's `.error` read through a wrapper is the same read.
+    for (const read of ["(r).error", "r!.error", "((r)).error"]) {
+      expect(
+        one(`async function f(db: any) { const r = await db.from("walks").select("id"); if (${read}) throw ${read}; return r.data; }`).verdict,
+        read,
+      ).toBe("OK");
+    }
+    // …while an envelope nothing reads is still discarded.
+    expect(one('async function f(db: any) { const r = await db.from("walks").select("id"); return r.data; }').verdict).toBe("DISCARDED");
+
+    // An envelope handed to a call through a wrapper is still handed to a
+    // call. Both spellings are red either way, so what the syntactic parent
+    // cost here is the REASON: `log((r))` reported "`.error` is never read"
+    // for an envelope whose consumer is simply not visible, and a red that
+    // misdescribes itself is its own defect.
+    for (const arg of ["r", "(r)", "(r as any)"]) {
+      expect(
+        one(`declare function log(v: unknown): void;
+async function f(db: any) { const r = await db.from("walks").select("id"); log(${arg}); return r.data; }`).verdict,
+        arg,
+      ).toBe("UNCLASSIFIED");
+    }
+  });
+
+  it("a wrapper's DEPTH is not a rule — nine are as transparent as one (Codex, PR #94)", () => {
+    // `outward` climbed at most eight wrappers, so a named closure invoked
+    // through nine reported its envelope as never read: a gate red on a
+    // healthy tree. A tree walk needs no bound (a finite tree has a finite
+    // depth), so the count was not a termination guard but a wrong answer at
+    // nine — measured on the shipped gate: eight OK, nine DISCARDED, for
+    // every wrapper kind and at forty. Codex's row is the first.
+    const wrap = (n: number, x: string) => "(".repeat(n) + x + ")".repeat(n);
+    const invoked = (call: string) =>
+      `async function f(db: any) { const r = await db.from("walks").select("id"); const check = () => { if (r.error) throw r.error; }; ${call}; return r.data; }`;
+    for (const call of [
+      `${wrap(9, "check")}()`,
+      `check${"!".repeat(9)}()`,
+      `(check${" as any".repeat(9)})()`,
+      `(check${" satisfies unknown".repeat(9)} as any)()`,
+      `(${"<any>".repeat(9)}check)()`,
+      "(((<any>(check as any)! satisfies unknown as any)!) as any)()",
+      `${wrap(40, "check")}()`,
+    ]) {
+      expect(one(invoked(call)).verdict, call).toBe("OK");
+    }
+    // …and depth is not evidence of INVOCATION: the same closure handed away
+    // forty deep still runs nothing, so what it reads is still unread.
+    expect(one(invoked(`const g = ${wrap(40, "check")}`)).verdict).toBe("DISCARDED");
+
+    // Every other parent reader at nine — each measured red, or missing, on
+    // the shipped gate: the builder link (`.select` "referenced and never
+    // called"), the `.error` read (an envelope "never read"), the call
+    // argument (the misdescribing red again), and the `.auth` hop, where a
+    // DISCARDED error was not reported at all.
+    const nine = (x: string) => wrap(9, x);
+    const env = 'const r = await db.from("walks").select("id");';
+    expect(one(`async function f(db: any) { const { data, error } = await ${nine('db.from("walks").select')}("id"); if (error) throw error; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(db: any) { ${env} if (${nine("r")}.error) throw r.error; return r.data; }`).verdict).toBe("OK");
+    const passed = one(`declare function log(v: unknown): void;
+async function f(db: any) { ${env} log(${nine("r")}); return r.data; }`);
+    expect(passed.verdict).toBe("UNCLASSIFIED");
+    expect(passed.reason).toMatch(/passed to a call/);
+    expect(one(`const db = adminClient();
+async function f(token: string) { const { data } = await ${nine("db.auth")}.getUser(token); return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`const db = adminClient();
+async function f(token: string) { const { data, error } = await ${nine("db.auth")}.getUser(token); if (error) throw error; return data; }`).verdict).toBe("OK");
+
+    // The DOWNWARD sibling, `unwrapTransparent`, carried the same count. A
+    // receiver nine deep was "unrecognised" (red on a healthy tree); a callee
+    // nine deep was no call at all, so its discarded error was a MISS; a
+    // factory nine deep was "declared as neither a client nor a value", in
+    // both directions. Each pair pins both directions, so the fix cannot
+    // become "deep means fine".
+    for (const [expr, handled, discarded] of [
+      [`${nine("db")}.from("walks").select("id")`, "OK", "DISCARDED"],
+      [`${nine("db.from")}("walks").select("id")`, "OK", "DISCARDED"],
+      [`${nine("adminClient")}().auth.getUser("t")`, "OK", "DISCARDED"],
+    ] as const) {
+      expect(one(`async function f(db: any) { const { data, error } = await ${expr}; if (error) throw error; return data; }`).verdict, expr).toBe(handled);
+      expect(one(`async function f(db: any) { const { data } = await ${expr}; return data; }`).verdict, expr).toBe(discarded);
+    }
+    expect(one(`async function f(token: string) { const db = ${nine("adminClient")}(); const { data, error } = await db.auth.getUser(token); if (error) throw error; return data; }`).verdict).toBe("OK");
+    expect(one(`async function f(token: string) { const db = ${nine("adminClient")}(); const { data } = await db.auth.getUser(token); return data; }`).verdict).toBe("DISCARDED");
+  });
+
+  it("a client alias formed by any assignment spelling is a client (Codex, PR #94)", () => {
+    const CLIENT = "declare function adminClient(): any;\n";
+    const computedMember = /is a computed member reached from a client/;
+    // `db2 ??= db` assigns the client when it runs. The rule read `=` alone,
+    // so the computed call produced no site and the discarded `.auth` call
+    // was refused as declared "neither a client nor a value" — the wrong
+    // sentence for a receiver that IS one (both measured on the shipped gate).
+    for (const src of [
+      `${CLIENT}async function f() { const db = adminClient(); let db2: any; db2 ??= db; const key: "from" = "from"; const { data } = await db2[key]("walks").select("id"); return data; }`,
+      `${CLIENT}async function f() { const db = adminClient(); let db2: any; db2 ||= db; const key: "from" = "from"; const { data } = await db2[key]("walks").select("id"); return data; }`,
+      `${CLIENT}async function f() { const db = adminClient(); let db2: any = 1; db2 &&= db; const key: "from" = "from"; const { data } = await db2[key]("walks").select("id"); return data; }`,
+      // …and a wrapped target, which is the same assignment.
+      `${CLIENT}async function f() { const db = adminClient(); let db2: any; (db2) = db; const key: "from" = "from"; const { data } = await db2[key]("walks").select("id"); return data; }`,
+    ]) {
+      const site = one(src);
+      expect(site.verdict, src).toBe("UNCLASSIFIED");
+      expect(site.reason, src).toMatch(computedMember);
+    }
+    const auth = one(`${CLIENT}async function f() { const db = adminClient(); let db2: any; db2 ||= db; const { data } = await db2.auth.getUser("t"); return data; }`);
+    expect(auth.verdict).toBe("DISCARDED");
+    // An assignment from something that is NOT a client gives no client.
+    expect(classifySource('async function f(other: { from: number }, k: "from") { let db2: any; db2 ??= other; const v = db2[k]; return v; }', "fixture.ts")).toEqual([]);
+  });
+
+  it("a computed member reached from a client is refused by name (Codex, PR #94)", () => {
+    const CLIENT = "declare function adminClient(): any;\n";
+    const computedMember = /is a computed member reached from a client/;
+    // Codex's case one gate over: the key's TYPE is the literal, so this
+    // type-checks, runs the query, discards its error, and produced NO site
+    // on the shipped gate — and so did every other spelling here.
+    for (const src of [
+      `${CLIENT}async function f() { const db = adminClient(); const key: "from" = "from"; const { data } = await db[key]("walks").select("id"); return data; }`,
+      `${CLIENT}async function f() { const db = adminClient(); const { data } = await db[pick()]("walks").select("id"); return data; }`,
+      `${CLIENT}async function f() { const db = adminClient(); const key: "from" = "from"; const q = db[key]; const { data } = await q("walks").select("id"); return data; }`,
+      `${CLIENT}async function f() { const db = adminClient(); const key: "from" = "from"; const { data } = await (db as never)[key]("walks").select("id"); return data; }`,
+      // …and reached through the GoTrue namespace, in both spellings of it.
+      `${CLIENT}async function f() { const db = adminClient(); const key: "getUser" = "getUser"; const { data } = await db.auth[key]("t"); return data; }`,
+      `${CLIENT}async function f() { const db = adminClient(); const key: "getUser" = "getUser"; const { data } = await db["auth"][key]("t"); return data; }`,
+    ]) {
+      const site = one(src);
+      expect(site.verdict, src).toBe("UNCLASSIFIED");
+      expect(site.reason, src).toMatch(computedMember);
+    }
+    // Conservative on purpose, and stated: a HANDLED error behind a computed
+    // member is refused too, because the refusal is about what this gate
+    // cannot read rather than about what the code does. The remedy is to name
+    // the member. Measured: no computed member on a client in the scanned
+    // tree, so this is red on nothing today.
+    const handled = one(`${CLIENT}async function f() { const db = adminClient(); const key: "from" = "from"; const { data, error } = await db[key]("walks").select("id"); if (error) throw error; return data; }`);
+    expect(handled.verdict).toBe("UNCLASSIFIED");
+    expect(handled.reason).toMatch(computedMember);
+    // Beneath the admin namespace the same site is reported — the hop's own
+    // "referenced and never called" sentence may ride beside it.
+    const admin = classifySource(`${CLIENT}async function f() { const db = adminClient(); const key: "getUserById" = "getUserById"; const { data } = await db.auth.admin[key]("id"); return data; }`, "fixture.ts");
+    expect(admin.map((s) => s.reason).some((r) => computedMember.test(r))).toBe(true);
+    // The other direction: a computed member of something that is NOT a client
+    // is ordinary code, and a receiver with no client evidence gets no report
+    // either — the round-five rule, since a computed member on `db: any` is a
+    // field read on a value until something says otherwise.
+    expect(classifySource('async function f(range: { from: number }, k: "from") { const v = range[k]; return v; }', "fixture.ts")).toEqual([]);
+    expect(classifySource("async function f(handlers: any, type: string) { const r = await handlers[type](1); return r; }", "fixture.ts")).toEqual([]);
+    expect(classifySource('async function f(db: any) { const key: "from" = "from"; const { data } = await db[key]("walks").select("id"); return data; }', "fixture.ts")).toEqual([]);
+    // A LITERAL key is not computed: `db["from"]` is `db.from`, classified as
+    // it always was.
+    expect(one(`${CLIENT}async function f() { const db = adminClient(); const { data } = await db["from"]("walks").select("id"); return data; }`).verdict).toBe("DISCARDED");
+  });
+
+  it("a transparent wrapper around a callee or a receiver is the same call (Codex, PR #94)", () => {
+    // `(db.from)("walks")` runs the query exactly as `db.from("walks")` does.
+    // The raw node is a wrapper, so the member was not found — and
+    // `escapedQueryMethod` did not fire either, because `calleeCall` climbs
+    // the wrapper and finds the call. Neither branch ran and a discarded error
+    // was invisible: 68 of 68 green, in the reader beside the one reported.
+    for (const src of [
+      'async function f(db: any) { const { data } = await (db.from)("walks").select("id"); return data; }',
+      'async function f(db: any) { const { data } = await (db.from as typeof db.from)("walks").select("id"); return data; }',
+      'async function f(db: any) { const { data } = await db.from!("walks").select("id"); return data; }',
+      'async function f(db: any) { const { data } = await (db.rpc)("fn_x", {}); return data; }',
+    ]) {
+      expect(one(src).verdict, src).toBe("DISCARDED");
+    }
+    // …and the healthy direction: the same wrapper with the error handled is
+    // silent, so the rule cannot become "a wrapper is a discard".
+    expect(one('async function f(db: any) { const { data, error } = await (db.from)("walks").select("id"); if (error) throw error; return data; }').verdict)
+      .toBe("OK");
+
+    // The FACTORY's own callee is reached through the same wrappers, and
+    // reading the raw node made `(adminClient)()` neither a client nor a
+    // value: a HANDLED `.auth` error on it was REPORTED — a gate red on a
+    // healthy tree — while an escaped `db.from` on it was not reported at all.
+    expect(one(`const db = (adminClient)();
+async function f(token: string) { const { data, error } = await db.auth.getUser(token); if (error) throw error; return data; }`).verdict).toBe("OK");
+    expect(one(`const db = (adminClient)();
+async function f(token: string) { const { data } = await db.auth.getUser(token); return data; }`).verdict).toBe("DISCARDED");
+    expect(one(`const db = (adminClient)();
+function f() { const g = db.from; return g; }`).verdict).toBe("UNCLASSIFIED");
+    // …and inline, where `receiverKind` reads the same callee.
+    expect(one(`async function f() { const { data, error } = await (adminClient)().from("walks").select("id"); if (error) throw error; return data; }`).verdict).toBe("OK");
+
+    // `<T>x` is a transparent wrapper too, and SIX copies of the set in this
+    // file each omitted it — two of them gates red on a healthy tree. There is
+    // one predicate now, in `lib/static-object.ts`, so they cannot disagree
+    // about the set again.
+    expect(one(`interface C { from(t: string): any }
+declare const db: C;
+async function f() { const { data, error } = await (<C>db).from("walks").select("id"); if (error) throw error; return data; }`).verdict).toBe("OK");
+    expect(one(`interface C { from(t: string): any }
+declare const db: C;
+async function f() { const { data } = await (<C>db).from("walks").select("id"); return data; }`).verdict).toBe("DISCARDED");
   });
 });
 

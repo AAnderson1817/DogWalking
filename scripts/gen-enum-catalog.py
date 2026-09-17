@@ -958,10 +958,6 @@ def refuse_session_changes(path: pathlib.Path, sql: str, skel: str) -> None:
             sys.exit(1)
 
 
-def strip_sql_comments(sql: str) -> str:
-    return strip_sql(sql)[0]
-
-
 # `create schema authorization current_user` brings into existence the schema
 # the default path names FIRST, so the next unqualified `create type` lands
 # in it — measured — with no role switch for any guard to see; a rename to
