@@ -117,6 +117,24 @@ interface ChannelCall {
  * boundary under a new name arrives through an import this seeds from.
  */
 /**
+ * The specifier names the client module `lib/supabase` — bare, or with an
+ * extension TypeScript resolves to a source file. `allowImportingTsExtensions`
+ * is on in `tsconfig.app.json`, so `@/lib/supabase.ts` is a legal spelling
+ * of the same module, and bundler resolution reads `./supabase.js` as it.
+ * The bare-only matcher recorded no namespace for `import * as sb from
+ * "./supabase.ts"`, so a computed `sb.supabase[key]("walk:public")` was
+ * missed and a private `sb.supabase.channel(…)` refused as unresolvable
+ * (Codex, PR #94, round 67; the named import had the same hole, and both
+ * were measured in the real hook). `supabase-admin`, `supabase.config` and
+ * `supabase.d.ts` are other modules and stay so.
+ */
+const SOURCE_EXTENSION = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
+function isClientModuleSpecifier(spec: string): boolean {
+  const base = spec.slice(spec.lastIndexOf("/") + 1);
+  return base.replace(SOURCE_EXTENSION, "") === "supabase";
+}
+
+/**
  * The two ways the client module is imported: `supabase` by NAME under some
  * local name, and the whole module as a NAMESPACE — `import * as sb from
  * "./supabase"`, where the client is `sb.supabase`. The second was refused
@@ -124,13 +142,20 @@ interface ChannelCall {
  * member, an alias and a destructuring (measured; the sibling of the
  * `globalThis.Object` finding, Codex, PR #94, round 66): a seed reached as
  * a member of a known base is the seed.
+ *
+ * An ALIAS of the namespace is the namespace: `const mod = sb;
+ * mod.supabase[key]("walk:public")` opened a public topic past the name-only
+ * set (Codex, PR #94, round 67 — measured green in the real hook), so the set
+ * is closed under the shared `holdersOf`, the reader the client's own aliases
+ * already go through. Name-based and file-wide, the reporting direction,
+ * stated at `holdersOf`.
  */
 function clientModuleImports(sf: ts.SourceFile): { names: Set<string>; namespaces: Set<string> } {
   const names = new Set<string>();
   const namespaces = new Set<string>();
   for (const st of sf.statements) {
     if (!ts.isImportDeclaration(st) || !ts.isStringLiteralLike(st.moduleSpecifier)) continue;
-    if (!/(^|\/)supabase$/.test(st.moduleSpecifier.text)) continue;
+    if (!isClientModuleSpecifier(st.moduleSpecifier.text)) continue;
     const bindings = st.importClause?.namedBindings;
     if (!bindings) continue;
     if (ts.isNamespaceImport(bindings)) namespaces.add(bindings.name.text);
@@ -138,7 +163,7 @@ function clientModuleImports(sf: ts.SourceFile): { names: Set<string>; namespace
       if ((el.propertyName ?? el.name).text === "supabase") names.add(el.name.text);
     }
   }
-  return { names, namespaces };
+  return { names, namespaces: holdersOf(sf, namespaces) };
 }
 
 /** `(receiver, key)` is the client read off a namespace import of its module: `sb.supabase`, `sb["supabase"]`, `const { supabase: db } = sb`. */
@@ -834,6 +859,13 @@ describe("the walk channel is the only channel, and it is private on both sides"
     expect(names('import { createClient } from "./supabase";')).toEqual([]);
     expect(names('import { supabase } from "./not-supabase-module";')).toEqual([]);
     expect(names('import { supabase } from "./supabase";\nconst c = makeThing(supabase);')).toEqual(["supabase"]);
+    // An explicit extension names the same module, and an alias of the
+    // module's namespace is the namespace (Codex, PR #94, round 67).
+    expect(names('import { supabase } from "@/lib/supabase.ts";')).toEqual(["supabase"]);
+    expect(names('import { supabase as db } from "./supabase.js";')).toEqual(["db"]);
+    expect(names('import * as sb from "./supabase";\nconst mod = sb;\nconst db = mod.supabase;')).toEqual(["db"]);
+    expect(names('import { supabase } from "./supabase-admin";')).toEqual([]);
+    expect(names('import { supabase } from "./supabase.config";')).toEqual([]);
   });
 
   // The CLASSIFICATION, pinned on fixtures rather than only on the one real
@@ -1063,6 +1095,59 @@ describe("the walk channel is the only channel, and it is private on both sides"
     // ordinary code wherever it is written).
     expect(verdicts(`import * as other from "./other";\n${KEY}other.supabase[key]("walk:public");`)).toEqual([]);
     expect(verdicts(`${KEY}sb.other[key]("walk:public");`)).toEqual([]);
+  });
+
+  it("recognises the client module under an explicit extension, and follows aliases of its namespace (Codex, PR #94, round 67)", () => {
+    const OPTS = "{ config: { private: true } }";
+    const KEY = 'const key: "channel" = "channel"; ';
+    const verdicts = (imp: string, body: string): string[] => {
+      const sf = ts.createSourceFile("f.ts", imp + "\n" + body, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+      return channelCallsIn(sf, "f.ts").map((c) => (c.private ? "private" : c.why));
+    };
+    const computedMember = /a computed member reached from the Supabase client/;
+    const H1 = "called with no options — `private` defaults to false (H1)";
+    // Codex's case: `./supabase.ts` is a legal spelling of the module under
+    // `allowImportingTsExtensions`, and the bare-only matcher recorded no
+    // namespace for it — the computed call was missed and the private named
+    // call refused as unresolvable. Measured in the real hook: `import * as
+    // sbx from "@/lib/supabase.ts"` and `import { supabase as sby } from
+    // "@/lib/supabase.ts"` each turned a PRIVATE call red.
+    for (const ext of [".ts", ".tsx", ".mts", ".js", ".jsx", ".mjs"]) {
+      const ns = `import * as sb from "./supabase${ext}";`;
+      const named = `import { supabase } from "@/lib/supabase${ext}";`;
+      expect(verdicts(ns, `${KEY}sb.supabase[key]("walk:public");`)[0], ext).toMatch(computedMember);
+      expect(verdicts(ns, `sb.supabase.channel(t, ${OPTS});`), ext).toEqual(["private"]);
+      expect(verdicts(named, `supabase.channel(t, ${OPTS});`), ext).toEqual(["private"]);
+      expect(verdicts(named, `${KEY}supabase[key]("walk:public");`)[0], ext).toMatch(computedMember);
+    }
+    // Another module is another module: a different name, a suffix that is
+    // not a source extension, a declaration file.
+    for (const spec of ["./supabase-admin.ts", "./supabase.config", "./supabase.d.ts", "@/lib/supabaseClient"]) {
+      expect(verdicts(`import * as sb from "${spec}";`, `${KEY}sb.supabase[key]("walk:public");`), spec).toEqual([]);
+      expect(verdicts(`import { supabase } from "${spec}";`, `supabase.channel(t, ${OPTS});`)[0], spec).toMatch(/cannot resolve that receiver/);
+    }
+    // Codex's second case: an ALIAS of the namespace is the namespace, and
+    // the name-only set let `mod.supabase[key]("walk:public")` open a public
+    // topic (measured green in the real hook). By declaration, by assignment,
+    // transitively, through a wrapper, in a logical assignment, and as the
+    // base of a destructuring; an alias of ANOTHER module's namespace, or of
+    // anything else, is not.
+    const NS = 'import * as sb from "./supabase";';
+    for (const alias of [
+      "const mod = sb;",
+      "let mod; mod = sb;",
+      "const a = sb; const mod = a;",
+      "const mod = (sb as never);",
+      "let mod = other; mod ??= sb;",
+    ]) {
+      expect(verdicts(NS, `${alias} ${KEY}mod.supabase[key]("walk:public");`)[0], alias).toMatch(computedMember);
+      expect(verdicts(NS, `${alias} ${KEY}mod[key]("walk:public");`)[0], alias).toMatch(computedMember);
+      expect(verdicts(NS, `${alias} mod.supabase.channel(t, ${OPTS});`), alias).toEqual(["private"]);
+      expect(verdicts(NS, `${alias} mod.supabase.channel("walk:public");`), alias).toEqual([H1]);
+      expect(verdicts(NS, `${alias} const { supabase: db } = mod; ${KEY}db[key]("walk:public");`)[0], alias).toMatch(computedMember);
+    }
+    expect(verdicts(`${NS}\nimport * as other from "./other";`, `const mod = other; ${KEY}mod.supabase[key]("walk:public");`)).toEqual([]);
+    expect(verdicts(NS, `const mod = other; ${KEY}mod.supabase[key]("walk:public");`)).toEqual([]);
   });
 
   it("classifies a channel call through every transparent receiver spelling", () => {

@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { join, posix, relative, resolve } from "node:path";
 import ts from "typescript";
 import {
   calleeCall,
@@ -218,6 +218,33 @@ function sourceFiles(dir: string): string[] {
 
 const QUERY_METHODS = new Set(["from", "rpc"]);
 const CLIENT_FACTORIES = new Set(["adminClient", "createClient"]);
+/**
+ * The MODULES whose `adminClient` / `createClient` is the Supabase client
+ * factory. A factory is the export of a known module, not a name: any
+ * namespace import exposing a method called `createClient` counted, so
+ * `import * as oauth from "./oauth"; oauth.createClient().auth.getUser()` was
+ * read as a Supabase operation and a dropped error on an unrelated library's
+ * client was reported as a discard (Codex, PR #94, round 67) — and the
+ * NAMED-import form had carried the same hole since this gate was written,
+ * `import { createClient } from "./oauth"` being the factory by spelling
+ * alone (measured; the sibling).
+ *
+ * The house wrapper is identified by its RESOLVED path, so `../_lib/admin.ts`
+ * from a function and `./admin.ts` from a `_lib` sibling are one module and a
+ * second `admin.ts` anywhere else is not one, whatever it exports; supabase-js
+ * by its package name under Deno's spelling, where the registry prefix and
+ * the version are the same package. Measured on the tree: every factory
+ * import is one of `../_lib/admin.ts`, `./admin.ts` and
+ * `npm:@supabase/supabase-js@2`.
+ */
+const ADMIN_MODULE = relative(ROOT, join(FUNCTIONS, "_lib", "admin.ts"));
+const SUPABASE_JS = /^(npm:|jsr:)?@supabase\/supabase-js(@[^/]+)?$/;
+
+function isClientModule(file: string, spec: string): boolean {
+  if (SUPABASE_JS.test(spec)) return true;
+  if (!spec.startsWith("./") && !spec.startsWith("../")) return false;
+  return posix.normalize(posix.join(posix.dirname(file), spec)) === ADMIN_MODULE;
+}
 /** Consuming a builder through a thenable method is a shape this gate does not read. */
 const THENABLE = new Set(["then", "catch", "finally"]);
 /**
@@ -1667,25 +1694,88 @@ function declaredByType(ctx: Ctx, t: ts.TypeNode | undefined): Declared {
  *            conditional), a destructured binding with no readable client
  *            type, an import, a class member, a cycle of aliases.
  */
+/** What an identifier is IMPORTED as, followed through plain aliases. */
+type ImportedAs = {
+  /** The module specifier as written. */
+  spec: string;
+  /** The exported name for a named import, `"default"` for a default import, null for a namespace. */
+  exported: string | null;
+};
+
 /**
- * `adminClient` / `createClient` by name, or the same export read off a
- * NAMESPACE import — `import * as admin from "../_lib/admin.ts";
- * admin.adminClient()`. A factory reached as a member of its module is the
- * factory; the name-only test made a handled `.auth` error on the client it
- * returns "declared as neither a client nor a value" (red on healthy code)
- * and an inline `admin.adminClient().from(…)` an unrecognised receiver
- * (measured; the `globalThis.Object` sibling in this reader, round 66). A
- * same-named METHOD on anything else stays what it was, unknown.
+ * The import an identifier is bound to — `import { a as b }` names the
+ * export `a`, `import * as ns` names the module, `import d` names its default
+ * — followed through a plain alias (`const a = admin;`, and `a = admin` in
+ * any alias-forming spelling, as `declaredAsClient` reads a receiver's
+ * sources), so an alias of the namespace is the namespace. Null for a local
+ * declaration, a parameter, or a name the file never declares.
  */
+function importedAs(ctx: Ctx, id: ts.Identifier, seen = new Set<ts.Symbol>()): ImportedAs | null {
+  const sym = symbolOf(ctx.checker, id);
+  if (!sym || seen.has(sym)) return null;
+  seen.add(sym);
+  const decl = sym.valueDeclaration ?? sym.declarations?.[0];
+  if (!decl) return null;
+  // A JSDoc `@import` binds a type and no value, so only a real import
+  // declaration answers.
+  const declared = (d: ts.Node, exported: string | null): ImportedAs | null =>
+    ts.isImportDeclaration(d) && ts.isStringLiteralLike(d.moduleSpecifier) ? { spec: d.moduleSpecifier.text, exported } : null;
+  if (ts.isNamespaceImport(decl)) return declared(decl.parent.parent, null);
+  if (ts.isImportSpecifier(decl)) return declared(decl.parent.parent.parent, (decl.propertyName ?? decl.name).text);
+  if (ts.isImportClause(decl)) return declared(decl.parent, "default");
+  if (!ts.isVariableDeclaration(decl)) return null;
+  const sources: ts.Expression[] = decl.initializer ? [decl.initializer] : [];
+  const visit = (n: ts.Node) => {
+    if (ts.isBinaryExpression(n) && isAliasFormingAssignment(n.operatorToken.kind)) {
+      const left = unwrapTransparent(n.left);
+      if (ts.isIdentifier(left) && symbolOf(ctx.checker, left) === sym) sources.push(n.right);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(ctx.sf);
+  for (const s of sources) {
+    const v = unwrapTransparent(s);
+    const found = ts.isIdentifier(v) ? importedAs(ctx, v, seen) : null;
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
+ * `adminClient` / `createClient` as the EXPORT of a known client module
+ * (`isClientModule`) — by name (`import { createClient } from
+ * "npm:@supabase/supabase-js@2"`, the spelling `credential-vault` uses, and
+ * renamed, `import { createClient as mk }`, is the same export), off a
+ * NAMESPACE import of one (`admin.adminClient()`), or off an alias of either
+ * (`const a = admin; a.adminClient()` with its error handled was "declared
+ * as neither a client nor a value" on the shipped gate: a refusal on healthy
+ * code, the channel gate's alias finding in this reader). A same-named
+ * export of any other module, a same-named method on anything else, and a
+ * local declaration of the name are NOT the factory: what they return is a
+ * receiver this gate cannot read, and it says so rather than reporting a
+ * discarded error on somebody else's client. An identifier the file declares
+ * no VALUE for — never declared, or declared ambiently (`declare function
+ * adminClient(): any`, which binds a type and emits nothing) — is taken by
+ * name: there is nothing to resolve, a typechecked module has none, and the
+ * fixtures here call `adminClient()` bare or under such a declaration.
+ */
+/** The file binds a value to this name: some declaration of it is not ambient. */
+function declaresValue(ctx: Ctx, id: ts.Identifier): boolean {
+  const decls = symbolOf(ctx.checker, id)?.declarations ?? [];
+  return decls.some((d) => !(ts.getCombinedModifierFlags(d) & ts.ModifierFlags.Ambient));
+}
 function isClientFactory(ctx: Ctx, callee: ts.Expression): boolean {
-  if (ts.isIdentifier(callee)) return CLIENT_FACTORIES.has(callee.text);
+  if (ts.isIdentifier(callee)) {
+    const imp = importedAs(ctx, callee);
+    if (imp) return imp.exported !== null && CLIENT_FACTORIES.has(imp.exported) && isClientModule(ctx.file, imp.spec);
+    return !declaresValue(ctx, callee) && CLIENT_FACTORIES.has(callee.text);
+  }
   const m = memberAccess(callee);
   if (!m || !CLIENT_FACTORIES.has(m.name)) return false;
   const base = unwrapTransparent(m.receiver);
   if (!ts.isIdentifier(base)) return false;
-  const sym = symbolOf(ctx.checker, base);
-  const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
-  return !!decl && ts.isNamespaceImport(decl);
+  const imp = importedAs(ctx, base);
+  return !!imp && imp.exported === null && isClientModule(ctx.file, imp.spec);
 }
 
 function declaredAsClient(ctx: Ctx, recv: ts.Expression, seen = new Set<ts.Symbol>()): Declared {
@@ -2068,18 +2158,21 @@ function g(db: any) { return db.from("clients").select("id"); }`, "fixture.ts");
     // 66: the `globalThis.Object` finding's sibling in this reader). A
     // same-named method on something that is NOT a namespace import stays
     // unknown, as it always was.
+    // The module is identified by its RESOLVED path (round 67), so the
+    // fixture sits where a function does.
+    const PROBE = "supabase/functions/probe/index.ts";
     const NS = 'import * as admin from "../_lib/admin.ts";\n';
     expect(classifySource(
       `${NS}async function f() { const db = admin.adminClient(); const { data, error } = await db.auth.getUser("t"); if (error) throw error; return data; }`,
-      "f.ts",
+      PROBE,
     ).map((s) => s.verdict)).toEqual(["OK"]);
     expect(classifySource(
       `${NS}async function f() { const { data } = await admin.adminClient().from("walks").select("id"); return data; }`,
-      "f.ts",
+      PROBE,
     ).map((s) => s.verdict)).toEqual(["DISCARDED"]);
     expect(classifySource(
       `${NS}async function f() { const db = admin.adminClient(); const { data } = await db.from("walks").select("id"); return data; }`,
-      "f.ts",
+      PROBE,
     ).map((s) => s.verdict)).toEqual(["DISCARDED"]);
     expect(classifySource(
       'declare const svc: { adminClient(): unknown };\nasync function f() { const db = svc.adminClient(); const { data, error } = await db.auth.getUser("t"); if (error) throw error; return data; }',
@@ -2098,6 +2191,71 @@ function g(db: any) { return db.from("clients").select("id"); }`, "fixture.ts");
       );
       expect(s.map((x) => x.verdict), spelling).toEqual(["DISCARDED"]);
     }
+  });
+
+  it("a factory is the export of a KNOWN module — by name, by namespace, or by an alias of either (Codex, PR #94, round 67)", () => {
+    const PROBE = "supabase/functions/probe/index.ts";
+    const LIB = "supabase/functions/_lib/probe.ts";
+    const verdicts = (src: string, file = PROBE) => classifySource(src, file).map((s) => s.verdict);
+    const HANDLED = 'const { data, error } = await db.auth.getUser("t"); if (error) throw error; return data;';
+    const DROPPED = 'const { data } = await db.auth.getUser("t"); return data;';
+    const fn = (imp: string, mk: string, body: string) => `${imp}\nasync function f() { const db = ${mk}; ${body} }`;
+
+    // Codex's case: a namespace of an UNRELATED module exposing a method
+    // called `createClient`. Its client is not one this gate can read, so a
+    // dropped error on it is refused loudly rather than reported as a
+    // Supabase discard — and a handled one is refused the same way, since
+    // the receiver is the question. The named-import spelling had the same
+    // hole (measured).
+    const oauthNs = 'import * as oauth from "./oauth";';
+    const oauthNamed = 'import { createClient } from "./oauth";';
+    expect(verdicts(fn(oauthNs, "oauth.createClient()", DROPPED))).toEqual(["UNCLASSIFIED"]);
+    expect(classifySource(fn(oauthNs, "oauth.createClient()", DROPPED), PROBE)[0]?.reason).toMatch(/neither a client nor a value/);
+    expect(verdicts(fn(oauthNs, "oauth.createClient()", HANDLED))).toEqual(["UNCLASSIFIED"]);
+    expect(verdicts(fn(oauthNamed, "createClient()", DROPPED))).toEqual(["UNCLASSIFIED"]);
+    // The house wrapper by its RESOLVED path: `../_lib/admin.ts` from a
+    // function and `./admin.ts` from a `_lib` sibling are one module, and a
+    // second `admin.ts` beside a function is NOT it, whatever it exports.
+    const adminNs = 'import * as admin from "../_lib/admin.ts";';
+    const adminNamed = 'import { adminClient } from "../_lib/admin.ts";';
+    expect(verdicts(fn(adminNs, "admin.adminClient()", HANDLED))).toEqual(["OK"]);
+    expect(verdicts(fn(adminNamed, "adminClient()", DROPPED))).toEqual(["DISCARDED"]);
+    expect(verdicts(fn('import { adminClient } from "./admin.ts";', "adminClient()", HANDLED), LIB)).toEqual(["OK"]);
+    expect(verdicts(fn('import * as admin from "./admin.ts";', "admin.adminClient()", HANDLED), LIB)).toEqual(["OK"]);
+    expect(verdicts(fn('import { adminClient } from "./admin.ts";', "adminClient()", DROPPED))).toEqual(["UNCLASSIFIED"]);
+    expect(verdicts(fn('import * as admin from "./admin.ts";', "admin.adminClient()", DROPPED))).toEqual(["UNCLASSIFIED"]);
+    // supabase-js under Deno's spelling — the one `credential-vault` uses —
+    // where the registry prefix and the version are the same package, and a
+    // RENAMED import is the same export.
+    for (const spec of [
+      "npm:@supabase/supabase-js@2",
+      "jsr:@supabase/supabase-js@2",
+      "@supabase/supabase-js",
+      "npm:@supabase/supabase-js@2.45.0",
+    ]) {
+      expect(verdicts(fn(`import { createClient } from "${spec}";`, 'createClient("u", "k")', DROPPED)), spec).toEqual(["DISCARDED"]);
+      expect(verdicts(fn(`import * as sj from "${spec}";`, 'sj.createClient("u", "k")', DROPPED)), spec).toEqual(["DISCARDED"]);
+    }
+    expect(verdicts(fn('import { createClient as mk } from "npm:@supabase/supabase-js@2";', 'mk("u", "k")', DROPPED))).toEqual(["DISCARDED"]);
+    // The exported NAME decides, not the local one, and a LOCAL declaration
+    // of the name is not the export either…
+    expect(verdicts(fn('import { other as createClient } from "../_lib/admin.ts";', "createClient()", HANDLED))).toEqual(["UNCLASSIFIED"]);
+    expect(verdicts(`function createClient() { return makeThing(); }\nasync function f() { const db = createClient(); ${DROPPED} }`)).toEqual(["UNCLASSIFIED"]);
+    // …while an identifier the file never declares is taken by name, which
+    // is what every bare `adminClient()` fixture in this file relies on.
+    expect(verdicts(`async function f() { const db = adminClient(); ${DROPPED} }`, "f.ts")).toEqual(["DISCARDED"]);
+    // An ALIAS of the namespace is the namespace — by declaration, by
+    // assignment, transitively — and an alias of the named import is the
+    // import. `const a = admin; a.adminClient()` with its error handled was
+    // "declared as neither a client nor a value" on the shipped gate: a
+    // refusal on healthy code (measured; the channel gate's alias finding in
+    // this reader). An alias of something ELSE is not.
+    expect(verdicts(`${adminNs}\nasync function f() { const a = admin; const db = a.adminClient(); ${HANDLED} }`)).toEqual(["OK"]);
+    expect(verdicts(`${adminNs}\nasync function f() { const a = admin; const db = a.adminClient(); ${DROPPED} }`)).toEqual(["DISCARDED"]);
+    expect(verdicts(`${adminNs}\nasync function f() { let a; a = admin; const db = a.adminClient(); ${HANDLED} }`)).toEqual(["OK"]);
+    expect(verdicts(`${adminNs}\nasync function f() { const a = admin; const b = a; const db = b.adminClient(); ${HANDLED} }`)).toEqual(["OK"]);
+    expect(verdicts(`${adminNamed}\nasync function f() { const mk = adminClient; const db = mk(); ${HANDLED} }`)).toEqual(["OK"]);
+    expect(verdicts(`declare const other: { adminClient(): unknown };\nasync function f() { const a = other; const db = a.adminClient(); ${HANDLED} }`)).toEqual(["UNCLASSIFIED"]);
   });
 
   it("receivers: a capitalised global is not a query; anything unrecognised is UNCLASSIFIED", () => {
@@ -2140,7 +2298,7 @@ function g(db: any) { return db.from("clients").select("id"); }`, "fixture.ts");
 }`, "f.ts")).toEqual([]);
     // A call that is not a known client factory could be either — a wrapper
     // returning a client, or a value — so it is refused loudly rather than
-    // guessed; adding a real factory to CLIENT_FACTORIES is the remedy.
+    // guessed; a real factory is one imported from a known client module.
     expect(classifySource(`function k() { return keysOf().auth.trim(); }`, "f.ts").map((s) => s.verdict)).toEqual(["UNCLASSIFIED"]);
     const s = one(`async function h() {
   const { data } = await client.auth.getUser("t");
