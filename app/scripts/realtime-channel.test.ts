@@ -1139,6 +1139,12 @@ describe("the walk channel is the only channel, and it is private on both sides"
       "const a = sb; const mod = a;",
       "const mod = (sb as never);",
       "let mod = other; mod ??= sb;",
+      // …and the destructured, looped and defaulted spellings, which the
+      // shared `holdersOf` already follows for the client — pinned here so
+      // the namespace set cannot quietly stop going through it (round 68).
+      "const [mod] = [sb];",
+      "const { m: mod } = { m: sb };",
+      "let mod; for (mod of [sb]) {}",
     ]) {
       expect(verdicts(NS, `${alias} ${KEY}mod.supabase[key]("walk:public");`)[0], alias).toMatch(computedMember);
       expect(verdicts(NS, `${alias} ${KEY}mod[key]("walk:public");`)[0], alias).toMatch(computedMember);

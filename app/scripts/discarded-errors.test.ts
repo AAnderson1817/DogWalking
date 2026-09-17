@@ -3,10 +3,11 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, posix, relative, resolve } from "node:path";
 import ts from "typescript";
 import {
+  type BoundValue,
+  boundValues,
   calleeCall,
   calleeOf,
   computedAccess,
-  isAliasFormingAssignment,
   isTransparentWrapper,
   memberAccess as sharedMemberAccess,
   memberRoot,
@@ -1723,22 +1724,36 @@ function importedAs(ctx: Ctx, id: ts.Identifier, seen = new Set<ts.Symbol>()): I
   if (ts.isNamespaceImport(decl)) return declared(decl.parent.parent, null);
   if (ts.isImportSpecifier(decl)) return declared(decl.parent.parent.parent, (decl.propertyName ?? decl.name).text);
   if (ts.isImportClause(decl)) return declared(decl.parent, "default");
-  if (!ts.isVariableDeclaration(decl)) return null;
-  const sources: ts.Expression[] = decl.initializer ? [decl.initializer] : [];
-  const visit = (n: ts.Node) => {
-    if (ts.isBinaryExpression(n) && isAliasFormingAssignment(n.operatorToken.kind)) {
-      const left = unwrapTransparent(n.left);
-      if (ts.isIdentifier(left) && symbolOf(ctx.checker, left) === sym) sources.push(n.right);
-    }
-    ts.forEachChild(n, visit);
-  };
-  visit(ctx.sf);
-  for (const s of sources) {
-    const v = unwrapTransparent(s);
-    const found = ts.isIdentifier(v) ? importedAs(ctx, v, seen) : null;
-    if (found) return found;
+  // An ALIAS, through every binding form the shared enumeration knows — a
+  // declaration, an assignment in any alias-forming spelling, a parameter or
+  // binding-element default, a destructuring against a literal, a loop over
+  // one — filtered to THIS symbol's targets, so a same-named binding
+  // elsewhere in the file is not this one. Following the declaration
+  // initializer and the plain assignments alone was a partial copy of that
+  // list: `const [a] = [admin]; a.adminClient()` with its error handled was
+  // "declared as neither a client nor a value", a refusal on healthy code
+  // (Codex, PR #94, round 68), and the object, loop, parameter-default and
+  // nested spellings were refused the same way (measured). A key taken off a
+  // NAMESPACE import is that module's export: `const { adminClient } =
+  // admin` is `admin.adminClient` one syntactic shape over.
+  for (const b of boundValuesOf(ctx.sf)) {
+    if (symbolOf(ctx.checker, b.target) !== sym) continue;
+    const v = unwrapTransparent(b.value);
+    if (!ts.isIdentifier(v)) continue;
+    const found = importedAs(ctx, v, seen);
+    if (!found) continue;
+    if (b.key === undefined) return found;
+    if (found.exported === null) return { spec: found.spec, exported: b.key };
   }
   return null;
+}
+
+/** `boundValues` once per file: every reader of a binding asks the same list. */
+const BOUND_VALUES = new WeakMap<ts.SourceFile, BoundValue[]>();
+function boundValuesOf(sf: ts.SourceFile): BoundValue[] {
+  let bound = BOUND_VALUES.get(sf);
+  if (!bound) BOUND_VALUES.set(sf, (bound = boundValues(sf)));
+  return bound;
 }
 
 /**
@@ -1808,45 +1823,43 @@ function declaredAsClient(ctx: Ctx, recv: ts.Expression, seen = new Set<ts.Symbo
   seen.add(sym);
   const decl = sym.valueDeclaration ?? sym.declarations?.[0];
   if (!decl) return "unknown";
-  if (ts.isVariableDeclaration(decl) || ts.isParameter(decl)) {
-    // Every SOURCE of the binding: its initialiser (a parameter's default
-    // included) and, for a variable, each later `db = …`. A factory anywhere
-    // WINS, even under an annotation naming something else — `const db: Db =
-    // adminClient()` is a client whatever `Db` is called (Codex on PR #92:
-    // the first version let a value-typed annotation return before the
-    // initialiser was looked at). With no visible client the annotation
+  if (ts.isVariableDeclaration(decl) || ts.isParameter(decl) || ts.isBindingElement(decl)) {
+    // Every SOURCE of the binding, through every binding form the shared
+    // enumeration knows (`boundValues`, filtered to this symbol): its
+    // initialiser or default, each later assignment in any alias-forming
+    // spelling (`db2 ??= db` assigns the client when it runs — Codex, PR
+    // #94, round 64), the part a destructuring takes off a literal and the
+    // elements a `for…of` yields. The initialiser-plus-assignments list this
+    // reader used to keep was a partial copy of that enumeration: `const
+    // [db] = [adminClient()]` with its error handled was "declared as neither
+    // a client nor a value", and with the error DROPPED it was refused the
+    // same way rather than reported (measured; the round-68 finding's
+    // sibling in this reader). A
+    // part taken by KEY off a non-literal source (`const { db } = deps`) is
+    // a member this reader cannot classify and counts as unknown. A factory
+    // anywhere WINS, even under an annotation naming something else — `const
+    // db: Db = adminClient()` is a client whatever `Db` is called (Codex on
+    // PR #92: the first version let a value-typed annotation return before
+    // the initialiser was looked at). With no visible client the annotation
     // decides; with no annotation, a value only when every source the gate
     // can read is one.
-    const sources: Declared[] = decl.initializer ? [byExpression(decl.initializer)] : [];
-    if (ts.isVariableDeclaration(decl)) {
-      // Every alias-forming spelling, not `=` alone: `db2 ??= db` assigns the
-      // client when it runs, and reading only `EqualsToken` left a computed
-      // call on `db2` with no site and a discarded `.auth` call on it refused
-      // as "neither a client nor a value" (measured; Codex, PR #94, round 64
-      // — the channel gate's assignment-alias finding, in this reader). The
-      // left side goes through the transparent wrappers, as every other
-      // target read in this family does.
-      const visit = (n: ts.Node) => {
-        if (ts.isBinaryExpression(n) && isAliasFormingAssignment(n.operatorToken.kind)) {
-          const left = unwrapTransparent(n.left);
-          if (ts.isIdentifier(left) && symbolOf(ctx.checker, left) === sym) sources.push(byExpression(n.right));
-        }
-        ts.forEachChild(n, visit);
-      };
-      visit(ctx.sf);
+    const sources: Declared[] = [];
+    for (const b of boundValuesOf(ctx.sf)) {
+      if (symbolOf(ctx.checker, b.target) !== sym) continue;
+      sources.push(b.key === undefined ? byExpression(b.value) : "unknown");
     }
     if (sources.includes("client")) return "client";
-    const byType = declaredByType(ctx, decl.type);
-    if (byType !== "unknown") return byType;
-    return sources.length > 0 && sources.every((d) => d === "value") ? "value" : "unknown";
-  }
-  if (ts.isBindingElement(decl)) {
-    // `({ db }: Deps)` — the client is somewhere inside a type the gate
-    // cannot read; refuse loudly rather than guess either way.
+    // The annotation: on the declaration itself, or — for a destructured
+    // binding — on the parameter or variable the pattern hangs off (`({ db
+    // }: Deps)`), where the client is somewhere inside a type the gate can
+    // read only as a whole, so that type says "client" or nothing.
     let p: ts.Node = decl;
     while (ts.isBindingElement(p) || ts.isObjectBindingPattern(p) || ts.isArrayBindingPattern(p)) p = p.parent;
     const t = ts.isParameter(p) || ts.isVariableDeclaration(p) ? p.type : undefined;
-    return declaredByType(ctx, t) === "client" ? "client" : "unknown";
+    const byType = declaredByType(ctx, t);
+    if (byType === "client") return "client";
+    if (!ts.isBindingElement(decl) && byType !== "unknown") return byType;
+    return sources.length > 0 && sources.every((d) => d === "value") ? "value" : "unknown";
   }
   // An import, a class member, a function — nothing this gate can read.
   return "unknown";
@@ -2256,6 +2269,63 @@ function g(db: any) { return db.from("clients").select("id"); }`, "fixture.ts");
     expect(verdicts(`${adminNs}\nasync function f() { const a = admin; const b = a; const db = b.adminClient(); ${HANDLED} }`)).toEqual(["OK"]);
     expect(verdicts(`${adminNamed}\nasync function f() { const mk = adminClient; const db = mk(); ${HANDLED} }`)).toEqual(["OK"]);
     expect(verdicts(`declare const other: { adminClient(): unknown };\nasync function f() { const a = other; const db = a.adminClient(); ${HANDLED} }`)).toEqual(["UNCLASSIFIED"]);
+  });
+
+  it("an alias of an import, or of a client, is followed through every binding form the shared enumeration knows (Codex, PR #94, round 68)", () => {
+    const PROBE = "supabase/functions/probe/index.ts";
+    const verdicts = (src: string) => classifySource(src, PROBE).map((s) => s.verdict);
+    const HANDLED = 'const { data, error } = await db.auth.getUser("t"); if (error) throw error; return data;';
+    const DROPPED = 'const { data } = await db.auth.getUser("t"); return data;';
+    const NS = 'import * as admin from "../_lib/admin.ts";\ndeclare const others: unknown[];';
+    const NAMED = 'import { adminClient } from "../_lib/admin.ts";';
+    // Codex's case — the namespace aliased by DESTRUCTURING — and every
+    // other binding form: each was "declared as neither a client nor a value"
+    // with its error handled on the shipped gate, a refusal on healthy code,
+    // because `importedAs` followed a declaration initializer and the plain
+    // assignments and nothing else, a partial copy of the shared enumeration.
+    for (const alias of [
+      "const [a] = [admin];",
+      "const { ns: a } = { ns: admin };",
+      "const [[a]] = [[admin]];",
+      "let a; a ??= admin;",
+      "let a; [a] = [admin];",
+      "const [a] = [...[admin]];",
+    ]) {
+      expect(verdicts(`${NS}\nasync function f() { ${alias} const db = a.adminClient(); ${HANDLED} }`), alias).toEqual(["OK"]);
+      expect(verdicts(`${NS}\nasync function f() { ${alias} const db = a.adminClient(); ${DROPPED} }`), alias).toEqual(["DISCARDED"]);
+    }
+    expect(verdicts(`${NS}\nasync function f() { for (const a of [admin]) { const db = a.adminClient(); ${HANDLED} } }`)).toEqual(["OK"]);
+    expect(verdicts(`${NS}\nasync function f(a = admin) { const db = a.adminClient(); ${HANDLED} }`)).toEqual(["OK"]);
+    expect(verdicts(`${NAMED}\nasync function f() { const [mk] = [adminClient]; const db = mk(); ${HANDLED} }`)).toEqual(["OK"]);
+    // A key taken off the NAMESPACE is that module's export — the factory
+    // itself, for supabase-js as for the house wrapper.
+    expect(verdicts(`${NS}\nasync function f() { const { adminClient: mk } = admin; const db = mk(); ${HANDLED} }`)).toEqual(["OK"]);
+    expect(verdicts(`import * as sj from "npm:@supabase/supabase-js@2";\nasync function f() { const { createClient } = sj; const db = createClient("u", "k"); ${DROPPED} }`)).toEqual(["DISCARDED"]);
+    // The rules that keep this from becoming "every destructuring is the
+    // import": a position after a spread this reader cannot expand is
+    // UNKNOWN (the `literalElements` erasure — slot 0, which the zero-width
+    // reading would hand `admin`; a later slot is unbound under either
+    // reading and pins nothing, the round-65 trap), a same-named binding
+    // elsewhere is another symbol, and a key taken off something that is
+    // not an import is nothing this reader can name.
+    expect(verdicts(`${NS}\nasync function f() { const [a] = [...others, admin]; const db = a.adminClient(); ${HANDLED} }`)).toEqual(["UNCLASSIFIED"]);
+    expect(verdicts(`${NS}\nasync function f() { const [a] = [admin]; return a; }\nasync function g(a: { adminClient(): unknown }) { const db = a.adminClient(); ${HANDLED} }`)).toEqual(["UNCLASSIFIED"]);
+    expect(verdicts(`declare const svc: { adminClient(): unknown };\nasync function f() { const { adminClient: mk } = svc; const db = mk(); ${HANDLED} }`)).toEqual(["UNCLASSIFIED"]);
+    // The SIBLING reader: a destructured client VALUE went the same way in
+    // `declaredAsClient` — the handled error refused, and the DROPPED one
+    // refused rather than reported (measured on the shipped gate).
+    for (const bind of [
+      "const [db] = [adminClient()];",
+      "const { db } = { db: adminClient() };",
+      "const [[db]] = [[adminClient()]];",
+    ]) {
+      expect(verdicts(`${NAMED}\nasync function f() { ${bind} ${HANDLED} }`), bind).toEqual(["OK"]);
+      expect(verdicts(`${NAMED}\nasync function f() { ${bind} ${DROPPED} }`), bind).toEqual(["DISCARDED"]);
+    }
+    expect(verdicts(`${NAMED}\nasync function f() { for (const db of [adminClient()]) { ${HANDLED} } }`)).toEqual(["OK"]);
+    // …while a part taken by key off a NON-literal source is still a member
+    // this reader cannot classify: refused loudly, as it always was.
+    expect(verdicts(`${NAMED}\ndeclare const deps: { db: unknown };\nasync function f() { const { db } = deps; ${HANDLED} }`)).toEqual(["UNCLASSIFIED"]);
   });
 
   it("receivers: a capitalised global is not a query; anything unrecognised is UNCLASSIFIED", () => {

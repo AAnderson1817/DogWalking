@@ -610,6 +610,12 @@ export type BindingSource = {
    * — which is never a value the source carries.
    */
   loop?: "of" | "in";
+  /**
+   * The target identifier NODE of a whole binding, or of a loop whose target
+   * is one identifier — so a consumer that resolves by SYMBOL can ask which
+   * binding is this one, where the name alone cannot (`boundValues`).
+   */
+  node?: ts.Identifier;
 };
 
 export function bindingSources(sf: ts.SourceFile): BindingSource[] {
@@ -619,7 +625,7 @@ export function bindingSources(sf: ts.SourceFile): BindingSource[] {
     const targets = new Set<string>();
     bindPatternNames(name, targets);
     if (targets.size === 0) return;
-    out.push(ts.isIdentifier(name) ? { targets, source, whole: true } : { targets, source, whole: false, pattern: name });
+    out.push(ts.isIdentifier(name) ? { targets, source, whole: true, node: name } : { targets, source, whole: false, pattern: name });
   };
   const visit = (n: ts.Node): void => {
     if (ts.isVariableDeclaration(n) || ts.isParameter(n) || ts.isBindingElement(n)) {
@@ -630,26 +636,30 @@ export function bindingSources(sf: ts.SourceFile): BindingSource[] {
       const left = unwrapTransparent(n.left);
       if (targets.size > 0) {
         out.push(ts.isIdentifier(left)
-          ? { targets, source: n.right, whole: true }
+          ? { targets, source: n.right, whole: true, node: left }
           : { targets, source: n.right, whole: false, pattern: n.left });
       }
     } else if (ts.isForOfStatement(n) || ts.isForInStatement(n)) {
       const targets = new Set<string>();
       let pattern: ts.BindingName | ts.Expression | undefined;
+      let node: ts.Identifier | undefined;
       if (ts.isVariableDeclarationList(n.initializer)) {
         for (const d of n.initializer.declarations) {
           bindPatternNames(d.name, targets);
-          if (!ts.isIdentifier(d.name)) pattern = d.name;
+          if (ts.isIdentifier(d.name)) node = d.name;
+          else pattern = d.name;
         }
       } else {
         collectAssignmentTargets(n.initializer, targets);
-        if (!ts.isIdentifier(unwrapTransparent(n.initializer))) pattern = n.initializer;
+        const init = unwrapTransparent(n.initializer);
+        if (ts.isIdentifier(init)) node = init;
+        else pattern = n.initializer;
       }
       if (targets.size > 0) {
         const loop = ts.isForOfStatement(n) ? "of" : "in";
         out.push(pattern
           ? { targets, source: n.expression, whole: false, loop, pattern }
-          : { targets, source: n.expression, whole: false, loop });
+          : { targets, source: n.expression, whole: false, loop, node });
       }
     }
     ts.forEachChild(n, visit);
@@ -710,7 +720,7 @@ export function holdersOf(
   memberHolds?: MemberHolds,
 ): Set<string> {
   const names = new Set(seeds);
-  const bindings = bindingSources(sf);
+  const bound = boundValues(sf);
   const holds = (e: ts.Expression): boolean => {
     const v = unwrapTransparent(e);
     if (ts.isIdentifier(v)) return names.has(v.text);
@@ -719,13 +729,12 @@ export function holdersOf(
   };
   for (let grew = true; grew;) {
     grew = false;
-    for (const b of bindings) {
-      const gained = b.whole ? (holds(b.source) ? b.targets : []) : partsHolding(b, holds, memberHolds);
-      for (const t of gained) {
-        if (!names.has(t)) {
-          names.add(t);
-          grew = true;
-        }
+    for (const b of bound) {
+      if (names.has(b.target.text)) continue;
+      const yes = b.key === undefined ? holds(b.value) : (memberHolds?.(b.value, b.key) ?? false);
+      if (yes) {
+        names.add(b.target.text);
+        grew = true;
       }
     }
   }
@@ -736,54 +745,77 @@ export function holdersOf(
 export type MemberHolds = (receiver: ts.Expression, key: string) => boolean;
 
 /**
- * The pattern names (or loop targets) that receive a seed out of a source.
- * Anything the reader cannot match is not followed — the miss direction,
- * stated in `holdersOf`.
+ * One binding's hand-over: `target` receives `value` — or, with `key` set,
+ * receives `value[key]`, a part taken by KEY off a NON-literal source
+ * (`const { adminClient } = admin`, `const { Object: O } = globalThis`), which
+ * is a member read of that source one syntactic shape over.
  */
-function partsHolding(b: BindingSource, holds: (e: ts.Expression) => boolean, memberHolds?: MemberHolds): Set<string> {
-  const out = new Set<string>();
-  const src = unwrapTransparent(b.source);
-  if (b.loop) {
-    // `for…in` binds KEYS — `for (const db in [supabase])` gives `db` the
-    // string "0" — so nothing it binds can hold the seed; reading it as the
-    // client refused an unrelated `db[key]` on healthy code (Codex, PR #94).
-    // Only `for…of` yields the elements, and an inline literal spread among
-    // them is expanded like any other. A pattern target takes each element
-    // APART: `for (const [db] of [[supabase]])` binds `db` to the client on
-    // its one pass, and the first reader tested the whole element against
-    // the seed and never matched it against the pattern (Codex, PR #94,
-    // round 66) — so each element goes through the same reader a
-    // declaration's source does.
-    if (b.loop !== "of" || !ts.isArrayLiteralExpression(src)) return out;
-    for (const el of literalElements(src, false)) {
-      if (b.pattern) for (const n of patternParts(b.pattern, el, holds, memberHolds)) out.add(n);
-      else if (holds(el)) for (const t of b.targets) out.add(t);
+export type BoundValue = { target: ts.Identifier; value: ts.Expression; key?: string };
+
+/**
+ * Every binding in the file as (target NODE, value), through every binding
+ * form `bindingSources` enumerates and every literal-reading rule stated at
+ * `holdersOf`: a whole binding hands its source over; a destructuring
+ * against a literal hands each name the part at its position or key, at any
+ * depth, with the spread and erasure rules of `literalElements` and
+ * `literalEntries`; a `for…of` over an array literal hands its variable every
+ * readable element, and a pattern target takes each element apart; a key
+ * taken off a non-literal source is a member read of it (`key` set); a
+ * position taken off one, and a `for…in` variable, hand nothing readable.
+ *
+ * The target is the identifier NODE rather than its name, so a reader that
+ * resolves by SYMBOL can ask "is this binding the one I hold?" —
+ * `holdersOf` consumes the same list by name. The two used to be one reader
+ * and two partial copies: `discarded-errors.test.ts` followed a declaration
+ * initializer and the plain assignments and nothing else, so `const [a] =
+ * [admin]; a.adminClient()` with its error handled was "declared as neither
+ * a client nor a value", a refusal on healthy code (Codex, PR #94, round 68)
+ * — and the object, loop, parameter-default and nested spellings, and a
+ * destructured client VALUE in the sibling reader, were refused the same way
+ * (measured). One enumeration now, and no reader keeps its own list.
+ */
+export function boundValues(sf: ts.SourceFile): BoundValue[] {
+  const out: BoundValue[] = [];
+  for (const b of bindingSources(sf)) {
+    if (b.loop) {
+      // `for…in` binds KEYS — `for (const db in [supabase])` gives `db` the
+      // string "0" — so nothing it binds is a value the source carries;
+      // reading it as the client refused an unrelated `db[key]` on healthy
+      // code (Codex, PR #94). Only `for…of` yields the elements, and an inline
+      // literal spread among them is expanded like any other. A pattern
+      // target takes each element APART: `for (const [db] of [[supabase]])`
+      // binds `db` to the client on its one pass, and the first reader tested
+      // the whole element against the seed and never matched it against the
+      // pattern (Codex, PR #94, round 66) — so each element goes through the
+      // same reader a declaration's source does.
+      const src = unwrapTransparent(b.source);
+      if (b.loop !== "of" || !ts.isArrayLiteralExpression(src)) continue;
+      for (const el of literalElements(src, false)) {
+        if (b.pattern) patternValues(b.pattern, el, out);
+        else if (b.node) out.push({ target: b.node, value: el });
+      }
+    } else if (b.whole) {
+      if (b.node) out.push({ target: b.node, value: b.source });
+    } else if (b.pattern) {
+      patternValues(b.pattern, b.source, out);
     }
-    return out;
   }
-  return b.pattern ? patternParts(b.pattern, b.source, holds, memberHolds) : out;
+  return out;
 }
 
 /**
- * The names a PATTERN binds to a part of `source` that holds the seed, at
- * any depth: `const [[db]] = [[supabase]]` and `const { a: { db } } = { a: {
- * db: supabase } }` reach `db` through a nested pattern matched against the
- * nested literal, where the one-level reader before it bound nothing (a
- * nested pattern was a null slot). A part is read off a LITERAL source by
- * position or by key, through `literalElements` and `literalEntries` with
- * their spread and erasure rules; a key taken off a NON-literal source is a
- * member READ of it, and holds the seed exactly when `source.key` would —
- * `const { Object: O } = globalThis` is `globalThis.Object` one syntactic
- * shape over, answered by the same `memberHolds`. A position taken off a
+ * The parts of `source` a PATTERN hands its names, at any depth: `const
+ * [[db]] = [[supabase]]` and `const { a: { db } } = { a: { db: supabase } }`
+ * reach `db` through a nested pattern matched against the nested literal,
+ * where the one-level reader before it bound nothing (a nested pattern was a
+ * null slot). A part is read off a LITERAL source by position or by key,
+ * through `literalElements` and `literalEntries` with their spread and
+ * erasure rules; a key taken off a NON-literal source is a member READ of it
+ * and is handed over with the key (`const { Object: O } = globalThis` is
+ * `globalThis.Object` one syntactic shape over). A position taken off a
  * non-literal source has no such spelling and is not followed.
  */
-function patternParts(
-  pat: ts.BindingName | ts.Expression,
-  source: ts.Expression,
-  holds: (e: ts.Expression) => boolean,
-  memberHolds?: MemberHolds,
-): Set<string> {
-  const out = new Set<string>();
+function patternValues(pat: ts.BindingName | ts.Expression, source: ts.Expression, out: BoundValue[]): void {
   const src = unwrapTransparent(source);
   const elements = ts.isArrayLiteralExpression(src) ? literalElements(src, true) : null;
   const keyed = ts.isObjectLiteralExpression(src) ? literalEntries(src) : null;
@@ -797,23 +829,19 @@ function patternParts(
       if (!v) continue;
       value = v;
     } else {
-      if (typeof entry.target === "string" && memberHolds?.(src, entry.key)) out.add(entry.target);
+      if (ts.isIdentifier(entry.target)) out.push({ target: entry.target, value: src, key: entry.key });
       continue;
     }
     if (!value) continue;
-    if (typeof entry.target === "string") {
-      if (holds(value)) out.add(entry.target);
-    } else {
-      for (const n of patternParts(entry.target, value, holds, memberHolds)) out.add(n);
-    }
+    if (ts.isIdentifier(entry.target)) out.push({ target: entry.target, value });
+    else patternValues(entry.target, value, out);
   }
-  return out;
 }
 
 /** One slot of a pattern: a position or a key, bound to a name or to a nested pattern. */
 type PatternEntry =
-  | { index: number; key?: undefined; target: string | ts.BindingName | ts.Expression }
-  | { index?: undefined; key: string; target: string | ts.BindingName | ts.Expression };
+  | { index: number; key?: undefined; target: ts.BindingName | ts.Expression }
+  | { index?: undefined; key: string; target: ts.BindingName | ts.Expression };
 
 /**
  * The slots of a destructuring pattern in either form — a binding pattern
@@ -826,11 +854,14 @@ type PatternEntry =
  */
 function patternEntries(pat: ts.BindingName | ts.Expression): PatternEntry[] {
   const out: PatternEntry[] = [];
-  const bindingTarget = (name: ts.BindingName): string | ts.BindingName => (ts.isIdentifier(name) ? name.text : name);
-  const assignmentTarget = (el: ts.Expression): string | ts.Expression | null => {
+  // A target is handed over as its NODE — an identifier, or a nested pattern
+  // — so a consumer can resolve the identifier by symbol; `boundValues` is
+  // the one reader, and `ts.isIdentifier` tells the two apart.
+  const bindingTarget = (name: ts.BindingName): ts.BindingName => name;
+  const assignmentTarget = (el: ts.Expression): ts.Expression | null => {
     const v = unwrapTransparent(el);
     const t = ts.isBinaryExpression(v) && v.operatorToken.kind === ts.SyntaxKind.EqualsToken ? unwrapTransparent(v.left) : v;
-    if (ts.isIdentifier(t)) return t.text;
+    if (ts.isIdentifier(t)) return t;
     if (ts.isArrayLiteralExpression(t) || ts.isObjectLiteralExpression(t)) return t;
     return null;
   };
@@ -856,7 +887,7 @@ function patternEntries(pat: ts.BindingName | ts.Expression): PatternEntry[] {
     }
   } else if (ts.isObjectLiteralExpression(pat)) {
     for (const p of pat.properties) {
-      if (ts.isShorthandPropertyAssignment(p)) out.push({ key: p.name.text, target: p.name.text });
+      if (ts.isShorthandPropertyAssignment(p)) out.push({ key: p.name.text, target: p.name });
       else if (ts.isPropertyAssignment(p)) {
         const key = propertyKey(p.name);
         const target = assignmentTarget(p.initializer);
