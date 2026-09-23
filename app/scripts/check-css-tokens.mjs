@@ -19,10 +19,18 @@
 // uses are read from string and template literals in the TypeScript AST, and
 // comments and JSX text are never looked at.
 //
-// Definitions come from CSS declarations (`--x:`), and from TS where a custom
-// property can also be set: an object-literal key (`style={{ "--x": … }}`) and
-// `setProperty("--x", …)`. None exists today; counting them anyway is what
-// stops the gate going red on a healthy tree the day one does.
+// Definitions come from CSS declarations (`--x:`), and from TS only where the
+// value is actually SET ON A STYLE: a `--x` key in an object literal that flows
+// straight into a JSX `style` prop (through parens, `as`, `satisfies`, a ternary
+// branch or the right of `&&`/`||`/`??`) or is typed or asserted as
+// `CSSProperties`; and `….style.setProperty("--x", …)`. None exists today;
+// counting them is what stops the gate going red on a healthy tree the day one
+// does. Counting ANY `--x`-shaped key was the first version, and Codex was right
+// to refuse it: a config or payload object would "define" a token no style ever
+// sets, and a real `var(--missing)` would pass. That is the silent direction.
+// The strict rule's cost is the loud one — a style object that reaches `style`
+// through a plain variable, untyped, is not recognised and the gate names the
+// token — and a red that names its cause is the failure worth choosing.
 //
 // Like the CSS side always has, this is scope-blind: a token defined under one
 // selector satisfies a use anywhere. Fixing that is a different gate.
@@ -71,6 +79,34 @@ function propertyName(name) {
   return stringValue(name);
 }
 
+const CSS_PROPERTIES = /(^|\.)CSSProperties$/;
+
+function isCssPropertiesType(type, sf) {
+  return Boolean(type && ts.isTypeReferenceNode(type) && CSS_PROPERTIES.test(type.typeName.getText(sf)));
+}
+
+// Walk up from an object literal through expressions that pass its value
+// through unchanged, and say whether it lands on a style.
+function isStyleObject(obj, sf) {
+  let node = obj;
+  for (;;) {
+    const p = node.parent;
+    if (!p) return false;
+    if (ts.isParenthesizedExpression(p)) { node = p; continue; }
+    if (ts.isAsExpression(p) || ts.isSatisfiesExpression(p)) {
+      if (isCssPropertiesType(p.type, sf)) return true;
+      node = p; continue;
+    }
+    if (ts.isConditionalExpression(p) && (p.whenTrue === node || p.whenFalse === node)) { node = p; continue; }
+    if (ts.isBinaryExpression(p) && p.right === node && [
+      ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken,
+    ].includes(p.operatorToken.kind)) { node = p; continue; }
+    if (ts.isJsxExpression(p)) return ts.isJsxAttribute(p.parent) && p.parent.name.getText(sf) === "style";
+    if (ts.isVariableDeclaration(p) && p.initializer === node) return isCssPropertiesType(p.type, sf);
+    return false;
+  }
+}
+
 export function scanTs(file, text) {
   const kind = file.endsWith(".tsx") ? ts.ScriptKind.TSX
     : file.endsWith(".jsx") ? ts.ScriptKind.JSX
@@ -91,12 +127,14 @@ export function scanTs(file, text) {
         uses.push({ name: m[1], file, line: start + lineAt(node.text, m.index) - 1 });
       }
     }
-    if (ts.isPropertyAssignment(node)) {
+    if (ts.isPropertyAssignment(node) && isStyleObject(node.parent, sf)) {
       const name = propertyName(node.name);
       if (name && TOKEN.test(name)) defs.push(name);
     }
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
-      && node.expression.name.text === "setProperty") {
+      && node.expression.name.text === "setProperty"
+      && ts.isPropertyAccessExpression(node.expression.expression)
+      && node.expression.expression.name.text === "style") {
       const name = stringValue(node.arguments[0]);
       if (name && TOKEN.test(name)) defs.push(name);
     }
