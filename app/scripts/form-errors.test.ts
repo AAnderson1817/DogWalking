@@ -39,12 +39,18 @@ import { describe, expect, it } from "vitest";
  *   - Object literals are read as well as JSX (`{ role: "alert" }`), since
  *     `<span {...props}>` and `createElement` carry props that way — and so is
  *     the spread itself. A spread whose object the scan can see (a literal,
- *     or a `const` bound to one) is read as though each of its properties
- *     were written on the element, so `{ role: r }` spread onto a `<span>` is
- *     refused exactly as `<span role={r}>` is. A spread it cannot see —
- *     `{...rest}` forwarding a component's own props — is a forwarding
- *     boundary: the role enters wherever that component is USED, and that
- *     attribute is read there.
+ *     or a `const` bound to one, either arm of a ternary) is read as though
+ *     each of its properties were written on the element, so `{ role: r }`
+ *     spread onto a `<span>` is refused exactly as `<span role={r}>` is.
+ *     `createElement`'s props (and `cloneElement`'s, and the automatic
+ *     runtime's `jsx`) are applied exactly as a spread is, and judged so.
+ *   - A spread the scan cannot see is refused as both attributes it could
+ *     carry, with one exception: `{...rest}` forwarding the enclosing
+ *     component's OWN props (a rest element of, or the whole, first
+ *     parameter of a capitalised function). That is a forwarding boundary —
+ *     the role enters wherever the component is USED, and that attribute is
+ *     read there. `<span {...getErrorProps()}>` has no such later site
+ *     (Codex, on #97), which is why "cannot see" is not the exception.
  *   - An identifier is read through the `const` it is bound to, by the
  *     TypeScript checker's symbol rather than by name, so a shadowing
  *     parameter is not mistaken for the outer constant. `const role =
@@ -129,22 +135,101 @@ function valuesOf(node: ts.Node, resolve: Resolve, seen = new Set<ts.Node>()): V
 }
 
 /**
- * The object literal a spread applies, if the scan can see one: written in
- * place, or bound to a `const`, through parentheses and type assertions. A
- * forwarded `rest`, a call's result or a parameter is not visible.
+ * The object literals a spread can apply, if the scan can see every one:
+ * written in place, or bound to a `const`, through parentheses and type
+ * assertions, either arm of a ternary, the right of `&&` (a falsy left adds
+ * nothing), and either side of `||`/`??`. `null`, `undefined` and `false`
+ * add nothing and contribute no object. Anything else — a call's result, a
+ * parameter, a `let` — is undefined: the scan cannot see what it applies.
  */
-function objectOf(node: ts.Expression, resolve: Resolve, seen = new Set<ts.Node>()): ts.ObjectLiteralExpression | undefined {
-  if (ts.isObjectLiteralExpression(node)) return node;
+function objectsOf(node: ts.Expression, resolve: Resolve, seen = new Set<ts.Node>()): ts.ObjectLiteralExpression[] | undefined {
+  if (ts.isObjectLiteralExpression(node)) return [node];
   if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node)
-    || ts.isSatisfiesExpression(node) || ts.isNonNullExpression(node)) return objectOf(node.expression, resolve, seen);
+    || ts.isSatisfiesExpression(node) || ts.isNonNullExpression(node)) return objectsOf(node.expression, resolve, seen);
+  const both = (a: ts.Expression, b: ts.Expression) => {
+    const left = objectsOf(a, resolve, seen);
+    const right = objectsOf(b, resolve, seen);
+    return left && right ? [...left, ...right] : undefined;
+  };
+  if (ts.isConditionalExpression(node)) return both(node.whenTrue, node.whenFalse);
+  if (ts.isBinaryExpression(node)) {
+    const op = node.operatorToken.kind;
+    if (op === ts.SyntaxKind.AmpersandAmpersandToken) return objectsOf(node.right, resolve, seen);
+    if (op === ts.SyntaxKind.BarBarToken || op === ts.SyntaxKind.QuestionQuestionToken) return both(node.left, node.right);
+  }
+  if (node.kind === ts.SyntaxKind.NullKeyword || node.kind === ts.SyntaxKind.FalseKeyword) return [];
   if (ts.isIdentifier(node)) {
+    if (node.text === "undefined") return [];
     const init = resolve(node);
     if (init && !seen.has(init)) {
       seen.add(init);
-      return objectOf(init, resolve, seen);
+      return objectsOf(init, resolve, seen);
     }
   }
   return undefined;
+}
+
+/** The name a function can be used under as a JSX tag, if it has one. */
+function functionName(fn: ts.SignatureDeclaration): string | undefined {
+  if ((ts.isFunctionDeclaration(fn) || ts.isFunctionExpression(fn)) && fn.name) return fn.name.text;
+  if ((ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) && ts.isVariableDeclaration(fn.parent)
+    && ts.isIdentifier(fn.parent.name)) return fn.parent.name.text;
+  return undefined;
+}
+
+/** `param` is the props of a component: the first parameter of a function whose name can be a JSX tag. */
+function isComponentProps(param: ts.ParameterDeclaration): boolean {
+  const fn = param.parent;
+  return ts.isFunctionLike(fn) && fn.parameters[0] === param && /^[A-Z]/.test(functionName(fn) ?? "");
+}
+
+/**
+ * The spread forwards the enclosing component's OWN props — the whole first
+ * parameter, or a rest element destructured from it (in the parameter list,
+ * or by a `const` from that parameter). Then the role enters wherever the
+ * component is used, and that element's attributes are read there; every
+ * spread in this tree is one of these (`Button`, `Card`, the three fields).
+ * Anything else the scan cannot see is refused: `<span {...getErrorProps()}>`
+ * has no later site where its role is read (Codex, on #97). A component is a
+ * function whose name starts with a capital, since only such a name can be a
+ * JSX tag; a helper that spreads its parameter is not one.
+ */
+function forwardsProps(expr: ts.Expression, checker: ts.TypeChecker): boolean {
+  let e = expr;
+  while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isSatisfiesExpression(e) || ts.isNonNullExpression(e)) {
+    e = e.expression;
+  }
+  if (!ts.isIdentifier(e)) return false;
+  const symbol = checker.getSymbolAtLocation(e);
+  const decl = symbol?.valueDeclaration ?? symbol?.declarations?.[0];
+  if (!decl) return false;
+  if (ts.isParameter(decl)) return ts.isIdentifier(decl.name) && isComponentProps(decl);
+  if (!ts.isBindingElement(decl) || !decl.dotDotDotToken || !ts.isObjectBindingPattern(decl.parent)) return false;
+  const holder = decl.parent.parent;
+  if (ts.isParameter(holder)) return isComponentProps(holder);
+  if (ts.isVariableDeclaration(holder) && holder.initializer && ts.isIdentifier(holder.initializer)
+    && ts.isVariableDeclarationList(holder.parent) && (holder.parent.flags & ts.NodeFlags.Const) !== 0) {
+    const source = checker.getSymbolAtLocation(holder.initializer);
+    const from = source?.valueDeclaration ?? source?.declarations?.[0];
+    return !!from && ts.isParameter(from) && ts.isIdentifier(from.name) && isComponentProps(from);
+  }
+  return false;
+}
+
+/**
+ * `createElement(type, props)` — or `cloneElement`, or the automatic
+ * runtime's `jsx` — applies `props` exactly as a spread applies its object,
+ * so the props are judged with the element's rules (Codex, on #97: `{ role:
+ * getRole() }` there was read as a plain object, where an unreadable role is
+ * no evidence, while `<span role={getRole()}>` is refused). The DOM's own
+ * `document.createElement(tag, options)` takes no props and is not one.
+ */
+const ELEMENT_FACTORIES = new Set(["createElement", "cloneElement", "jsx", "jsxs", "jsxDEV"]);
+function isElementFactory(call: ts.CallExpression): boolean {
+  const callee = call.expression;
+  if (ts.isIdentifier(callee)) return ELEMENT_FACTORIES.has(callee.text);
+  return ts.isPropertyAccessExpression(callee) && ELEMENT_FACTORIES.has(callee.name.text)
+    && !(ts.isIdentifier(callee.expression) && callee.expression.text === "document");
 }
 
 /** The value of a JSX attribute, or of an object-literal property. */
@@ -291,16 +376,24 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
   // `role` it cannot read is refused there, as `role={r}` is. Nested spreads
   // inside that object are followed too. A getter supplies its value when the
   // object is spread, and the scan cannot read what it returns, so it is
-  // unreadable; a method or a setter supplies no string at all.
+  // unreadable; a method or a setter supplies no string at all. A spread
+  // whose objects the scan cannot see could carry either attribute, so it is
+  // judged as both — unless it forwards the component's own props.
   const visitSpread = (owner: string, expr: ts.Expression, site: ts.Node, seen = new Set<ts.Node>()) => {
-    const obj = objectOf(expr, resolve);
-    if (!obj || seen.has(obj)) return;
-    seen.add(obj);
-    for (const prop of obj.properties) {
-      if (ts.isPropertyAssignment(prop)) visitMember(owner, prop.name, prop.initializer, site);
-      else if (ts.isShorthandPropertyAssignment(prop)) visitProps(owner, prop.name.text, prop.name, site);
-      else if (ts.isGetAccessorDeclaration(prop)) visitMember(owner, prop.name, prop, site);
-      else if (ts.isSpreadAssignment(prop)) visitSpread(owner, prop.expression, site, seen);
+    const objects = objectsOf(expr, resolve);
+    if (objects === undefined) {
+      if (!forwardsProps(expr, checker)) for (const each of ["role", "aria-live"]) visitProps(owner, each, expr, site);
+      return;
+    }
+    for (const obj of objects) {
+      if (seen.has(obj)) continue;
+      seen.add(obj);
+      for (const prop of obj.properties) {
+        if (ts.isPropertyAssignment(prop)) visitMember(owner, prop.name, prop.initializer, site);
+        else if (ts.isShorthandPropertyAssignment(prop)) visitProps(owner, prop.name.text, prop.name, site);
+        else if (ts.isGetAccessorDeclaration(prop)) visitMember(owner, prop.name, prop, site);
+        else if (ts.isSpreadAssignment(prop)) visitSpread(owner, prop.expression, site, seen);
+      }
     }
   };
 
@@ -310,6 +403,16 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
       for (const attr of node.attributes.properties) {
         if (ts.isJsxAttribute(attr)) visitProps(owner, attrName(attr.name), valueOf(attr.initializer), attr);
         else if (ts.isJsxSpreadAttribute(attr)) visitSpread(owner, attr.expression, attr);
+      }
+    } else if (ts.isCallExpression(node) && isElementFactory(node)) {
+      // The element type is the owner (`StateField` may carry the role);
+      // an argument list the scan cannot see is props it cannot see.
+      const [type, props] = node.arguments;
+      const owner = type && (ts.isIdentifier(type) || ts.isStringLiteral(type)) ? type.text : "<element>";
+      if (node.arguments.some(ts.isSpreadElement)) {
+        for (const each of ["role", "aria-live"]) visitProps("<element>", each, node, node);
+      } else if (props) {
+        visitSpread(owner, props, node);
       }
     } else if (ts.isPropertyAssignment(node)) {
       visitMember(null, node.name, node.initializer, node);
@@ -430,7 +533,9 @@ describe("what the scan refuses and admits", () => {
 
   it("reads object literals, which is how spread props and createElement carry a role", () => {
     expect(rules(`const props = { role: "alert" };`)).toEqual(["role"]);
-    expect(rules(`createElement("span", { "aria-live": "assertive" });`)).toEqual(["aria-live"]);
+    // Reported where the object is written and where createElement applies
+    // it, as a spread's object is.
+    expect(rules(`createElement("span", { "aria-live": "assertive" });`)).toEqual(["aria-live", "aria-live"]);
     // An icon called "alert" is not a role, and neither is a signed-in
     // persona: `role` is an ordinary property name outside JSX, so only a
     // literal "alert" there is evidence of anything.
@@ -477,6 +582,60 @@ describe("what the scan refuses and admits", () => {
       .toEqual(["role"]);
     expect(rules(`const props = { role() { return 1; } }; export const X = () => <span {...props}>x</span>;`))
       .toEqual([]);
+  });
+
+  it("refuses a spread it cannot see, unless it forwards the component's own props (Codex, on #97)", () => {
+    // The shape it admitted: an opaque spread straight onto a DOM element,
+    // which has no later site where the role it carries is read.
+    expect(rules(`export const X = () => <span {...getErrorProps()}>x</span>;`)).toEqual(["role", "aria-live"]);
+    expect(rules(`export const X = ({ p }) => <span {...p}>x</span>;`)).toEqual(["role", "aria-live"]);
+    expect(rules(`let p = {}; export const X = () => <Card {...p}>x</Card>;`)).toEqual(["role", "aria-live"]);
+    // StateField may carry the role, but not an assertive live region.
+    expect(rules(`export const X = () => <StateField {...getProps()} title="x" />;`)).toEqual(["aria-live"]);
+    // What the scan can see is judged, not refused: both arms, the right of
+    // &&, and a spread of nothing.
+    expect(rules(`const a = { role: "status" }; const b = { title: "x" };
+      export const X = ({ big }) => <span {...(big ? a : b)}>x</span>;`)).toEqual([]);
+    expect(rules(`const a = { role: "status" }; export const X = ({ on }) => <span {...(on && a)}>x</span>;`)).toEqual([]);
+    expect(rules(`export const X = () => <span {...null}>x</span>;`)).toEqual([]);
+    expect(rules(`const a = { role: r }; export const X = ({ big }) => <span {...(big ? a : {})}>x</span>;`))
+      .toEqual(["role"]);
+  });
+
+  it("admits a component forwarding its own props, and nothing that merely looks like it", () => {
+    // Every spread in the tree is this shape: a rest element of the first
+    // parameter of a capitalised function.
+    expect(rules(`export function Card({ className, ...rest }) { return <div {...rest} />; }`)).toEqual([]);
+    expect(rules(`export function Card(props) { return <div {...props} />; }`)).toEqual([]);
+    expect(rules(`export const Card = ({ className, ...rest }) => <div {...rest} />;`)).toEqual([]);
+    expect(rules(`export function Card(props) { const { className, ...rest } = props; return <div {...rest} />; }`))
+      .toEqual([]);
+    // A helper is not a component: nothing reads its caller's attributes.
+    expect(rules(`function render({ ...p }) { return <span {...p} />; }`)).toEqual(["role", "aria-live"]);
+    // Nor is a second parameter, a nested rest, or a rest of something else.
+    expect(rules(`export function Card(props, extra) { return <div {...extra} />; }`)).toEqual(["role", "aria-live"]);
+    expect(rules(`export function Card({ a: { ...inner } }) { return <div {...inner} />; }`)).toEqual(["role", "aria-live"]);
+    expect(rules(`export function Card(props) { const { ...rest } = getProps(); return <div {...rest} />; }`))
+      .toEqual(["role", "aria-live"]);
+  });
+
+  it("judges createElement's props with the element's rules (Codex, on #97)", () => {
+    // The shape it admitted: an unreadable role in a props object, read as a
+    // plain object where an unreadable role is no evidence.
+    expect(rules(`createElement("span", { role: getRole() });`)).toEqual(["role"]);
+    expect(rules(`React.createElement("span", { role: r });`)).toEqual(["role"]);
+    expect(rules(`cloneElement(child, { "aria-live": level });`)).toEqual(["aria-live"]);
+    expect(rules(`jsx("span", { role: r });`)).toEqual(["role"]);
+    // Props it cannot see, or an argument list it cannot see.
+    expect(rules(`React.createElement("span", getProps());`)).toEqual(["role", "aria-live"]);
+    expect(rules(`createElement(...args);`)).toEqual(["role", "aria-live"]);
+    // The element type is the owner, and forwarding is forwarding here too.
+    expect(rules(`createElement(StateField, { role: r, title: "x" });`)).toEqual([]);
+    expect(rules(`export function Wrap(props) { return createElement("span", props); }`)).toEqual([]);
+    // The DOM's own createElement takes no props.
+    expect(rules(`const a = document.createElement("a");`)).toEqual([]);
+    expect(rules(`const el = document.createElement("div", options);`)).toEqual([]);
+    expect(rules(`createElement("span", { role: "status" }, "x");`)).toEqual([]);
   });
 
   it("admits what a binding says is harmless, and a forwarded spread", () => {

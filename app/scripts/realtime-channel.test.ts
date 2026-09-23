@@ -114,6 +114,23 @@ function memberOf(e: ts.PropertyAccessExpression | ts.ElementAccessExpression): 
 }
 
 /**
+ * An object literal written where a value is ASSIGNED TO rather than built:
+ * the left of `=`, nested in another such literal (or an array one), or the
+ * variable of a `for … of`/`for … in`.
+ */
+function isAssignmentTarget(node: ts.Node): boolean {
+  const parent = node.parent;
+  if (!parent) return false;
+  if (ts.isBinaryExpression(parent)) return parent.operatorToken.kind === ts.SyntaxKind.EqualsToken && parent.left === node;
+  if (ts.isParenthesizedExpression(parent)) return isAssignmentTarget(parent);
+  if ((ts.isPropertyAssignment(parent) && parent.initializer === node) || ts.isSpreadAssignment(parent)
+    || ts.isSpreadElement(parent)) return isAssignmentTarget(parent.parent);
+  if (ts.isArrayLiteralExpression(parent)) return isAssignmentTarget(parent);
+  if (ts.isForOfStatement(parent) || ts.isForInStatement(parent)) return parent.initializer === node;
+  return false;
+}
+
+/**
  * Every `.channel` in a file: a call is judged on its options, anything else
  * is refused. The member is read however it is spelled — the shipped scan
  * knew `a["channel"]` and not `` a[`channel`] `` (Codex, on #97) — and a CALL
@@ -125,6 +142,21 @@ function channelSites(file: string, text: string): Site[] {
   const sf = parse(file, text);
   const sites: Site[] = [];
   const visit = (node: ts.Node) => {
+    // Destructuring takes the member without an access expression at all:
+    // `const { channel } = supabase; channel.call(supabase, t)` (Codex, on
+    // #97). A `channel` key in a binding pattern, or in an object literal
+    // that is being assigned to, is refused like a bare reference. An object
+    // literal that is merely BUILT with a `channel` field — the notification
+    // delivery channel in send-notification — is data, not a member taken.
+    const taken = ts.isBindingElement(node)
+      ? (node.propertyName ? keyOf(node.propertyName) : ts.isIdentifier(node.name) ? node.name.text : undefined)
+      : (ts.isShorthandPropertyAssignment(node) || ts.isPropertyAssignment(node)) && isAssignmentTarget(node.parent)
+        ? keyOf(node.name)
+        : undefined;
+    if (taken === "channel") {
+      const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
+      sites.push({ file, line, problem: "`.channel` taken by destructuring, so the scan cannot see its options" });
+    }
     if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
       const name = memberOf(node);
       const call = ts.isCallExpression(node.parent) && node.parent.expression === node ? node.parent : undefined;
@@ -269,6 +301,25 @@ describe("what the channel scan refuses and admits", () => {
       .toMatch(/:2 is not private: a call through a member the scan cannot read/);
     // Indexing that is not called is ordinary code, and is not counted.
     expect(client({ [THE_CHANNEL_FILE]: `${PRIVATE}\nconst row = rows[i];\nconst v = row[\`id\`];` })).toEqual([]);
+  });
+
+  it("refuses `channel` taken by destructuring, which needs no access expression (Codex, on #97)", () => {
+    const one = (code: string) => client({ [THE_CHANNEL_FILE]: `${PRIVATE}\n${code}` }).join("\n");
+    // The shape it missed: the second channel is opened with no `.channel`
+    // in sight, and the private call still satisfied the count.
+    const destructured = one("const { channel } = supabase;\nchannel.call(supabase, t);");
+    expect(destructured).toMatch(/:2 is not private: `\.channel` taken by destructuring/);
+    expect(destructured).toMatch(/exactly one channel call, found 2/);
+    expect(one("const { channel: open } = supabase;")).toMatch(/taken by destructuring/);
+    expect(one('const { ["channel"]: open } = supabase;')).toMatch(/taken by destructuring/);
+    expect(one("const { realtime: { channel } } = supabase;")).toMatch(/taken by destructuring/);
+    expect(one("let channel;\n({ channel } = supabase);")).toMatch(/taken by destructuring/);
+    expect(one("export function open({ channel }: typeof supabase) { return channel; }")).toMatch(/taken by destructuring/);
+    // An object BUILT with a `channel` field is data — the delivery channel
+    // send-notification records — and destructuring anything else is too.
+    expect(one("const claim = { notification_id: id, channel };")).toBe("");
+    expect(one("const out = { channel: \"email\" };")).toBe("");
+    expect(one('const { data, error } = await supabase.from("walks").select("id");')).toBe("");
   });
 
   it("reads the definition that wins — the last one — and refuses what could override it", () => {
