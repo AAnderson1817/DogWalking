@@ -211,8 +211,13 @@ python3 scripts/gen-definer-catalog-proofs.py
 The generator reads the migrations with `gen-enum-catalog.py`'s SQL reader and
 scans its skeleton; it used to strip comments with a regex pair that lost a
 GRANT sharing a line with `--` inside a string, let a nested block comment end
-early, and read a `/*` inside a string as a comment. The proofs are those
-cases, and must end with `DEFINER CATALOGUE PROOFS PASS`.
+early, and read a `/*` inside a string as a comment. It models each function's
+ACL, and refuses by name a definer function `PUBLIC` or `anon` can execute or
+one `authenticated` holds only through the platform's default privileges
+(invariant 5) — so the first command above fails on either, before the diff.
+The proofs are the reader's cases, one per rule of the model, and each shape
+PR B's review found it misreading, with `main()` driven for both refusals; they
+must end with `DEFINER CATALOGUE PROOFS PASS`.
 
 Queries the **live schema**, so it needs gate 7's stack up. Without it the
 script exits non-zero from `psql`, which is a missing prerequisite and not a

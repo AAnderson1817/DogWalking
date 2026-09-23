@@ -101,9 +101,9 @@ from pg_roles where rolname = current_user;
 0004 puts `force row level security` on every tenant table — 23 of them.
 `FORCE` means **the table's own owner is subject to its policies**, and a
 `SECURITY DEFINER` function executes as its owner. So without `BYPASSRLS` on
-the deploying role, all 53 definer functions in this project — the credit
-engine, the vault, the materializer, the webhook's ledger writes — read zero
-rows from tables they own and write nothing. The migrations still apply
+the deploying role, every definer function in this project — the credit
+engine, the vault, the materializer, the webhook's ledger writes — reads zero
+rows from the tables it owns and writes nothing. The migrations still apply
 cleanly. The schema is simply inert.
 
 This was invisible to every test in this repository for the whole of its life,

@@ -87,6 +87,29 @@ suppressed address. Product surface rather than a fix, which is why it is its
 own item; the trust questions (what a shared login proves, whether to log
 lifts) want a written argument before code.
 
+### 3. TEMP, and the `search_path` that lets a temp table shadow `public`
+`PUBLIC` holds TEMP on the database (PostgreSQL's default), and a definer
+function whose `search_path` is `public` alone searches `pg_temp` FIRST for
+relations. So a SQL session holding a role with EXECUTE on a definer function
+can create a temp table named like one the function reads and have the
+function read that instead, as its owner (measured on `my_client_id()` with a
+temp `clients`, PR B review). The same TEMP privilege is what let an API role
+attach a definer TRIGGER function to a temp table of its own, which `0053`
+closed for the four that were open and smoke now refuses for all.
+
+Not reachable through the product: `anon` and `authenticated` are NOLOGIN,
+PostgREST issues no DDL, and no function an API role can execute runs dynamic
+SQL. Two independent hardenings, each a migration on every definer function,
+so each wants the money-path argument:
+
+- move every definer function to `set search_path = public, pg_temp`, the form
+  PostgreSQL's documentation recommends. It puts temp tables last whatever
+  TEMP is granted, so it does not depend on the platform; smoke already
+  accepts it, and a single-quoted `'public, pg_temp'` (one schema of that
+  name) still fails;
+- `revoke temporary on database … from public`, once it is measured on a real
+  project that nothing the platform runs as an API role needs a temp table.
+
 ## Done
 
 - **Spec-drift PR B — invariant 5's REVOKE half.** Migration `0053` revokes
@@ -97,8 +120,11 @@ lifts) want a written argument before code.
   revoked. `scripts/gen-definer-catalog.py` models each function's ACL
   instead of collecting GRANTs, so an unrevoked function renders `PUBLIC` and
   fails the build, and gate 8e (`scripts/check-definer-catalog-live.py`) holds
-  that model to a reset database. See the `security(0053)+ci(definer-acl)`
-  status-log entry.
+  that model to a reset database. Its review found the four reachable from any
+  SQL session holding an API role (never through the product), a grant pattern
+  that leaves `authenticated` on the platform default (refused now), and
+  healthy SQL the model misread (item 3 is what it left). See the
+  `security(0053)+ci(definer-acl)` status-log entry.
 
 - **Spec-drift PR A — the gates that passed for the wrong reason.** Eight
   checks, each proven red-first against the defect the audit named:

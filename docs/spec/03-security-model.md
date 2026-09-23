@@ -533,20 +533,45 @@ handler `.rpc()`s them.
 ## Definer function catalog + grant pattern
 Every definer fn: `SECURITY DEFINER SET search_path = public`, then
 ```
-REVOKE ALL ON FUNCTION fn_x(…) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION fn_x(…) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION fn_x(…) TO <role list>;
 ```
 The REVOKE is not a formality. A new function is executable by `PUBLIC`
 (PostgreSQL's default) and by `anon`, `authenticated` and `service_role` (the
 platform's default privileges), so a definer function created without it is
-callable by anyone holding the anon key. Four definer trigger functions were,
-from `0012`–`0015` until `0053` — not exploitable, since PostgreSQL refuses to
-call a trigger function directly and no API role can create a trigger, but
-invariant 5 all the same. `0053` revokes them from every API role, which
-cannot break them: EXECUTE on a trigger function is checked when the trigger
-is created, not when it fires (smoke.sql pins that for the three an API role
-can reach). Smoke asserts both halves of invariant 5 against the live
-catalogue, for every definer function.
+callable by anyone holding the anon key. `authenticated` belongs in it too:
+this block used to say `FROM PUBLIC, anon`, which leaves every signed-in user
+holding EXECUTE through the default privileges with no GRANT anyone wrote —
+a function meant for the service role, callable by any client, with every
+other check green (PR B review). None exists today, and the generator now
+refuses one by name; granting `authenticated` back explicitly, where it is the
+caller, is what the GRANT line is for.
+
+Four definer TRIGGER functions kept the whole default from `0012`–`0015` until
+`0053`. PostgreSQL refuses to call a trigger function directly, and an earlier
+version of this section called that "not exploitable" because no API role can
+create a trigger. It can: `PUBLIC` holds TEMP on the database, a role owns
+every temp table it creates, and an owner may put a trigger on its own table.
+So a SQL session holding an API role with EXECUTE on one of them could attach
+it to a temp table shaped like the one it guards and run its body, as the
+owner, on rows it chose — measured on `fn_refund_cancelled_debit` with the
+pre-`0053` ACL, a client's balance went from 4 to 1004, refunding a debit that
+never happened. It was never reachable through the product, because `anon` and
+`authenticated` are NOLOGIN (PostgREST connects as `authenticator`, switches
+role and issues no DDL) and no function an API role can execute runs dynamic
+SQL; invariant 5 holds without depending on that argument. `0053` revokes the
+four from every API role, which cannot break them — EXECUTE on a trigger
+function is checked when a trigger is created, not when it fires (smoke.sql
+pins that for the three an API role can reach) — and smoke now refuses a
+definer trigger function that ANY API role can execute, `authenticated`
+included. TEMP itself, and the `search_path` that lets a temp table shadow
+`public` inside a definer body, are left to their own item in
+`docs/dev/backlog.md`.
+
+Smoke asserts both halves of invariant 5 against the live catalogue, for every
+definer function: `search_path` pinned to `public` (or to `public, pg_temp`,
+the form PostgreSQL's documentation recommends, which puts temp tables last),
+and no EXECUTE for `PUBLIC` or `anon`.
 This catalogue used to be hand-written and listed **11** functions when there
 were **48** (the generated block below carries the live count). It was presented as the complete grant-audit checklist, so an engineer
 adding a definer function and checking their grants against it had no idea 37
@@ -565,14 +590,27 @@ at the platform default, and every `CREATE`, `CREATE OR REPLACE`, `DROP`,
 `GRANT` and `REVOKE` is applied in migration order, keyed by name AND
 argument types: `0026` created a new overload of `fn_apply_invoice_paid` and
 dropped the old one, and a new overload starts at the default, not at the old
-one's revokes. A definer function `PUBLIC` or `anon` can execute fails the
-generator by name, and a statement it cannot read (a routine grant in another
-shape, `ALTER FUNCTION`, `ALTER DEFAULT PRIVILEGES`, a procedure) is refused
-rather than guessed at. What no reading of the migrations can see is a grant
-made by dynamic SQL inside a body, so gate 8e
-(`scripts/check-definer-catalog-live.py`) holds the whole model — every
-function the migrations create, its argument types, its `SECURITY DEFINER`
-flag and the API roles holding EXECUTE — to a reset database.
+one's revokes. Argument types are compared as `format_type` prints them, so
+`float`, `dec`, `int[3]`, `interval day` and `pg_catalog.char` are the types
+PostgreSQL resolves them to, and an argument needs no name. A definer
+function `PUBLIC` or `anon` can execute fails the generator by name, and so
+does one `authenticated` holds only through the platform's default
+privileges. A statement it cannot read (a routine grant in another shape,
+`ALTER FUNCTION`, `ALTER DEFAULT PRIVILEGES`, a procedure) is refused rather
+than guessed at, and so is one that changes functions without naming them: a
+`DROP … CASCADE` on a type, table, schema or anything else a function can
+depend on, a range type (whose constructors no statement names), and a
+`drop function if exists` of a signature it does not know while the name
+exists with another — a no-op, or a type it spells differently from
+PostgreSQL, and it cannot tell which.
+
+So the table below is the model's reading, not the database's word. What no
+reading of the migrations can see is a grant made by dynamic SQL inside a
+body, and what a reading can get wrong is a type or a statement it misreads;
+gate 8e (`scripts/check-definer-catalog-live.py`) is the backstop for both. It
+holds the whole model — every function the migrations create, its argument
+types, its `SECURITY DEFINER` flag and the API roles holding EXECUTE — to a
+reset database, and fails by name where they disagree.
 
 Each `create function` is read as one statement, bounded on the skeleton
 where the reader has blanked its body, which matters: a fixed window reports
@@ -594,7 +632,9 @@ function gets on the platform: `PUBLIC` (PostgreSQL's default) plus `anon`,
 `authenticated` and `service_role` (Supabase's default privileges). Only the
 API roles are shown. **none** means no API role can call it — service-role
 and other definer functions only, which is the correct default. `PUBLIC` or
-`anon` would break invariant 5, and the generator refuses it.
+`anon` would break invariant 5, and so would `authenticated` holding it only
+through the default privileges; the generator refuses both. Gate 8e holds
+this reading to a reset database.
 
 | Function | EXECUTE held by |
 |---|---|
