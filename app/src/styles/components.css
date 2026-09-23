@@ -557,11 +557,12 @@ a.btn { text-decoration: none; }
   color: var(--sanpo-color-text-secondary);
   font-size: var(--fs-14);
 }
-/* Kaki is reserved for the notes that describe a change to who may claim the
-   account. Painting the attention rule on reassurance too — "this does not
-   change how they sign in", "this invite isn't live" — teaches the operator
-   that the red bar means nothing in particular, which is the erosion the
-   status vocabulary in spec 05 exists to prevent. */
+/* Kaki is reserved for notes the operator has to act on: a change to who may
+   claim the account, and an address that no longer receives email (0052).
+   Painting the attention rule on reassurance too — "this does not change how
+   they sign in", "this invite isn't live" — teaches the operator that the red
+   bar means nothing in particular, which is the erosion the status vocabulary
+   in spec 05 exists to prevent. */
 .form-note--attention { border-left-color: var(--sanpo-color-border-attention); }
 /* Same treatment as `.form-error:empty`, and for the same reason: the region
    is always in the DOM so the live region pre-exists its text, and an
@@ -2379,6 +2380,11 @@ body:has(.today-emaki-page) .bottom-nav {
    text roles on an ancestor does not reach them. The button is legible here
    because it paints its own background, not because it inherited anything. */
 .client-relationship-header__actions { margin-top: var(--s-2); }
+/* The suppressed-address notice (0052). A `.form-note`, so it paints no
+   surface and stays out of the H24 tint escalation; inside the header its
+   de-emphasis colour is already the escalated on-tint role. The margin only
+   applies when there is text — `.form-note:empty` takes it out of flow. */
+.client-relationship-header__notice { margin-top: var(--s-2); }
 .client-relationship-header__credits { font-size: var(--fs-20); font-weight: 900; white-space: nowrap; }
 .client-relationship-header__credits span { color: var(--sanpo-color-text-primary); font-family: var(--font-body); font-size: var(--fs-12); }
 .client-relationship-header__meta {

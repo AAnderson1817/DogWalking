@@ -1,4 +1,4 @@
-// Editing a client record (backlog 1).
+// Editing a client record (the `fix(client-columns)` work).
 //
 // The row was create-only in the product: `updateClient` shipped with zero
 // importers, so a mistyped email could not be corrected and a client who moved

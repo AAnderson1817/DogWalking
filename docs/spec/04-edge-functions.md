@@ -1446,10 +1446,27 @@ Two consequences of editing the address, recorded rather than carried
 silently:
 
 * Editing a client's address TO one that is already suppressed makes every
-  future client-facing email skip permanently, terminally, and with no signal
-  anywhere in the operator UI — `email_delivery_status` says `skipped` and
-  nothing surfaces it. Whether the operator should be told is a product
-  question, not a defect in the sender.
+  future client-facing email skip permanently and terminally. The row records
+  it — `email_status = 'skipped'`, `email_last_error = 'recipient
+  unsubscribed'` — but it is a row the operator cannot read
+  (`notifications_operator_select` admits operator-facing rows only), so until
+  `0052` nothing in the operator UI ever said so. Now the client record does:
+  `fn_client_email_suppressed(client)` answers, for the calling operator's own
+  client only, whether every email to its current address is suppressed, and
+  ClientDetail's header shows a notice when it is — typically just after the
+  save that caused it — naming the likeliest fix (a typo) and, for a client
+  with a login, that the portal inbox still has everything.
+
+  It asks `fn_email_suppressed` for every notification type rather than
+  restating its predicate, so the notice cannot disagree with the sender about
+  case, operator scope or type scope; a per-type row (a preference, which
+  nothing writes yet) is correctly not reported as email being off. It
+  discloses one boolean — not which business's mail was unsubscribed from, not
+  when, no reason text, no enumeration — and there is no write path: an
+  operator must never be able to lift a suppression. The address owner cannot
+  lift one either yet, so the notice promises no way to turn email back on
+  (backlog). Why this exposes no operator's list, and the one limit that
+  remains, is in spec 03 (definer catalogue).
 * `clients.unsubscribe_token` **is rotated whenever the address changes**
   (`0046`). Before that it was not, so a stranger who had received a mistyped
   email held a live one-click link that, when clicked, suppressed whatever

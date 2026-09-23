@@ -24,6 +24,7 @@ import { CredentialRow, PutCredentialSheet } from "@/components/VaultFlows";
 import { ScheduleTab } from "@/components/ScheduleEditor";
 import {
   adjustCredits,
+  clientEmailSuppressed,
   createCheckout,
   createSetupCheckout,
   createTopupCheckout,
@@ -51,6 +52,7 @@ import {
   propertyFormError,
   propertyFormOf,
   propertyPatch,
+  suppressedEmailNotice,
 } from "@/lib/client-edit";
 import { useAuth } from "@/lib/auth-context";
 import { compressImage } from "@/lib/image";
@@ -99,6 +101,42 @@ export default function ClientDetail() {
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  // 0052: is every email to this address suppressed? Fetched on its own
+  // rather than inside `reload`, because it is advisory — a failed check leaves
+  // the screen exactly as it was before this existed, where the same failure
+  // inside `reload` would replace the client with a LoadError (the M39
+  // lesson). The answer is kept WITH the address it was asked about: an
+  // address edited from a suppressed one to another must not show the old
+  // answer while the new one is in flight, and `live` stops a slow answer for
+  // the previous address overwriting the current one's.
+  const clientId = client?.id ?? null;
+  const clientEmail = client?.email ?? null;
+  const [emailCheck, setEmailCheck] =
+    useState<{ id: string; email: string; off: boolean } | null>(null);
+  useEffect(() => {
+    if (!clientId || !clientEmail) return;
+    let live = true;
+    clientEmailSuppressed(clientId).then(
+      (off) => {
+        if (live) setEmailCheck({ id: clientId, email: clientEmail, off });
+      },
+      // Silence is the pre-0052 behaviour, and the check runs again the next
+      // time the address changes or the screen mounts.
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [clientId, clientEmail]);
+  // Compared the way the sender compares — `fn_email_suppressed` lowercases —
+  // so a capitalisation fix keeps its answer instead of blinking the notice
+  // off and on again (and re-announcing it) while the same answer is fetched.
+  const emailOff = emailCheck !== null
+    && emailCheck.off
+    && emailCheck.id === clientId
+    && clientEmail !== null
+    && emailCheck.email.toLowerCase() === clientEmail.toLowerCase();
 
   if (error && missing) {
     return (
@@ -157,6 +195,17 @@ export default function ClientDetail() {
           <span>{client.phone ?? "No phone"}</span>
           <Badge status={clientTreatment.badge}>{clientTreatment.label}</Badge>
         </div>
+        {/* The suppressed-address notice (0052). Always mounted, like the edit
+            sheet's note: a live region that already exists when its text
+            arrives is announced, and the moment this text usually arrives is
+            just after the operator saved the address that caused it. `:empty`
+            takes it out of flow when there is nothing to say. */}
+        <p
+          className="form-note form-note--attention client-relationship-header__notice"
+          role="status"
+        >
+          {emailOff ? suppressedEmailNotice(client) : null}
+        </p>
         {/* Withheld from a purged client: `fn_purge_client` (H5) writes the
             tombstone, the UPDATE grant still covers those columns, and nothing
             in the database stops an edit re-personalising an erasure that was
