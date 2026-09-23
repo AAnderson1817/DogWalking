@@ -1465,8 +1465,15 @@ silently:
   (a preference, which nothing writes yet) covering every emailed type are
   email being off; covering some of them, or a bell-only type, are not. The
   first version asked over every enum value, bell-only types included, and so
-  missed the first of those (Codex, PR #96). It
-  discloses one boolean — not which business's mail was unsubscribed from, not
+  missed the first of those (Codex, PR #96).
+
+  Each answer names the address it checked (`o_email`), and the screen files
+  it under that address rather than under the one it has on screen: the row
+  can have changed since the screen loaded it — another tab, or a save racing
+  the check — and a bare boolean filed under the address on screen would put
+  the notice on the wrong one (Codex, PR #96, second round). The operator can
+  already read that column, so the label discloses nothing. The function
+  discloses one boolean besides — not which business's mail was unsubscribed from, not
   when, no reason text, no enumeration — and there is no write path: an
   operator must never be able to lift a suppression. The address owner cannot
   lift one either yet, so the notice promises no way to turn email back on

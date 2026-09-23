@@ -106,10 +106,13 @@ export default function ClientDetail() {
   // rather than inside `reload`, because it is advisory — a failed check leaves
   // the screen exactly as it was before this existed, where the same failure
   // inside `reload` would replace the client with a LoadError (the M39
-  // lesson). The answer is kept WITH the address it was asked about: an
-  // address edited from a suppressed one to another must not show the old
-  // answer while the new one is in flight, and `live` stops a slow answer for
-  // the previous address overwriting the current one's.
+  // lesson). The answer is kept WITH the address the database checked, which
+  // is not always the one on screen: the row can have changed since it was
+  // loaded (another tab, or a save racing the check), and filing the answer
+  // under the address on screen would put a notice on the wrong one (Codex,
+  // PR #96). The key also stops an address edited from a suppressed one to
+  // another showing the old answer while the new one is in flight, and `live`
+  // stops a slow answer overwriting a newer one.
   const clientId = client?.id ?? null;
   const clientEmail = client?.email ?? null;
   const [emailCheck, setEmailCheck] =
@@ -118,8 +121,10 @@ export default function ClientDetail() {
     if (!clientId || !clientEmail) return;
     let live = true;
     clientEmailSuppressed(clientId).then(
-      (off) => {
-        if (live) setEmailCheck({ id: clientId, email: clientEmail, off });
+      (answer) => {
+        if (live && answer) {
+          setEmailCheck({ id: clientId, email: answer.email, off: answer.suppressed });
+        }
       },
       // Silence is the pre-0052 behaviour, and the check runs again the next
       // time the address changes or the screen mounts.
