@@ -6126,6 +6126,77 @@ begin
   raise notice 'a client''s suppressed address is reported to its operator only, as the sender sees it (0052): OK';
 end $$;
 
+-- ── Invariant 1 · credit_balance is written only by fn_ledger_apply ──────
+-- A `pg_proc` catalogue assertion — what Postgres installed, not migration
+-- text (ci(gates)). It lived in ci.yml until the spec-drift audit, which
+-- found two ways to write the column that its pattern did not see:
+-- `update public.clients set credit_balance …` (a schema qualifier) and
+-- `update clients c set credit_balance …` (an alias). Both were probed and
+-- both passed silently. It runs here now, so a local validate runs it too,
+-- and it tests its own pattern every time rather than once: a detector
+-- that stops matching fails its self-test, not a future review.
+do $$
+declare
+  -- One pattern, read by the real check and by the self-test below, so the
+  -- two cannot drift apart. The optional parts are exactly the spellings of
+  -- "the clients table" an UPDATE can use: ONLY, a (quoted) schema, a
+  -- quoted name, and an alias with or without AS.
+  v_re constant text :=
+    'update[[:space:]]+(only[[:space:]]+)?'
+    || '("?public"?[[:space:]]*\.[[:space:]]*)?"?clients"?'
+    || '([[:space:]]+(as[[:space:]]+)?"?[[:alpha:]_][[:alnum:]_$]*"?)?'
+    || '[[:space:]]+set[^;]*credit_balance';
+  v_offenders text;
+  r record;
+begin
+  -- Positive control on the real catalogue: the pattern must find the one
+  -- legitimate writer, or a pattern that matches nothing passes the check.
+  if not exists (select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+                  where n.nspname = 'public' and p.proname = 'fn_ledger_apply'
+                    and p.prosrc ~* v_re) then
+    raise exception 'FAIL: the invariant-1 pattern no longer matches fn_ledger_apply itself — it is blind';
+  end if;
+
+  select string_agg(p.proname, ', ' order by p.proname) into v_offenders
+    from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+   where n.nspname = 'public'
+     and p.proname <> 'fn_ledger_apply'
+     and p.prosrc ~* v_re;
+  if v_offenders is not null then
+    raise exception 'FAIL: invariant 1 — credit_balance written outside fn_ledger_apply by: %', v_offenders;
+  end if;
+
+  -- The self-test. PL/pgSQL resolves table names at execution, so these
+  -- bodies need nothing to exist; they are dropped before the block ends and
+  -- the suite rolls back regardless.
+  for r in
+    select * from (values
+      ('plain',      'update clients set credit_balance = credit_balance + 1 where id = p;', true),
+      ('qualified',  'update public.clients set credit_balance = 0 where id = p;', true),
+      ('aliased',    'update clients c set credit_balance = 0 where c.id = p;', true),
+      ('only, as',   'UPDATE ONLY public.clients AS c SET credit_balance = 0 WHERE c.id = p;', true),
+      ('quoted',     'update "public"."clients" set "credit_balance" = 0 where id = p;', true),
+      ('multi-line', e'update\n    clients\n   set credit_balance = 0\n where id = p;', true),
+      ('other column',   'update clients set status = ''active'' where id = p;', false),
+      ('a read',         'perform credit_balance from clients where id = p;', false),
+      ('another table',  'update clients_archive set credit_balance = 0 where id = p;', false),
+      ('next statement', 'update clients set status = ''active''; perform credit_balance from clients;', false)
+    ) as t(label, body, flagged)
+  loop
+    execute format(
+      'create function public.fn_inv1_probe(p uuid) returns void language plpgsql as $b$ begin %s end $b$',
+      r.body);
+    if (select p.prosrc ~* v_re from pg_proc p
+         where p.proname = 'fn_inv1_probe' and p.pronamespace = 'public'::regnamespace) is distinct from r.flagged then
+      raise exception 'FAIL: the invariant-1 pattern % the % form: %',
+        case when r.flagged then 'misses' else 'wrongly flags' end, r.label, r.body;
+    end if;
+    drop function public.fn_inv1_probe(uuid);
+  end loop;
+
+  raise notice 'invariant 1: credit_balance is written only by fn_ledger_apply, and the pattern finds every spelling of the write: OK';
+end $$;
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;

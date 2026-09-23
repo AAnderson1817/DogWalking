@@ -668,31 +668,6 @@ jobs:
           ./supabase/tests/concurrency.sh 2>&1 | tee /tmp/cc.out
           grep -q "CONCURRENCY PASS" /tmp/cc.out
 
-      # Asserted against the catalogue, not the migration text. The grep this
-      # replaces matched `update +clients +set +credit_balance`, so a newline,
-      # a tab, or a second space between any two words walked straight past it
-      # — and it read the files rather than what Postgres actually installed.
-      # pg_proc holds the real bodies of the real functions after all 18
-      # migrations have run, including any later CREATE OR REPLACE.
-      - name: Invariant 1 — credit_balance written only by fn_ledger_apply
-        run: |
-          psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 <<'SQL'
-          do $$
-          declare offenders text;
-          begin
-            select string_agg(p.proname, ', ' order by p.proname) into offenders
-            from pg_proc p
-            join pg_namespace n on n.oid = p.pronamespace
-            where n.nspname = 'public'
-              and p.proname <> 'fn_ledger_apply'
-              and p.prosrc ~* 'update[[:space:]]+clients[[:space:]]+set[^;]*credit_balance';
-            if offenders is not null then
-              raise exception 'INVARIANT 1 FAIL: credit_balance written outside fn_ledger_apply by: %', offenders;
-            end if;
-            raise notice 'INVARIANT 1 PASS: credit_balance writes confined to fn_ledger_apply';
-          end $$;
-          SQL
-
       # The nightly job generates every walk on every calendar and runs the
       # credit-expiry sweep. It used to be scheduled by a hand-typed dashboard
       # entry that no restore recreated and nothing asserted (review H15), and
