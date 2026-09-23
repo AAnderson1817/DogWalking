@@ -365,7 +365,7 @@ const literalText = (e: ts.Expression): string | undefined =>
  * read as POST-only (Codex, on #97).
  */
 function keyOf(name: ts.PropertyName): string | typeof UNREADABLE {
-  if (ts.isComputedPropertyName(name)) return literalText(name.expression) ?? UNREADABLE;
+  if (ts.isComputedPropertyName(name)) return literalText(unwrap(name.expression)) ?? UNREADABLE;
   return name.text;
 }
 
@@ -373,14 +373,44 @@ type Access = ts.PropertyAccessExpression | ts.ElementAccessExpression;
 
 /** The member an access names — `a.b`, `a["b"]`, `` a[`b`] `` — or UNREADABLE. */
 function memberOf(e: Access): string | typeof UNREADABLE {
-  return ts.isPropertyAccessExpression(e) ? e.name.text : literalText(e.argumentExpression) ?? UNREADABLE;
+  return ts.isPropertyAccessExpression(e) ? e.name.text : literalText(unwrap(e.argumentExpression)) ?? UNREADABLE;
 }
 
-/** An expression with the wrappers that change nothing at run time removed. */
+type Wrapper =
+  | ts.ParenthesizedExpression | ts.AsExpression | ts.SatisfiesExpression
+  | ts.TypeAssertion | ts.NonNullExpression;
+
+/**
+ * A node that changes nothing at run time: `( )`, `as`, `satisfies`, `<T>`,
+ * `!`. The scan reads through one wherever it reads an expression — the
+ * options object, a key, a member, a list and its entries, the `Deno`
+ * receiver, a callee — because each place it did not was a finding (Codex, on
+ * #97, twice), and two of them hid a door rather than inventing one.
+ */
+function isWrapper(n: ts.Node): n is Wrapper {
+  return ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isSatisfiesExpression(n)
+    || ts.isTypeAssertionExpression(n) || ts.isNonNullExpression(n);
+}
+
+/** An expression with its wrappers removed. */
 function unwrap(value: ts.Expression): ts.Expression {
   let e = value;
-  while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isSatisfiesExpression(e)
-    || ts.isTypeAssertionExpression(e) || ts.isNonNullExpression(e)) e = e.expression;
+  while (isWrapper(e)) e = e.expression;
+  return e;
+}
+
+/** Whether `node` sits in a type (`typeof serveFunction`), which nothing runs. */
+function inType(node: ts.Node): boolean {
+  for (let n = node.parent; n && !ts.isStatement(n) && !ts.isSourceFile(n); n = n.parent) {
+    if (ts.isTypeNode(n)) return true;
+  }
+  return false;
+}
+
+/** The outermost wrapper around `node`: what a call or an access actually holds. */
+function outermost(node: ts.Expression): ts.Expression {
+  let e = node;
+  while (isWrapper(e.parent) && e.parent.expression === e) e = e.parent;
   return e;
 }
 
@@ -405,7 +435,7 @@ function admitsGet(value: ts.Expression): boolean {
 /** Why this serveFunction call's options might admit a GET, or null if they cannot. */
 function widening(call: ts.CallExpression): string | null {
   if (call.arguments.some(ts.isSpreadElement)) return "serveFunction arguments spread from elsewhere";
-  const options = call.arguments[1];
+  const options = call.arguments[1] && unwrap(call.arguments[1]);
   if (!options) return null;
   if (!ts.isObjectLiteralExpression(options)) return "serveFunction options the scan cannot read";
   const keys = options.properties.map((p) => (ts.isSpreadAssignment(p) ? null : keyOf(p.name)));
@@ -447,14 +477,17 @@ function getReachable(root: string): Map<string, string> {
       const visit = (node: ts.Node) => {
         const access = ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node) ? node : undefined;
         const member = access && memberOf(access);
-        if (access && ts.isIdentifier(access.expression) && access.expression.text === "Deno") {
+        const receiver = access && unwrap(access.expression);
+        if (receiver && ts.isIdentifier(receiver) && receiver.text === "Deno") {
           if (member === "serve") door("its own Deno.serve");
           else if (member === UNREADABLE) door("a member of Deno the scan cannot read");
         }
-        const namesServeFunction = (ts.isIdentifier(node) && node.text === "serveFunction") || member === "serveFunction";
+        const namesServeFunction = ((ts.isIdentifier(node) && node.text === "serveFunction") || member === "serveFunction")
+          && !inType(node);
         if (namesServeFunction) {
-          const parent = node.parent;
-          if (ts.isCallExpression(parent) && parent.expression === node) {
+          const held = outermost(node as ts.Expression);
+          const parent = held.parent;
+          if (ts.isCallExpression(parent) && parent.expression === held) {
             serves = true;
             const why = widening(parent);
             if (why) found.set(name, why);
@@ -590,7 +623,17 @@ describe("verify-deployment's read-only argument is derived", () => {
     fn("post-list-non-null", 'serveFunction(h, { methods: ["POST"]! });');
     fn("get-entry-as-const", 'serveFunction(h, { methods: ["GET" as const] });');
     fn("get-entry-paren", 'serveFunction(h, { methods: [("POST"), (("GET"))] });');
+    // The options object and a computed key are unwrapped the same way
+    // (Codex again): a wrapper changes nothing handleRequest sees.
+    fn("options-paren", 'serveFunction(h, ({ methods: ["POST"] }));');
+    fn("options-as-const", 'serveFunction(h, ({ methods: ["POST"] } as const));');
+    fn("options-satisfies", 'serveFunction(h, { methods: ["POST"] } satisfies ServeOptions);');
+    fn("options-paren-get", 'serveFunction(h, ({ methods: ["GET"] }));');
+    fn("key-paren-post", 'serveFunction(h, { [("methods")]: ["POST"] });');
+    fn("key-paren-get", 'serveFunction(h, { [("methods")]: ["GET"] });');
     expect(Object.fromEntries(getReachable(root))).toEqual({
+      "options-paren-get": "serveFunction widened with methods",
+      "key-paren-get": "serveFunction widened with methods",
       "get-entry-as-const": "serveFunction widened with methods",
       "get-entry-paren": "serveFunction widened with methods",
       "get-as-const": "serveFunction widened with methods",
@@ -619,9 +662,23 @@ describe("verify-deployment's read-only argument is derived", () => {
     fn("deno-template", "serveFunction(h);\nDeno[`serve`](g);");
     fn("deno-unreadable", "serveFunction(h);\nDeno[method](g);");
     fn("deno-alias", "serveFunction(h);\nconst serve = Deno.serve;\nserve(g);");
-    // Not doors: other members of Deno, read the ordinary way.
+    // Wrapped, each is the same reference (Codex, on #97). The two beside a
+    // plain serveFunction(h) were silent misses: no door at all.
+    fn("element-paren", 'serveFunction(h);\nhttp[("serveFunction")](g, { methods: ["GET"] });');
+    fn("deno-paren", "serveFunction(h);\n(Deno as any).serve(g);");
+    fn("deno-element-paren", 'serveFunction(h);\nDeno[("serve")](g);');
+    fn("callee-as-get", '(serveFunction as typeof serveFunction)(h, { methods: ["GET"] });');
+    // Not doors: other members of Deno, read the ordinary way; and a wrapped
+    // callee is still a call, whose options the scan reads.
     fn("deno-env", 'serveFunction(h);\nconst url = Deno.env.get("SUPABASE_URL");');
+    fn("callee-paren", '(serveFunction)(h, { methods: ["POST"] });');
+    // A type is not a reference: nothing runs `typeof serveFunction`.
+    fn("type-mention", 'type Serve = typeof serveFunction;\nserveFunction(h);');
     expect(Object.fromEntries(getReachable(root))).toEqual({
+      "element-paren": "serveFunction widened with methods",
+      "deno-paren": "its own Deno.serve",
+      "deno-element-paren": "its own Deno.serve",
+      "callee-as-get": "serveFunction widened with methods",
       namespace: "serveFunction widened with methods",
       element: "serveFunction widened with methods",
       alias: "serveFunction referenced without being called, so the scan cannot see its options",
