@@ -80,10 +80,13 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
 - **`db-push-check.sh` and `concurrency.sh` were CI-only until recently** and
   are now `validate.sh` gates 7b and 8b. Both were added after a green local
   run that CI refused, one PR apart. If you add a gate to `ci.yml`, add it to
-  `validate.sh` and `SKILL.md` in the same commit — `CLAUDE.md` calls the
-  three a lockstep and the drift is invisible until CI disagrees with you.
-- **Two gates still exist only in CI**: *Every test file is claimed by a
-  vitest project* and *Every e2e spec is actually run by this workflow*.
+  `validate.sh` and `SKILL.md` in the same commit — gate 10g
+  (`scripts/check-gate-lockstep.py`) now fails when you do not.
+- **Which checks run only in CI is `SKILL.md` §13**, a table of every named
+  `ci.yml` step and where it runs here (a gate number, `CI only`, or
+  `setup`). Gate 10g keeps it complete, so read the table rather than a count
+  in prose: this file used to say two gates were CI-only when there were
+  seven.
 
 ## Traps this repository has already paid for
 
@@ -117,7 +120,7 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
 - **A vitest file claimed by neither project runs nowhere, silently.** `node`
   takes `src/lib/**/*.test.ts` and `scripts/**/*.test.ts`; `dom` takes
   components / screens / hooks / prototypes plus `src/lib/**/*.test.tsx`. The
-  orphan check is CI-only, so locally the file just never runs.
+  orphan check is CI-only (§13), so locally the file just never runs.
 - **A new e2e spec needs its own named step in `ci.yml`.** Specs are invoked
   by filename; locally everything runs, so the gap only appears in CI.
 - **Migrations are append-only and guard-enforced.** Never edit an applied,

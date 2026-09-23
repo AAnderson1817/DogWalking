@@ -175,6 +175,12 @@ run "10e. enum catalogue" enum_catalog
 # Reads the migrations only, so it always runs.
 run "10f. enum catalogue proofs" python3 scripts/gen-enum-catalog-proofs.py
 
+# 10g. This file, SKILL.md and ci.yml were called a lockstep and checked by
+# nothing, and 7b and 8b were each missing from here until CI refused a green
+# local run. Every ci.yml step now has a row in SKILL.md §13 saying where it
+# runs here, and every SKILL.md gate must be run above.
+run "10g. gate lockstep" python3 scripts/check-gate-lockstep.py
+
 # ── 11. Secret-leak grep ──────────────────────────────────────────────────
 no_secret_literals() {
   local hits

@@ -222,7 +222,17 @@ jobs:
       - name: CLAUDE.md's counts match the tree
         run: python3 scripts/check-status-counters.py
 
-      - name: Secret-leak grep (validate gate 7)
+      # Every named step in this file has a row in SKILL.md §13 saying where it
+      # runs locally, and SKILL.md's gates and validate.sh's agree. The three
+      # were called a lockstep and checked by nothing: gates 7b and 8b were
+      # each missing from validate.sh until a green local run CI refused, and
+      # this step's neighbour was labelled "validate gate 7" as gate 11.
+      - name: The CI, SKILL.md and validate.sh gate lists agree
+        run: python3 scripts/check-gate-lockstep.py
+
+      # validate.sh gate 11. The number is in SKILL.md §13's table, not in this
+      # name, which said "gate 7" long after that became `db reset`.
+      - name: Secret-leak grep
         run: |
           if grep -RInE "(VAULT_MASTER_KEY|SERVICE_ROLE|sk_live|sk_test)" \
                app/src supabase/functions --include='*.ts' --include='*.tsx' \

@@ -39,7 +39,9 @@ Authoritative specs live in `docs/spec/`. `docs/phases/00–08` is the v1 build 
   the permission only in the same commit as the test that needs it.)
 - Full validation: `/validate`, or `scripts/validate.sh` (the same gates in the
   same order, runnable without Claude Code — review L22). Keep the three in
-  lockstep: `ci.yml`, `SKILL.md`, `validate.sh`.
+  lockstep: `ci.yml`, `SKILL.md`, `validate.sh`. Gate 10g
+  (`scripts/check-gate-lockstep.py`) checks it: every `ci.yml` step has a row
+  in `SKILL.md` §13, and every `SKILL.md` gate is run by `validate.sh`.
 
 ## Non-negotiable invariants
 1. Credit balance mutations happen ONLY inside `SECURITY DEFINER` functions that take a per-client row lock (`SELECT … FOR UPDATE`). No code path ever `UPDATE`s `clients.credit_balance` or `INSERT`s into `credit_ledger` directly from an API role.
