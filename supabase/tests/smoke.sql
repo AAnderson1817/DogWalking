@@ -6167,21 +6167,66 @@ end $$;
 --     tree inserts positionally, and the remedy is to name the columns.
 --     `default values` writes each column's default and is not flagged;
 --   - `copy … from`, which loads rows the same way. Nothing here does that.
--- Still outside the rule, and said rather than implied: SQL assembled at run
--- time, and a comment carrying a `;` inside the statement.
+--
+-- Each body is read twice, and a match in either reading flags it (Codex,
+-- the ninth round). Its example, `insert into only (clients) …`, is a
+-- syntax error — INSERT takes no ONLY in any form, measured — and MERGE,
+-- the one statement that inserts rows AND takes `ONLY (clients)`, names no
+-- target in its `then insert`, so it was already caught (pinned below); and
+-- `update only (clients)` has been caught since the UPDATE arm stopped
+-- reading its target (pinned above). But the class the example pointed at
+-- is real: the arms read TEXT, so a comment carrying `(`, `)` or `;`, or a
+-- literal carrying `;`, is structure to them — a comment with a parenthesis
+-- between the table and its column list, or a literal with a semicolon
+-- before the balance in an UPDATE, hid the write. So the pattern also reads
+-- a skeleton: comments gone and every string literal's contents gone, each
+-- to one space, quoted identifiers kept. One
+-- `regexp_replace` makes it, and its alternatives each open on their own
+-- character, so the leftmost wins the way the lexer's does — a `--` inside a
+-- literal is not a comment, and a `'` inside a comment opens no literal. The
+-- raw reading stays, and it is load-bearing: the skeleton blanks an
+-- EXECUTE'd literal, which raw reads. So the skeleton can only add a catch,
+-- never cost one raw makes. What its one regex does not model — a nested
+-- block comment, a dollar-quoted string inside a body (read as code) — can
+-- cost it a catch raw would miss too, or add a red, but never hide a write
+-- raw sees, and none occurs in the catalogue (measured).
+--
+-- A SQL-standard body (`begin atomic`) is not in `prosrc` at all: prosrc is
+-- empty and the body lives in `prosqlbody`, so a scan of prosrc left such a
+-- function invisible whatever it wrote. The text read is prosrc followed by
+-- `pg_get_function_sqlbody`.
+--
+-- Still outside the rule: SQL assembled at run time.
 do $$
 declare
-  -- One pattern, read by the real check and by the self-test below, so the
-  -- two cannot drift apart.
+  -- One pattern and one lexer, read by the real check and by the self-test
+  -- below through one function, so the two cannot drift apart.
   v_re constant text :=
        '\mupdate\M[^;]*\mset\M[^;]*\mcredit_balance\M'
     || '|\minsert\M\s+(?:\minto\M[^(;]*)?\((?:[^();]|\([^();]*\))*?\mcredit_balance\M'
     || '|\minsert\M\s+(?:\minto\M[^(;]*?)?(?:\(\s*)?\m(?:(?<!\mdefault\s+)values|select|with|table|overriding)\M'
     || '|\mcopy\M[^;]*\mfrom\M';
+  -- A quoted identifier (group 1, kept); an escape string, whose E is not the
+  -- tail of an identifier (the lexer's rule: letters, digits, `_`, `$` and
+  -- every non-ASCII character continue one); a standard literal; a line
+  -- comment; a block comment. All but group 1 become one space.
+  v_lex constant text :=
+       '("(?:[^"]|"")*")'
+    || '|(?<![^\u0001-\u0023\u0025-\u002f\u003a-\u0040\u005b-\u005e\u0060\u007b-\u007f])[Ee]''(?:[^''\\]|\\.|'''')*'''
+    || '|''(?:[^'']|'''')*'''
+    || '|--[^\n]*'
+    || '|/\*(?:[^*]|\*+[^*/])*\*+/';
   v_offenders text;
   v_tables text;
   r record;
 begin
+  create function pg_temp.fn_inv1_writes(p_fn oid, p_re text, p_lex text)
+  returns boolean language sql stable as $f$
+    select s ~* p_re or regexp_replace(s, p_lex, '\1 ', 'g') ~* p_re
+      from (select p.prosrc || E'\n' || coalesce(pg_get_function_sqlbody(p.oid), '') as s
+              from pg_proc p where p.oid = p_fn) b
+  $f$;
+
   -- The premise: the column exists on `clients` and nowhere else. A second
   -- table gaining it would make every write to that table read as a write
   -- to the balance, so the rule has to be revisited, not silently widened.
@@ -6203,7 +6248,7 @@ begin
   -- legitimate writer, or a pattern that matches nothing passes the check.
   if not exists (select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
                   where n.nspname = 'public' and p.proname = 'fn_ledger_apply'
-                    and p.prosrc ~* v_re) then
+                    and pg_temp.fn_inv1_writes(p.oid, v_re, v_lex)) then
     raise exception 'FAIL: the invariant-1 pattern no longer matches fn_ledger_apply itself — it is blind';
   end if;
 
@@ -6211,15 +6256,15 @@ begin
     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
    where n.nspname = 'public'
      and p.proname <> 'fn_ledger_apply'
-     and p.prosrc ~* v_re;
+     and pg_temp.fn_inv1_writes(p.oid, v_re, v_lex);
   if v_offenders is not null then
     raise exception 'FAIL: invariant 1 — credit_balance written outside fn_ledger_apply by: %', v_offenders;
   end if;
 
-  -- The self-test: twenty-five bodies it must flag and eleven it must not.
-  -- PL/pgSQL resolves table names at execution, so these bodies need nothing
-  -- to exist; they are dropped before the block ends and the suite rolls
-  -- back regardless.
+  -- The self-test: forty bodies it must flag and thirteen it must not, plus a
+  -- SQL-standard body after the loop. PL/pgSQL resolves table names at
+  -- execution, so these bodies need nothing to exist; they are dropped before
+  -- the block ends and the suite rolls back regardless.
   for r in
     select * from (values
       ('plain',      'update clients set credit_balance = credit_balance + 1 where id = p;', true),
@@ -6248,6 +6293,27 @@ begin
       ('merge, then insert values',  'merge into clients c using (select p as id) s on c.id = s.id when not matched then insert values (s.id);', true),
       ('insert, overriding',         'insert into clients overriding system value values (p, 10);', true),
       ('copy from',                  'copy clients (id, credit_balance) from ''/tmp/balances.csv'';', true),
+      -- Comments and literals carrying the arms' own structure (Codex, the
+      -- ninth round): each of these is caught by the skeleton reading alone.
+      ('insert, a comment with a parenthesis before the column list', e'insert into clients -- the account (from the invite)\n  (id, credit_balance) values (p, 10);', true),
+      ('insert, a block comment with a parenthesis', 'insert into clients /* ( */ (id, credit_balance) values (p, 10);', true),
+      ('insert, an unbalanced parenthesis in a comment in the column list', e'insert into clients (id, -- see (1\n  credit_balance) values (p, 10);', true),
+      ('insert, a closing parenthesis in a comment in the column list', e'insert into clients (id, -- a)\n  credit_balance) values (p, 10);', true),
+      ('insert, positional after a comment with a parenthesis', e'insert into clients -- every column (in order)\n  values (p, 10);', true),
+      ('update, a comment carrying a semicolon', e'update clients -- note; deliberate\n  set credit_balance = 0 where id = p;', true),
+      ('update, a literal carrying a semicolon', 'update clients set status = ''a;b'', credit_balance = 0 where id = p;', true),
+      ('update, a literal carrying a comment marker and a semicolon', 'update clients set status = ''x--;y'', credit_balance = 0 where id = p;', true),
+      ('update, a comment carrying an apostrophe and a semicolon', e'update clients -- don''t; stop\n  set credit_balance = 0 where id = p;', true),
+      ('update, a quoted column after a literal carrying a semicolon', 'update "clients" set status = ''a;b'', "credit_balance" = 0 where id = p;', true),
+      ('update, an escape string carrying a quote and a semicolon', 'update clients set status = E''it\''s; fine'', credit_balance = 0 where id = p;', true),
+      ('update, after a typed literal ending in a backslash', 'perform date''x\''; update clients set status = ''a;b'', credit_balance = 0 where id = p;', true),
+      -- Raw is still read, and this is why: the skeleton blanks a literal, and
+      -- an EXECUTE'd literal is a statement.
+      ('execute of a literal', 'execute ''update clients set credit_balance = 0 where id = $1'' using p;', true),
+      -- MERGE is the one statement that inserts rows and takes a parenthesised
+      -- ONLY target, and its insert clause names no target.
+      ('merge into only (clients), then insert columns', 'merge into only (clients) c using (select p as id) s on c.id = s.id when not matched then insert (id, credit_balance) values (s.id, 10);', true),
+      ('merge into only (clients), then insert values', 'merge into only (clients) c using (select p as id) s on c.id = s.id when not matched then insert values (s.id);', true),
       ('other column',   'update clients set status = ''active'' where id = p;', false),
       ('a read',         'perform credit_balance from clients where id = p;', false),
       ('next statement', 'update clients set status = ''active''; perform credit_balance from clients;', false),
@@ -6263,19 +6329,33 @@ begin
       ('a read in a values tuple (fn_notify_low_credit)', e'insert into notifications (operator_id, client_id, type, title, body)\n  values (v.operator_id, p, ''low_credit'', ''t'', format(''%s has %s'', v.full_name, v.credit_balance));', false),
       ('a read at the top of a values tuple', 'insert into credit_ledger (client_id, amount) values (p, v.credit_balance);', false),
       ('a read in a source select', 'insert into credit_ledger (client_id, amount) select id, credit_balance from clients where id = p;', false),
-      ('default values', e'insert into job_runs default\n   values;', false)
+      ('default values', e'insert into job_runs default\n   values;', false),
+      -- The skeleton keeps every real statement boundary: a semicolon a
+      -- literal or a comment carried was never one, and one outside them is.
+      ('a literal carrying a semicolon, then a read', 'update clients set status = ''a;b'' where id = p; perform credit_balance from clients where id = p;', false),
+      ('a comment carrying a semicolon, then a read', e'update clients set status = ''x'' where id = p; -- then; the read\n  perform credit_balance from clients where id = p;', false)
     ) as t(label, body, flagged)
   loop
     execute format(
       'create function public.fn_inv1_probe(p uuid) returns void language plpgsql as $b$ declare v int; begin %s end $b$',
       r.body);
-    if (select p.prosrc ~* v_re from pg_proc p
+    if (select pg_temp.fn_inv1_writes(p.oid, v_re, v_lex) from pg_proc p
          where p.proname = 'fn_inv1_probe' and p.pronamespace = 'public'::regnamespace) is distinct from r.flagged then
       raise exception 'FAIL: the invariant-1 pattern % the % form: %',
         case when r.flagged then 'misses' else 'wrongly flags' end, r.label, r.body;
     end if;
     drop function public.fn_inv1_probe(uuid);
   end loop;
+
+  -- A SQL-standard body is parsed when it is created, so it cannot go through
+  -- the loop's PL/pgSQL template, and `where false` keeps it inert. EXECUTE,
+  -- because PL/pgSQL would end the statement at the body's own semicolon.
+  execute 'create function public.fn_inv1_probe_atomic() returns void language sql '
+       || 'begin atomic update clients set credit_balance = 0 where false; end';
+  if not pg_temp.fn_inv1_writes('public.fn_inv1_probe_atomic()'::regprocedure, v_re, v_lex) then
+    raise exception 'FAIL: the invariant-1 pattern misses a SQL-standard body, whose prosrc is empty';
+  end if;
+  drop function public.fn_inv1_probe_atomic();
 
   raise notice 'invariant 1: every statement that can write credit_balance is fn_ledger_apply''s, and only clients has the column: OK';
 end $$;
