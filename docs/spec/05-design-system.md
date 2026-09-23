@@ -555,8 +555,12 @@ not there is a message, so the region is in the accessibility tree before the
 text arrives. Empty, it is taken out of flow — an absolutely positioned child
 is not a flex item, so it costs no `gap` in the forms it sits inside. Progress
 and outcome notices (Calendar, Money) use persistent `role="status"` regions on
-the same principle. CI fails a bare `className="field__error"` outside
-`fields.tsx`.
+the same principle. A screen that cannot load uses `StateField` with
+`role="alert"` instead. `app/scripts/form-errors.test.ts` reads the JSX and
+fails any other alert role, any `aria-live="assertive"`, and any `__error` class
+in any string outside `fields.tsx` and `FormError`'s own `className` prop. It
+replaced a grep for the literal `className="field__error"` that a bare
+`<span className="signin__error" role="alert">` passed.
 
 **Controls whose only boundary is a border clear 3:1** (SC 1.4.11).
 `--sanpo-color-input-border` is Neutral Muted — 5.07:1 on white, 4.73:1 on

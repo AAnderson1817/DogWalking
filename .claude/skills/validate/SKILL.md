@@ -35,6 +35,12 @@ oxlint with `--deny-warnings`. A warning fails CI.
 ```
 npm --prefix app test -- --run
 ```
+Besides the unit tests, the `node` project carries the source scans that used
+to be CI greps: every error rendered through `FormError` or `StateField`
+(`app/scripts/form-errors.test.ts`) and the one private Realtime channel
+(`app/scripts/realtime-channel.test.ts`). They moved here because a grep could
+not tell a `StateField` prop from a bare `<span>` four lines below its tag, and
+because a CI-only check is a green local run CI then refuses.
 
 ## 4. Frontend build
 ```
