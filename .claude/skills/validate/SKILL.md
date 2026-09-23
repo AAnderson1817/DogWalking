@@ -265,17 +265,19 @@ names as `[A-Za-z0-9_-]` and CI as `[a-zA-Z0-9-]`, which read `var(--a_c)` as
 in the TypeScript AST, so comments and JSX text never count; a name built at
 runtime (`var(--s-${n})`) is read as a prefix some defined name must start
 with, because a literal ending mid-name is a fragment; a custom property
-counts as defined from TS only when it is SET ON A STYLE — a `--x` key in an
-object that flows into a `style` prop (directly or through a spread) or is
-typed as `CSSProperties`, an intersection with it, or a union whose every
-non-null member is one (a union value is ONE of its members, so
-`CSSProperties | Payload` does not make a payload a style), or
-`….style.setProperty` — because counting any `--x`-shaped key let a config
-object "define" a token no style ever sets (Codex, PR #95). Every other flow
-into a style (a type alias, `Readonly<…>`, a function's return type) is left
-unrecognised on purpose, and the red says so: when the missing name is set
-somewhere in a shape the gate does not read, the FAIL line names every place
-it is set. That is the stopping rule —
+counts as defined from TS only when its VALUE reaches a `style` prop — an
+object that flows into one (directly, through a spread, a ternary or
+`||`/`??`), or a `const` used that way in the same file, resolved by symbol so
+a shadowing name is a different binding — or is set by `….style.setProperty`.
+A type decides nothing: counting any `--x`-shaped key let a config object
+"define" a token no style ever sets, and reading a `CSSProperties` annotation
+as evidence let an unused typed object and a `CSSProperties | Payload` union
+do the same (Codex, PR #95, four rounds). Every other flow into a style (an
+import, a `let`, a function's return value) is left unrecognised on purpose,
+and the red says so: when the missing name is set somewhere the gate cannot
+follow, the FAIL line names every place it is set and suggests a default in
+CSS, which is a real definition whatever the object is. That is the stopping
+rule —
 recognising every flow is a type checker's job, and adding one shape per
 review round is how a check grows without end. Test files are fixtures and
 are not read; and it refuses to pass if it scanned no stylesheets, no TS, or

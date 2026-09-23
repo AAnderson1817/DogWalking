@@ -31,26 +31,32 @@
 // it.
 //
 // Definitions come from CSS declarations (`--x:`), and from TS only where the
-// value is actually SET ON A STYLE: a `--x` key in an object literal that flows
-// straight into a JSX `style` prop (through parens, `as`, `satisfies`, a ternary
-// branch, the right of `&&`/`||`/`??`, or a spread into such an object) or is
-// typed or asserted as `CSSProperties`, an intersection with it, or a union
-// whose every non-null member is one; and `….style.setProperty("--x", …)`. None exists
-// today; counting them is what stops the gate going red on a healthy tree the
-// day one does. Counting ANY `--x`-shaped key was the first version, and Codex
-// was right to refuse it: a config or payload object would "define" a token no
-// style ever sets, and a real `var(--missing)` would pass. That is the silent
-// direction.
+// value is actually SET ON A STYLE: a `--x` key in an object literal whose
+// value reaches a JSX `style` prop — straight in (through parens, `as`,
+// `satisfies`, `!`, a ternary branch, either side of `||`/`??`, the right of
+// `&&`, or a spread into such an object), or through a `const` that is itself
+// used that way in the same file, followed by symbol so a shadowing name is a
+// different binding; and `….style.setProperty("--x", …)`. None exists today;
+// counting them is what stops the gate going red on a healthy tree the day one
+// does. Counting ANY `--x`-shaped key was the first version, and Codex was right
+// to refuse it: a config or payload object would "define" a token no style ever
+// sets, and a real `var(--missing)` would pass. That is the silent direction.
+// Reading a `CSSProperties` TYPE as evidence was the second, and Codex refused
+// that too, three rounds running (PR #95): a type says what shape an object
+// has, not that anything applies it, so an unused typed object and a union
+// that is really a payload each "defined" a token. The value is what is
+// followed now, and a type decides nothing.
 //
 // The strict rule's cost is the loud direction, and it is paid on purpose.
-// Every other way a value reaches a style — an untyped variable, a type alias,
-// `Readonly<…>`, a function's return type, `useMemo`, `Object.assign` — is left
+// Every other way a value reaches a style — an import from another file, a
+// `let`, a function's return value, `useMemo`, `Object.assign` — is left
 // unrecognised. Recognising them all is a type checker's job, and adding them
 // one review round at a time is how a check grows without end. What makes the
 // cost affordable is the red itself: when a missing name IS set somewhere, in a
-// shape this does not read, the FAIL line points at where and says so, so
-// the fix is in the message rather than in a reading of this file. That hint
-// never counts as a definition — it only changes what the red says.
+// shape this does not read, the FAIL line points at where and says so, so the
+// fix is in the message rather than in a reading of this file. That hint never
+// counts as a definition — it only changes what the red says — and its remedy,
+// a default in CSS, is a real definition whatever the object turns out to be.
 //
 // Like the CSS side always has, this is scope-blind: a token defined under one
 // selector satisfies a use anywhere. Fixing that is a different gate.
@@ -99,63 +105,108 @@ function propertyName(name) {
   return stringValue(name);
 }
 
-const CSS_PROPERTIES = /(^|\.)CSSProperties$/;
+// Wrappers that pass a value through unchanged.
+const passesThrough = (n) => ts.isParenthesizedExpression(n) || ts.isAsExpression(n)
+  || ts.isSatisfiesExpression(n) || ts.isNonNullExpression(n) || ts.isTypeAssertionExpression(n);
+const OR_LIKE = [ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken];
 
-const isNullish = (type) => (ts.isParenthesizedTypeNode(type) ? isNullish(type.type)
-  : type.kind === ts.SyntaxKind.UndefinedKeyword
-    || (ts.isLiteralTypeNode(type) && type.literal.kind === ts.SyntaxKind.NullKeyword));
-
-// A declared type the object is a STYLE under: CSSProperties itself; an
-// intersection with it, because an intersection value is every member at once
-// (`CSSProperties & { "--gap": string }` is the conventional way to type a
-// custom property); or a union whose every member the object could be is one,
-// because a union value is ONE of its members and nothing says which —
-// `CSSProperties | Payload` does not make a payload a style (Codex, PR #95).
-// null and undefined cannot hold a key, so `CSSProperties | undefined` is a
-// style. A type alias or a wrapper like `Readonly<…>` is not followed; see the
-// header for why that is loud.
-function isCssPropertiesType(type, sf) {
-  if (!type) return false;
-  if (ts.isParenthesizedTypeNode(type)) return isCssPropertiesType(type.type, sf);
-  if (ts.isIntersectionTypeNode(type)) return type.types.some((t) => isCssPropertiesType(t, sf));
-  if (ts.isUnionTypeNode(type)) {
-    const members = type.types.filter((t) => !isNullish(t));
-    return members.length > 0 && members.every((t) => isCssPropertiesType(t, sf));
-  }
-  return ts.isTypeReferenceNode(type) && CSS_PROPERTIES.test(type.typeName.getText(sf));
-}
-
-// Walk up from an object literal through expressions that pass its value
-// through unchanged, and say whether it lands on a style.
-function isStyleObject(obj, sf) {
-  let node = obj;
+// Walk up from an expression and say whether its value lands on a style.
+// `seen` holds the consts already followed: `const x = c ? { … } : x` is legal
+// syntax, and without it the walk from the object into `x` and back through
+// its own initializer never ends.
+function landsOnStyle(start, ctx, seen = new Set()) {
+  let node = start;
   for (;;) {
     const p = node.parent;
     if (!p) return false;
-    if (ts.isParenthesizedExpression(p)) { node = p; continue; }
-    // `{ ...X, … }` puts X's keys on the containing object: X is a style
-    // object exactly when that one is.
+    if (passesThrough(p)) { node = p; continue; }
+    // `{ ...X, … }` puts X's keys on the containing object: X lands on a
+    // style exactly when that one does.
     if (ts.isSpreadAssignment(p)) { node = p.parent; continue; }
-    if (ts.isAsExpression(p) || ts.isSatisfiesExpression(p)) {
-      if (isCssPropertiesType(p.type, sf)) return true;
-      node = p; continue;
-    }
     if (ts.isConditionalExpression(p) && (p.whenTrue === node || p.whenFalse === node)) { node = p; continue; }
-    if (ts.isBinaryExpression(p) && p.right === node && [
-      ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken,
-    ].includes(p.operatorToken.kind)) { node = p; continue; }
-    if (ts.isJsxExpression(p)) return ts.isJsxAttribute(p.parent) && p.parent.name.getText(sf) === "style";
-    if (ts.isVariableDeclaration(p) && p.initializer === node) return isCssPropertiesType(p.type, sf);
+    // Either side of `||`/`??` can be the result, and an object is truthy and
+    // never nullish, so an object on the left IS the result; `a && b` is b.
+    if (ts.isBinaryExpression(p)) {
+      const op = p.operatorToken.kind;
+      if (OR_LIKE.includes(op) || (op === ts.SyntaxKind.AmpersandAmpersandToken && p.right === node)) { node = p; continue; }
+    }
+    if (ts.isJsxExpression(p)) return ts.isJsxAttribute(p.parent) && p.parent.name.getText(ctx.sf) === "style";
+    if (ts.isVariableDeclaration(p) && p.initializer === node) return constReachesStyle(p, ctx, seen);
     return false;
   }
 }
 
-export function scanTs(file, text) {
-  const kind = file.endsWith(".tsx") ? ts.ScriptKind.TSX
-    : file.endsWith(".jsx") ? ts.ScriptKind.JSX
-    : /\.m?js$/.test(file) ? ts.ScriptKind.JS
-    : ts.ScriptKind.TS;
-  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind);
+// A const lands on a style when a use of it in this file does. By symbol,
+// not by name: a parameter or an inner const of the same name is a different
+// binding, and matching names would let one binding's style "define" the
+// other's keys. Only a const — a `let` can be replaced before it is used.
+function constReachesStyle(decl, ctx, seen) {
+  if (!ts.isIdentifier(decl.name) || !(ts.getCombinedNodeFlags(decl) & ts.NodeFlags.Const)) return false;
+  const symbol = ctx.checker.getSymbolAtLocation(decl.name);
+  if (!symbol || seen.has(symbol)) return false;
+  seen.add(symbol);
+  for (const id of ctx.identifiers().get(decl.name.text) ?? []) {
+    if (id === decl.name || ctx.checker.getSymbolAtLocation(id) !== symbol) continue;
+    if (landsOnStyle(id, ctx, seen)) return true;
+  }
+  return false;
+}
+
+const COMPILER_OPTIONS = {
+  noLib: true,
+  noResolve: true,
+  target: ts.ScriptTarget.Latest,
+  jsx: ts.JsxEmit.Preserve,
+  allowJs: true,
+  skipLibCheck: true,
+  types: [],
+};
+
+const scriptKind = (file) => (file.endsWith(".tsx") ? ts.ScriptKind.TSX
+  : file.endsWith(".jsx") ? ts.ScriptKind.JSX
+  : /\.m?js$/.test(file) ? ts.ScriptKind.JS
+  : ts.ScriptKind.TS);
+
+// One program over the sources read here, so the checker can resolve a name to
+// its binding. Imports are not resolved (`noResolve`): a local's symbol never
+// crosses a file, which is all the const rule needs.
+function programOver(sources) {
+  const host = {
+    getSourceFile: (name) => {
+      const text = sources.get(name);
+      return text === undefined ? undefined : ts.createSourceFile(name, text, ts.ScriptTarget.Latest, true, scriptKind(name));
+    },
+    getDefaultLibFileName: () => "lib.d.ts",
+    writeFile: () => {},
+    getCurrentDirectory: () => "/",
+    getCanonicalFileName: (f) => f,
+    useCaseSensitiveFileNames: () => true,
+    getNewLine: () => "\n",
+    fileExists: (f) => sources.has(f),
+    readFile: (f) => sources.get(f),
+    directoryExists: () => true,
+    getDirectories: () => [],
+  };
+  return ts.createProgram([...sources.keys()], COMPILER_OPTIONS, host);
+}
+
+function scanTs(sf, checker) {
+  const file = sf.fileName;
+  // Every identifier in the file by name, built on first need: only an object
+  // assigned to a const ever asks.
+  let index;
+  const identifiers = () => {
+    if (!index) {
+      index = new Map();
+      const collect = (n) => {
+        if (ts.isIdentifier(n)) index.set(n.text, [...(index.get(n.text) ?? []), n]);
+        ts.forEachChild(n, collect);
+      };
+      collect(sf);
+    }
+    return index;
+  };
+  const ctx = { sf, checker, identifiers };
   const defs = [];
   const uses = [];
   // Keys and setProperty calls that name a custom property but are NOT read as
@@ -180,7 +231,7 @@ export function scanTs(file, text) {
     if (ts.isPropertyAssignment(node)) {
       const name = propertyName(node.name);
       if (name && TOKEN.test(name)) {
-        if (isStyleObject(node.parent, sf)) defs.push(name);
+        if (landsOnStyle(node.parent, ctx)) defs.push(name);
         else nearMisses.push({ name, kind: "key", file, line: lineOf(node) });
       }
     }
@@ -213,8 +264,10 @@ export function check(root) {
     r.defs.forEach((d) => defined.add(d));
     uses.push(...r.uses);
   }
+  const program = programOver(new Map(code.map((f) => [f, fs.readFileSync(f, "utf8")])));
+  const checker = program.getTypeChecker();
   for (const f of code) {
-    const r = scanTs(f, fs.readFileSync(f, "utf8"));
+    const r = scanTs(program.getSourceFile(f), checker);
     r.defs.forEach((d) => defined.add(d));
     uses.push(...r.uses);
     nearMisses.push(...r.nearMisses);
@@ -265,17 +318,18 @@ function main() {
       ? `var(${u.name}…) can name no defined custom property: none starts with ${u.name}`
       : `${u.name} is used but never defined`;
     // Every place the name is set, not the first: the first found can be a
-    // config key while the untyped style object that matters comes later
-    // (Codex, PR #95). The remedy is conditional on purpose — the key may be a
-    // config or payload field, and telling the reader to type THAT as
-    // CSSProperties would coach them into the silent direction, a token
-    // "defined" by an object no style reads.
+    // config key while the style object that matters comes later (Codex, PR
+    // #95). The remedy is a default in CSS because that is a real definition
+    // whatever the object turns out to be; the earlier "type it CSSProperties"
+    // coached a config key into counting, the silent direction.
     const parts = [];
     const keys = u.nearMisses.filter((n) => n.kind === "key");
     const calls = u.nearMisses.filter((n) => n.kind === "setProperty");
     if (keys.length) {
-      parts.push(`${setAt(keys)}, but not in a shape this gate reads as a style; if ${keys.length === 1
-        ? "that object is" : "one of those objects is"} applied as a style, type it CSSProperties`);
+      const one = keys.length === 1;
+      parts.push(`${setAt(keys)}, but ${one ? "never reaches" : "none reaches"} a \`style\` this gate can follow; `
+        + `if ${one ? "that object is" : "one of those objects is"} applied as a style some other way, `
+        + "give the property a default in CSS");
     }
     if (calls.length) {
       parts.push(`${setAt(calls)}, by setProperty on something that is not \`….style\`; if ${calls.length === 1
