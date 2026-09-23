@@ -39,7 +39,7 @@ export default function Pricing() {
           <p style={{ textAlign: "center", color: "var(--text-2)", marginTop: "var(--s-1)" }}>
             After a {TRIAL_DAYS}-day free trial. No card needed to start; cancel any time.
           </p>
-          <ul style={{ paddingLeft: "var(--s-5)", margin: "var(--s-4) 0" }}>
+          <ul style={{ paddingLeft: "var(--s-6)", margin: "var(--s-4) 0" }}>
             {INCLUDED.map((line) => (
               <li key={line} style={{ marginBottom: "var(--s-2)" }}>
                 {line}
