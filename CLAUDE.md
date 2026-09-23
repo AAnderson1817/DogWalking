@@ -181,7 +181,7 @@ So:
 - [x] 09 v2 "Biscuit" reskin (no phase file — since superseded by the Sanpo Indigo Emaki rebrand)
 
 v1 is feature-complete. Everything below `phase(09)` in the log is post-v1:
-hardening, ops, and brand. Migrations run through `0052`; there are 16 edge
+hardening, ops, and brand. Migrations run through `0053`; there are 16 edge
 functions. (Both numbers were stale — review H21 — the migration count had
 gone stale AGAIN by 0043 before the H32 work corrected it, and it was stale a
 THIRD time at `0051`. "Nothing enforces these two counts" is what this

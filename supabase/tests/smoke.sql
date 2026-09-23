@@ -6425,6 +6425,195 @@ begin
   raise notice 'invariant 1: every statement that can write credit_balance is fn_ledger_apply''s, and only clients has the column: OK';
 end $$;
 
+-- ── Invariant 5 · every SECURITY DEFINER function pins search_path = public
+--    and is not executable by PUBLIC or anon ─────────────────────────────
+-- CLAUDE.md invariant 5, both halves, against what Postgres installed. Until
+-- the spec-drift audit neither half was asserted anywhere but per function,
+-- and four trigger functions had kept EXECUTE for PUBLIC and anon since 0012
+-- (fixed in 0053) — while spec 03's generated catalogue said **none** for
+-- them, because the generator collected GRANTs and a function nobody grants
+-- is not a function nobody can call.
+--
+-- Both predicates live in ONE place, pg_temp functions the real check and the
+-- self-test both call, so the two cannot drift apart (the invariant-1 rule).
+-- The REVOKE half asks PostgreSQL rather than reading an ACL:
+-- `has_function_privilege('anon', …)` is true when anon holds EXECUTE itself
+-- OR through PUBLIC, and it reads a NULL `proacl` as the default it stands
+-- for — EXECUTE to PUBLIC — which a hand-read `aclexplode(proacl)` would miss.
+do $$
+declare
+  v_n     int;
+  v_bad   text;
+  v_probe oid;
+  r       record;
+begin
+  create function pg_temp.inv5_open(p oid) returns boolean language sql stable as
+    $f$ select has_function_privilege('anon', p, 'EXECUTE') $f$;
+  create function pg_temp.inv5_unpinned(p oid) returns boolean language sql stable as
+    $f$ select not ('search_path=public' = any(coalesce((select proconfig from pg_proc where oid = p), '{}'))) $f$;
+
+  -- Precondition: a query that sees nothing agrees with everything.
+  select count(*) into v_n from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+   where n.nspname = 'public' and p.prosecdef;
+  if v_n < 50 then
+    raise exception 'FAIL: invariant 5 saw only % SECURITY DEFINER functions in public — it is not looking where they are', v_n;
+  end if;
+
+  select string_agg(p.oid::regprocedure::text, ', ' order by 1) into v_bad
+    from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+   where n.nspname = 'public' and p.prosecdef and pg_temp.inv5_open(p.oid);
+  if v_bad is not null then
+    raise exception 'FAIL: invariant 5 — SECURITY DEFINER functions executable by PUBLIC or anon: % — revoke all on function … from public, anon', v_bad;
+  end if;
+
+  select string_agg(p.oid::regprocedure::text, ', ' order by 1) into v_bad
+    from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+   where n.nspname = 'public' and p.prosecdef and pg_temp.inv5_unpinned(p.oid);
+  if v_bad is not null then
+    raise exception 'FAIL: invariant 5 — SECURITY DEFINER functions that do not set search_path = public: %', v_bad;
+  end if;
+
+  -- The self-test: each predicate asked about probes whose answer is known.
+  -- A probe is created, judged and dropped one at a time; the suite rolls
+  -- back regardless.
+  for r in
+    select * from (values
+      ('the platform default (never revoked)', '',                                                          true,  false),
+      ('revoked from public, anon',            'revoke all on function public.fn_inv5_probe() from public, anon;', false, false),
+      ('revoked from anon only — PUBLIC still holds it', 'revoke all on function public.fn_inv5_probe() from anon;', true, false),
+      ('revoked, then granted to anon',        'revoke all on function public.fn_inv5_probe() from public, anon; grant execute on function public.fn_inv5_probe() to anon;', true, false),
+      ('no set search_path',                   'revoke all on function public.fn_inv5_probe() from public, anon; alter function public.fn_inv5_probe() reset search_path;', false, true),
+      ('search_path = public, pg_temp',        'revoke all on function public.fn_inv5_probe() from public, anon; alter function public.fn_inv5_probe() set search_path = public, pg_temp;', false, true)
+    ) as t(label, after, open, unpinned)
+  loop
+    execute 'create function public.fn_inv5_probe() returns void language sql security definer set search_path = public as $b$ select 1 $b$';
+    if r.after <> '' then execute r.after; end if;
+    -- Looked up, not cast: a `'…'::regprocedure` constant is folded into the
+    -- statement's cached plan, so the second iteration would ask about the
+    -- oid of the function the first one dropped — and has_function_privilege
+    -- answers NULL for an oid that no longer exists.
+    select p.oid into v_probe from pg_proc p
+     where p.proname = 'fn_inv5_probe' and p.pronamespace = 'public'::regnamespace;
+    if pg_temp.inv5_open(v_probe) is distinct from r.open then
+      raise exception 'FAIL: the invariant-5 REVOKE predicate % the % form', case when r.open then 'misses' else 'wrongly flags' end, r.label;
+    end if;
+    if pg_temp.inv5_unpinned(v_probe) is distinct from r.unpinned then
+      raise exception 'FAIL: the invariant-5 search_path predicate % the % form', case when r.unpinned then 'misses' else 'wrongly flags' end, r.label;
+    end if;
+    drop function public.fn_inv5_probe();
+  end loop;
+
+  -- A NULL proacl is the built-in default, EXECUTE to PUBLIC. A project whose
+  -- deploy role has no default privileges (db-push-check's `sb_deploy`)
+  -- creates every function that way, so it must read as open, not as "no
+  -- grants". Reached by removing this role's default privileges for the one
+  -- CREATE, inside the suite's transaction.
+  alter default privileges in schema public revoke all on functions from anon, authenticated, service_role;
+  execute 'create function public.fn_inv5_probe() returns void language sql security definer set search_path = public as $b$ select 1 $b$';
+  alter default privileges in schema public grant all on functions to anon, authenticated, service_role;
+  select p.oid into v_probe from pg_proc p
+   where p.proname = 'fn_inv5_probe' and p.pronamespace = 'public'::regnamespace;
+  if (select proacl from pg_proc where oid = v_probe) is not null then
+    raise exception 'FAIL: the NULL-proacl probe was created with an ACL — the self-test is not testing what it says';
+  end if;
+  if not pg_temp.inv5_open(v_probe) then
+    raise exception 'FAIL: the invariant-5 REVOKE predicate misses a NULL proacl, which is EXECUTE to PUBLIC';
+  end if;
+  drop function public.fn_inv5_probe();
+
+  raise notice 'invariant 5: all % SECURITY DEFINER functions set search_path = public and none is executable by PUBLIC or anon: OK', v_n;
+end $$;
+
+-- ── 0053 · a trigger fires whatever EXECUTE says ──────────────────────────
+-- 0053 revoked EXECUTE on four definer trigger functions from every API role.
+-- That is safe only because PostgreSQL checks EXECUTE on a trigger function
+-- when the trigger is CREATED, not when it FIRES. Pinned here, as the API
+-- role that makes each change, for the three an API role can reach —
+-- `fn_assert_tenant_consistency` is also exercised as `authenticated` by
+-- security assertion 3c, and `fn_assert_plan_change_intent_tenant` guards a
+-- table no API role can write.
+do $$
+declare
+  v_op     uuid := '99999999-0000-4000-a000-000000000001';
+  v_cli    uuid := '99999999-0000-4000-c000-00000000000b';
+  v_prop   uuid;
+  v_sched  uuid;
+  v_paused uuid;
+  v_debit  uuid;
+  v_day    date := current_date + 30;
+begin
+  reset session authorization;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  if has_function_privilege('authenticated', 'fn_cancel_paused_walks()', 'EXECUTE')
+     or has_function_privilege('authenticated', 'fn_refund_cancelled_debit()', 'EXECUTE')
+     or has_function_privilege('authenticated', 'fn_assert_tenant_consistency()', 'EXECUTE') then
+    raise exception 'FAIL: a 0053 trigger function is still executable by authenticated — this block would prove nothing';
+  end if;
+
+  insert into properties (id, operator_id, client_id, label)
+  values (gen_random_uuid(), v_op, v_cli, 'B home 0053') returning id into v_prop;
+  insert into recurring_schedules (operator_id, client_id, property_id, service_type_id,
+                                   days_of_week, window_start, window_end, start_date, active)
+  select v_op, v_cli, v_prop, st.id, array[1,2,3,4,5,6,7], '09:00', '10:00', current_date, true
+    from service_types st where st.operator_id = v_op and st.is_default
+  returning id into v_sched;
+
+  -- A scheduled walk inside the window the operator is about to pause, and
+  -- an in-progress walk that has already been debited.
+  insert into walks (id, operator_id, client_id, property_id, service_type_id, schedule_id,
+                     scheduled_date, origin_date, window_start, window_end, status)
+  select gen_random_uuid(), v_op, v_cli, v_prop, st.id, v_sched, v_day, v_day, '09:00', '10:00', 'scheduled'
+    from service_types st where st.operator_id = v_op and st.is_default
+  returning id into v_paused;
+  insert into walks (id, operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, origin_date, window_start, window_end, status, credits_debited)
+  select gen_random_uuid(), v_op, v_cli, v_prop, st.id, current_date, current_date, '11:00', '12:00',
+         'in_progress', 1
+    from service_types st where st.operator_id = v_op and st.is_default
+  returning id into v_debit;
+
+  perform set_config('request.jwt.claims', format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  set local session authorization authenticated;
+
+  -- fn_cancel_paused_walks: pausing the schedule cancels the walk inside it.
+  update recurring_schedules set paused_from = v_day - 1, paused_until = v_day + 1 where id = v_sched;
+  if (select status from walks where id = v_paused) <> 'cancelled' then
+    raise exception 'FAIL: pausing a schedule as authenticated no longer cancels the walk inside the window (0053)';
+  end if;
+
+  -- fn_refund_cancelled_debit: cancelling a debited walk refunds its credit.
+  update walks set status = 'cancelled' where id = v_debit;
+  reset session authorization;
+  if not exists (select 1 from credit_ledger
+                  where walk_id = v_debit and entry_type = 'adjust' and amount = 1
+                    and note = 'auto refund: walk cancelled after debit') then
+    raise exception 'FAIL: cancelling a debited walk as authenticated no longer refunds it (0053)';
+  end if;
+
+  -- fn_assert_tenant_consistency: a walk on another tenant's client is refused
+  -- by the WALK's trigger. The exact message is pinned: with that trigger
+  -- dropped the insert succeeds, and its notification is then refused by the
+  -- same function on `notifications` — so "any tenant-consistency error"
+  -- passes with the trigger this checks gone (measured).
+  set local session authorization authenticated;
+  begin
+    insert into walks (operator_id, client_id, property_id, service_type_id,
+                       scheduled_date, window_start, window_end, status)
+    select v_op, '99999999-0000-4000-c000-0000000000f2', v_prop, st.id,
+           v_day, '10:00', '11:00', 'scheduled'
+      from service_types st where st.operator_id = v_op and st.is_default;
+    raise exception 'FAIL: a cross-tenant walk was accepted as authenticated (0053)';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm <> 'tenant consistency: walk client must belong to operator' then
+      raise exception 'FAIL: the cross-tenant walk was refused for the wrong reason: % (0053)', sqlerrm;
+    end if;
+  end;
+  reset session authorization;
+
+  raise notice 'the 0053 trigger functions fire for authenticated with EXECUTE revoked: OK';
+end $$;
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;
