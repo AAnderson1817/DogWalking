@@ -241,6 +241,19 @@ now: each writes a migration into a scratch copy of the real set and asserts
 the generator either renders the expected catalogue or refuses with the
 sentence the rule names. About half a minute; a FAIL line names the rule.
 
+## 10g. The three gate lists agree
+```
+python3 scripts/check-gate-lockstep.py
+```
+Every named `ci.yml` step has a row in §13 saying where it runs here, every
+row names a step that exists, every gate below is run by `validate.sh` and
+every gate `validate.sh` runs is here. `CLAUDE.md` called these three files a
+lockstep for months before anything checked it, and they drifted exactly as
+an unchecked list does: gates 7b and 8b were each missing from `validate.sh`
+until a green local run that CI refused, and this file's own §13 ended "read
+the workflow rather than trusting this list to stay complete". Must end with
+`GATE LOCKSTEP PASS`.
+
 ## 11. Secret-leak grep
 ```
 grep -RInE "(VAULT_MASTER_KEY|SERVICE_ROLE|sk_live|sk_test)" app/src supabase/functions --include='*.ts' --include='*.tsx' | grep -v 'Deno.env.get' | grep -v env.ts && echo "FAIL: literal secret reference" || echo "PASS: no secret literals"
@@ -310,17 +323,60 @@ no string literals — a check that saw nothing reports agreement. Still
 scope-blind, as it always was: a token defined under one selector satisfies a
 use anywhere.
 
-## 13. The rest of CI's invariant checks
-These live in `ci.yml` and are cheap to run by hand when touching their
-subject; run them when relevant, and read the workflow rather than trusting
-this list to stay complete:
+## 13. Every CI step, and where it runs here
+`ci.yml` is what CI enforces; this table says where each of its steps runs
+locally. Gate 10g fails when a step has no row, a row names no step, or a gate
+id names no heading — so the list is complete by construction, where the one
+it replaced was a hand-kept selection that told its reader not to trust it.
 
-- invariant 1 — `credit_balance` written only by `fn_ledger_apply` (a
-  `pg_proc` catalogue assertion, not a grep over migration text)
-- errors go through `FormError`, never a bare `field__error` span
-- exactly one `<main>`, owned by `AppMain`
-- the walk channel is private, and is the only channel
-- every `new HttpError(5xx, …)` carries its cause
-- DEV fixtures absent from the production bundle
-- the build stamps its commit, and `version.json` is excluded from the SPA rewrite
-- the nightly schedule is in a migration
+- **a gate id**: `validate.sh` runs the same check under that number;
+- **CI only**: a check with no local gate. Each is cheap to run by hand when
+  you touch its subject — read the step in `ci.yml`;
+- **setup**: an install or a cache, not a check.
+
+| CI step | Here |
+|---|---|
+| `Install` | setup |
+| `Typecheck` | 1 |
+| `Lint (warnings fail)` | 2 |
+| `Unit tests` | 3 |
+| `Build` | 4 |
+| `The built service worker is stamped, and precaches a usable shell` | CI only |
+| `A production build without Supabase config is refused` | CI only |
+| `Every test file is claimed by a vitest project` | CI only |
+| `The deployed frontend sets its security headers` | CI only |
+| `Deploy workflow gating` | 10c |
+| `CLAUDE.md's counts match the tree` | 10d |
+| `The CI, SKILL.md and validate.sh gate lists agree` | 10g |
+| `Secret-leak grep` | 11 |
+| `The build stamps the commit it was built from` | CI only |
+| `version.json is excluded from the SPA rewrite` | CI only |
+| `DEV fixtures absent from the production bundle` | CI only |
+| `Every CSS token used is a token that exists` | 12 |
+| `Behavioural tests still execute` | CI only |
+| `Exactly one <main>, owned by AppMain` | CI only |
+| `Resolve the Playwright version` | setup |
+| `Chromium browser` | setup |
+| `Today composition (4 viewports)` | 5 |
+| `Today contrast (sampled from the artwork)` | 5 |
+| `Tint contrast (rendered component gallery)` | 5 |
+| `Today plate responsive candidates` | 5 |
+| `Calendar week geometry` | 5 |
+| `Every e2e spec is actually run by this workflow` | CI only |
+| `Typecheck entrypoints` | 6 |
+| `Tests` | 6 |
+| `Every 5xx throw carries its cause` | CI only |
+| `No secret logging grep (phase 01 gate)` | CI only |
+| `Reset — shim + migrations 0001..NNNN + seed` | 7 |
+| `Push endpoint allowlist — both implementations agree` | 8c |
+| `Walk cost parity — TS leaf, fn_walk_cost and the snapshot trigger agree` | 8d |
+| ``Would `supabase db push` apply this?`` | 7b |
+| `Smoke suite (credit engine + full spec-03 security matrix)` | 8 |
+| `Materializer suite (idempotency, skips, no resurrection)` | 8 |
+| `Concurrency suite (the row lock behind invariant 1)` | 8b |
+| `The nightly schedule is in a migration` | CI only |
+| `Generated types match the schema` | 10b |
+| `Spec 03's definer catalogue matches the migrations` | 10a |
+| `Spec 01's enum catalogue matches the migrations` | 10e |
+| `The enum catalogue generator's proof set holds` | 10f |
+| `No edits to migrations that already exist on the base branch` | 9 |
