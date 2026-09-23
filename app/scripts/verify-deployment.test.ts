@@ -319,10 +319,12 @@ describe("verify-deployment", () => {
  *
  *   - a function with its own `Deno.serve`, which answers whatever it likes
  *     (`stripe-webhook`, `platform-webhook`);
- *   - `serveFunction` widened with `methods`, which lets a GET reach the
- *     handler (`unsubscribe`, whose GET is the one-click link) — however the
- *     key is spelled. Options, keys or arguments the scan cannot read count
- *     as this door, since what they hide could be `methods`.
+ *   - `serveFunction` widened with a `methods` list that contains `"GET"`,
+ *     which lets a GET reach the handler (`unsubscribe`, whose GET is the
+ *     one-click link) — however the key is spelled. A literal list without
+ *     it, `["POST"]` or `[]`, admits no GET and is no door. Options, keys,
+ *     arguments or a list the scan cannot read count as this door, since
+ *     what they hide could be `methods` or `"GET"`.
  *
  * The script's header named them from memory — "every function but two" was
  * "12 of the 13" once and wrong the next PR — so this reads the source for
@@ -374,6 +376,24 @@ function memberOf(e: Access): string | typeof UNREADABLE {
   return ts.isPropertyAccessExpression(e) ? e.name.text : literalText(e.argumentExpression) ?? UNREADABLE;
 }
 
+/**
+ * Whether a `methods` value can let a GET through. `handleRequest` admits a
+ * method only when the list contains it exactly, so a literal list is a door
+ * only if one of its entries is `"GET"` — `["POST"]` and `[]` admit none
+ * (Codex, on #97). Anything the scan cannot read — a variable, a spread, an
+ * entry that is not a literal — could be `"GET"`, so it is a door.
+ */
+function admitsGet(value: ts.Expression): boolean {
+  let e = value;
+  while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isSatisfiesExpression(e)
+    || ts.isTypeAssertionExpression(e)) e = e.expression;
+  if (!ts.isArrayLiteralExpression(e)) return true;
+  return e.elements.some((el) => {
+    const text = ts.isSpreadElement(el) ? undefined : literalText(el);
+    return text === undefined || text === "GET";
+  });
+}
+
 /** Why this serveFunction call's options might admit a GET, or null if they cannot. */
 function widening(call: ts.CallExpression): string | null {
   if (call.arguments.some(ts.isSpreadElement)) return "serveFunction arguments spread from elsewhere";
@@ -383,7 +403,11 @@ function widening(call: ts.CallExpression): string | null {
   const keys = options.properties.map((p) => (ts.isSpreadAssignment(p) ? null : keyOf(p.name)));
   if (keys.includes(null)) return "serveFunction options spread from elsewhere";
   if (keys.includes(UNREADABLE)) return "serveFunction options with a key the scan cannot read";
-  if (keys.includes("methods")) return "serveFunction widened with methods";
+  for (const p of options.properties) {
+    if (ts.isSpreadAssignment(p) || keyOf(p.name) !== "methods") continue;
+    // A shorthand, a method or an accessor supplies a value the scan cannot read.
+    if (!ts.isPropertyAssignment(p) || admitsGet(p.initializer)) return "serveFunction widened with methods";
+  }
   return null;
 }
 
@@ -526,6 +550,34 @@ describe("verify-deployment's read-only argument is derived", () => {
       shorthand: "serveFunction widened with methods",
       "computed-unreadable": "serveFunction options with a key the scan cannot read",
       "spread-arguments": "serveFunction arguments spread from elsewhere",
+    });
+  });
+
+  it("reads the methods a widening lists, as handleRequest does (Codex, on #97)", () => {
+    // handleRequest lets a method through only when the list contains it
+    // exactly, so an explicit POST-only or empty list is no door. Without
+    // this the gate would demand a contract_for case for a function no GET
+    // can reach — a red on healthy code.
+    const root = mkdtempSync(join(tmpdir(), "methods-"));
+    const fn = (name: string, text: string) => {
+      mkdirSync(join(root, name), { recursive: true });
+      writeFileSync(join(root, name, "index.ts"), text);
+    };
+    fn("post-only", 'serveFunction(h, { methods: ["POST"] });');
+    fn("post-only-as-const", 'serveFunction(h, { methods: ["POST"] as const });');
+    fn("empty", "serveFunction(h, { methods: [] });");
+    fn("lowercase", 'serveFunction(h, { methods: ["get"] });');
+    fn("get-as-const", 'serveFunction(h, { methods: ["GET", "POST"] as const });');
+    fn("unreadable-entry", "serveFunction(h, { methods: [METHOD, \"POST\"] });");
+    fn("spread-entry", 'serveFunction(h, { methods: [...EXTRA, "POST"] });');
+    fn("variable", "serveFunction(h, { methods: METHODS });");
+    fn("accessor", 'serveFunction(h, { get methods() { return ["POST"]; } });');
+    expect(Object.fromEntries(getReachable(root))).toEqual({
+      "get-as-const": "serveFunction widened with methods",
+      "unreadable-entry": "serveFunction widened with methods",
+      "spread-entry": "serveFunction widened with methods",
+      variable: "serveFunction widened with methods",
+      accessor: "serveFunction widened with methods",
     });
   });
 
