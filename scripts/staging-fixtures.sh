@@ -32,7 +32,8 @@ admin() { curl -sS -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_
 # more than 100 auth users they fell off page 1. Cleanup then found nothing,
 # the create collided with the row it had failed to remove, and the job failed
 # with a message that named neither cause. The bound is there so a project
-# with a large user table cannot spin here forever.
+# with a large user table cannot spin here forever: 50 pages, or
+# USER_LOOKUP_MAX_PAGES (the tests set it low).
 #
 # Stops on an EMPTY page, never on a short one. A first fix asked for
 # `per_page=200` and stopped when a page returned fewer than 200 — but GoTrue
@@ -53,9 +54,9 @@ admin() { curl -sS -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_
 # a 401 body read as "absent" would pass the dead-token check while checking
 # nothing. Warnings go to stderr because stdout is the captured return value.
 user_id_for() {
-  local page=1 code lbody id first seen=""
+  local page=1 max=${USER_LOOKUP_MAX_PAGES:-50} code lbody id first seen=""
   lbody=$(mktemp)
-  while [ "$page" -le 50 ]; do
+  while [ "$page" -le "$max" ]; do
     code=$(admin -o "$lbody" -w '%{http_code}' "$base/auth/v1/admin/users?page=$page&per_page=100") || true
     case "$code" in
       2*) ;;
@@ -74,7 +75,7 @@ user_id_for() {
     seen=$first
     page=$((page + 1))
   done
-  echo "auth user lookup: read 50 pages without reaching an empty one, so the search did not finish" >&2
+  echo "auth user lookup: read $max pages without reaching an empty one, so the search did not finish" >&2
   return 9
 }
 
