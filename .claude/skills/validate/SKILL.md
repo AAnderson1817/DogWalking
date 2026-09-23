@@ -234,33 +234,40 @@ grep -RInE "(VAULT_MASTER_KEY|SERVICE_ROLE|sk_live|sk_test)" app/src supabase/fu
 ## 12. Every `var(--x)` names a property something defines
 
 ```
-python3 - <<'PY'
-import re, pathlib, sys
-defined, used = set(), {}
-for f in pathlib.Path('app/src').rglob('*.css'):
-    t = re.sub(r'/\*.*?\*/', '', f.read_text(), flags=re.S)
-    for m in re.finditer(r'(--[A-Za-z0-9_-]+)\s*:', t): defined.add(m.group(1))
-    for m in re.finditer(r'var\(\s*(--[A-Za-z0-9_-]+)', t): used.setdefault(m.group(1), str(f))
-missing = sorted((k, v) for k, v in used.items() if k not in defined)
-for k, v in missing: print(f"FAIL: {k} is used but never defined ({v})")
-sys.exit(1 if missing else 0)
-PY
+node app/scripts/check-css-tokens.mjs
 ```
 
-An undefined custom property makes the **whole declaration** invalid, and the
-element silently inherits instead — so the failure is a layout that looks
-subtly wrong rather than an error anyone sees. This gate shipped in CI with
-`feat(settings)`, after four colour tokens and `--fs-13` were written from
-memory and none of them existed.
+An undefined custom property makes the **whole declaration** invalid at
+computed-value time, and the property then behaves as `unset`: an inherited
+property takes its parent's value, a non-inherited one drops to its **initial**
+value. Either way the failure is a layout that looks subtly wrong rather than
+an error anyone sees. Measured, not recalled: on `/pricing`,
+`padding-left: var(--s-5)` computed to `0px` — not the UA list indent — and the
+bullets hung out into the card's padding. This file used to say the element
+"silently inherits", which is true only of inherited properties.
 
-It was **missing from this file until H6**, which is the more interesting
-defect: the spacing scale is 1·2·3·4·6·8·12 with no `--s-5`, a `var(--s-5)`
-went in twice, `/validate` passed, and CI caught it. A local gate weaker than
-the CI gate is the same shape as the `deno test -A` mismatch recorded at the
-top of this file — it means "green locally" does not predict "green in CI",
-which is the only thing running these gates before committing is for.
+The history is three instances of one mistake, each through a door the check
+did not watch. `feat(settings)` shipped `--fs-13` and four colour tokens written
+from memory, which is why CI got the check. It was **missing from this file
+until H6**, so a `var(--s-5)` went into CSS twice, `/validate` passed, and CI
+caught it — a local gate weaker than the CI gate means "green locally" does not
+predict "green in CI". Then a third `var(--s-5)` went into a React style object
+in `Pricing.tsx` and sat live for weeks with every gate green, because both
+copies scanned `*.css` only. The spacing scale is 1·2·3·4·6·8·12; all three
+`--s-5`s became `--s-6`.
 
-Keep this identical to `.github/workflows/ci.yml`'s step of the same name.
+It is one script now, called by this gate and by `ci.yml`'s step "Every CSS
+token used is a token that exists", because the three inline copies this
+section used to say to "keep identical" had drifted: validate.sh read token
+names as `[A-Za-z0-9_-]` and CI as `[a-zA-Z0-9-]`, which read `var(--a_c)` as
+`--a`. What it checks, and why each rule exists, is in the script's header and
+`app/scripts/css-tokens.test.ts`: uses come from string and template literals
+in the TypeScript AST, so comments and JSX text never count; custom properties
+set from TS (`style={{ "--x": … }}`, `setProperty`) count as definitions; test
+files are fixtures and are not read; and it refuses to pass if it scanned no
+stylesheets, no TS, or no string literals — a check that saw nothing reports
+agreement. Still scope-blind, as it always was: a token defined under one
+selector satisfies a use anywhere.
 
 ## 13. The rest of CI's invariant checks
 These live in `ci.yml` and are cheap to run by hand when touching their
