@@ -19,8 +19,10 @@ interface FieldChrome {
  * announced far less reliably. Empty, it is taken out of flow by
  * `.form-error:empty` and occupies nothing.
  *
- * Every error in the product goes through here; CI fails a bare
- * `className="field__error"` outside this file.
+ * Every form error in the product goes through here (a screen that cannot
+ * load uses `StateField role="alert"`), and `app/scripts/form-errors.test.ts`
+ * fails an alert role, an assertive live region or an `__error` class
+ * anywhere else.
  */
 export function FormError({
   message,
