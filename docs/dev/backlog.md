@@ -71,26 +71,7 @@ bundles with Docker, deliberately, until staging has demonstrated the new path;
 run 105 is one demonstration. Moving production to `--use-api` belongs with this
 item: same workflows, same raise-the-bar argument, same staging-first test.
 
-### 2. Spec-drift audit follow-up: the next migration
-Found by the audit recorded as `docs(spec-drift)` and verified against HEAD;
-PR A (the gates that passed for the wrong reason) is done — see below.
-
-**Invariant 5's REVOKE half** (money/trust path:
-written safety argument, adversarial self-review, red-first smoke):
-`fn_assert_plan_change_intent_tenant`, `fn_assert_tenant_consistency`,
-`fn_cancel_paused_walks` and `fn_refund_cancelled_debit` carry `=X` (PUBLIC)
-and `anon=X` in `proacl`; the other 13 definer trigger functions were
-revoked. Not exploitable (Postgres refuses to call a trigger function
-directly; no API role holds CREATE or TRIGGER), and a trigger still fires
-for `authenticated` with EXECUTE revoked (measured). Revoke the four; add a
-smoke block asserting no `prosecdef` function in `public` grants EXECUTE to
-`public` or `anon` (red against HEAD first); make
-`scripts/gen-definer-catalog.py` read `revoke` too and render an unrevoked
-function as `PUBLIC` rather than **none**. The generator now reads migrations
-with the enum generator's SQL reader and has a proof set
-(`scripts/gen-definer-catalog-proofs.py`); add the revoke cases there.
-
-### 3. Let the address owner turn email back on
+### 2. Let the address owner turn email back on
 `0052` tells the operator when a client's address has unsubscribed, and the
 notice deliberately promises no way back, because none exists: a suppression
 is permanent, an operator must never be able to lift one (0038), and the
@@ -107,6 +88,17 @@ own item; the trust questions (what a shared login proves, whether to log
 lifts) want a written argument before code.
 
 ## Done
+
+- **Spec-drift PR B — invariant 5's REVOKE half.** Migration `0053` revokes
+  EXECUTE on the four definer trigger functions that had kept the platform
+  default (PUBLIC, anon, authenticated) since `0012`–`0015`; smoke asserts both
+  halves of invariant 5 for every definer function, and that the three
+  triggers an API role can reach still fire for `authenticated` with EXECUTE
+  revoked. `scripts/gen-definer-catalog.py` models each function's ACL
+  instead of collecting GRANTs, so an unrevoked function renders `PUBLIC` and
+  fails the build, and gate 8e (`scripts/check-definer-catalog-live.py`) holds
+  that model to a reset database. See the `security(0053)+ci(definer-acl)`
+  status-log entry.
 
 - **Spec-drift PR A — the gates that passed for the wrong reason.** Eight
   checks, each proven red-first against the defect the audit named:
