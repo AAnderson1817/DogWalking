@@ -37,7 +37,21 @@ import { describe, expect, it } from "vitest";
  *     exception is `FormError`'s own `className` prop, which layers a layout
  *     class onto the region (`claim-invite__error`) rather than building one.
  *   - Object literals are read as well as JSX (`{ role: "alert" }`), since
- *     `<span {...props}>` and `createElement` carry props that way.
+ *     `<span {...props}>` and `createElement` carry props that way — and so is
+ *     the spread itself. A spread whose object the scan can see (a literal,
+ *     or a `const` bound to one) is read as though each of its properties
+ *     were written on the element, so `{ role: r }` spread onto a `<span>` is
+ *     refused exactly as `<span role={r}>` is. A spread it cannot see —
+ *     `{...rest}` forwarding a component's own props — is a forwarding
+ *     boundary: the role enters wherever that component is USED, and that
+ *     attribute is read there.
+ *   - An identifier is read through the `const` it is bound to, by the
+ *     TypeScript checker's symbol rather than by name, so a shadowing
+ *     parameter is not mistaken for the outer constant. `const role =
+ *     "alert"; const props = { role }` is the shape that needed it (Codex, on
+ *     the PR that introduced this scan): the shorthand property was not read
+ *     at all, and the spread that applied it was skipped. A `let`, a
+ *     parameter, an import or a call stays unreadable.
  *
  * `fields.tsx` and `StateField.tsx` are the implementations, so they are the
  * only files exempt. Test files are fixtures and are not read.
@@ -57,28 +71,80 @@ const UNREADABLE = Symbol("unreadable");
 type Value = string | null | typeof UNREADABLE;
 
 /**
+ * The expression a `const` identifier is bound to, or undefined for anything
+ * else (a `let`, a parameter, an import, an undeclared name). Resolved by the
+ * checker's symbol — the BINDING — so a parameter that shadows an outer
+ * constant is the parameter.
+ */
+type Resolve = (id: ts.Identifier) => ts.Expression | undefined;
+
+function resolverFor(checker: ts.TypeChecker): Resolve {
+  return (id) => {
+    const parent = id.parent;
+    const symbol = parent && ts.isShorthandPropertyAssignment(parent) && parent.name === id
+      ? checker.getShorthandAssignmentValueSymbol(parent)
+      : checker.getSymbolAtLocation(id);
+    const decl = symbol?.valueDeclaration ?? symbol?.declarations?.[0];
+    if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer || !ts.isIdentifier(decl.name)) return undefined;
+    const list = decl.parent;
+    if (!ts.isVariableDeclarationList(list) || (list.flags & ts.NodeFlags.Const) === 0) return undefined;
+    return decl.initializer;
+  };
+}
+
+/**
  * The values an attribute expression can produce, read from the expressions
  * that produce it: both arms of a ternary, the right of `&&`, either side of
- * `||`/`??`, through parentheses and type assertions. `null`, `undefined` and
- * booleans set no role and read as `null`. Anything else — an identifier, a
- * call, a template with a hole — could be any string, and is UNREADABLE.
+ * `||`/`??`, through parentheses and type assertions, and through a `const`
+ * an identifier is bound to. `null`, `undefined` and booleans set no role and
+ * read as `null`. Anything else — a `let`, a parameter, a call, a template
+ * with a hole — could be any string, and is UNREADABLE.
  */
-function valuesOf(node: ts.Node): Value[] {
+function valuesOf(node: ts.Node, resolve: Resolve, seen = new Set<ts.Node>()): Value[] {
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return [node.text];
   if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node)
-    || ts.isSatisfiesExpression(node) || ts.isNonNullExpression(node)) return valuesOf(node.expression);
-  if (ts.isConditionalExpression(node)) return [...valuesOf(node.whenTrue), ...valuesOf(node.whenFalse)];
+    || ts.isSatisfiesExpression(node) || ts.isNonNullExpression(node)) return valuesOf(node.expression, resolve, seen);
+  if (ts.isConditionalExpression(node)) {
+    return [...valuesOf(node.whenTrue, resolve, seen), ...valuesOf(node.whenFalse, resolve, seen)];
+  }
   if (ts.isBinaryExpression(node)) {
     const op = node.operatorToken.kind;
-    if (op === ts.SyntaxKind.AmpersandAmpersandToken) return [null, ...valuesOf(node.right)];
+    if (op === ts.SyntaxKind.AmpersandAmpersandToken) return [null, ...valuesOf(node.right, resolve, seen)];
     if (op === ts.SyntaxKind.BarBarToken || op === ts.SyntaxKind.QuestionQuestionToken) {
-      return [...valuesOf(node.left), ...valuesOf(node.right)];
+      return [...valuesOf(node.left, resolve, seen), ...valuesOf(node.right, resolve, seen)];
     }
   }
   if (node.kind === ts.SyntaxKind.NullKeyword || node.kind === ts.SyntaxKind.TrueKeyword
     || node.kind === ts.SyntaxKind.FalseKeyword) return [null];
-  if (ts.isIdentifier(node) && node.text === "undefined") return [null];
+  if (ts.isIdentifier(node)) {
+    if (node.text === "undefined") return [null];
+    const init = resolve(node);
+    // `seen` breaks a cycle of constants naming each other, which parses.
+    if (init && !seen.has(init)) {
+      seen.add(init);
+      return valuesOf(init, resolve, seen);
+    }
+  }
   return [UNREADABLE];
+}
+
+/**
+ * The object literal a spread applies, if the scan can see one: written in
+ * place, or bound to a `const`, through parentheses and type assertions. A
+ * forwarded `rest`, a call's result or a parameter is not visible.
+ */
+function objectOf(node: ts.Expression, resolve: Resolve, seen = new Set<ts.Node>()): ts.ObjectLiteralExpression | undefined {
+  if (ts.isObjectLiteralExpression(node)) return node;
+  if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node)
+    || ts.isSatisfiesExpression(node) || ts.isNonNullExpression(node)) return objectOf(node.expression, resolve, seen);
+  if (ts.isIdentifier(node)) {
+    const init = resolve(node);
+    if (init && !seen.has(init)) {
+      seen.add(init);
+      return objectOf(init, resolve, seen);
+    }
+  }
+  return undefined;
 }
 
 /** The value of a JSX attribute, or of an object-literal property. */
@@ -96,9 +162,9 @@ function valueOf(init: ts.Node | undefined): ts.Node | undefined {
  * persona is `role: null` in auth-context), so only a literal `"alert"` there
  * is evidence of anything.
  */
-function mayBe(value: ts.Node | undefined, word: string, unreadableCounts: boolean): boolean {
+function mayBe(value: ts.Node | undefined, word: string, unreadableCounts: boolean, resolve: Resolve): boolean {
   if (!value) return false;
-  return valuesOf(value).some((v) =>
+  return valuesOf(value, resolve).some((v) =>
     v === UNREADABLE ? unreadableCounts : typeof v === "string" && v.trim().toLowerCase() === word);
 }
 
@@ -115,6 +181,41 @@ function propName(name: ts.PropertyName | ts.JsxAttributeName): string | undefin
   return undefined;
 }
 
+const COMPILER_OPTIONS: ts.CompilerOptions = {
+  noLib: true,
+  noResolve: true,
+  target: ts.ScriptTarget.Latest,
+  jsx: ts.JsxEmit.Preserve,
+  skipLibCheck: true,
+  types: [],
+};
+
+/**
+ * One file, parsed and bound, so an identifier can be followed to its
+ * binding. Imports are not resolved (`noResolve`): a local's symbol never
+ * crosses a file, which is all this needs — the same shape the
+ * discarded-errors gate uses.
+ */
+function checked(file: string, text: string): { sf: ts.SourceFile; checker: ts.TypeChecker } {
+  const kind = file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind);
+  const host: ts.CompilerHost = {
+    getSourceFile: (name) => (name === file ? sf : undefined),
+    getDefaultLibFileName: () => "lib.d.ts",
+    writeFile: () => {},
+    getCurrentDirectory: () => "/",
+    getCanonicalFileName: (f) => f,
+    useCaseSensitiveFileNames: () => true,
+    getNewLine: () => "\n",
+    fileExists: (f) => f === file,
+    readFile: (f) => (f === file ? text : undefined),
+    directoryExists: () => true,
+    getDirectories: () => [],
+  };
+  const checker = ts.createProgram([file], COMPILER_OPTIONS, host).getTypeChecker();
+  return { sf, checker };
+}
+
 /**
  * Findings for one file, and how many alert roles the visitor inspected on the
  * way — allowed ones included — so the tree test can tell "nothing wrong" from
@@ -122,8 +223,8 @@ function propName(name: ts.PropertyName | ts.JsxAttributeName): string | undefin
  */
 function scan(file: string, text: string): { findings: Finding[]; alertRoles: number } {
   if (IMPLEMENTATIONS.has(file)) return { findings: [], alertRoles: 0 };
-  const kind = file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
-  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind);
+  const { sf, checker } = checked(file, text);
+  const resolve = resolverFor(checker);
   const findings: Finding[] = [];
   let alertRoles = 0;
   const at = (node: ts.Node, rule: Finding["rule"]) =>
@@ -145,11 +246,11 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
     site: ts.Node,
   ) => {
     const jsx = owner !== null;
-    if (name === "role" && mayBe(value, "alert", jsx)) {
+    if (name === "role" && mayBe(value, "alert", jsx, resolve)) {
       alertRoles += 1;
       if (owner !== "StateField") at(site, "role");
     }
-    if (name === "aria-live" && mayBe(value, "assertive", jsx)) at(site, "aria-live");
+    if (name === "aria-live" && mayBe(value, "assertive", jsx, resolve)) at(site, "aria-live");
     if (name === "className" && owner === "FormError" && value) {
       const mark = (n: ts.Node) => {
         formErrorClass.add(n);
@@ -159,14 +260,33 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
     }
   };
 
+  // A spread applies each property of the object it names as though it were
+  // written on the element, so it is judged with the element's rules — a
+  // `role` it cannot read is refused there, as `role={r}` is. Nested spreads
+  // inside that object are followed too.
+  const visitSpread = (owner: string, expr: ts.Expression, site: ts.Node, seen = new Set<ts.Node>()) => {
+    const obj = objectOf(expr, resolve);
+    if (!obj || seen.has(obj)) return;
+    seen.add(obj);
+    for (const prop of obj.properties) {
+      if (ts.isPropertyAssignment(prop)) visitProps(owner, propName(prop.name), prop.initializer, site);
+      else if (ts.isShorthandPropertyAssignment(prop)) visitProps(owner, prop.name.text, prop.name, site);
+      else if (ts.isSpreadAssignment(prop)) visitSpread(owner, prop.expression, site, seen);
+    }
+  };
+
   const visit = (node: ts.Node) => {
     if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
       const owner = tagName(node);
       for (const attr of node.attributes.properties) {
         if (ts.isJsxAttribute(attr)) visitProps(owner, propName(attr.name), valueOf(attr.initializer), attr);
+        else if (ts.isJsxSpreadAttribute(attr)) visitSpread(owner, attr.expression, attr);
       }
     } else if (ts.isPropertyAssignment(node)) {
       visitProps(null, propName(node.name), node.initializer, node);
+    } else if (ts.isShorthandPropertyAssignment(node)) {
+      // `{ role }`: the value is the binding of the same name.
+      visitProps(null, node.name.text, node.name, node);
     }
     ts.forEachChild(node, visit);
   };
@@ -288,6 +408,44 @@ describe("what the scan refuses and admits", () => {
     expect(rules(`const MARKS = { failed: "alert" };`)).toEqual([]);
     expect(rules(`setState({ session, role: null, roleError: null });`)).toEqual([]);
     expect(rules(`const next = { role: resolved.role };`)).toEqual([]);
+  });
+
+  it("follows a role through a constant, a shorthand property and a spread (Codex, on #97)", () => {
+    // The shape it missed: the shorthand was not read, and the spread that
+    // applied it was skipped. Reported where the value is written AND where
+    // it is applied.
+    expect(rules(`const role = "alert"; const props = { role };
+      export const X = () => <span {...props}>x</span>;`)).toEqual(["role", "role"]);
+    // A spread is judged as though each property were written on the element,
+    // so a role it cannot read is refused there as `role={r}` is.
+    expect(rules(`const props = { role: r }; export const X = () => <span {...props}>x</span>;`)).toEqual(["role"]);
+    expect(rules(`const base = { role: r }; const props = { ...base };
+      export const X = () => <span {...props}>x</span>;`)).toEqual(["role"]);
+    expect(rules(`export const X = () => <span {...{ "aria-live": "assertive" }}>x</span>;`))
+      .toEqual(["aria-live", "aria-live"]);
+    expect(rules(`const r = "alert"; export const X = () => <span role={r}>x</span>;`)).toEqual(["role"]);
+  });
+
+  it("admits what a binding says is harmless, and a forwarded spread", () => {
+    expect(rules(`const r = "status"; export const X = () => <span role={r}>x</span>;`)).toEqual([]);
+    expect(rules(`const props = { role: "status" }; export const X = () => <span {...props}>x</span>;`)).toEqual([]);
+    // A component forwarding its own props: the role is read where it is used.
+    expect(rules(`export function Card({ children, ...rest }) { return <div {...rest}>{children}</div>; }`))
+      .toEqual([]);
+    // StateField may carry it however it arrives.
+    expect(rules(`const props = { role: r }; export const X = () => <StateField {...props} title="x" />;`))
+      .toEqual([]);
+  });
+
+  it("resolves by binding, not by name", () => {
+    // The parameter shadows the constant, so this `{ role }` is a persona.
+    expect(rules(`const role = "alert";
+      export function persona(role: string | null) { return { role }; }`)).toEqual([]);
+    // A `let` can be reassigned before it is read, so it stays unreadable —
+    // and on an element, unreadable is refused.
+    expect(rules(`let r = "status"; export const X = () => <span role={r}>x</span>;`)).toEqual(["role"]);
+    // Constants naming each other parse; the scan must not loop.
+    expect(rules(`const a = b; const b = a; export const X = () => <span role={a}>x</span>;`)).toEqual(["role"]);
   });
 
   it("does not read comments or JSX text", () => {
