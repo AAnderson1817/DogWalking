@@ -103,7 +103,11 @@ spec-drift audit found two spellings of the write it could not see. Its rewrite
 found three more rounds of the same class (an upsert, a `MERGE`, `clients *`),
 so it no longer reads the target: any `update … set …` statement naming the
 column outside `fn_ledger_apply` fails, on the premise — asserted — that only
-`clients` has a `credit_balance` column.
+`clients` has a `credit_balance` column. An UPDATE is not the only write
+(Codex): an INSERT whose column list names the column, an INSERT with no
+column list at all (positional, whatever its target), and `copy … from` fail
+too, while a VALUES tuple or a source select that only READS the balance does
+not.
 
 ## 8b. Concurrency suite (requires `LOCAL_DB_URL`)
 ```
