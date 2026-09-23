@@ -49,7 +49,13 @@ jobs:
     runs-on: ubuntu-latest
     environment: staging
     steps:
+      # `ref` pins the commit the deploy just shipped, so the posture is read
+      # by the check script that shipped with it rather than whatever reached
+      # main since. On a workflow_run event `github.sha` is main's newest
+      # commit, not the deployed one; `scripts/verify-workflows.py` rule 4.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Fetch and check the live auth config
         run: |

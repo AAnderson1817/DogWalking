@@ -206,11 +206,16 @@ python3 scripts/gen-types.py && git diff --exit-code -- app/src/lib/types.ts
 ```
 python3 scripts/verify-workflows.py
 ```
-Three rules that YAML validity cannot express, each written after the thing it
+Four rules that YAML validity cannot express, each written after the thing it
 forbids shipped: no job may gate on its own result (it can then never run); a
 job whose `if` uses a status function must re-state every `needs` it dropped the
-implicit `success()` for; and a job that runs `git push` needs `fetch-depth: 0`,
-because git cannot prove a fast-forward from a shallow clone.
+implicit `success()` for; a job that runs `git push` needs `fetch-depth: 0`,
+because git cannot prove a fast-forward from a shallow clone; and every checkout
+in a `workflow_run`-triggered workflow pins
+`ref: ${{ github.event.workflow_run.head_sha || github.sha }}`, because on that
+event `github.sha` is main's newest commit rather than the one the upstream run
+tested or deployed. The last one fails if it inspected no such checkout, since
+a trigger parse that read nothing would report every checkout pinned.
 
 ## 10d. CLAUDE.md's counts match the tree
 ```
