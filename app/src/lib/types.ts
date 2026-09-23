@@ -1294,6 +1294,10 @@ export type Database = {
         };
         Returns: boolean;
       };
+      fn_client_facing_notification_types: {
+        Args: Record<string, never>;
+        Returns: Database["public"]["Enums"]["notification_type"][];
+      };
       fn_credential_log_block_mutation: {
         Args: Record<string, never>;
         Returns: unknown;

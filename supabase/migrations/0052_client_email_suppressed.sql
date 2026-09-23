@@ -44,17 +44,52 @@
 --
 -- The notice must never disagree with the sender about what counts as a match
 -- (`lower()` on the address, the operator scope, the type scope). So this asks
--- the sender's own question — `fn_email_suppressed` — for every notification
--- type, rather than restating the predicate. A suppression with no type
--- answers yes for all of them, which is what "email to this address is off"
--- means; a typed row (a per-type preference, which nothing writes yet) leaves
--- other types deliverable and is correctly NOT reported as a full stop. The
--- smoke block pins the agreement in both directions.
+-- the sender's own question — `fn_email_suppressed` — rather than restating
+-- the predicate, once for every type the sender actually EMAILS. A suppression
+-- with no type answers yes for all of them; so do per-type rows covering every
+-- one of them, which the schema supports though nothing writes one yet; a
+-- per-type row covering some of them leaves the rest deliverable and is
+-- correctly not reported as email being off.
+--
+-- "Every type the sender emails" is not "every notification type", and the
+-- first version of this migration asked the latter: `enum_range` includes
+-- bell-only types such as `card_saved` (0044) that are never emailed, so
+-- per-type opt-outs from all six emailed types left the sender skipping every
+-- email while this answered false (Codex, PR #96). The smoke block's "agree
+-- with the sender" check had asked the same wrong question, so it could not
+-- see it — a test cannot catch an error it shares with the code.
+--
+-- The emailed set is `CLIENT_FACING` in send-notification/handler.ts, and SQL
+-- cannot import it, so `fn_client_facing_notification_types()` is a copy —
+-- which 0029 declined to make for `fn_notification_backlog`, because a second
+-- copy drifts. This one is tied to the first: `client_facing_parity_test.ts`
+-- parses the LAST definition of the function below out of the migrations and
+-- compares it with the Set the sender imports, so changing either alone fails
+-- the build.
 --
 -- Not a raise for a client that is not the caller's: answering false leaks
 -- nothing (it is also the answer for "yours, and deliverable"), and a lookup
 -- that could error is one more way for an advisory notice to take down the
 -- screen it sits on — the M39 lesson.
+
+create function fn_client_facing_notification_types()
+returns notification_type[]
+language sql
+-- Not immutable: `enum_in` is STABLE (measured), as `enum_out` was for 0038.
+stable
+set search_path = public
+as $$
+  select array[
+    'walk_complete', 'low_credit', 'renewal_upcoming',
+    'payment_failed', 'walk_scheduled', 'walk_cancelled'
+  ]::notification_type[];
+$$;
+
+-- No API role needs it: the definer function below calls it as its owner.
+revoke all on function fn_client_facing_notification_types() from public, anon, authenticated;
+
+comment on function fn_client_facing_notification_types() is
+  'The notification types send-notification emails to a client — a copy of CLIENT_FACING in send-notification/handler.ts, pinned to it by client_facing_parity_test.ts (0052).';
 
 create function fn_client_email_suppressed(p_client uuid)
 returns boolean
@@ -65,7 +100,7 @@ set search_path = public
 as $$
   select coalesce(bool_and(fn_email_suppressed(c.email, c.operator_id, t.value)), false)
     from clients c
-   cross join unnest(enum_range(null::notification_type)) as t(value)
+   cross join unnest(fn_client_facing_notification_types()) as t(value)
    where c.id = p_client
      -- The caller check IS the scoping. Only the client's own operator may
      -- ask; a client persona, another operator or an unknown id gets false.
@@ -77,4 +112,4 @@ revoke all on function fn_client_email_suppressed(uuid) from public, anon;
 grant execute on function fn_client_email_suppressed(uuid) to authenticated;
 
 comment on function fn_client_email_suppressed(uuid) is
-  'True when every email to the calling operator''s own client''s current address is suppressed. Asks fn_email_suppressed for every notification type, so the notice cannot disagree with the sender; false for anyone else''s client (0052, spec 04).';
+  'True when every email the sender would send to the calling operator''s own client''s current address is suppressed. Asks fn_email_suppressed for each type in fn_client_facing_notification_types(), so the notice cannot disagree with the sender; false for anyone else''s client (0052, spec 04).';

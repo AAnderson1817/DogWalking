@@ -661,7 +661,7 @@ platform-wide suppression is the address owner's instruction to every operator
 and nobody's list, so each operator it binds may learn that it binds them; an
 operator-scoped one is consulted only for its own operator, here exactly as in
 the sender, because this function asks the sender's `fn_email_suppressed` rather
-than restating it. The limit, stated: an operator can save any address to one of
+than restating it, once for each type the sender emails. The limit, stated: an operator can save any address to one of
 their own clients and then ask, so what bounds the disclosure is how little it
 says — that someone at that address once unsubscribed from Sanpo email; no
 business, no date, no reason — not the cost of asking. Spec 04 (`unsubscribe`)
