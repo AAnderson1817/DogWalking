@@ -281,35 +281,16 @@ jobs:
           echo "PASS: no DEV fixtures in dist"
 
       # A var() naming a property nothing defines makes the whole declaration
-      # invalid, and CSS fails silently: the element keeps its inherited value
-      # and the page still renders, just wrong. Two shipped this way — a
-      # font-size on --fs-13 (the scale is 12/14/16/20/24/32/44) and four
-      # colour tokens written from memory. Both were caught by hand; this is
-      # the check that catches the next one.
+      # invalid at computed-value time, and CSS fails silently: an inherited
+      # property takes its parent's value, a non-inherited one drops to its
+      # initial value (padding-left: 0, measured). Three shipped this way — a
+      # font-size on --fs-13, four colour tokens written from memory, and a
+      # var(--s-5) in Pricing.tsx that this step could not see because it read
+      # stylesheets only. One checker now, shared with validate.sh gate 12, and
+      # it reads TSX style objects through the TypeScript AST so a comment that
+      # MENTIONS a token is not counted as a use.
       - name: Every CSS token used is a token that exists
-        run: |
-          python3 - <<'PY'
-          import re, pathlib, glob, sys
-          defined, used = set(), {}
-          # `src/**`, not `src/styles/**`: review L21 moved the inbox
-          # prototype's stylesheet next to the component that imports it, and a
-          # stylesheet this check cannot see is a stylesheet whose undefined
-          # tokens ship silently — which is the whole failure being guarded.
-          for f in glob.glob('app/src/**/*.css', recursive=True):
-              # Comments first. A `var(--role)` written in prose to explain a
-              # rule is not a use, and neither is a `--x:` inside one; without
-              # this the check fails on its own documentation.
-              t = re.sub(r'/\*.*?\*/', '', pathlib.Path(f).read_text(), flags=re.S)
-              defined |= set(re.findall(r'(--[a-zA-Z0-9-]+)\s*:', t))
-              for m in re.finditer(r'var\(\s*(--[a-zA-Z0-9-]+)', t):
-                  used.setdefault(m.group(1), f)
-          missing = sorted((k, v) for k, v in used.items() if k not in defined)
-          if missing:
-              for k, v in missing:
-                  print(f"::error file={v}::{k} is used but never defined")
-              sys.exit(1)
-          print(f"{len(used)} custom properties used, all defined")
-          PY
+        run: node app/scripts/check-css-tokens.mjs
 
       # Twenty error messages were rendered as bare spans with no role and no
       # live region, so every failure in the product — including "ending the

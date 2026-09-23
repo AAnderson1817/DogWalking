@@ -186,20 +186,16 @@ no_secret_literals() {
 run "11. no secret literals" no_secret_literals
 
 # ── 12. Every var(--x) names a property something defines ─────────────────
-# An undefined custom property makes the WHOLE declaration invalid and the
-# element silently inherits, so the failure is a layout that looks subtly wrong
-# rather than an error anyone sees.
-run "12. css tokens defined" python3 - <<'PY'
-import re, pathlib, sys
-defined, used = set(), {}
-for f in pathlib.Path('app/src').rglob('*.css'):
-    t = re.sub(r'/\*.*?\*/', '', f.read_text(), flags=re.S)
-    for m in re.finditer(r'(--[A-Za-z0-9_-]+)\s*:', t): defined.add(m.group(1))
-    for m in re.finditer(r'var\(\s*(--[A-Za-z0-9_-]+)', t): used.setdefault(m.group(1), str(f))
-missing = sorted((k, v) for k, v in used.items() if k not in defined)
-for k, v in missing: print(f"{k} is used but never defined ({v})")
-sys.exit(1 if missing else 0)
-PY
+# An undefined custom property makes the whole declaration invalid at
+# computed-value time, and the property behaves as `unset`: an inherited one
+# takes its parent's value, a non-inherited one drops to its INITIAL value.
+# Measured on /pricing: `padding-left: var(--s-5)` computed to 0px, not the UA
+# default, and the list's bullets hung out into the card. No error anywhere.
+#
+# One checker, shared with ci.yml's step of the same subject and documented in
+# SKILL.md §12. It reads TSX style objects as well as stylesheets — the version
+# that read `*.css` only passed with that `--s-5` live in a React component.
+run "12. css tokens defined" node app/scripts/check-css-tokens.mjs
 
 # ── Summary ───────────────────────────────────────────────────────────────
 printf '\n\033[1m── summary ─────────────────────────────────────────\033[0m\n'
