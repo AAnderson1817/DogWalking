@@ -45,7 +45,10 @@
 // that too, three rounds running (PR #95): a type says what shape an object
 // has, not that anything applies it, so an unused typed object and a union
 // that is really a payload each "defined" a token. The value is what is
-// followed now, and a type decides nothing.
+// followed now, and a type decides nothing. And a key whose literal value
+// REMOVES the property — null, undefined, a boolean or "", which React clears
+// rather than sets, like setProperty(name, "") — defines nothing either
+// (Codex, round 5).
 //
 // The strict rule's cost is the loud direction, and it is paid on purpose.
 // Every other way a value reaches a style — an import from another file, a
@@ -109,6 +112,26 @@ function propertyName(name) {
 const passesThrough = (n) => ts.isParenthesizedExpression(n) || ts.isAsExpression(n)
   || ts.isSatisfiesExpression(n) || ts.isNonNullExpression(n) || ts.isTypeAssertionExpression(n);
 const OR_LIKE = [ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken];
+
+// A value that REMOVES the property it names rather than setting it. React
+// removes a style declaration whose value is null, undefined, a boolean or ""
+// (for a custom property it calls setProperty(name, "")), and CSSOM's
+// setProperty removes one given "" or null. Only a literal that always
+// removes is refused: a value computed at run time — `on ? "red" : undefined`
+// — sets the property whenever it is not empty, and a definition that holds
+// sometimes is still a definition, the approximation the CSS side makes too.
+const bare = (n) => { while (n && passesThrough(n)) n = n.expression; return n; };
+const isEmptyString = (n) => (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) && n.text === "";
+function reactRemoves(value) {
+  const v = bare(value);
+  return v.kind === ts.SyntaxKind.NullKeyword || v.kind === ts.SyntaxKind.TrueKeyword
+    || v.kind === ts.SyntaxKind.FalseKeyword || ts.isVoidExpression(v)
+    || (ts.isIdentifier(v) && v.text === "undefined") || isEmptyString(v);
+}
+function cssomRemoves(value) {
+  const v = bare(value); // absent in a one-argument call, which throws and sets nothing
+  return !!v && (v.kind === ts.SyntaxKind.NullKeyword || isEmptyString(v));
+}
 
 // Walk up from an expression and say whether its value lands on a style.
 // `seen` holds the consts already followed: `const x = c ? { … } : x` is legal
@@ -231,8 +254,9 @@ function scanTs(sf, checker) {
     if (ts.isPropertyAssignment(node)) {
       const name = propertyName(node.name);
       if (name && TOKEN.test(name)) {
-        if (landsOnStyle(node.parent, ctx)) defs.push(name);
-        else nearMisses.push({ name, kind: "key", file, line: lineOf(node) });
+        if (!landsOnStyle(node.parent, ctx)) nearMisses.push({ name, kind: "key", file, line: lineOf(node) });
+        else if (reactRemoves(node.initializer)) nearMisses.push({ name, kind: "removed", file, line: lineOf(node) });
+        else defs.push(name);
       }
     }
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
@@ -241,8 +265,9 @@ function scanTs(sf, checker) {
       if (name && TOKEN.test(name)) {
         const onStyle = ts.isPropertyAccessExpression(node.expression.expression)
           && node.expression.expression.name.text === "style";
-        if (onStyle) defs.push(name);
-        else nearMisses.push({ name, kind: "setProperty", file, line: lineOf(node) });
+        if (!onStyle) nearMisses.push({ name, kind: "setProperty", file, line: lineOf(node) });
+        else if (cssomRemoves(node.arguments[1])) nearMisses.push({ name, kind: "removed", file, line: lineOf(node) });
+        else defs.push(name);
       }
     }
     ts.forEachChild(node, visit);
@@ -330,6 +355,11 @@ function main() {
       parts.push(`${setAt(keys)}, but ${one ? "never reaches" : "none reaches"} a \`style\` this gate can follow; `
         + `if ${one ? "that object is" : "one of those objects is"} applied as a style some other way, `
         + "give the property a default in CSS");
+    }
+    const removed = u.nearMisses.filter((n) => n.kind === "removed");
+    if (removed.length) {
+      parts.push(`${setAt(removed)}, but to a value that removes the property rather than setting it, `
+        + "as React does with null, undefined, a boolean or \"\" and setProperty with \"\" or null");
     }
     if (calls.length) {
       parts.push(`${setAt(calls)}, by setProperty on something that is not \`….style\`; if ${calls.length === 1

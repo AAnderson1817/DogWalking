@@ -268,8 +268,11 @@ with, because a literal ending mid-name is a fragment; a custom property
 counts as defined from TS only when its VALUE reaches a `style` prop — an
 object that flows into one (directly, through a spread, a ternary or
 `||`/`??`), or a `const` used that way in the same file, resolved by symbol so
-a shadowing name is a different binding — or is set by `….style.setProperty`.
-A type decides nothing: counting any `--x`-shaped key let a config object
+a shadowing name is a different binding — or is set by `….style.setProperty`,
+and in either case only to a value that SETS it: a literal `null`,
+`undefined`, boolean or `""` removes the property (React clears it, and so
+does `setProperty` with `""` or `null`), so it defines nothing. A type decides
+nothing: counting any `--x`-shaped key let a config object
 "define" a token no style ever sets, and reading a `CSSProperties` annotation
 as evidence let an unused typed object and a `CSSProperties | Payload` union
 do the same (Codex, PR #95, four rounds). Every other flow into a style (an
