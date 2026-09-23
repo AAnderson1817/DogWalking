@@ -540,7 +540,11 @@ This catalogue used to be hand-written and listed **11** functions when there
 were **48** (the generated block below carries the live count). It was presented as the complete grant-audit checklist, so an engineer
 adding a definer function and checking their grants against it had no idea 37
 peers existed (review H21) — the opposite of what a checklist is for. It is
-generated now, and CI fails when it and the migrations disagree.
+generated now, and CI fails when it and the migrations disagree. It reads the
+migrations with `gen-enum-catalog.py`'s SQL reader and scans its skeleton, so a
+`--` or `/*` inside a string literal, a nested block comment, and a `COMMENT ON`
+string that says "security definer" are all read as PostgreSQL reads them;
+`scripts/gen-definer-catalog-proofs.py` holds a probe for each.
 
 The generator bounds each function's text by the next `create … function`
 rather than by a fixed window, which matters: a naive window reports 52,

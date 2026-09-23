@@ -15,10 +15,24 @@ The grants are read from the migrations rather than from a live database on
 purpose: this runs in CI with no Postgres service in the frontend job, and the
 migrations are the append-only source of truth that a `db push` will apply.
 
+The migrations are read by `gen-enum-catalog.py`'s SQL reader, not a copy of
+it. This file used to strip comments with a regex pair — `/\*.*?\*/` then
+`--[^\n]*` — which is the pair the enum generator had to replace: it cut a
+statement at a `--` inside a string literal (dropping a GRANT that shared the
+line), let a nested block comment end early (exposing a commented-out CREATE),
+and read a `/*` inside a literal as the start of a comment that swallowed the
+statements after it (spec-drift audit). The shared reader's review rounds
+already paid for all three; a second copy would have to pay again. Statements
+are found on its SKELETON, where the contents of every literal and quoted name
+are masked, so a `COMMENT ON` string that says "security definer" or "create
+function" is not read as code; names and roles are read from the clean text at
+the same spans. `scripts/gen-definer-catalog-proofs.py` holds the probes.
+
 Writes between the markers in docs/spec/03-security-model.md. Idempotent.
 """
 from __future__ import annotations
 
+import importlib.util
 import pathlib
 import re
 import sys
@@ -43,11 +57,31 @@ GRANT = re.compile(
 )
 
 
-def strip_sql_comments(sql: str) -> str:
-    """`--` to end of line, and /* */ blocks. A commented-out grant is not a
-    grant, and a commented-out create is not a function."""
-    sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.S)
-    return re.sub(r"--[^\n]*", "", sql)
+def load_reader():
+    """`gen-enum-catalog.py`, loaded by path because its name has dashes."""
+    path = ROOT / "scripts" / "gen-enum-catalog.py"
+    spec = importlib.util.spec_from_file_location("gen_enum_catalog", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+READER = load_reader()
+
+
+def read_migration(path: pathlib.Path) -> tuple[str, str]:
+    """-> (clean, skeleton): comments gone, dollar-quoted bodies blanked, and in
+    the skeleton every literal's and quoted name's contents masked. A migration
+    the reader refuses is refused here too, by name — the enum gate (10e)
+    refuses it on the same reading, so this adds no new way to fail."""
+    try:
+        return READER.strip_sql(path.read_text())
+    except READER.HiddenDDL as e:
+        print(
+            f"FAIL: {path.name}: the SQL reader shared with gen-enum-catalog.py refused it — {e}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
 
 
 def function_body_after(sql: str, start: int) -> str:
@@ -65,10 +99,10 @@ def collect() -> tuple[dict[str, bool], dict[str, set[str]], list[str]]:
     grants: dict[str, set[str]] = {}
     order: list[str] = []
     for path in sorted(MIGRATIONS.glob("*.sql")):
-        sql = strip_sql_comments(path.read_text())
-        for m in CREATE.finditer(sql):
+        clean, skel = read_migration(path)
+        for m in CREATE.finditer(skel):
             name = m.group(1)
-            chunk = function_body_after(sql, m.start())
+            chunk = function_body_after(skel, m.start())
             # Last definition wins: `create or replace` in a later migration is
             # what Postgres actually has. Reading the first would describe a
             # function that no longer exists — the same trap the payment-status
@@ -76,9 +110,11 @@ def collect() -> tuple[dict[str, bool], dict[str, set[str]], list[str]]:
             definer[name] = bool(re.search(r"security\s+definer", chunk, re.I))
             if name not in order:
                 order.append(name)
-        for m in GRANT.finditer(sql):
+        for m in GRANT.finditer(skel):
             name = m.group(1)
-            roles = {r.strip() for r in m.group(2).split(",") if r.strip()}
+            # From the clean text at the same span: a quoted role is masked in
+            # the skeleton.
+            roles = {r.strip().strip('"') for r in clean[m.start(2):m.end(2)].split(",") if r.strip()}
             grants.setdefault(name, set()).update(roles)
     return definer, grants, order
 

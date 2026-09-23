@@ -179,7 +179,13 @@ about which functions exist.
 Reads the migrations only, so it always runs:
 ```
 python3 scripts/gen-definer-catalog.py && git diff --exit-code -- docs/spec/03-security-model.md
+python3 scripts/gen-definer-catalog-proofs.py
 ```
+The generator reads the migrations with `gen-enum-catalog.py`'s SQL reader and
+scans its skeleton; it used to strip comments with a regex pair that lost a
+GRANT sharing a line with `--` inside a string, let a nested block comment end
+early, and read a `/*` inside a string as a comment. The proofs are those
+cases, and must end with `DEFINER CATALOGUE PROOFS PASS`.
 
 Queries the **live schema**, so it needs gate 7's stack up. Without it the
 script exits non-zero from `psql`, which is a missing prerequisite and not a
