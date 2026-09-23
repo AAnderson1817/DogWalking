@@ -87,6 +87,37 @@ describe("gate 12: css tokens defined", () => {
     expect(code).toBe(1);
   });
 
+  it("reads a name that runs into a substitution as a prefix, not a whole name", () => {
+    // `var(--s-${n})` reaches the scan as a template head ending in `--s-`;
+    // checked as a whole name, that is "--s- is used but never defined" on a
+    // healthy tree. Concatenation leaves the same fragment in a string literal.
+    const src = [
+      "export const t = (n: 1 | 2) => `var(--s-${n})`;",
+      'export const c = (n: 1 | 2) => "var(--s-" + n + ")";',
+      "export const m = (a: string, n: 1 | 2) => `${a} var(--s-${n})`;",
+    ].join("\n");
+    const css = ":root { --s-1: 4px; --s-2: 8px; }\n";
+    const { code, out } = run(tree({ "styles/tokens.css": `${CSS}${css}`, "lib/space.ts": src, "screens/Ok.tsx": TSX }));
+    expect(out).toContain("PASS:");
+    expect(code).toBe(0);
+  });
+
+  it("fails a prefix that no defined token starts with", () => {
+    const src = "export const t = (n: number) => `var(--nosuch-${n})`;";
+    const { code, out } = run(tree({ "styles/tokens.css": CSS, "lib/space.ts": src, "screens/Ok.tsx": TSX }));
+    expect(out).toMatch(/FAIL: var\(--nosuch-…\) can name no defined custom property: none starts with --nosuch- \(.*space\.ts:1\)/);
+    expect(code).toBe(1);
+  });
+
+  it("still reads a name finished before the substitution as a whole name", () => {
+    // `--a_` is terminated by the comma, so it is a whole name — and an
+    // undefined one — even though `--a_b` would satisfy it as a prefix.
+    const src = "export const t = (fallback: string) => `var(--a_, ${fallback})`;";
+    const { code, out } = run(tree({ "styles/tokens.css": CSS, "lib/space.ts": src, "screens/Ok.tsx": TSX }));
+    expect(out).toContain("FAIL: --a_ is used but never defined");
+    expect(code).toBe(1);
+  });
+
   it("counts a custom property set on a style from TS as defined", () => {
     // None exists today. Without this the gate goes red on a healthy tree the
     // day one does, which is how a gate gets deleted. Each shape here is one
@@ -102,10 +133,43 @@ describe("gate 12: css tokens defined", () => {
       'export const E = () => <div style={annotated} className="var(--annot)" />;',
       'export function f(el: HTMLElement) { el.style.setProperty("--set", "2px"); return "var(--set)"; }',
       'export function g() { document.documentElement.style.setProperty("--root", "2px"); return "var(--root)"; }',
+      // Codex on PR #95, round 2: a spread into a style object, and a type
+      // that includes CSSProperties without being exactly it.
+      'export const F = () => <div style={{ ...{ "--spread": "1px" }, padding: "var(--spread)" }} />;',
+      'export const G = (on: boolean) => <div style={{ ...(on ? { "--condSpread": "1px" } : {}), padding: "var(--condSpread)" }} />;',
+      'const inter: React.CSSProperties & { "--gap": string } = { "--gap": "1px" };',
+      'export const H = () => <div style={inter} className="var(--gap)" />;',
+      'const maybe: (CSSProperties | undefined) = { "--maybe": "1px" };',
+      'export const I = () => <div style={maybe} className="var(--maybe)" />;',
     ].join("\n");
     const { code, out } = run(tree({ "styles/tokens.css": CSS, "screens/Local.tsx": src }));
     expect(out).toContain("PASS:");
     expect(code).toBe(0);
+  });
+
+  it("names an unrecognised style shape in the red, and still does not count it", () => {
+    // The strict rule leaves most flows unrecognised on purpose — a plain
+    // variable, a type alias, a function's return type. What makes that
+    // affordable is a red that points at the key, so the fix is in the message.
+    const src = [
+      'const vars = { "--plain": "1px" };',
+      'export const S = () => <p className="x" style={vars} />;',
+      'export const T = () => <p className="x" style={{ margin: "var(--plain)" }} />;',
+    ].join("\n");
+    const { code, out } = run(tree({ "styles/tokens.css": CSS, "screens/S.tsx": src }));
+    expect(out).toMatch(
+      /FAIL: --plain is used but never defined \(.*S\.tsx:3\) — --plain is set at .*S\.tsx:1, but not in a shape this gate reads as a style/,
+    );
+    expect(code).toBe(1);
+
+    // The hint reads a prefix the way the check does: one rule for both.
+    const built = [
+      'const steps = { "--sp-1": "4px" };',
+      "export const U = (n: 1) => <p className=\"x\" style={{ gap: `var(--sp-${n})` }} />;",
+    ].join("\n");
+    const r = run(tree({ "styles/tokens.css": CSS, "screens/U.tsx": built }));
+    expect(r.out).toMatch(/FAIL: var\(--sp-…\) can name no defined custom property: none starts with --sp- \(.*U\.tsx:2\) — --sp-1 is set at .*U\.tsx:1/);
+    expect(r.code).toBe(1);
   });
 
   it("does not count a --x key in an ordinary object as a definition", () => {
@@ -127,6 +191,9 @@ describe("gate 12: css tokens defined", () => {
     ].join("\n");
     const { code, out } = run(tree({ "styles/tokens.css": CSS, "screens/S.tsx": src }));
     expect(out).toContain("FAIL: --notstyle is used but never defined");
+    // The hint's remedy fits the call: "type it CSSProperties" cannot apply
+    // to a setProperty, and a remedy that cannot apply is noise in a red.
+    expect(out).toMatch(/--notstyle is set at .*S\.tsx:2, by setProperty on something that is not `….style`/);
     expect(code).toBe(1);
   });
 

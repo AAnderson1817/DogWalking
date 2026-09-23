@@ -19,18 +19,38 @@
 // uses are read from string and template literals in the TypeScript AST, and
 // comments and JSX text are never looked at.
 //
+// A name built at runtime — `var(--s-${n})`, `"var(--s-" + n + ")"` — reaches
+// the scan as a literal that ENDS mid-name. CSS cannot close a `var()` without
+// `)` or `,`, so a literal ending inside a name is always a fragment, and
+// reading the fragment as a whole name reported `--s-` undefined on a healthy
+// tree. It is read as a prefix: some defined property must start with it, so a
+// typo in the part that IS written down still fails. The residual, stated:
+// whatever completes the name at runtime is not checked — a typo in the part
+// that is substituted passes, and so does a fragment that was already the whole
+// name (what follows begins with `,` or `)`) when a longer defined name extends
+// it.
+//
 // Definitions come from CSS declarations (`--x:`), and from TS only where the
 // value is actually SET ON A STYLE: a `--x` key in an object literal that flows
 // straight into a JSX `style` prop (through parens, `as`, `satisfies`, a ternary
-// branch or the right of `&&`/`||`/`??`) or is typed or asserted as
-// `CSSProperties`; and `….style.setProperty("--x", …)`. None exists today;
-// counting them is what stops the gate going red on a healthy tree the day one
-// does. Counting ANY `--x`-shaped key was the first version, and Codex was right
-// to refuse it: a config or payload object would "define" a token no style ever
-// sets, and a real `var(--missing)` would pass. That is the silent direction.
-// The strict rule's cost is the loud one — a style object that reaches `style`
-// through a plain variable, untyped, is not recognised and the gate names the
-// token — and a red that names its cause is the failure worth choosing.
+// branch, the right of `&&`/`||`/`??`, or a spread into such an object) or is
+// typed or asserted as a type that includes `CSSProperties` (itself, or a union
+// or intersection with it); and `….style.setProperty("--x", …)`. None exists
+// today; counting them is what stops the gate going red on a healthy tree the
+// day one does. Counting ANY `--x`-shaped key was the first version, and Codex
+// was right to refuse it: a config or payload object would "define" a token no
+// style ever sets, and a real `var(--missing)` would pass. That is the silent
+// direction.
+//
+// The strict rule's cost is the loud direction, and it is paid on purpose.
+// Every other way a value reaches a style — an untyped variable, a type alias,
+// `Readonly<…>`, a function's return type, `useMemo`, `Object.assign` — is left
+// unrecognised. Recognising them all is a type checker's job, and adding them
+// one review round at a time is how a check grows without end. What makes the
+// cost affordable is the red itself: when a missing name IS set somewhere, in a
+// shape this does not read, the FAIL line points at where and says so, so
+// the fix is in the message rather than in a reading of this file. That hint
+// never counts as a definition — it only changes what the red says.
 //
 // Like the CSS side always has, this is scope-blind: a token defined under one
 // selector satisfies a use anywhere. Fixing that is a different gate.
@@ -81,8 +101,17 @@ function propertyName(name) {
 
 const CSS_PROPERTIES = /(^|\.)CSSProperties$/;
 
+// A declared type that INCLUDES CSSProperties: itself, or a union or
+// intersection with it (`CSSProperties & { "--gap": string }` is the
+// conventional way to type a custom property). A type alias or a wrapper
+// like `Readonly<…>` is not followed; see the header for why that is loud.
 function isCssPropertiesType(type, sf) {
-  return Boolean(type && ts.isTypeReferenceNode(type) && CSS_PROPERTIES.test(type.typeName.getText(sf)));
+  if (!type) return false;
+  if (ts.isParenthesizedTypeNode(type)) return isCssPropertiesType(type.type, sf);
+  if (ts.isUnionTypeNode(type) || ts.isIntersectionTypeNode(type)) {
+    return type.types.some((t) => isCssPropertiesType(t, sf));
+  }
+  return ts.isTypeReferenceNode(type) && CSS_PROPERTIES.test(type.typeName.getText(sf));
 }
 
 // Walk up from an object literal through expressions that pass its value
@@ -93,6 +122,9 @@ function isStyleObject(obj, sf) {
     const p = node.parent;
     if (!p) return false;
     if (ts.isParenthesizedExpression(p)) { node = p; continue; }
+    // `{ ...X, … }` puts X's keys on the containing object: X is a style
+    // object exactly when that one is.
+    if (ts.isSpreadAssignment(p)) { node = p.parent; continue; }
     if (ts.isAsExpression(p) || ts.isSatisfiesExpression(p)) {
       if (isCssPropertiesType(p.type, sf)) return true;
       node = p; continue;
@@ -115,7 +147,11 @@ export function scanTs(file, text) {
   const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind);
   const defs = [];
   const uses = [];
+  // Keys and setProperty calls that name a custom property but are NOT read as
+  // a style. They never define anything; they only make a red say where to look.
+  const nearMisses = [];
   let literals = 0;
+  const lineOf = (n) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
 
   const visit = (node) => {
     const literal = ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)
@@ -124,24 +160,33 @@ export function scanTs(file, text) {
       literals += 1;
       const start = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
       for (const m of node.text.matchAll(VAR_USE)) {
-        uses.push({ name: m[1], file, line: start + lineAt(node.text, m.index) - 1 });
+        // A name that runs to the literal's last character is not finished
+        // there (see the header): it is a prefix of whatever gets built.
+        const prefix = m.index + m[0].length === node.text.length;
+        uses.push({ name: m[1], prefix, file, line: start + lineAt(node.text, m.index) - 1 });
       }
     }
-    if (ts.isPropertyAssignment(node) && isStyleObject(node.parent, sf)) {
+    if (ts.isPropertyAssignment(node)) {
       const name = propertyName(node.name);
-      if (name && TOKEN.test(name)) defs.push(name);
+      if (name && TOKEN.test(name)) {
+        if (isStyleObject(node.parent, sf)) defs.push(name);
+        else nearMisses.push({ name, kind: "key", file, line: lineOf(node) });
+      }
     }
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
-      && node.expression.name.text === "setProperty"
-      && ts.isPropertyAccessExpression(node.expression.expression)
-      && node.expression.expression.name.text === "style") {
+      && node.expression.name.text === "setProperty") {
       const name = stringValue(node.arguments[0]);
-      if (name && TOKEN.test(name)) defs.push(name);
+      if (name && TOKEN.test(name)) {
+        const onStyle = ts.isPropertyAccessExpression(node.expression.expression)
+          && node.expression.expression.name.text === "style";
+        if (onStyle) defs.push(name);
+        else nearMisses.push({ name, kind: "setProperty", file, line: lineOf(node) });
+      }
     }
     ts.forEachChild(node, visit);
   };
   visit(sf);
-  return { defs, uses, literals };
+  return { defs, uses, nearMisses, literals };
 }
 
 export function check(root) {
@@ -150,6 +195,7 @@ export function check(root) {
   const code = files.filter((f) => TS_EXT.test(f) && !f.endsWith(".d.ts") && !TEST_FILE.test(f));
   const defined = new Set();
   const uses = [];
+  const nearMisses = [];
   let literals = 0;
   for (const f of css) {
     const r = scanCss(f, fs.readFileSync(f, "utf8"));
@@ -160,6 +206,7 @@ export function check(root) {
     const r = scanTs(f, fs.readFileSync(f, "utf8"));
     r.defs.forEach((d) => defined.add(d));
     uses.push(...r.uses);
+    nearMisses.push(...r.nearMisses);
     literals += r.literals;
   }
   // A checker that scanned nothing reports agreement. These are the ways it
@@ -170,7 +217,13 @@ export function check(root) {
   if (code.length === 0) floors.push(`no .ts/.tsx files found under ${root}`);
   if (code.length > 0 && literals === 0) floors.push("the TypeScript scan read no string literals at all — the parser is not seeing the source");
   if (css.length > 0 && code.length > 0 && uses.length === 0) floors.push("no var() uses found anywhere — nothing was checked");
-  const missing = uses.filter((u) => !defined.has(u.name));
+  // One rule for "does this name satisfy this use", shared by the check and the
+  // hint, so the hint can never point at a key the check would not have taken.
+  const satisfies = (u, name) => (u.prefix ? name.startsWith(u.name) : name === u.name);
+  const names = [...defined];
+  const missing = uses
+    .filter((u) => !names.some((d) => satisfies(u, d)))
+    .map((u) => ({ ...u, nearMisses: nearMisses.filter((n) => satisfies(u, n.name)) }));
   return { missing, floors, counts: { css: css.length, code: code.length, uses: uses.length, defined: defined.size } };
 }
 
@@ -182,8 +235,23 @@ function main() {
   for (const f of floors) console.log(`FAIL: ${f}`);
   for (const u of missing) {
     const where = path.relative(process.cwd(), u.file);
-    console.log(`FAIL: ${u.name} is used but never defined (${where}:${u.line})`);
-    if (ci) console.log(`::error file=${where},line=${u.line}::${u.name} is used but never defined`);
+    const what = u.prefix
+      ? `var(${u.name}…) can name no defined custom property: none starts with ${u.name}`
+      : `${u.name} is used but never defined`;
+    let hint = "";
+    const [near, ...more] = u.nearMisses;
+    if (near) {
+      // Conditional on purpose: the key may be a config or payload field, and
+      // telling the reader to type THAT as CSSProperties would coach them into
+      // the silent direction — a token "defined" by an object no style reads.
+      const remedy = near.kind === "setProperty"
+        ? "by setProperty on something that is not `….style`; if that is a style declaration, call it on `….style`"
+        : "but not in a shape this gate reads as a style; if that object is applied as a style, type it CSSProperties";
+      hint = ` — ${near.name} is set at ${path.relative(process.cwd(), near.file)}:${near.line}`
+        + `${more.length ? ` (and ${more.length} more)` : ""}, ${remedy} (header of app/scripts/check-css-tokens.mjs)`;
+    }
+    console.log(`FAIL: ${what} (${where}:${u.line})${hint}`);
+    if (ci) console.log(`::error file=${where},line=${u.line}::${what}${hint}`);
   }
   if (floors.length || missing.length) process.exit(1);
   console.log(
