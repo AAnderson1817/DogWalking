@@ -292,6 +292,8 @@ function intercepts(
 }
 
 const SUPABASE = "https://abcdefgh.supabase.co";
+// The worker's own origin, as `loadServiceWorker` stubs `self.location`.
+const APP = "https://app.sanpo.test";
 
 describe("the service worker never caches Supabase traffic", () => {
   let handlers: Handlers;
@@ -308,15 +310,32 @@ describe("the service worker never caches Supabase traffic", () => {
   // One case per path family the boundary covers. A response cached under any
   // of these is a response served to the wrong person.
   const neverCached: [string, string][] = [
-    ["REST rows", `${SUPABASE}/rest/v1/clients?select=*`],
-    ["Storage objects", `${SUPABASE}/storage/v1/object/sign/walk-photos/x.jpg`],
-    ["auth session", `${SUPABASE}/auth/v1/user`],
-    ["realtime", `${SUPABASE}/realtime/v1/websocket`],
-    ["edge functions", `${SUPABASE}/functions/v1/complete-walk`],
+    ["REST rows", "/rest/v1/clients?select=*"],
+    ["Storage objects", "/storage/v1/object/sign/walk-photos/x.jpg"],
+    ["auth session", "/auth/v1/user"],
+    ["realtime", "/realtime/v1/websocket"],
+    ["edge functions", "/functions/v1/complete-walk"],
   ];
 
-  for (const [what, url] of neverCached) {
+  for (const [what, path] of neverCached) {
+    // The deployed shape: Supabase on its own origin. The worker only ever
+    // intercepts its own origin, so these pass whatever `isNeverCache` says.
+    // They are kept because they are what production looks like.
     it(`goes straight to the network for ${what}`, () => {
+      const url = `${SUPABASE}${path}`;
+      expect(intercepts(handlers, url), `${url} was intercepted by the worker`).toBe(false);
+    });
+
+    // The same paths on the app's OWN origin, as they would be behind a proxy
+    // rewrite. These are the only cases that reach the same-origin branch,
+    // where `isNeverCache` is all that stands between a Supabase response
+    // and `cacheFirst`. Until these existed every assertion above was
+    // satisfied by the origin check alone, and `isNeverCache` returning
+    // false for everything stayed green (spec-drift audit). No app route
+    // begins with one of these prefixes, so on this origin they can only be
+    // Supabase traffic.
+    it(`goes straight to the network for ${what} on the app's own origin`, () => {
+      const url = `${APP}${path}`;
       expect(intercepts(handlers, url), `${url} was intercepted by the worker`).toBe(false);
     });
   }
