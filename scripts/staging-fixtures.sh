@@ -41,11 +41,14 @@ admin() { curl -sS -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_
 # to fix, reintroduced by inferring the last page from the size REQUESTED
 # rather than from what the server returned.
 #
-# `seen` guards the other direction: an endpoint that ignores `page` would
-# otherwise be rescanned to the bound and still report absence.
+# `seen` guards the other direction: an endpoint that ignores `page` answers
+# page 1 forever. That is a failed lookup, not an absence, since nothing past
+# page 1 was searched; so is reaching the page bound without an empty page.
+# Both used to return "absent" (Codex, on #97).
 #
-# Exit 0 with the id on stdout (empty = genuinely absent); exit 9 when the
-# LOOKUP failed — non-2xx, or a body with no users array. The distinction is
+# Exit 0 with the id on stdout (empty = genuinely absent, read to an empty
+# page); exit 9 when the LOOKUP failed — non-2xx, a body with no users array,
+# a page that repeats the last, or the bound reached. The distinction is
 # load-bearing: the claim replay's security assertions read this function, and
 # a 401 body read as "absent" would pass the dead-token check while checking
 # nothing. Warnings go to stderr because stdout is the captured return value.
@@ -64,11 +67,15 @@ user_id_for() {
     [ -n "$id" ] && { printf '%s' "$id"; return 0; }
     [ "$(jq -r '.users | length' "$lbody")" -eq 0 ] && return 0
     first=$(jq -r '.users[0].id // empty' "$lbody")
-    [ -n "$first" ] && [ "$first" = "$seen" ] && return 0
+    if [ -n "$first" ] && [ "$first" = "$seen" ]; then
+      echo "auth user lookup: page $page repeated page $((page - 1)), so the endpoint ignores the page parameter and only the first page was searched" >&2
+      return 9
+    fi
     seen=$first
     page=$((page + 1))
   done
-  return 0
+  echo "auth user lookup: read 50 pages without reaching an empty one, so the search did not finish" >&2
+  return 9
 }
 
 # del <url> <what> — a DELETE whose failure is REPORTED, not swallowed. Every

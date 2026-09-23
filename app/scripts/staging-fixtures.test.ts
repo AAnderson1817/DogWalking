@@ -152,11 +152,24 @@ describe("user_id_for", () => {
     expect(r.err).toContain("HTTP 000");
   });
 
-  it("stops, rather than rescanning to the bound, when the server ignores `page`", async () => {
+  it("exits 9 when the server ignores `page`, rather than rescanning or reporting absence", async () => {
+    // Only page 1 was ever searched, so "absent" would be a guess — and the
+    // claim replay's dead-token check reads absence as its pass (Codex, #97).
     const { base, requests } = await stub({ users: many(100), ignorePage: true });
-    const r = await sh(base, 'user_id_for "nobody@sanpo.test"; echo "[exit $?]"');
-    expect(r.out).toBe("[exit 0]\n");
+    const r = await sh(base, 'rc=0; user_id_for "nobody@sanpo.test" || rc=$?; echo "[exit $rc]"');
+    expect(r.out).toBe("[exit 9]\n");
+    expect(r.err).toContain("page 2 repeated page 1");
     expect(requests.filter((q) => q.startsWith("GET")).length).toBe(2);
+  });
+
+  it("exits 9 when it runs out of pages before reaching the end", async () => {
+    // The bound stops a huge user table spinning here forever. Reaching it
+    // means the search did not finish, which is not the same as absent.
+    const { base, requests } = await stub({ users: many(5100) });
+    const r = await sh(base, 'rc=0; user_id_for "nobody@sanpo.test" || rc=$?; echo "[exit $rc]"');
+    expect(r.out).toBe("[exit 9]\n");
+    expect(r.err).toContain("50 pages");
+    expect(requests.filter((q) => q.startsWith("GET")).length).toBe(50);
   });
 });
 
