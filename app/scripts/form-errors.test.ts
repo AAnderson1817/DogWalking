@@ -152,6 +152,17 @@ type Value = string | null | typeof UNREADABLE;
  */
 type Resolve = (id: ts.Identifier) => ts.Expression | undefined;
 
+/**
+ * Parentheses, `as`, `satisfies`, `x!` and `<T>x`: nodes that hand their
+ * value on unchanged at run time. One predicate for every place the scan
+ * reads through a wrapper — four of them once listed four kinds and missed
+ * `<T>x`, which parses in a .ts file.
+ */
+const passesThrough = (n: ts.Node): n is
+  ts.ParenthesizedExpression | ts.AsExpression | ts.SatisfiesExpression | ts.NonNullExpression | ts.TypeAssertion =>
+  ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isSatisfiesExpression(n)
+  || ts.isNonNullExpression(n) || ts.isTypeAssertionExpression(n);
+
 function resolverFor(checker: ts.TypeChecker): Resolve {
   return (id) => {
     const parent = id.parent;
@@ -176,8 +187,7 @@ function resolverFor(checker: ts.TypeChecker): Resolve {
  */
 function valuesOf(node: ts.Node, resolve: Resolve, seen = new Set<ts.Node>()): Value[] {
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return [node.text];
-  if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node)
-    || ts.isSatisfiesExpression(node) || ts.isNonNullExpression(node)) return valuesOf(node.expression, resolve, seen);
+  if (passesThrough(node)) return valuesOf(node.expression, resolve, seen);
   if (ts.isConditionalExpression(node)) {
     return [...valuesOf(node.whenTrue, resolve, seen), ...valuesOf(node.whenFalse, resolve, seen)];
   }
@@ -212,8 +222,7 @@ function valuesOf(node: ts.Node, resolve: Resolve, seen = new Set<ts.Node>()): V
  */
 function objectsOf(node: ts.Expression, resolve: Resolve, seen = new Set<ts.Node>()): ts.ObjectLiteralExpression[] | undefined {
   if (ts.isObjectLiteralExpression(node)) return [node];
-  if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node)
-    || ts.isSatisfiesExpression(node) || ts.isNonNullExpression(node)) return objectsOf(node.expression, resolve, seen);
+  if (passesThrough(node)) return objectsOf(node.expression, resolve, seen);
   const both = (a: ts.Expression, b: ts.Expression) => {
     const left = objectsOf(a, resolve, seen);
     const right = objectsOf(b, resolve, seen);
@@ -264,9 +273,7 @@ function isComponentProps(param: ts.ParameterDeclaration): boolean {
  */
 function forwardsProps(expr: ts.Expression, checker: ts.TypeChecker): boolean {
   let e = expr;
-  while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isSatisfiesExpression(e) || ts.isNonNullExpression(e)) {
-    e = e.expression;
-  }
+  while (passesThrough(e)) e = e.expression;
   if (!ts.isIdentifier(e)) return false;
   const symbol = checker.getSymbolAtLocation(e);
   const decl = symbol?.valueDeclaration ?? symbol?.declarations?.[0];
@@ -316,12 +323,6 @@ function forwardsProps(expr: ts.Expression, checker: ts.TypeChecker): boolean {
  */
 const ELEMENT_FACTORIES = new Set(["createElement", "cloneElement", "jsx", "jsxs", "jsxDEV"]);
 const isFactoryName = (n: string | typeof UNREADABLE): boolean => typeof n === "string" && ELEMENT_FACTORIES.has(n);
-
-/** Parentheses, assertions and non-null: nodes that hand their value on unchanged. */
-const passesThrough = (n: ts.Node): n is
-  ts.ParenthesizedExpression | ts.AsExpression | ts.SatisfiesExpression | ts.NonNullExpression | ts.TypeAssertion =>
-  ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isSatisfiesExpression(n)
-  || ts.isNonNullExpression(n) || ts.isTypeAssertionExpression(n);
 
 const isComma = (n: ts.Node): n is ts.BinaryExpression =>
   ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.CommaToken;
@@ -477,8 +478,7 @@ function foldOf(node: ts.Node, resolve: Resolve, path: Set<ts.Node> = new Set())
       combiners: [...a.combiners, ...b.combiners],
     };
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return piece(node.text);
-  if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node)
-    || ts.isSatisfiesExpression(node) || ts.isNonNullExpression(node)) return foldOf(node.expression, resolve, path);
+  if (passesThrough(node)) return foldOf(node.expression, resolve, path);
   if (ts.isConditionalExpression(node)) {
     const a = foldOf(node.whenTrue, resolve, path);
     const b = foldOf(node.whenFalse, resolve, path);
@@ -880,6 +880,22 @@ describe("what the scan refuses and admits", () => {
     expect(rules("const cls = `walk-card__${state}`;")).toEqual([]);
     // FormError's own className may still carry it, however it is assembled.
     expect(rules(APPROVED_IMPORTS + `<FormError message={e} className={"claim-invite__" + "error"} />`)).toEqual([]);
+  });
+
+  it("reads through a <T> assertion wherever it reads through the other wrappers (a .ts file)", () => {
+    // `<T>x` parses only outside JSX, and the scan reads .ts files too. Four
+    // of its wrapper checks knew parentheses, `as`, `satisfies` and `!` but
+    // not this one — the same class Codex found in the channel scan on #97.
+    const ts = (text: string) => rules(text, "lib/probe.ts");
+    // The silent one: the fold read the assertion as a hole, and neither
+    // side of a hole carries the class.
+    expect(ts(`const cls = "signin__" + <string>"error";`)).toEqual(["error-class"]);
+    // A role value, an applied props object, and a component forwarding its
+    // own props, each read through the assertion rather than refused as
+    // something the scan cannot see.
+    expect(ts(`const props = { role: <const>"alert" };`)).toEqual(["role"]);
+    expect(ts(`createElement("span", <Props>{ role: "alert" });`)).toEqual(["role", "role"]);
+    expect(ts(`export function Field(props: P) { return createElement("span", <P>props); }`)).toEqual([]);
   });
 
   it("admits a layout class on FormError itself", () => {
