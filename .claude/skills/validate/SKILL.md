@@ -99,7 +99,9 @@ psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/materializer.sql
 just these two — later work adds files here. Invariant 1 (`credit_balance`
 written only by `fn_ledger_apply`) is asserted inside `smoke.sql` against
 `pg_proc`, with a self-test of its own pattern; it was a CI-only step until the
-spec-drift audit found two spellings of the write it could not see.
+spec-drift audit found two spellings of the write it could not see (a schema
+qualifier, an alias), and its rewrite's own review found two more (an upsert
+and a `MERGE`).
 
 ## 8b. Concurrency suite (requires `LOCAL_DB_URL`)
 ```

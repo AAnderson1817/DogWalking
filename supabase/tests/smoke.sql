@@ -6138,14 +6138,23 @@ end $$;
 do $$
 declare
   -- One pattern, read by the real check and by the self-test below, so the
-  -- two cannot drift apart. The optional parts are exactly the spellings of
-  -- "the clients table" an UPDATE can use: ONLY, a (quoted) schema, a
-  -- quoted name, and an alias with or without AS.
+  -- two cannot drift apart. Two statements write a column of an existing
+  -- row: an UPDATE, whose optional parts are exactly the spellings of "the
+  -- clients table" it can use — ONLY, a (quoted) schema, a quoted name, an
+  -- alias with or without AS — and an INSERT … ON CONFLICT or a MERGE into
+  -- clients whose action is `update set`. The second arm is from this PR's
+  -- own review: the first version saw only UPDATE, so an upsert or a MERGE
+  -- wrote credit_balance past it (measured, both). Its `[[:space:](]` after
+  -- the name is the boundary the UPDATE arm gets from its own `set`.
   v_re constant text :=
-    'update[[:space:]]+(only[[:space:]]+)?'
+    '(update[[:space:]]+(only[[:space:]]+)?'
     || '("?public"?[[:space:]]*\.[[:space:]]*)?"?clients"?'
     || '([[:space:]]+(as[[:space:]]+)?"?[[:alpha:]_][[:alnum:]_$]*"?)?'
-    || '[[:space:]]+set[^;]*credit_balance';
+    || '[[:space:]]+set'
+    || '|(insert|merge)[[:space:]]+into[[:space:]]+(only[[:space:]]+)?'
+    || '("?public"?[[:space:]]*\.[[:space:]]*)?"?clients"?[[:space:](]'
+    || '[^;]*update[[:space:]]+set)'
+    || '[^;]*credit_balance';
   v_offenders text;
   r record;
 begin
@@ -6166,7 +6175,8 @@ begin
     raise exception 'FAIL: invariant 1 — credit_balance written outside fn_ledger_apply by: %', v_offenders;
   end if;
 
-  -- The self-test. PL/pgSQL resolves table names at execution, so these
+  -- The self-test: eight bodies it must flag and six it must not. PL/pgSQL
+  -- resolves table names at execution, so these
   -- bodies need nothing to exist; they are dropped before the block ends and
   -- the suite rolls back regardless.
   for r in
@@ -6177,10 +6187,14 @@ begin
       ('only, as',   'UPDATE ONLY public.clients AS c SET credit_balance = 0 WHERE c.id = p;', true),
       ('quoted',     'update "public"."clients" set "credit_balance" = 0 where id = p;', true),
       ('multi-line', e'update\n    clients\n   set credit_balance = 0\n where id = p;', true),
+      ('upsert',     'insert into clients (id, credit_balance) values (p, 0) on conflict (id) do update set credit_balance = 1;', true),
+      ('merge',      'merge into public.clients c using (select p as id) s on c.id = s.id when matched then update set credit_balance = 1;', true),
       ('other column',   'update clients set status = ''active'' where id = p;', false),
       ('a read',         'perform credit_balance from clients where id = p;', false),
       ('another table',  'update clients_archive set credit_balance = 0 where id = p;', false),
-      ('next statement', 'update clients set status = ''active''; perform credit_balance from clients;', false)
+      ('next statement', 'update clients set status = ''active''; perform credit_balance from clients;', false),
+      ('upsert of another table',  'insert into clients_archive (id) values (p) on conflict (id) do update set credit_balance = 1;', false),
+      ('upsert of another column', 'insert into clients (id, status) values (p, ''active'') on conflict (id) do update set status = ''active'';', false)
     ) as t(label, body, flagged)
   loop
     execute format(
