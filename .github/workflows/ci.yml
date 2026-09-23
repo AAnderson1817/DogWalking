@@ -644,6 +644,19 @@ jobs:
       - name: Walk cost parity — TS leaf, fn_walk_cost and the snapshot trigger agree
         run: ./scripts/check-walk-cost-parity.sh
 
+      # The definer catalogue's generator reads the migrations and MODELS each
+      # function's ACL from its reading of PostgreSQL's rules: what a new
+      # function starts with, what CREATE OR REPLACE keeps, what DROP and a
+      # new overload reset. A model written from a reading of the rules shares
+      # that reading's mistakes, and so would a test written from the same
+      # reading, so this asks the database the migrations just built: every
+      # function they create, with the same argument types, the same SECURITY
+      # DEFINER flag and the same API roles holding EXECUTE. It also sees what
+      # no reading of the migrations can — a grant made by dynamic SQL in a
+      # body — because the database has applied it and the model has not.
+      - name: Spec 03's definer catalogue matches the database
+        run: python3 scripts/check-definer-catalog-live.py
+
       # The reset above connects as the cluster's bootstrap SUPERUSER and
       # applies each file statement-at-a-time, so it answers a weaker question
       # than a deploy asks (review M5). This re-applies all of them from zero
