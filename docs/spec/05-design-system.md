@@ -561,8 +561,9 @@ fails any other alert role, any `aria-live="assertive"`, and any `__error` class
 in any string outside `fields.tsx` and `FormError`'s own `className` prop. It
 reads a role through the `const` it is bound to and through a spread whose
 object it can see, so `const role = "alert"; <span {...{ role }}>` is refused
-as `<span role="alert">` is; a forwarded `{...rest}` is read where the
-component is used. It replaced a grep for the literal `className="field__error"`
+as `<span role="alert">` is — computed keys and getters included, and a key it
+cannot read is judged as both `role` and `aria-live` on an element; a
+forwarded `{...rest}` is read where the component is used. It replaced a grep for the literal `className="field__error"`
 that a bare `<span className="signin__error" role="alert">` passed.
 
 **Controls whose only boundary is a border clear 3:1** (SC 1.4.11).
