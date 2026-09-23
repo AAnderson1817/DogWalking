@@ -33,7 +33,9 @@
 #     list said "12 of the 13" and named one of them for three functions'
 #     worth of growth — do not state a count here; it is an enumeration
 #     connected to nothing, and `contract_for` is where the bespoke cases are
-#     actually held.)
+#     actually held. `verify-deployment.test.ts` derives both doors — a bare
+#     `Deno.serve`, and `serveFunction` widened with `methods` — from the
+#     source and fails when `contract_for` and they disagree.)
 #   * `unsubscribe` accepts GET by design, so it is probed with NO token —
 #     which returns the confirmation page without reaching the database.
 #     `unsubscribe_test.ts` pins that ("no token at all: the same page, and
