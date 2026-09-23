@@ -29,8 +29,10 @@ import { describe, expect, it } from "vitest";
  *     literal `config: { private: true }` — read as the LAST definition of
  *     each key, since that is the one that holds. A config the scan cannot
  *     read is refused, and so are a bare reference to `.channel` (`const ch =
- *     supabase.channel`) and a call through a member it cannot read
- *     (`supabase[name](…)`), which are how a call leaves the scan's sight.
+ *     supabase.channel`), a call through a member it cannot read
+ *     (`supabase[name](…)`), and a member taken by destructuring (`const {
+ *     channel } = supabase`, or under a key it cannot read), which are how a
+ *     call leaves the scan's sight.
  *   - server: the edge functions publish through `_lib/broadcast.ts` only,
  *     whose `private: true` is pinned by `broadcast_test.ts`. So no function
  *     may open a channel, and no file but that one may name the broadcast
@@ -144,18 +146,32 @@ function channelSites(file: string, text: string): Site[] {
   const visit = (node: ts.Node) => {
     // Destructuring takes the member without an access expression at all:
     // `const { channel } = supabase; channel.call(supabase, t)` (Codex, on
-    // #97). A `channel` key in a binding pattern, or in an object literal
-    // that is being assigned to, is refused like a bare reference. An object
+    // #97). A `channel` key in an object binding pattern, or in an object
+    // literal that is being assigned to, is refused like a bare reference —
+    // and so is a key the scan cannot read there, `const { [key]: open } =
+    // supabase` (Codex again), since it could be `channel`. That costs nothing
+    // today: the tree destructures with no computed key at all (measured, 623
+    // object binding elements). An array pattern takes by position and a rest
+    // element takes what is left, so neither names a member, and the shipped
+    // rule refused `const [channel] = pair` as though it did. An object
     // literal that is merely BUILT with a `channel` field — the notification
     // delivery channel in send-notification — is data, not a member taken.
     const taken = ts.isBindingElement(node)
-      ? (node.propertyName ? keyOf(node.propertyName) : ts.isIdentifier(node.name) ? node.name.text : undefined)
+      ? ts.isObjectBindingPattern(node.parent) && !node.dotDotDotToken
+        ? node.propertyName ? keyOf(node.propertyName) : ts.isIdentifier(node.name) ? node.name.text : undefined
+        : undefined
       : (ts.isShorthandPropertyAssignment(node) || ts.isPropertyAssignment(node)) && isAssignmentTarget(node.parent)
         ? keyOf(node.name)
         : undefined;
-    if (taken === "channel") {
+    if (taken === "channel" || taken === UNREADABLE) {
       const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
-      sites.push({ file, line, problem: "`.channel` taken by destructuring, so the scan cannot see its options" });
+      sites.push({
+        file,
+        line,
+        problem: taken === "channel"
+          ? "`.channel` taken by destructuring, so the scan cannot see its options"
+          : "a member taken by destructuring under a key the scan cannot read, which could be `channel`",
+      });
     }
     if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
       const name = memberOf(node);
@@ -222,7 +238,11 @@ function serverProblems(files: Map<string, string>): { publisherNamesEndpoint: b
   let publisherNamesEndpoint = false;
   for (const [file, text] of files) {
     for (const s of channelSites(file, text)) {
-      problems.push(`${s.file}:${s.line} opens a Realtime channel on the server — publish through ${THE_PUBLISHER}`);
+      // Say what was seen: a site is not always a call (a destructuring, a
+      // member the scan cannot read), and a red that misdescribes itself
+      // sends the reader after the wrong thing.
+      const seen = s.problem ? ` (${s.problem})` : "";
+      problems.push(`${s.file}:${s.line} opens a Realtime channel on the server${seen} — publish through ${THE_PUBLISHER}`);
     }
     const mentions = endpointMentions(file, text);
     if (file === THE_PUBLISHER) publisherNamesEndpoint = mentions.length > 0;
@@ -322,6 +342,23 @@ describe("what the channel scan refuses and admits", () => {
     expect(one('const { data, error } = await supabase.from("walks").select("id");')).toBe("");
   });
 
+  it("refuses a member taken under a key it cannot read, which could be `channel` (Codex, on #97)", () => {
+    const one = (code: string) => client({ [THE_CHANNEL_FILE]: `${PRIVATE}\n${code}` }).join("\n");
+    // The shape it missed: the key is a constant, so no `channel` is written
+    // at the site, and the private call still satisfied the count.
+    const computed = one('const key = "channel" as const;\nconst { [key]: open } = supabase;\nopen(t);');
+    expect(computed).toMatch(/:3 is not private: a member taken by destructuring under a key the scan cannot read/);
+    expect(computed).toMatch(/exactly one channel call, found 2/);
+    expect(one("let open;\n({ [key]: open } = supabase);")).toMatch(/under a key the scan cannot read/);
+    expect(one("function open({ [key]: fn }: typeof supabase) { return fn; }")).toMatch(/under a key the scan cannot read/);
+    // A key it CAN read is judged by what it spells, however it is written.
+    expect(one("const { [`channel`]: open } = supabase;")).toMatch(/`\.channel` taken by destructuring/);
+    expect(one('const { ["from"]: from } = supabase;')).toBe("");
+    // A position or a rest names no member, so `channel` there is just a name.
+    expect(one("const [channel, other] = pair;")).toBe("");
+    expect(one("const { ...channel } = rest;")).toBe("");
+  });
+
   it("reads the definition that wins — the last one — and refuses what could override it", () => {
     const one = (call: string) => client({ [THE_CHANNEL_FILE]: call }).join("\n");
     // A spread after the definition may replace it at run time.
@@ -357,6 +394,8 @@ describe("what the channel scan refuses and admits", () => {
     expect(server(publisher)).toBe("");
     expect(server({ ...publisher, "complete-walk/index.ts": "client.channel(t).send(m);" }))
       .toMatch(/opens a Realtime channel on the server/);
+    expect(server({ ...publisher, "complete-walk/index.ts": "const { [k]: open } = client;" }))
+      .toMatch(/on the server \(a member taken by destructuring under a key the scan cannot read/);
     expect(server({ ...publisher, "complete-walk/index.ts": "await fetch(`${u}/realtime/v1/api/broadcast`);" }))
       .toMatch(/calls the broadcast endpoint directly/);
     // Prose is not a call.

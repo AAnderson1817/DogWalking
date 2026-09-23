@@ -33,7 +33,12 @@ import { describe, expect, it } from "vitest";
  *     the same rule.
  *   - An `__error` class token is FormError's, in any string in the tree: a
  *     literal assembled in a variable (`const cls = "signin__error"`) is
- *     caught where it is written, not only where it is applied. The one
+ *     caught where it is written, not only where it is applied, and so is a
+ *     class assembled by concatenation (`"signin__" + "error"`, a template
+ *     built from constants) — `+` and templates are folded through the
+ *     constants the scan can read, and reported once, at the innermost
+ *     concatenation that forms the class. What it cannot compute (a
+ *     parameter, a call) stays unread, as it does for a role. The one
  *     exception is `FormError`'s own `className` prop, which layers a layout
  *     class onto the region (`claim-invite__error`) rather than building one.
  *   - Object literals are read as well as JSX (`{ role: "alert" }`), since
@@ -256,6 +261,64 @@ function mayBe(value: ts.Node | undefined, word: string, unreadableCounts: boole
 const ERROR_CLASS = /__error(?:--[A-Za-z0-9-]+)?$/;
 const hasErrorClass = (s: string) => s.split(/\s+/).some((token) => ERROR_CLASS.test(token));
 
+/** A `+` or a template: where a string is assembled from pieces. */
+const isCombiner = (node: ts.Node): boolean =>
+  ts.isTemplateExpression(node) || (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken);
+
+/** Past this many values a fold gives up rather than multiply ternaries without bound. */
+const FOLD_LIMIT = 64;
+
+interface Fold {
+  values: string[]; // every string the expression can produce
+  literals: string[]; // every literal piece the fold read, wherever it is written
+  combiners: ts.Node[]; // every `+` or template it passed through, itself included
+}
+
+/**
+ * The strings an expression can produce, when the scan can compute every one:
+ * a string literal, `+` over strings, a template whose holes it can compute,
+ * either arm of a ternary, through parentheses and type assertions and a
+ * `const` an identifier is bound to. Undefined for anything else — a
+ * parameter, a call, a number, a `let` — which is the same line `valuesOf`
+ * draws, and past FOLD_LIMIT values.
+ */
+function foldOf(node: ts.Node, resolve: Resolve, path: Set<ts.Node> = new Set()): Fold | undefined {
+  const piece = (s: string): Fold => ({ values: [s], literals: [s], combiners: [] });
+  const join = (a: Fold | undefined, b: Fold | undefined): Fold | undefined =>
+    !a || !b || a.values.length * b.values.length > FOLD_LIMIT ? undefined : {
+      values: a.values.flatMap((x) => b.values.map((y) => x + y)),
+      literals: [...a.literals, ...b.literals],
+      combiners: [...a.combiners, ...b.combiners],
+    };
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return piece(node.text);
+  if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node)
+    || ts.isSatisfiesExpression(node) || ts.isNonNullExpression(node)) return foldOf(node.expression, resolve, path);
+  if (ts.isConditionalExpression(node)) {
+    const a = foldOf(node.whenTrue, resolve, path);
+    const b = foldOf(node.whenFalse, resolve, path);
+    return a && b && a.values.length + b.values.length <= FOLD_LIMIT ? {
+      values: [...a.values, ...b.values],
+      literals: [...a.literals, ...b.literals],
+      combiners: [...a.combiners, ...b.combiners],
+    } : undefined;
+  }
+  if (ts.isIdentifier(node)) {
+    // The path rather than every node visited: a constant used twice is read
+    // twice, and only one that leads back to itself (which parses) is refused.
+    const init = resolve(node);
+    return init && !path.has(init) ? foldOf(init, resolve, new Set([...path, init])) : undefined;
+  }
+  let folded: Fold | undefined;
+  if (ts.isTemplateExpression(node)) {
+    folded = piece(node.head.text);
+    for (const span of node.templateSpans) folded = join(join(folded, foldOf(span.expression, resolve, path)), piece(span.literal.text));
+  } else if (isCombiner(node)) {
+    const bin = node as ts.BinaryExpression;
+    folded = join(foldOf(bin.left, resolve, path), foldOf(bin.right, resolve, path));
+  }
+  return folded && { ...folded, combiners: [...folded.combiners, node] };
+}
+
 function tagName(el: ts.JsxOpeningElement | ts.JsxSelfClosingElement): string {
   return el.tagName.getText();
 }
@@ -433,6 +496,31 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
     ts.forEachChild(node, strings);
   };
   strings(sf);
+
+  // A class assembled by concatenation is assembled where it is written:
+  // `"signin__" + "error"` carries it in neither literal, and a BEM class
+  // built from constants, `${BLOCK}__${ELEMENT}`, in none (Codex, on #97).
+  // So every `+` and template is folded, and a class that appears only in the
+  // fold is reported ONCE, at the innermost combiner that forms it: a class a
+  // single literal already carries is that literal's finding above, and a
+  // combiner built on another that already formed it adds nothing new.
+  const folds = new Map<ts.Node, Fold | undefined>();
+  const fold = (n: ts.Node) => {
+    if (!folds.has(n)) folds.set(n, foldOf(n, resolve));
+    return folds.get(n);
+  };
+  const forms = (n: ts.Node): boolean => {
+    const f = fold(n);
+    return !!f && f.values.some(hasErrorClass) && !f.literals.some(hasErrorClass);
+  };
+  const combiners = (node: ts.Node) => {
+    if (isCombiner(node) && !formErrorClass.has(node) && forms(node)
+      && !fold(node)!.combiners.some((c) => c !== node && forms(c))) {
+      at(node, "error-class");
+    }
+    ts.forEachChild(node, combiners);
+  };
+  combiners(sf);
   return { findings, alertRoles };
 }
 
@@ -525,6 +613,29 @@ describe("what the scan refuses and admits", () => {
     expect(rules(`<p className="x__error--big">x</p>`)).toEqual(["error-class"]);
     // A class that merely contains the word is somebody else's.
     expect(rules(`<p className="walk-card__error-count">x</p>`)).toEqual([]);
+  });
+
+  it("refuses an __error class assembled by concatenation, where it is assembled (Codex, on #97)", () => {
+    // The shape it missed: neither fragment carries the class on its own.
+    expect(rules(`const cls = "signin__" + "error"; export const X = () => <span className={cls}>x</span>;`))
+      .toEqual(["error-class"]);
+    // The good-faith shape: a BEM class built from constants.
+    expect(rules("const BLOCK = \"signin\"; const ELEMENT = \"error\"; const cls = `${BLOCK}__${ELEMENT}`;"))
+      .toEqual(["error-class"]);
+    expect(rules(`const cls = "x__" + (big ? "error--big" : "error");`)).toEqual(["error-class"]);
+    expect(rules(`const ERR = "error"; const cls = "a__" + ERR + " " + "b__" + ERR;`)).toEqual(["error-class"]);
+    // A constant read twice in one concatenation is read twice: only a
+    // constant that leads back to itself stops the fold.
+    expect(rules(`const E = "error"; const cls = E + " x__" + E;`)).toEqual(["error-class"]);
+    // Reported once, where it is formed — not again by everything that uses it.
+    expect(rules(`const cls = "signin__" + "error"; const wide = cls + " wide";`)).toEqual(["error-class"]);
+    expect(rules(`const cls = "signin__error" + " wide";`)).toEqual(["error-class"]);
+    // What the scan cannot compute stays unread, and a healthy class is healthy.
+    expect(rules(`const cls = "signin__" + kind;`)).toEqual([]);
+    expect(rules(`const cls = "walk-card__" + "error-count";`)).toEqual([]);
+    expect(rules("const cls = `walk-card__${state}`;")).toEqual([]);
+    // FormError's own className may still carry it, however it is assembled.
+    expect(rules(`<FormError message={e} className={"claim-invite__" + "error"} />`)).toEqual([]);
   });
 
   it("admits a layout class on FormError itself", () => {
