@@ -320,7 +320,9 @@ describe("verify-deployment", () => {
  *   - a function with its own `Deno.serve`, which answers whatever it likes
  *     (`stripe-webhook`, `platform-webhook`);
  *   - `serveFunction` widened with `methods`, which lets a GET reach the
- *     handler (`unsubscribe`, whose GET is the one-click link).
+ *     handler (`unsubscribe`, whose GET is the one-click link) — however the
+ *     key is spelled. Options, keys or arguments the scan cannot read count
+ *     as this door, since what they hide could be `methods`.
  *
  * The script's header named them from memory — "every function but two" was
  * "12 of the 13" once and wrong the next PR — so this reads the source for
@@ -348,34 +350,89 @@ function tsFiles(dir: string): string[] {
   });
 }
 
+/** A name only running the code would tell: a computed key, `obj[expr]`. */
+const UNREADABLE = Symbol("unreadable");
+
+const literalText = (e: ts.Expression): string | undefined =>
+  ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e) || ts.isNumericLiteral(e) ? e.text : undefined;
+
+/**
+ * The name a property key spells, however it is spelled — `methods`,
+ * `"methods"`, `["methods"]`, `` [`methods`] `` — or UNREADABLE. Not
+ * `getText()`, which keeps the quotes: that is how `{ "methods": ["GET"] }`
+ * read as POST-only (Codex, on #97).
+ */
+function keyOf(name: ts.PropertyName): string | typeof UNREADABLE {
+  if (ts.isComputedPropertyName(name)) return literalText(name.expression) ?? UNREADABLE;
+  return name.text;
+}
+
+type Access = ts.PropertyAccessExpression | ts.ElementAccessExpression;
+
+/** The member an access names — `a.b`, `a["b"]`, `` a[`b`] `` — or UNREADABLE. */
+function memberOf(e: Access): string | typeof UNREADABLE {
+  return ts.isPropertyAccessExpression(e) ? e.name.text : literalText(e.argumentExpression) ?? UNREADABLE;
+}
+
+/** Why this serveFunction call's options might admit a GET, or null if they cannot. */
+function widening(call: ts.CallExpression): string | null {
+  if (call.arguments.some(ts.isSpreadElement)) return "serveFunction arguments spread from elsewhere";
+  const options = call.arguments[1];
+  if (!options) return null;
+  if (!ts.isObjectLiteralExpression(options)) return "serveFunction options the scan cannot read";
+  const keys = options.properties.map((p) => (ts.isSpreadAssignment(p) ? null : keyOf(p.name)));
+  if (keys.includes(null)) return "serveFunction options spread from elsewhere";
+  if (keys.includes(UNREADABLE)) return "serveFunction options with a key the scan cannot read";
+  if (keys.includes("methods")) return "serveFunction widened with methods";
+  return null;
+}
+
 /**
  * name -> how a GET can reach its code, for every function where it can.
  * A function with neither a `Deno.serve` nor a `serveFunction` call is
  * reported too: the scan cannot see how it serves, which is not "safe".
+ *
+ * Every REFERENCE is judged, not only the calls the scan recognises, because
+ * a function that serves the ordinary way beside a call the scan cannot see
+ * never reaches that fallback: `Deno.serve` however it is spelled is a door,
+ * called or not; `serveFunction` must be called where it is named, or its
+ * options are out of sight (an alias, a renaming import); and a member of
+ * `Deno` the scan cannot read could be `serve`. What stays outside: a second
+ * serve reached through a name the scan never sees at all (`const { serve } =
+ * Deno`, an alias of `Deno` itself) beside a first one it does — one serve
+ * per function is the shape the runtime runs, and the fallback covers it.
  */
 function getReachable(root: string): Map<string, string> {
   const found = new Map<string, string>();
   for (const name of functionDirs(root)) {
     let serves = false;
+    const door = (why: string) => {
+      serves = true;
+      found.set(name, why);
+    };
     for (const file of tsFiles(join(root, name))) {
       const sf = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
       const visit = (node: ts.Node) => {
-        if (ts.isCallExpression(node)) {
-          const callee = node.expression;
-          if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression)
-            && callee.expression.text === "Deno" && callee.name.text === "serve") {
+        const access = ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node) ? node : undefined;
+        const member = access && memberOf(access);
+        if (access && ts.isIdentifier(access.expression) && access.expression.text === "Deno") {
+          if (member === "serve") door("its own Deno.serve");
+          else if (member === UNREADABLE) door("a member of Deno the scan cannot read");
+        }
+        const namesServeFunction = (ts.isIdentifier(node) && node.text === "serveFunction") || member === "serveFunction";
+        if (namesServeFunction) {
+          const parent = node.parent;
+          if (ts.isCallExpression(parent) && parent.expression === node) {
             serves = true;
-            found.set(name, "its own Deno.serve");
-          } else if (ts.isIdentifier(callee) && callee.text === "serveFunction") {
-            serves = true;
-            const options = node.arguments[1];
-            if (options && !ts.isObjectLiteralExpression(options)) {
-              found.set(name, "serveFunction options the scan cannot read");
-            } else if (options && options.properties.some((p) => ts.isSpreadAssignment(p))) {
-              found.set(name, "serveFunction options spread from elsewhere");
-            } else if (options && options.properties.some((p) => p.name?.getText(sf) === "methods")) {
-              found.set(name, "serveFunction widened with methods");
-            }
+            const why = widening(parent);
+            if (why) found.set(name, why);
+          } else if (ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent)) {
+            // `import { serveFunction }` names it without calling it; renamed,
+            // every call is under a name the scan does not look for.
+            if (parent.propertyName) door("serveFunction imported under another name, so the scan cannot see its calls");
+          } else if (!(ts.isPropertyAccessExpression(parent) && parent.name === node)) {
+            // (the name of `http.serveFunction` is judged as that access)
+            door("serveFunction referenced without being called, so the scan cannot see its options");
           }
         }
         ts.forEachChild(node, visit);
@@ -437,6 +494,70 @@ describe("verify-deployment's read-only argument is derived", () => {
       spread: "serveFunction options spread from elsewhere",
       "in-a-handler": "its own Deno.serve",
       unserved: "neither Deno.serve nor serveFunction — the scan cannot see how it serves",
+    });
+  });
+
+  it("reads a key however it is spelled, and refuses one it cannot read (Codex, on #97)", () => {
+    // `{ "methods": ["GET"] }` is the same widening as `{ methods: … }`, and
+    // the scan read the key with getText(), which keeps the quotes — so the
+    // function was classed POST-only and verify-deployment would have sent
+    // its handler an authenticated GET.
+    const root = mkdtempSync(join(tmpdir(), "keys-"));
+    const fn = (name: string, text: string) => {
+      mkdirSync(join(root, name), { recursive: true });
+      writeFileSync(join(root, name, "index.ts"), text);
+    };
+    fn("quoted", 'serveFunction(h, { "methods": ["GET"] });');
+    fn("single-quoted", "serveFunction(h, { 'methods': [\"GET\"] });");
+    fn("computed", 'serveFunction(h, { ["methods"]: ["GET"] });');
+    fn("computed-template", 'serveFunction(h, { [`methods`]: ["GET"] });');
+    fn("shorthand", 'const methods = ["GET"];\nserveFunction(h, { methods });');
+    fn("computed-unreadable", 'serveFunction(h, { [KEY]: ["GET"] });');
+    fn("spread-arguments", "serveFunction(...ARGS);");
+    // Not doors: a key the scan reads that is not `methods`, and the plain
+    // default. Without these, refusing every options object would pass.
+    fn("other-key", "serveFunction(h, { timeout: 5 });");
+    fn("imported", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(h);');
+    expect(Object.fromEntries(getReachable(root))).toEqual({
+      quoted: "serveFunction widened with methods",
+      "single-quoted": "serveFunction widened with methods",
+      computed: "serveFunction widened with methods",
+      "computed-template": "serveFunction widened with methods",
+      shorthand: "serveFunction widened with methods",
+      "computed-unreadable": "serveFunction options with a key the scan cannot read",
+      "spread-arguments": "serveFunction arguments spread from elsewhere",
+    });
+  });
+
+  it("sees every call of serveFunction and every Deno.serve, however it is reached", () => {
+    // The fallback ("neither …") covers a function whose only serve the scan
+    // cannot see. These are the cases it cannot cover: a serve the scan does
+    // see, beside one it does not.
+    const root = mkdtempSync(join(tmpdir(), "callees-"));
+    const fn = (name: string, text: string) => {
+      mkdirSync(join(root, name), { recursive: true });
+      writeFileSync(join(root, name, "index.ts"), text);
+    };
+    fn("namespace", 'serveFunction(h);\nhttp.serveFunction(g, { methods: ["GET"] });');
+    fn("element", 'serveFunction(h);\nhttp["serveFunction"](g, { methods: ["GET"] });');
+    fn("alias", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(h);\n'
+      + 'const serve = serveFunction;\nserve(g, { methods: ["GET"] });');
+    fn("renamed", 'import { serveFunction as serve } from "../_lib/http.ts";\nserve(h, { methods: ["GET"] });');
+    fn("deno-element", "serveFunction(h);\nDeno[\"serve\"](g);");
+    fn("deno-template", "serveFunction(h);\nDeno[`serve`](g);");
+    fn("deno-unreadable", "serveFunction(h);\nDeno[method](g);");
+    fn("deno-alias", "serveFunction(h);\nconst serve = Deno.serve;\nserve(g);");
+    // Not doors: other members of Deno, read the ordinary way.
+    fn("deno-env", 'serveFunction(h);\nconst url = Deno.env.get("SUPABASE_URL");');
+    expect(Object.fromEntries(getReachable(root))).toEqual({
+      namespace: "serveFunction widened with methods",
+      element: "serveFunction widened with methods",
+      alias: "serveFunction referenced without being called, so the scan cannot see its options",
+      renamed: "serveFunction imported under another name, so the scan cannot see its calls",
+      "deno-element": "its own Deno.serve",
+      "deno-template": "its own Deno.serve",
+      "deno-unreadable": "a member of Deno the scan cannot read",
+      "deno-alias": "its own Deno.serve",
     });
   });
 });
