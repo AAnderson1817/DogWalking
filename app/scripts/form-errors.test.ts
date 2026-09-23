@@ -48,7 +48,10 @@ import { describe, expect, it } from "vitest";
  *     each of its properties were written on the element, so `{ role: r }`
  *     spread onto a `<span>` is refused exactly as `<span role={r}>` is.
  *     `createElement`'s props (and `cloneElement`'s, and the automatic
- *     runtime's `jsx`) are applied exactly as a spread is, and judged so.
+ *     runtime's `jsx`) are applied exactly as a spread is, and judged so —
+ *     however the factory is reached: every REFERENCE to one is judged, and
+ *     one the scan cannot see being called is refused where it is taken
+ *     (`factoryCall`, below).
  *   - A spread the scan cannot see is refused as both attributes it could
  *     carry, with one exception: `{...rest}` forwarding the enclosing
  *     component's OWN props (a rest element of, or the whole, first
@@ -76,6 +79,7 @@ interface Finding {
   line: number;
   rule: "role" | "aria-live" | "error-class";
   text: string;
+  note?: string; // why a site that is not an attribute was judged as one
 }
 
 const UNREADABLE = Symbol("unreadable");
@@ -228,14 +232,137 @@ function forwardsProps(expr: ts.Expression, checker: ts.TypeChecker): boolean {
  * getRole() }` there was read as a plain object, where an unreadable role is
  * no evidence, while `<span role={getRole()}>` is refused). The DOM's own
  * `document.createElement(tag, options)` takes no props and is not one.
+ *
+ * Every REFERENCE to a factory is judged, not only the calls the scan
+ * recognises, because a factory it does not see being called applies props
+ * it never reads (Codex again: `React["createElement"](…)` passed). So the
+ * member is read however it is spelled — `.createElement`,
+ * `["createElement"]`, a template, a `const` key — and through parentheses,
+ * assertions and a comma (`(0, React.createElement)(…)`); a CALL through a
+ * member the scan cannot read could be a factory, and is judged as one; and a
+ * factory referenced without being called (`const h = React.createElement`,
+ * handed to a function, `.call`) or taken under another name (`import {
+ * createElement as h }`, `const { createElement: h } = React`, a key the scan
+ * cannot read, a destructuring assignment) is refused where it is taken,
+ * since its calls are under a name the scan does not follow.
+ *
+ * A bare name is the factory when it is imported, destructured in a variable
+ * declaration, or not declared in the file at all. A local variable,
+ * function, class or parameter of the same name is something else — a
+ * destructured parameter is a component's props — and the factory could only
+ * reach one through a reference refused where it is taken. What stays
+ * outside: a factory reached without its name appearing in the tree, as an
+ * unreadable member taken as a value (indexing that is not called is ordinary
+ * code) or a library that applies props itself.
  */
 const ELEMENT_FACTORIES = new Set(["createElement", "cloneElement", "jsx", "jsxs", "jsxDEV"]);
-function isElementFactory(call: ts.CallExpression): boolean {
-  const callee = call.expression;
-  if (ts.isIdentifier(callee)) return ELEMENT_FACTORIES.has(callee.text);
-  return ts.isPropertyAccessExpression(callee) && ELEMENT_FACTORIES.has(callee.name.text)
-    && !(ts.isIdentifier(callee.expression) && callee.expression.text === "document");
+const isFactoryName = (n: string | typeof UNREADABLE): boolean => typeof n === "string" && ELEMENT_FACTORIES.has(n);
+
+/** Parentheses, assertions and non-null: nodes that hand their value on unchanged. */
+const passesThrough = (n: ts.Node): n is
+  ts.ParenthesizedExpression | ts.AsExpression | ts.SatisfiesExpression | ts.NonNullExpression | ts.TypeAssertion =>
+  ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isSatisfiesExpression(n)
+  || ts.isNonNullExpression(n) || ts.isTypeAssertionExpression(n);
+
+const isComma = (n: ts.Node): n is ts.BinaryExpression =>
+  ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.CommaToken;
+
+/** What a call calls: through the pass-throughs and a comma's right side. */
+function calleeOf(call: ts.CallExpression): ts.Expression {
+  let e: ts.Expression = call.expression;
+  for (;;) {
+    if (passesThrough(e)) e = e.expression;
+    else if (isComma(e)) e = e.right;
+    else return e;
+  }
 }
+
+/** The call `node` is what calls, climbing the same nodes `calleeOf` descends. */
+function callOf(node: ts.Node): ts.CallExpression | undefined {
+  let e = node;
+  for (let p = e.parent; p; e = p, p = e.parent) {
+    if (!((passesThrough(p) && p.expression === e) || (isComma(p) && p.right === e))) {
+      return ts.isCallExpression(p) && p.expression === e ? p : undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The names a member access can read, the way a computed key is read in
+ * `keysOf`: `.x`, `["x"]`, `` [`x`] ``, a `const` key, either arm of a
+ * ternary, and UNREADABLE for a key the scan cannot read.
+ */
+function memberNames(access: ts.PropertyAccessExpression | ts.ElementAccessExpression, resolve: Resolve): (string | typeof UNREADABLE)[] {
+  if (ts.isPropertyAccessExpression(access)) return [access.name.text];
+  if (ts.isNumericLiteral(access.argumentExpression)) return [access.argumentExpression.text];
+  return valuesOf(access.argumentExpression, resolve).flatMap((v) => (v === null ? [] : [v]));
+}
+
+/** A member access names a factory, could (its key is unreadable), or does not. */
+function memberFactory(access: ts.PropertyAccessExpression | ts.ElementAccessExpression, resolve: Resolve): "factory" | "maybe" | undefined {
+  if (ts.isIdentifier(access.expression) && access.expression.text === "document") return undefined;
+  const names = memberNames(access, resolve);
+  if (names.some(isFactoryName)) return "factory";
+  return names.includes(UNREADABLE) ? "maybe" : undefined;
+}
+
+/** The declaration a name is bound by, reading a shorthand property as the value it names. */
+function bindingOf(id: ts.Identifier, checker: ts.TypeChecker): ts.Declaration | undefined {
+  const p = id.parent;
+  const symbol = p && ts.isShorthandPropertyAssignment(p) && p.name === id
+    ? checker.getShorthandAssignmentValueSymbol(p)
+    : checker.getSymbolAtLocation(id);
+  return symbol?.valueDeclaration ?? symbol?.declarations?.[0];
+}
+
+/** A bare name is the factory: imported, destructured in a variable declaration, or not declared here at all. */
+function namesFactory(id: ts.Identifier, checker: ts.TypeChecker): boolean {
+  if (!ELEMENT_FACTORIES.has(id.text)) return false;
+  const decl = bindingOf(id, checker);
+  if (!decl) return true;
+  if (ts.isImportSpecifier(decl) || ts.isImportClause(decl) || ts.isNamespaceImport(decl)) return true;
+  let holder: ts.Node = decl;
+  while (ts.isBindingElement(holder)) holder = holder.parent.parent;
+  return holder !== decl && ts.isVariableDeclaration(holder);
+}
+
+/**
+ * The name is read as a value here — not declared, not a member's name (the
+ * access is judged instead), not the source of a rename (judged as the
+ * rename), not in a type, and not the target of a destructuring assignment.
+ */
+function isValueReference(id: ts.Identifier, checker: ts.TypeChecker): boolean {
+  const p = id.parent;
+  if (!p) return false;
+  if (ts.isShorthandPropertyAssignment(p)) return p.name === id && !isAssignmentTarget(p.parent);
+  if (ts.isPropertyAccessExpression(p) && p.name === id) return false;
+  if ((ts.isImportSpecifier(p) || ts.isExportSpecifier(p) || ts.isBindingElement(p)) && p.propertyName === id) return false;
+  if (ts.isExportSpecifier(p)) return false;
+  for (let a: ts.Node | undefined = p; a && !ts.isSourceFile(a); a = a.parent) if (ts.isTypeNode(a)) return false;
+  const symbol = checker.getSymbolAtLocation(id);
+  return !symbol?.declarations?.some((d) => (d as ts.NamedDeclaration).name === id);
+}
+
+/**
+ * `node` is being assigned to: the left of `=`, or inside a literal that is —
+ * so `({ createElement } = React)` takes the member out without a binding
+ * pattern the scan would read as one.
+ */
+function isAssignmentTarget(node: ts.Node): boolean {
+  const parent = node.parent;
+  if (!parent) return false;
+  if (ts.isBinaryExpression(parent)) return parent.operatorToken.kind === ts.SyntaxKind.EqualsToken && parent.left === node;
+  if (ts.isParenthesizedExpression(parent)) return isAssignmentTarget(parent);
+  if ((ts.isPropertyAssignment(parent) && parent.initializer === node) || ts.isSpreadAssignment(parent)
+    || ts.isSpreadElement(parent)) return isAssignmentTarget(parent.parent);
+  if (ts.isArrayLiteralExpression(parent)) return isAssignmentTarget(parent);
+  if (ts.isForOfStatement(parent) || ts.isForInStatement(parent)) return parent.initializer === node;
+  return false;
+}
+
+/** The text of an import or export name, which may be an identifier or a string. */
+const exportNameText = (n: ts.ModuleExportName): string => n.text;
 
 /** The value of a JSX attribute, or of an object-literal property. */
 function valueOf(init: ts.Node | undefined): ts.Node | undefined {
@@ -389,13 +516,29 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
   const resolve = resolverFor(checker);
   const findings: Finding[] = [];
   let alertRoles = 0;
-  const at = (node: ts.Node, rule: Finding["rule"]) =>
+  const at = (node: ts.Node, rule: Finding["rule"], note?: string) =>
     findings.push({
       file,
       line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1,
       rule,
       text: node.getText(sf).replace(/\s+/g, " ").slice(0, 100),
+      ...(note ? { note } : {}),
     });
+  // A factory the scan cannot follow could apply either attribute.
+  const refuse = (site: ts.Node, note: string) => {
+    at(site, "role", note);
+    at(site, "aria-live", note);
+  };
+  const TAKEN = "an element factory taken as a value, so the scan cannot see the props it is called with";
+  const RENAMED = "an element factory taken under another name, so the scan cannot see its calls";
+  const UNREAD_KEY = "a member taken by destructuring under a key the scan cannot read, which could be an element factory";
+  const ASSIGNED = "an element factory taken by destructuring assignment into a variable declared elsewhere, so the scan cannot see its calls";
+  const factoryCall = (call: ts.CallExpression): "factory" | "maybe" | undefined => {
+    const callee = calleeOf(call);
+    if (ts.isIdentifier(callee)) return namesFactory(callee, checker) ? "factory" : undefined;
+    if (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) return memberFactory(callee, resolve);
+    return undefined;
+  };
 
   // String literals that are FormError's own `className` — the one place an
   // `__error` class may be written outside fields.tsx.
@@ -467,9 +610,10 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
         if (ts.isJsxAttribute(attr)) visitProps(owner, attrName(attr.name), valueOf(attr.initializer), attr);
         else if (ts.isJsxSpreadAttribute(attr)) visitSpread(owner, attr.expression, attr);
       }
-    } else if (ts.isCallExpression(node) && isElementFactory(node)) {
+    } else if (ts.isCallExpression(node) && factoryCall(node)) {
       // The element type is the owner (`StateField` may carry the role);
       // an argument list the scan cannot see is props it cannot see.
+      const before = findings.length;
       const [type, props] = node.arguments;
       const owner = type && (ts.isIdentifier(type) || ts.isStringLiteral(type)) ? type.text : "<element>";
       if (node.arguments.some(ts.isSpreadElement)) {
@@ -477,11 +621,38 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
       } else if (props) {
         visitSpread(owner, props, node);
       }
+      if (factoryCall(node) === "maybe") {
+        for (const f of findings.slice(before)) f.note = "a call through a member the scan cannot read, judged as the element factory it could be";
+      }
     } else if (ts.isPropertyAssignment(node)) {
       visitMember(null, node.name, node.initializer, node);
     } else if (ts.isShorthandPropertyAssignment(node)) {
       // `{ role }`: the value is the binding of the same name.
       visitProps(null, node.name.text, node.name, node);
+    }
+
+    // A factory referenced without being called, however it is spelled.
+    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))
+      && memberFactory(node, resolve) === "factory" && !callOf(node)) refuse(node, TAKEN);
+    if (ts.isIdentifier(node) && ELEMENT_FACTORIES.has(node.text) && isValueReference(node, checker)
+      && namesFactory(node, checker) && !callOf(node)) refuse(node, TAKEN);
+    // A factory taken under another name: renamed on import or export, or
+    // destructured under another key, or under a key the scan cannot read.
+    if ((ts.isImportSpecifier(node) || ts.isExportSpecifier(node)) && node.propertyName
+      && ELEMENT_FACTORIES.has(exportNameText(node.propertyName)) && exportNameText(node.propertyName) !== node.name.text) {
+      refuse(node, RENAMED);
+    }
+    if (ts.isBindingElement(node) && ts.isObjectBindingPattern(node.parent) && !node.dotDotDotToken && node.propertyName) {
+      const keys = keysOf(node.propertyName, resolve);
+      const local = ts.isIdentifier(node.name) ? node.name.text : undefined;
+      if (keys.some((k) => isFactoryName(k) && k !== local)) refuse(node, RENAMED);
+      else if (keys.includes(UNREADABLE)) refuse(node, UNREAD_KEY);
+    }
+    // `({ createElement } = React)`: taken into a variable declared elsewhere.
+    if ((ts.isShorthandPropertyAssignment(node) || ts.isPropertyAssignment(node)) && isAssignmentTarget(node.parent)) {
+      const keys = keysOf(node.name, resolve);
+      if (keys.some(isFactoryName)) refuse(node, ASSIGNED);
+      else if (keys.includes(UNREADABLE)) refuse(node, UNREAD_KEY);
     }
     ts.forEachChild(node, visit);
   };
@@ -551,7 +722,7 @@ function scanTree(): { files: number; findings: Finding[]; alertSites: number } 
 }
 
 const show = (fs: Finding[]) =>
-  fs.map((f) => `  ${f.file}:${f.line} [${f.rule}] ${f.text}`).join("\n");
+  fs.map((f) => `  ${f.file}:${f.line} [${f.rule}] ${f.text}${f.note ? ` — ${f.note}` : ""}`).join("\n");
 
 describe("every error goes through FormError or StateField", () => {
   it("holds for the tree", () => {
@@ -747,6 +918,59 @@ describe("what the scan refuses and admits", () => {
     expect(rules(`const a = document.createElement("a");`)).toEqual([]);
     expect(rules(`const el = document.createElement("div", options);`)).toEqual([]);
     expect(rules(`createElement("span", { role: "status" }, "x");`)).toEqual([]);
+  });
+
+  it("reads an element factory however it is reached (Codex, on #97)", () => {
+    // The shape it missed: a factory called through a computed member.
+    expect(rules(`React["createElement"]("span", { role: getRole() });`)).toEqual(["role"]);
+    expect(rules("React[`createElement`](\"span\", { role: r });")).toEqual(["role"]);
+    expect(rules(`const K = "cloneElement"; React[K](child, { role: r });`)).toEqual(["role"]);
+    // Through parentheses, an assertion and a comma, as a bundler writes it.
+    expect(rules(`(0, React.createElement)("span", { role: r });`)).toEqual(["role"]);
+    expect(rules(`(React.createElement as Factory)("span", { role: r });`)).toEqual(["role"]);
+    // A call through a member it cannot read could be one, and is judged so…
+    expect(rules(`React[name]("span", { role: r });`)).toEqual(["role"]);
+    expect(rules(`React[name]("span", getProps());`)).toEqual(["role", "aria-live"]);
+    expect(scanSource("screens/Probe.tsx", `React[name]("span", { role: r });`)[0]?.note)
+      .toMatch(/cannot read, judged as the element factory it could be/);
+    // …which clears whatever it is when nothing in it could be an alert.
+    expect(rules(`handlers[kind]("span", { title: "x" });`)).toEqual([]);
+    // The DOM's is not one, however it is spelled.
+    expect(rules(`document["createElement"]("div", options);`)).toEqual([]);
+    expect(rules(`document[name]("div", options);`)).toEqual([]);
+  });
+
+  it("refuses an element factory taken as a value or under another name (Codex, on #97)", () => {
+    const both = ["role", "aria-live"];
+    const notes = (text: string) => scanSource("screens/Probe.tsx", text).map((f) => f.note);
+    // Its calls are under a name the scan does not follow.
+    expect(rules(`const h = React.createElement;`)).toEqual(both);
+    expect(rules(`const h = React["cloneElement"];`)).toEqual(both);
+    expect(rules(`React.createElement.call(null, "span", { role: r });`)).toEqual(both);
+    expect(rules(`import { createElement } from "react"; export const h = createElement;`)).toEqual(both);
+    expect(rules(`render(jsx);`)).toEqual(both);
+    expect(rules(`import { createElement } from "react"; const f = { createElement };`)).toEqual(both);
+    expect(notes(`const h = React.createElement;`)[0]).toMatch(/taken as a value/);
+    expect(rules(`import { createElement as h } from "react";`)).toEqual(both);
+    expect(rules(`export { createElement as h } from "react";`)).toEqual(both);
+    expect(rules(`const { createElement: h } = React;`)).toEqual(both);
+    expect(rules(`const { ["cloneElement"]: c } = React;`)).toEqual(both);
+    expect(notes(`const { createElement: h } = React;`)[0]).toMatch(/under another name/);
+    expect(rules(`const { [key]: h } = React;`)).toEqual(both);
+    expect(notes(`const { [key]: h } = React;`)[0]).toMatch(/key the scan cannot read/);
+    expect(rules(`let createElement; ({ createElement } = React);`)).toEqual(both);
+    expect(notes(`let createElement; ({ createElement } = React);`)[0]).toMatch(/declared elsewhere/);
+    // Under its own name it is still read where it is called.
+    expect(rules(`import { createElement } from "react"; createElement("span", { role: "status" });`)).toEqual([]);
+    expect(rules(`const { createElement } = React; createElement("span", { role: r });`)).toEqual(["role"]);
+    expect(rules(`const { createElement: createElement } = React;`)).toEqual([]);
+    expect(rules(`export { createElement } from "react";`)).toEqual([]);
+    // A local of the same name is something else, and a type is no reference.
+    expect(rules(`const jsx = compile(md); export const X = () => <div>{jsx}</div>;`)).toEqual([]);
+    expect(rules(`export function Card({ jsx }) { return <div>{jsx}</div>; }`)).toEqual([]);
+    expect(rules(`type F = typeof React.createElement; let g: typeof createElement;`)).toEqual([]);
+    // …and a wrapper of the real one is caught where it applies the props.
+    expect(rules(`function make(tag, props) { return React.createElement(tag, props); }`)).toEqual(both);
   });
 
   it("admits what a binding says is harmless, and a forwarded spread", () => {
