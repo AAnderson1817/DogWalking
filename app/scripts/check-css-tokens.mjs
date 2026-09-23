@@ -19,6 +19,18 @@
 // uses are read from string and template literals in the TypeScript AST, and
 // comments and JSX text are never looked at.
 //
+// Every `var(` in a string IS a use, wherever the string sits. A value reaches
+// a style through flows this cannot follow — a prop, a return value, an
+// import — so reading only strings that visibly sit in a style would move uses
+// into the silent direction, and the tree's only `var()` strings outside an
+// object literal are MapView's four SVG `stroke`/`fill` values, which Chromium
+// applies (measured): real uses. Codex (PR #95, round 6) asked for strings in
+// "provably non-style" contexts to be skipped; that is a list of attributes and
+// call sites growing a round at a time, for a mention the tree does not
+// contain. So prose that writes `var(--x)` is red too, and a red on a string
+// not visibly in a style says the fix, which is one token: write the name
+// without `var(`.
+//
 // A name built at runtime — `var(--s-${n})`, `"var(--s-" + n + ")"` — reaches
 // the scan as a literal that ENDS mid-name. CSS cannot close a `var()` without
 // `)` or `,`, so a literal ending inside a name is always a fragment, and
@@ -32,13 +44,16 @@
 //
 // Definitions come from CSS declarations (`--x:`), and from TS only where the
 // value is actually SET ON A STYLE: a `--x` key in an object literal whose
-// value reaches a JSX `style` prop — straight in (through parens, `as`,
-// `satisfies`, `!`, a ternary branch, either side of `||`/`??`, the right of
-// `&&`, or a spread into such an object), or through a `const` that is itself
-// used that way in the same file, followed by symbol so a shadowing name is a
-// different binding; and `….style.setProperty("--x", …)`. None exists today;
-// counting them is what stops the gate going red on a healthy tree the day one
-// does. Counting ANY `--x`-shaped key was the first version, and Codex was right
+// value reaches the `style` prop of a HOST element, a lowercase or dashed tag
+// like `div` or `my-widget` — straight in (through parens, `as`, `satisfies`,
+// `!`, a ternary branch, either side of `||`/`??`, the right of `&&`, or a
+// spread into such an object), or through a `const` that is itself used that
+// way in the same file, followed by symbol so a shadowing name is a different
+// binding; and `….style.setProperty("--x", …)`. A component's `style` is an
+// ordinary prop it may drop, so a key that reaches only a component is named
+// in a red and never counted (Codex, round 6). None exists today; counting
+// them is what stops the gate going red on a healthy tree the day one does.
+// Counting ANY `--x`-shaped key was the first version, and Codex was right
 // to refuse it: a config or payload object would "define" a token no style ever
 // sets, and a real `var(--missing)` would pass. That is the silent direction.
 // Reading a `CSSProperties` TYPE as evidence was the second, and Codex refused
@@ -92,7 +107,9 @@ export function scanCss(file, text) {
   // `var(--role)` written in prose to explain a rule is not a use.
   const t = text.replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, " "));
   const defs = [...t.matchAll(CSS_DEF)].map((m) => m[1]);
-  const uses = [...t.matchAll(VAR_USE)].map((m) => ({ name: m[1], file, line: lineAt(t, m.index) }));
+  // A value in a stylesheet is a style by construction: `styled` only
+  // ever changes what a red says about a string in TS.
+  const uses = [...t.matchAll(VAR_USE)].map((m) => ({ name: m[1], styled: true, file, line: lineAt(t, m.index) }));
   return { defs, uses };
 }
 
@@ -133,10 +150,24 @@ function cssomRemoves(value) {
   return !!v && (v.kind === ts.SyntaxKind.NullKeyword || isEmptyString(v));
 }
 
-// Walk up from an expression and say whether its value lands on a style.
-// `seen` holds the consts already followed: `const x = c ? { … } : x` is legal
-// syntax, and without it the walk from the object into `x` and back through
-// its own initializer never ends.
+// React applies `style` to a host element — a tag with a lowercase first
+// letter or a dash, `div` or `my-widget`, which every JSX transform turns into
+// a string — and to nothing else. A component receives `style` as an ordinary
+// prop, and whether it passes it on to an element is not visible from here, so
+// its `style` answers with the tag, to be reported and never counted (Codex,
+// PR #95 round 6). TypeScript's own `isIntrinsicJsxName` is this rule, but it
+// is not public API, and a gate that breaks on a compiler upgrade is red on a
+// healthy tree.
+function styleTarget(attr, sf) {
+  const tag = attr.parent.parent.tagName; // JsxAttributes → the opening or self-closing element
+  return ts.isIdentifier(tag) && (/^[a-z]/.test(tag.text) || tag.text.includes("-")) ? true : tag.getText(sf);
+}
+
+// Walk up from an expression and say where its value lands: `true` on a host
+// element's style, a component's tag when only on a component's `style`, and
+// `false` on neither. `seen` holds the consts already followed: `const x = c ?
+// { … } : x` is legal syntax, and without it the walk from the object into `x`
+// and back through its own initializer never ends.
 function landsOnStyle(start, ctx, seen = new Set()) {
   let node = start;
   for (;;) {
@@ -153,26 +184,49 @@ function landsOnStyle(start, ctx, seen = new Set()) {
       const op = p.operatorToken.kind;
       if (OR_LIKE.includes(op) || (op === ts.SyntaxKind.AmpersandAmpersandToken && p.right === node)) { node = p; continue; }
     }
-    if (ts.isJsxExpression(p)) return ts.isJsxAttribute(p.parent) && p.parent.name.getText(ctx.sf) === "style";
+    if (ts.isJsxExpression(p)) {
+      const attr = p.parent;
+      return ts.isJsxAttribute(attr) && attr.name.getText(ctx.sf) === "style" ? styleTarget(attr, ctx.sf) : false;
+    }
     if (ts.isVariableDeclaration(p) && p.initializer === node) return constReachesStyle(p, ctx, seen);
     return false;
   }
 }
 
-// A const lands on a style when a use of it in this file does. By symbol,
-// not by name: a parameter or an inner const of the same name is a different
-// binding, and matching names would let one binding's style "define" the
-// other's keys. Only a const — a `let` can be replaced before it is used.
+// A const lands where a use of it in this file does. By symbol, not by name:
+// a parameter or an inner const of the same name is a different binding, and
+// matching names would let one binding's style "define" the other's keys.
+// Only a const — a `let` can be replaced before it is used. A host element's
+// style anywhere settles it; a component's is kept in case nothing better
+// turns up, so a red can still say where the value went.
 function constReachesStyle(decl, ctx, seen) {
   if (!ts.isIdentifier(decl.name) || !(ts.getCombinedNodeFlags(decl) & ts.NodeFlags.Const)) return false;
   const symbol = ctx.checker.getSymbolAtLocation(decl.name);
   if (!symbol || seen.has(symbol)) return false;
   seen.add(symbol);
+  let found = false;
   for (const id of ctx.identifiers().get(decl.name.text) ?? []) {
     if (id === decl.name || ctx.checker.getSymbolAtLocation(id) !== symbol) continue;
-    if (landsOnStyle(id, ctx, seen)) return true;
+    const target = landsOnStyle(id, ctx, seen);
+    if (target === true) return true;
+    if (target && !found) found = target;
   }
-  return false;
+  return found;
+}
+
+// Whether a string visibly sits in a style: the value of a property of an
+// object that lands on one, through the wrappers, branches and joins a value
+// passes through on the way. It decides what a red SAYS and never whether it
+// is red: every `var(` in a string is a use (see the header).
+function visiblyStyled(literal, ctx) {
+  let node = literal;
+  for (;;) {
+    const p = node.parent;
+    if (!p) return false;
+    if (passesThrough(p) || ts.isBinaryExpression(p) || ts.isTemplateSpan(p) || ts.isTemplateExpression(p)
+      || (ts.isConditionalExpression(p) && p.condition !== node)) { node = p; continue; }
+    return ts.isPropertyAssignment(p) && p.initializer === node && landsOnStyle(p.parent, ctx) !== false;
+  }
 }
 
 const COMPILER_OPTIONS = {
@@ -244,18 +298,23 @@ function scanTs(sf, checker) {
     if (literal) {
       literals += 1;
       const start = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
-      for (const m of node.text.matchAll(VAR_USE)) {
+      const found = [...node.text.matchAll(VAR_USE)];
+      const styled = found.length > 0 && visiblyStyled(node, ctx);
+      for (const m of found) {
         // A name that runs to the literal's last character is not finished
         // there (see the header): it is a prefix of whatever gets built.
         const prefix = m.index + m[0].length === node.text.length;
-        uses.push({ name: m[1], prefix, file, line: start + lineAt(node.text, m.index) - 1 });
+        uses.push({ name: m[1], prefix, styled, file, line: start + lineAt(node.text, m.index) - 1 });
       }
     }
     if (ts.isPropertyAssignment(node)) {
       const name = propertyName(node.name);
       if (name && TOKEN.test(name)) {
-        if (!landsOnStyle(node.parent, ctx)) nearMisses.push({ name, kind: "key", file, line: lineOf(node) });
-        else if (reactRemoves(node.initializer)) nearMisses.push({ name, kind: "removed", file, line: lineOf(node) });
+        const target = landsOnStyle(node.parent, ctx);
+        const at = { name, file, line: lineOf(node) };
+        if (target === false) nearMisses.push({ ...at, kind: "key" });
+        else if (target !== true) nearMisses.push({ ...at, kind: "component", component: target });
+        else if (reactRemoves(node.initializer)) nearMisses.push({ ...at, kind: "removed" });
         else defs.push(name);
       }
     }
@@ -318,11 +377,12 @@ export function check(root) {
 
 const joinAnd = (xs) => (xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}`);
 
+// By file and line, so no message depends on the order of the directory walk.
+const byPlace = (a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.line - b.line);
+
 // "--x is set at a.ts:1 and b.tsx:3", or name by name when a prefix use
 // matched several: "--s-1 is set at a.ts:1 and --s-2 is set at a.ts:2".
-// Sorted by file and line, so the order does not depend on the directory walk.
 function setAt(nearMisses) {
-  const byPlace = (a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.line - b.line);
   const sorted = [...nearMisses].sort(byPlace);
   const at = (n) => `${path.relative(process.cwd(), n.file)}:${n.line}`;
   const names = new Set(sorted.map((n) => n.name));
@@ -356,6 +416,14 @@ function main() {
         + `if ${one ? "that object is" : "one of those objects is"} applied as a style some other way, `
         + "give the property a default in CSS");
     }
+    const components = u.nearMisses.filter((n) => n.kind === "component");
+    if (components.length) {
+      const tags = [...new Set([...components].sort(byPlace).map((n) => `\`<${n.component}>\``))];
+      const one = tags.length === 1;
+      parts.push(`${setAt(components)}, but reaches only the \`style\` of ${joinAnd(tags)}, `
+        + `${one ? "a component" : "components"} this gate cannot see into; `
+        + `if ${one ? "it passes" : "one of them passes"} \`style\` on to an element, give the property a default in CSS`);
+    }
     const removed = u.nearMisses.filter((n) => n.kind === "removed");
     if (removed.length) {
       parts.push(`${setAt(removed)}, but to a value that removes the property rather than setting it, `
@@ -364,6 +432,13 @@ function main() {
     if (calls.length) {
       parts.push(`${setAt(calls)}, by setProperty on something that is not \`….style\`; if ${calls.length === 1
         ? "that is" : "one of those is"} a style declaration, call it on \`….style\``);
+    }
+    // Every `var(` in a string is a use (see the header), so prose that names
+    // a token is red too. Only a string that is not visibly in a style is told
+    // so: on the likeliest red, a typo in a style, the sentence is noise.
+    if (!u.styled) {
+      parts.push(`if this string only mentions ${u.name} rather than applying it, write it without \`var(\`: `
+        + "every `var(` in a string is read as a use");
     }
     const hint = parts.length ? ` — ${parts.join("; and ")} (header of app/scripts/check-css-tokens.mjs)` : "";
     console.log(`FAIL: ${what} (${where}:${u.line})${hint}`);

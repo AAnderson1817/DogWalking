@@ -58,6 +58,9 @@ describe("gate 12: css tokens defined", () => {
     const css = `${CSS}.y {\n  margin: var(--gone);\n}\n`;
     const { code, out } = run(tree({ "styles/tokens.css": css, "screens/Ok.tsx": TSX }));
     expect(out).toMatch(/FAIL: --gone is used but never defined \(.*tokens\.css:4\)/);
+    // A stylesheet value is a style by construction, so its red never
+    // suggests the string might be prose.
+    expect(out).not.toContain("only mentions");
     expect(code).toBe(1);
   });
 
@@ -309,6 +312,96 @@ describe("gate 12: css tokens defined", () => {
     // The hint's remedy fits the call: "type it CSSProperties" cannot apply
     // to a setProperty, and a remedy that cannot apply is noise in a red.
     expect(out).toMatch(/--notstyle is set at .*S\.tsx:2, by setProperty on something that is not `….style`/);
+    expect(code).toBe(1);
+  });
+
+  it("does not count a key that reaches only a component's style: the component may drop it", () => {
+    // Codex on PR #95, round 6: React applies `style` to a host element and to
+    // nothing else. A component receives it as an ordinary prop, and whether
+    // it passes it on to an element is not visible from here, so its keys are
+    // reported, not counted. `motion.div` begins with a lowercase letter and is
+    // still a component: the rule reads the tag, not its text.
+    const src = [
+      "declare const Sink: (p: { style?: object }) => null;",
+      'export const S = () => <Sink style={{ "--sunk": "red" }} />;',
+      'const vars = { "--via": "1px" };',
+      "export const T = () => <Card style={vars} />;",
+      'export const U = () => <motion.div style={{ "--moved": "1px" }} />;',
+      'export const V = () => <p className="x" style={{ margin: "var(--sunk) var(--via) var(--moved)" }} />;',
+    ].join("\n");
+    const { code, out } = run(tree({ "styles/tokens.css": CSS, "screens/S.tsx": src }));
+    const line = (name: string) => out.split("\n").find((l) => l.startsWith(`FAIL: ${name} is used`)) ?? "";
+    expect(line("--sunk")).toMatch(
+      /— --sunk is set at .*S\.tsx:2, but reaches only the `style` of `<Sink>`, a component this gate cannot see into; if it passes `style` on to an element, give the property a default in CSS/,
+    );
+    expect(line("--via")).toMatch(/— --via is set at .*S\.tsx:3, but reaches only the `style` of `<Card>`/);
+    expect(line("--moved")).toMatch(/— --moved is set at .*S\.tsx:5, but reaches only the `style` of `<motion\.div>`/);
+    expect(code).toBe(1);
+  });
+
+  it("counts a host element's style, a dashed custom element included, whatever a component also gets", () => {
+    // A tag with a lowercase first letter or a dash is a string to every JSX
+    // transform, i.e. a host element, and React applies `style` to it. A const
+    // that reaches a component AND a host element counts, whichever is first.
+    const src = [
+      'export const A = () => <svg style={{ "--svg": "1px" }} />;',
+      'export const B = () => <my-widget style={{ "--custom-el": "1px" }} />;',
+      'export const C = () => <My-Widget style={{ "--dashed": "1px" }} />;',
+      'const both = { "--both": "1px" };',
+      "export const D = () => <Card style={both} />;",
+      "export const E = () => <div style={both} />;",
+      'export const F = () => <p className="x" style={{ margin: "var(--svg) var(--custom-el) var(--dashed) var(--both)" }} />;',
+    ].join("\n");
+    const { code, out } = run(tree({ "styles/tokens.css": CSS, "screens/Host.tsx": src }));
+    expect(out).toContain("PASS:");
+    expect(code).toBe(0);
+  });
+
+  it("reads a var( in any string as a use, and says how to mention one when the string is not a style", () => {
+    // Codex on PR #95, round 6, asked for strings in non-style contexts to be
+    // skipped. Declined: a value reaches a style through flows this cannot
+    // follow, and the only non-style attribute strings with var() in the tree
+    // are SVG stroke/fill, which ARE uses (next case). So a mention is red, and
+    // the red says the fix is one token: name the property without `var(`.
+    const src = [
+      "declare const on: boolean;",
+      'export const S = () => <p className="x" title="Use var(--prose) here" />;',
+      'export const T = () => <p className="x" title="Use the --named token here" />;',
+      'export const U = () => <ul style={{ paddingLeft: "var(--typo)" }} />;',
+      'export const V = () => <ul style={{ color: on ? "var(--branch)" : "red" }} />;',
+      'export const W = () => <Card style={{ margin: "var(--comp)" }} />;',
+      "export const X = (n: number) => <ul style={{ gap: `var(--tpl-${n})` }} />;",
+      'export const Y = (n: number) => <ul style={{ gap: "var(--cat-" + n + ")" }} />;',
+    ].join("\n");
+    const { code, out } = run(tree({ "styles/tokens.css": CSS, "screens/S.tsx": src }));
+    const line = (name: string) => out.split("\n").find((l) => l.startsWith(`FAIL: ${name} is used`)) ?? "";
+    expect(line("--prose")).toMatch(
+      /\(.*S\.tsx:2\) — if this string only mentions --prose rather than applying it, write it without `var\(`: every `var\(` in a string is read as a use/,
+    );
+    expect(out).not.toContain("--named");
+    // A string that visibly sits in a style gets an ordinary red: the hint is
+    // for prose, and on the likeliest red — a typo in a style — it is noise.
+    for (const name of ["--typo", "--branch", "--comp"]) {
+      expect(line(name)).toContain(`FAIL: ${name} is used but never defined`);
+      expect(line(name)).not.toContain("only mentions");
+    }
+    // A name built in a template or by `+` inside a style is still in a style.
+    for (const prefix of ["--tpl-", "--cat-"]) {
+      const built = out.split("\n").find((l) => l.includes(`none starts with ${prefix} `)) ?? "";
+      expect(built).toContain(`FAIL: var(${prefix}…) can name no defined custom property`);
+      expect(built).not.toContain("only mentions");
+    }
+    expect(code).toBe(1);
+  });
+
+  it("still reads a non-style attribute as a use: SVG stroke and fill apply tokens", () => {
+    // MapView's SVG fallback draws the route with `stroke="var(--…)"`, a
+    // presentation attribute rather than a `style`. Chromium applies it
+    // (measured), so it is a use, and skipping strings outside a style would
+    // stop checking the one place the route's colour is named.
+    const src = 'export const R = () => <path stroke="var(--route)" fill="var(--a)" />;';
+    const { code, out } = run(tree({ "styles/tokens.css": CSS, "components/Map.tsx": src }));
+    expect(out).toContain("FAIL: --route is used but never defined");
     expect(code).toBe(1);
   });
 
