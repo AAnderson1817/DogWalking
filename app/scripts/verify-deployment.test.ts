@@ -1,8 +1,9 @@
 import { execFile, execFileSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import ts from "typescript";
 import { afterEach, describe, expect, it } from "vitest";
 
 /**
@@ -304,5 +305,138 @@ describe("verify-deployment", () => {
     const { code, out } = await run(base);
     expect(code).not.toBe(0);
     expect(out).toContain("could not list deployed functions (HTTP 500)");
+  });
+});
+
+/**
+ * The script's safety argument, derived rather than enumerated.
+ *
+ * `verify-deployment.sh` runs against PRODUCTION, and it is read-only only
+ * because every probe is a GET that returns before any code can write: a
+ * `serveFunction` function refuses a non-POST before calling its handler.
+ * Two things break that, and each needs a bespoke `contract_for` case — a
+ * decision recorded in the script — before its first probe goes out:
+ *
+ *   - a function with its own `Deno.serve`, which answers whatever it likes
+ *     (`stripe-webhook`, `platform-webhook`);
+ *   - `serveFunction` widened with `methods`, which lets a GET reach the
+ *     handler (`unsubscribe`, whose GET is the one-click link).
+ *
+ * The script's header named them from memory — "every function but two" was
+ * "12 of the 13" once and wrong the next PR — so this reads the source for
+ * both doors and holds `contract_for` to exactly that set, in both directions:
+ * a missing case is a probe that may reach a handler; a case for a function
+ * that no longer needs one is an exception that outlived its reason
+ * (spec-drift audit).
+ */
+const FUNCTIONS_ROOT = join(REPO, "supabase", "functions");
+
+/** Function directories, by the predicate `scripts/repo-functions.sh` uses. */
+function functionDirs(root: string): string[] {
+  return readdirSync(root, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && !e.name.startsWith("_") && !e.name.startsWith("."))
+    .filter((e) => existsSync(join(root, e.name, "index.ts")))
+    .map((e) => e.name)
+    .sort();
+}
+
+function tsFiles(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) return tsFiles(p);
+    return e.name.endsWith(".ts") && !/(_test|\.test)\.ts$/.test(e.name) ? [p] : [];
+  });
+}
+
+/**
+ * name -> how a GET can reach its code, for every function where it can.
+ * A function with neither a `Deno.serve` nor a `serveFunction` call is
+ * reported too: the scan cannot see how it serves, which is not "safe".
+ */
+function getReachable(root: string): Map<string, string> {
+  const found = new Map<string, string>();
+  for (const name of functionDirs(root)) {
+    let serves = false;
+    for (const file of tsFiles(join(root, name))) {
+      const sf = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
+      const visit = (node: ts.Node) => {
+        if (ts.isCallExpression(node)) {
+          const callee = node.expression;
+          if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression)
+            && callee.expression.text === "Deno" && callee.name.text === "serve") {
+            serves = true;
+            found.set(name, "its own Deno.serve");
+          } else if (ts.isIdentifier(callee) && callee.text === "serveFunction") {
+            serves = true;
+            const options = node.arguments[1];
+            if (options && !ts.isObjectLiteralExpression(options)) {
+              found.set(name, "serveFunction options the scan cannot read");
+            } else if (options && options.properties.some((p) => ts.isSpreadAssignment(p))) {
+              found.set(name, "serveFunction options spread from elsewhere");
+            } else if (options && options.properties.some((p) => p.name?.getText(sf) === "methods")) {
+              found.set(name, "serveFunction widened with methods");
+            }
+          }
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(sf);
+    }
+    if (!serves) found.set(name, "neither Deno.serve nor serveFunction — the scan cannot see how it serves");
+  }
+  return found;
+}
+
+/** The bespoke cases in `contract_for`, and the names its stale-exception loop checks. */
+function scriptExceptions(): { arms: string[]; loop: string[] } {
+  const script = readFileSync(SCRIPT, "utf8");
+  const body = /contract_for\(\)\s*\{([\s\S]*?)\n\}/.exec(script)?.[1] ?? "";
+  const arms = [...body.matchAll(/^\s*([a-z0-9-]+)\)\s/gm)].map((m) => m[1]).sort();
+  const loop = (/^for special in ([^;]+); do$/m.exec(script)?.[1] ?? "").trim().split(/\s+/).filter(Boolean).sort();
+  return { arms, loop };
+}
+
+describe("verify-deployment's read-only argument is derived", () => {
+  it("gives every function a GET can reach its own contract, and no other function one", () => {
+    const reachable = getReachable(FUNCTIONS_ROOT);
+    const { arms } = scriptExceptions();
+    // Preconditions: the scan found the functions, and the script parser
+    // found its cases — either one empty would agree with anything.
+    expect(functionDirs(FUNCTIONS_ROOT).length, "no function directories found").toBeGreaterThan(10);
+    expect(arms.length, "contract_for has no bespoke cases — the parser is blind").toBeGreaterThan(0);
+    const missing = [...reachable].filter(([n]) => !arms.includes(n)).map(([n, why]) => `${n} (${why})`);
+    const stale = arms.filter((n) => !reachable.has(n));
+    expect(missing, `a GET can reach these, and contract_for has no case for them: ${missing.join(", ")}`).toEqual([]);
+    expect(stale, `contract_for excuses these, and a GET can no longer reach them: ${stale.join(", ")}`).toEqual([]);
+  });
+
+  it("checks exactly the contract_for cases for staleness — the same list twice, kept by hand", () => {
+    const { arms, loop } = scriptExceptions();
+    expect(loop).toEqual(arms);
+  });
+
+  it("finds each door, and does not mistake prose or the default for one", () => {
+    const root = mkdtempSync(join(tmpdir(), "doors-"));
+    const fn = (name: string, files: Record<string, string>) => {
+      mkdirSync(join(root, name), { recursive: true });
+      for (const [f, text] of Object.entries(files)) writeFileSync(join(root, name, f), text);
+    };
+    fn("bare", { "index.ts": "Deno.serve(async (req) => new Response(req.method));" });
+    fn("widened", { "index.ts": 'serveFunction(h, { methods: ["GET", "POST"] });' });
+    fn("default", { "index.ts": "// Deno.serve is not used here\nserveFunction(async (req) => handle(req));" });
+    fn("opaque", { "index.ts": "serveFunction(h, OPTIONS);" });
+    fn("spread", { "index.ts": "serveFunction(h, { ...OPTIONS });" });
+    fn("in-a-handler", { "index.ts": 'import "./server.ts";', "server.ts": "Deno.serve(() => new Response());" });
+    fn("unserved", { "index.ts": "export const x = 1;" });
+    fn("_lib", { "index.ts": "Deno.serve(() => new Response());" });
+    const reachable = Object.fromEntries(getReachable(root));
+    expect(reachable).toEqual({
+      bare: "its own Deno.serve",
+      widened: "serveFunction widened with methods",
+      opaque: "serveFunction options the scan cannot read",
+      spread: "serveFunction options spread from elsewhere",
+      "in-a-handler": "its own Deno.serve",
+      unserved: "neither Deno.serve nor serveFunction — the scan cannot see how it serves",
+    });
   });
 });
