@@ -171,8 +171,12 @@ jobs:
       # recurring fault into a slightly slower green.
       - name: Deploy all functions
         run: |
+          # Bundle server-side: GHCR rate limits blocked edge-runtime image
+          # pulls on two fresh runners even after all three retries (2026-09-23).
+          # The API path removes that Docker dependency; probes still verify
+          # every deployed function before the frontend release advances.
           for attempt in 1 2 3; do
-            if supabase functions deploy --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"; then
+            if supabase functions deploy --use-api --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"; then
               if [ "$attempt" -gt 1 ]; then
                 echo "::warning title=Function deploy needed $attempt attempts::The function deploy failed $((attempt - 1)) time(s) before succeeding. The bundler has died of a signal before (exit 135 on change-plan, 2026-08-29). If this recurs, stop treating it as noise."
               fi
@@ -419,3 +423,4 @@ jobs:
           add NOTIFY_FROM_EMAIL   "${{ secrets.NOTIFY_FROM_EMAIL }}"
           if [ ${#args[@]} -eq 0 ]; then echo "nothing to sync"; exit 0; fi
           supabase secrets set "${args[@]}" --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
+
