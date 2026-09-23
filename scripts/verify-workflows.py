@@ -6,7 +6,7 @@ Every rule here exists because the repository shipped the thing it forbids.
 The deploy workflows are the least-exercised code in the project — production
 has never run at all, and staging runs once per merge with nobody reading the
 log unless it goes red. So a mistake in their gating is both easy to make and
-slow to find. All three rules below were written after a real failure, and each
+slow to find. All four rules below were written after a real failure, and each
 one is checked against the shipped files by `verify-workflows.test.py`-style
 sabotage in the PR that introduced it.
 
@@ -29,6 +29,8 @@ WORKFLOWS = pathlib.Path(".github/workflows")
 STATUS_FUNCS = ("success(", "failure(", "cancelled(", "always(")
 
 failures: list[str] = []
+# Checkouts rule 4 inspected: its eyesight precondition (see main).
+chained_checkouts = 0
 
 
 def fail(workflow: str, job: str, message: str) -> None:
@@ -36,9 +38,15 @@ def fail(workflow: str, job: str, message: str) -> None:
 
 
 def check(path: pathlib.Path) -> None:
+    global chained_checkouts
     doc = yaml.safe_load(path.read_text())
     if not isinstance(doc, dict):
         return
+    # YAML 1.1 reads the bare key `on` as the boolean True.
+    triggers = doc.get(True, doc.get("on")) or {}
+    if isinstance(triggers, str):
+        triggers = [triggers]
+    chained = "workflow_run" in triggers
     jobs = doc.get("jobs") or {}
     for name, job in jobs.items():
         if not isinstance(job, dict):
@@ -112,6 +120,30 @@ def check(path: pathlib.Path) -> None:
                     "rejected as a non-fast-forward even when it is one",
                 )
 
+        # ── Rule 4: a chained run checks out the commit it follows ───────
+        # On a `workflow_run` event `github.sha` is the default branch's newest
+        # commit when the run STARTS, not the commit the upstream run tested or
+        # deployed. A checkout with no `ref` therefore runs whatever reached
+        # `main` in between — a smoke replay sourcing newer fixture helpers
+        # against an older deployment, or a posture check running a script the
+        # deploy never shipped. `deploy-staging.yml` pinned all five of its
+        # checkouts from the start; the two workflows chained after it did not
+        # (Codex, on #97, named one; the other is its sibling).
+        if chained:
+            for step in steps:
+                if not (isinstance(step, dict) and str(step.get("uses") or "").startswith("actions/checkout")):
+                    continue
+                chained_checkouts += 1
+                ref = str((step.get("with") or {}).get("ref") or "")
+                if "github.event.workflow_run.head_sha" not in ref:
+                    fail(
+                        path.name,
+                        name,
+                        "checks out without `ref: ${{ github.event.workflow_run.head_sha || github.sha }}` in a "
+                        "workflow_run-triggered workflow, so it runs main's newest commit rather than the one the "
+                        "upstream run tested or deployed",
+                    )
+
 
 def main() -> int:
     files = sorted(WORKFLOWS.glob("*.yml"))
@@ -121,12 +153,23 @@ def main() -> int:
     for path in files:
         check(path)
 
+    # Rule 4 passes vacuously if it sees no chained checkout — a trigger parse
+    # that stopped reading `on:` would report every checkout pinned. Seven
+    # exist today (five in deploy-staging.yml, one each in the two workflows
+    # chained after it); if they are ever all gone on purpose, this is the
+    # line to revisit.
+    if chained_checkouts == 0:
+        failures.append("rule 4 inspected no checkout in any workflow_run-triggered workflow — it checked nothing")
+
     if failures:
         for line in failures:
             print(f"::error::{line}")
         print(f"\nFAIL: {len(failures)} workflow gating problem(s)")
         return 1
-    print(f"PASS: {len(files)} workflows — no self-referential conditions, no dropped `needs` gate, no shallow push")
+    print(
+        f"PASS: {len(files)} workflows — no self-referential conditions, no dropped `needs` gate, "
+        f"no shallow push, no unpinned checkout after a workflow_run ({chained_checkouts} checked)"
+    )
     return 0
 
 

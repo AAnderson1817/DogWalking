@@ -71,8 +71,15 @@ jobs:
       # For scripts/staging-fixtures.sh, which both replays source: the
       # throwaway-fixture helpers each step used to define inline, where the
       # onboard replay kept the defects the claim replay had been cured of.
+      #
+      # `ref` pins the commit the deploy just shipped. On a workflow_run event
+      # `github.sha` is main's newest commit when this run starts, so without
+      # it a merge landing in between would replay newer helpers against the
+      # older deployment (Codex, on #97). The same expression as every
+      # checkout in deploy-staging.yml; `scripts/verify-workflows.py` rule 4.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
         with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
 
       - name: Fetch API keys (masked)
