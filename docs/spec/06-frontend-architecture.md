@@ -66,7 +66,11 @@ come from.
                    · access). The header carries Edit details — name, email and
                    phone — and each property on the Access tab carries its own
                    Edit. Both are Sheets inside this route, not new routes.
-                   Withheld from a purged client (spec 03, erasure).
+                   Withheld from a purged client (spec 03, erasure). The header
+                   also says when every email to the client's address is
+                   suppressed (0052; spec 04, `unsubscribe`), in a live region
+                   that is always mounted, since the text usually arrives just
+                   after the save that caused it.
 /walks/:id/live    WalkMode  (.walkmode theme)
 /vault             AccessVault
 /billing           BillingConsole (phase 07: renewals, failed payments, plan changes)

@@ -25,14 +25,7 @@ before you hit them.
 
 ## Open
 
-### 1. Tell the operator when an edited address is already suppressed
-Also recorded in spec 04. Editing a client's address to one already in
-`email_suppressions` makes every future client-facing email skip
-permanently and terminally, with no signal in the UI. Whether to surface it
-— and how, without exposing one operator's suppression list to another — is
-a product question.
-
-### 2. The pinned Supabase CLI is behind, and `db push` warns every deploy
+### 1. The pinned Supabase CLI is behind, and `db push` warns every deploy
 Read off the `24c74bd` staging deploy (run 33537033230, `Apply migrations`),
 not recalled:
 
@@ -67,7 +60,7 @@ Not urgent: nothing is broken, and the cost of being wrong here is a deploy
 that fails at `link` or `push`, which is exactly the failure 2.109.1 was
 pinned to avoid.
 
-### 3. Spec-drift audit follow-ups (two PRs left, in this order)
+### 2. Spec-drift audit follow-ups (two PRs left, in this order)
 Found by the audit recorded as `docs(spec-drift)`; each was verified against
 HEAD and none is fixed by that PR, which corrected documents only.
 
@@ -104,7 +97,7 @@ HEAD and none is fixed by that PR, which corrected documents only.
   and `|| true` cleanup the claim-replay step was cured of; dead today only
   because its address is run-scoped.
 
-**PR B — migration `0052`, invariant 5's REVOKE half** (money/trust path:
+**PR B — the next migration, invariant 5's REVOKE half** (money/trust path:
 written safety argument, adversarial self-review, red-first smoke):
 `fn_assert_plan_change_intent_tenant`, `fn_assert_tenant_consistency`,
 `fn_cancel_paused_walks` and `fn_refund_cancelled_debit` carry `=X` (PUBLIC)
@@ -117,7 +110,34 @@ smoke block asserting no `prosecdef` function in `public` grants EXECUTE to
 `scripts/gen-definer-catalog.py` read `revoke` too and render an unrevoked
 function as `PUBLIC` rather than **none**.
 
+### 3. Let the address owner turn email back on
+`0052` tells the operator when a client's address has unsubscribed, and the
+notice deliberately promises no way back, because none exists: a suppression
+is permanent, an operator must never be able to lift one (0038), and the
+address owner has no path either. So a client who unsubscribed from one
+walker's mail and later hires another gets no email from anyone, forever.
+
+The one honest proof of ownership available is a claimed client whose login
+email — confirmed by GoTrue — equals the suppressed address. A definer
+function callable only by that client, deleting only the platform-wide rows
+for `lower(auth.users.email)` and only when `email_confirmed_at` is set, would
+let them opt back in from the portal without anything ever emailing a
+suppressed address. Product surface rather than a fix, which is why it is its
+own item; the trust questions (what a shared login proves, whether to log
+lifts) want a written argument before code.
+
 ## Done
+
+- **Tell the operator when an edited address is already suppressed** —
+  migration `0052`'s `fn_client_email_suppressed`, answering for the calling
+  operator's own client only, and a notice in ClientDetail's header. The
+  product question the item left open — how, without exposing one operator's
+  suppression list to another — is answered in spec 03: a platform-wide row is
+  the address owner's instruction to everyone and nobody's list, an
+  operator-scoped row is consulted only for its own operator, and one boolean
+  leaves the function. It asks the sender's own `fn_email_suppressed` for every
+  type, so the notice and the skip cannot disagree. See the
+  `feat(email-suppressed)` status-log entry.
 
 - **The walk-cost duplication and the last two `index.ts`-only functions** —
   `api.ts`'s `walkCost()` wrapper deleted (zero importers), the arithmetic

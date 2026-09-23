@@ -5949,6 +5949,138 @@ begin
   raise notice 'the delete rules the erasure design rests on are RESTRICT (spec 01/03): OK';
 end $$;
 
+-- ── 0052 · the operator is told when a client's address has opted out ─────
+-- A suppressed address makes every client-facing email skip,
+-- terminally, and the skip is recorded on a notification row the operator
+-- cannot read (`notifications_operator_select` admits only operator-facing
+-- rows). So the answer has to come from a definer function — and it has to be
+-- the SENDER's answer, scoped so that no operator learns anything about
+-- another operator's own suppressions or another operator's clients.
+do $$
+declare
+  v_op1  uuid := '99999999-0000-4000-a000-000000000001';
+  v_op2  uuid := '99999999-0000-4000-a000-000000000002';
+  v_user uuid := '99999999-0000-4000-a000-000000000003';  -- client A's login
+  v_a    uuid := '99999999-0000-4000-c000-00000000000a';  -- op1, claimed by v_user
+  v_a2   uuid := '99999999-0000-4000-c000-0000000000a2';  -- op1, unclaimed
+  v_f2   uuid := '99999999-0000-4000-c000-0000000000f2';  -- op2
+  r record;
+  v_got boolean;
+  v_sender boolean;
+  v_def boolean;
+  v_cfg text[];
+begin
+  reset session authorization;
+
+  -- A bare call to a missing function aborts the suite with Postgres's own
+  -- message, which reads as a broken suite rather than a broken rule.
+  if to_regprocedure('fn_client_email_suppressed(uuid)') is null then
+    raise exception 'FAIL: fn_client_email_suppressed(uuid) does not exist — the operator has no way to learn a client''s address opted out (0052)';
+  end if;
+
+  -- Invariant 5: definer, pinned search_path.
+  select p.prosecdef, p.proconfig into v_def, v_cfg
+    from pg_proc p where p.oid = 'fn_client_email_suppressed(uuid)'::regprocedure;
+  if not v_def or not ('search_path=public' = any(coalesce(v_cfg, '{}'))) then
+    raise exception 'FAIL: fn_client_email_suppressed is not SECURITY DEFINER with search_path=public (invariant 5)';
+  end if;
+
+  -- One row of each kind the sender distinguishes. Addresses unique to this
+  -- block, so nothing an earlier block left behind can satisfy an assertion.
+  insert into email_suppressions (email, operator_id, notification_type, reason) values
+    ('smoke-0052-global@example.test', null,  null,            'smoke: one-click'),
+    ('smoke-0052-op1@example.test',    v_op1, null,            'smoke: op1 only'),
+    ('smoke-0052-op2@example.test',    v_op2, null,            'smoke: op2 only'),
+    ('smoke-0052-typed@example.test',  null,  'walk_complete', 'smoke: one type');
+
+  for r in
+    select * from (values
+      -- client, email written to it, who asks, the owner asks?, expected, what it proves
+      (v_a2, 'smoke-0052-global@example.test'::text, v_op1, true,  true,
+       'a platform-wide opt-out on the operator''s own client'),
+      (v_a2, 'Smoke-0052-Global@Example.TEST',       v_op1, true,  true,
+       'the same opt-out with the address typed in another case (the sender lowercases)'),
+      (v_a2, 'smoke-0052-op1@example.test',          v_op1, true,  true,
+       'a suppression scoped to this operator'),
+      (v_a2, 'smoke-0052-op2@example.test',          v_op1, true,  false,
+       'another operator''s own suppression (it binds only them, and op1''s mail still goes)'),
+      (v_f2, 'smoke-0052-op2@example.test',          v_op2, true,  true,
+       'that same suppression, asked by the operator it belongs to'),
+      (v_a2, 'smoke-0052-typed@example.test',        v_op1, true,  false,
+       'a one-type preference, which leaves every other email deliverable'),
+      (v_a2, 'smoke-0052-clean@example.test',        v_op1, true,  false,
+       'an address nobody suppressed'),
+      (v_a2, null,                                   v_op1, true,  false,
+       'a client with no address'),
+      (v_a2, 'smoke-0052-global@example.test',       v_op2, false, false,
+       'another operator asking about op1''s client'),
+      (v_a,  'smoke-0052-global@example.test',       v_user, false, false,
+       'a client persona asking about their own row (the contract is the operator''s)')
+    ) as t(client, email, asker, owner_asks, want, label)
+  loop
+    reset session authorization;
+    update clients set email = r.email where id = r.client;
+
+    -- The sender's own answer for this row: every type, the way
+    -- send-notification asks it. Computed as postgres, since the function is
+    -- service-role only.
+    select coalesce(bool_and(fn_email_suppressed(c.email, c.operator_id, ty)), false)
+      into v_sender
+      from clients c
+     cross join unnest(enum_range(null::notification_type)) as ty
+     where c.id = r.client and c.email is not null;
+
+    perform set_config('request.jwt.claims',
+      format('{"sub":"%s","role":"authenticated"}', r.asker)::text, true);
+    set local session authorization authenticated;
+    begin
+      v_got := fn_client_email_suppressed(r.client);
+    exception when others then
+      raise exception 'FAIL: fn_client_email_suppressed raised "%" for %, where it must answer (0052)',
+        sqlerrm, r.label;
+    end;
+    reset session authorization;
+
+    if v_got is distinct from r.want then
+      raise exception 'FAIL: % — expected %, got % (0052)', r.label, r.want, v_got;
+    end if;
+    -- The notice and the skip must agree whenever the owner asks. A rewrite
+    -- that restates the sender's predicate instead of asking it is how the two
+    -- would drift (a missing lower(), a dropped operator scope).
+    if r.owner_asks and v_got is distinct from v_sender then
+      raise exception 'FAIL: the notice says % but the sender would % every email — % (0052)',
+        v_got, case when v_sender then 'skip' else 'not skip' end, r.label;
+    end if;
+  end loop;
+
+  -- An id that is nobody's client answers like "yours and deliverable":
+  -- no existence oracle over client ids, and nothing to raise.
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op1)::text, true);
+  set local session authorization authenticated;
+  if fn_client_email_suppressed('00000000-0000-4000-8000-000000000000') then
+    reset session authorization;
+    raise exception 'FAIL: an unknown client id reported a suppressed address (0052)';
+  end if;
+  reset session authorization;
+
+  -- Not callable without a session (invariant 5: REVOKE from PUBLIC and anon).
+  perform set_config('request.jwt.claims', '{"role":"anon"}', true);
+  set local session authorization anon;
+  begin
+    perform fn_client_email_suppressed(v_a2);
+    raise exception 'FAIL: anon can execute fn_client_email_suppressed (invariant 5) (0052)';
+  exception
+    when insufficient_privilege then null;
+    when others then
+      if sqlerrm like 'FAIL:%' then raise; end if;
+      raise exception 'FAIL: the anon call failed for the wrong reason: % (0052)', sqlerrm;
+  end;
+  reset session authorization;
+
+  raise notice 'a client''s suppressed address is reported to its operator only, as the sender sees it (0052): OK';
+end $$;
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;

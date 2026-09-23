@@ -44,6 +44,9 @@ vi.mock("@/lib/api", async () => {
   createSetupCheckout: vi.fn(),
   createTopupCheckout: vi.fn(),
   updateClient: vi.fn(),
+  // 0052. Not under test here; the suppressed-address notice
+  // has its own file.
+  clientEmailSuppressed: async () => false,
   };
 });
 vi.mock("@/lib/auth-context", () => ({

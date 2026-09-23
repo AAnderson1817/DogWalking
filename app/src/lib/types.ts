@@ -1288,6 +1288,12 @@ export type Database = {
         };
         Returns: string;
       };
+      fn_client_email_suppressed: {
+        Args: {
+          p_client: string;
+        };
+        Returns: boolean;
+      };
       fn_credential_log_block_mutation: {
         Args: Record<string, never>;
         Returns: unknown;

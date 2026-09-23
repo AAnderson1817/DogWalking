@@ -665,6 +665,22 @@ export async function revokeInvite(clientId: string): Promise<void> {
   if (error) throw new Error(error.message);
 }
 
+/**
+ * Whether every email to this client's current address is suppressed — its
+ * owner unsubscribed (0038) — so `send-notification` skips the client's walk
+ * updates and billing notices. The skip is recorded on a notification row the
+ * operator cannot read, so without this the operator never finds out
+ * (0052).
+ *
+ * Answers only about the calling operator's OWN client and is false for
+ * anyone else's, so it is not a lookup over the suppression list.
+ */
+export async function clientEmailSuppressed(clientId: string): Promise<boolean> {
+  const { data, error } = await supabase.rpc("fn_client_email_suppressed", { p_client: clientId });
+  if (error) throw new Error(error.message);
+  return data === true;
+}
+
 /** The one place the claim URL is built, so Roster and ClientDetail agree. */
 export function inviteUrlFor(token: string): string {
   return `${window.location.origin}/claim/${token}`;

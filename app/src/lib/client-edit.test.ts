@@ -8,6 +8,7 @@ import {
   propertyFormError,
   propertyFormOf,
   propertyPatch,
+  suppressedEmailNotice,
   type ClientEditable,
   type PropertyEditable,
 } from "./client-edit";
@@ -178,6 +179,35 @@ describe("isEditable", () => {
     // database stops an edit re-personalising an erasure done on request.
     expect(isEditable(client({ purged_at: "2026-08-01T00:00:00Z" }))).toBe(false);
     expect(isEditable(client())).toBe(true);
+  });
+});
+
+describe("suppressedEmailNotice", () => {
+  it("says what stopped, for whom, and the likeliest fix", () => {
+    const text = suppressedEmailNotice(client());
+    expect(text).toMatch(/^Email to this address is turned off/);
+    expect(text).toMatch(/Amelia Hart won't get walk updates or billing notices by email\./);
+    expect(text).toMatch(/If the address has a typo, fix it with Edit details\.$/);
+  });
+
+  it("points a client who has claimed their account at the portal, and only them", () => {
+    // The notification rows are written whatever happens to the email, and the
+    // portal inbox reads them — but only for a client with a login. Telling
+    // the operator an unclaimed client can "still see them" would be false.
+    expect(suppressedEmailNotice(client({ auth_user_id: "u-1" })))
+      .toMatch(/by email, but they'll still see them in their Sanpo portal\./);
+    expect(suppressedEmailNotice(client())).not.toMatch(/portal/);
+  });
+
+  it("names no business, no date, and no way to turn email back on", () => {
+    // One boolean comes back from the database, deliberately: the suppression
+    // is usually platform-wide and nobody's list. And no path to re-enable
+    // exists — an operator must never lift one — so the copy promises none.
+    for (const c of [client(), client({ auth_user_id: "u-1" })]) {
+      const text = suppressedEmailNotice(c);
+      expect(text).not.toMatch(/turn (it|email) back on|re-?subscribe|contact support/i);
+      expect(text).not.toMatch(/\d/);
+    }
   });
 });
 
