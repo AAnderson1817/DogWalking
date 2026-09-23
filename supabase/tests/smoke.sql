@@ -6165,7 +6165,11 @@ end $$;
 --     and so may write this column whatever the target is spelled. Flagged
 --     whatever the target, the conservative direction: no function in the
 --     tree inserts positionally, and the remedy is to name the columns.
---     `default values` writes each column's default and is not flagged;
+--     `default values` writes each column's default and is not flagged,
+--     however it is spelled: a comment between the two words is whitespace
+--     to PostgreSQL, so the raw reading treats it as whitespace too (Codex,
+--     the sixteenth round — its lookbehind saw `*/`, flagged `DEFAULT /* …
+--     */ VALUES`, and a match in either reading wins);
 --   - `copy … from`, which loads rows the same way. Nothing here does that.
 --
 -- Each body is read twice, and a match in either reading flags it (Codex,
@@ -6196,6 +6200,14 @@ end $$;
 -- function invisible whatever it wrote. The text read is prosrc followed by
 -- `pg_get_function_sqlbody`.
 --
+-- The price of the raw reading, pinned in the self-test: it reads comment and
+-- literal TEXT as code — that is how it sees an EXECUTE'd statement — so
+-- prose that spells an arm is flagged too (`-- keep a copy from …`, an error
+-- message saying `insert into … with …`). That is the loud direction, and
+-- the red names the reading that caught each function: a flag only raw
+-- raised says the match is in comment or literal text, where an EXECUTE'd
+-- statement is a real write and prose is not — reword it.
+--
 -- Still outside the rule: SQL assembled at run time.
 do $$
 declare
@@ -6204,7 +6216,7 @@ declare
   v_re constant text :=
        '\mupdate\M[^;]*\mset\M[^;]*\mcredit_balance\M'
     || '|\minsert\M\s+(?:\minto\M[^(;]*)?\((?:[^();]|\([^();]*\))*?\mcredit_balance\M'
-    || '|\minsert\M\s+(?:\minto\M[^(;]*?)?(?:\(\s*)*\m(?:(?<!\mdefault\s+)values|select|with|table|overriding)\M'
+    || '|\minsert\M\s+(?:\minto\M[^(;]*?)?(?:\(\s*)*\m(?:(?<!\mdefault(?:\s|--[^\n]*\n|/\*(?:[^*]|\*+[^*/])*\*+/)+)values|select|with|table|overriding)\M'
     || '|\mcopy\M[^;]*\mfrom\M';
   -- A quoted identifier (group 1, kept); an escape string, whose E is not the
   -- tail of an identifier (the lexer's rule: letters, digits, `_`, `$` and
@@ -6220,9 +6232,14 @@ declare
   v_tables text;
   r record;
 begin
+  -- Which reading matched: 'code' when the skeleton does (the write is in the
+  -- code itself), 'text' when only raw does (it is in comment or literal
+  -- text), null when neither. A match in either flags the body; the name is
+  -- what the red says, so a flag only raw raised points at the text.
   create function pg_temp.fn_inv1_writes(p_fn oid, p_re text, p_lex text)
-  returns boolean language sql stable as $f$
-    select s ~* p_re or regexp_replace(s, p_lex, '\1 ', 'g') ~* p_re
+  returns text language sql stable as $f$
+    select case when regexp_replace(s, p_lex, '\1 ', 'g') ~* p_re then 'code'
+                when s ~* p_re then 'text' end
       from (select p.prosrc || E'\n' || coalesce(pg_get_function_sqlbody(p.oid), '') as s
               from pg_proc p where p.oid = p_fn) b
   $f$;
@@ -6248,20 +6265,22 @@ begin
   -- legitimate writer, or a pattern that matches nothing passes the check.
   if not exists (select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
                   where n.nspname = 'public' and p.proname = 'fn_ledger_apply'
-                    and pg_temp.fn_inv1_writes(p.oid, v_re, v_lex)) then
-    raise exception 'FAIL: the invariant-1 pattern no longer matches fn_ledger_apply itself — it is blind';
+                    and pg_temp.fn_inv1_writes(p.oid, v_re, v_lex) = 'code') then
+    raise exception 'FAIL: the invariant-1 pattern no longer matches fn_ledger_apply''s own write — it is blind';
   end if;
 
-  select string_agg(p.proname, ', ' order by p.proname) into v_offenders
+  select string_agg(p.proname || case pg_temp.fn_inv1_writes(p.oid, v_re, v_lex)
+           when 'text' then ' (matched only in comment or string-literal text: an EXECUTE''d statement there is a real write, and prose that spells one is flagged too — reword it)'
+           else '' end, ', ' order by p.proname) into v_offenders
     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
    where n.nspname = 'public'
      and p.proname <> 'fn_ledger_apply'
-     and pg_temp.fn_inv1_writes(p.oid, v_re, v_lex);
+     and pg_temp.fn_inv1_writes(p.oid, v_re, v_lex) is not null;
   if v_offenders is not null then
     raise exception 'FAIL: invariant 1 — credit_balance written outside fn_ledger_apply by: %', v_offenders;
   end if;
 
-  -- The self-test: forty-four bodies it must flag and fourteen it must not, plus a
+  -- The self-test: forty-nine bodies it must flag and eighteen it must not, plus a
   -- SQL-standard body after the loop. PL/pgSQL resolves table names at
   -- execution, so these bodies need nothing to exist; they are dropped before
   -- the block ends and the suite rolls back regardless.
@@ -6315,6 +6334,12 @@ begin
       -- Raw is still read, and this is why: the skeleton blanks a literal, and
       -- an EXECUTE'd literal is a statement.
       ('execute of a literal', 'execute ''update clients set credit_balance = 0 where id = $1'' using p;', true),
+      -- And its price, pinned: raw reads comment and literal TEXT as code — that
+      -- is how it sees an EXECUTE'd statement — so prose that spells an arm is
+      -- flagged too. The red names the reading that caught it (below).
+      ('prose in a comment inside an update (the price)', e'update clients set plan_id = null -- credit_balance moves only through fn_ledger_apply\n where id = p;', true),
+      ('prose in a comment spelling copy from (the price)', e'-- keep a copy from the template\n perform 1;', true),
+      ('an error message that spells an insert (the price)', 'raise exception ''cannot insert into the ledger with a null amount'';', true),
       -- MERGE is the one statement that inserts rows and takes a parenthesised
       -- ONLY target, and its insert clause names no target.
       ('merge into only (clients), then insert columns', 'merge into only (clients) c using (select p as id) s on c.id = s.id when not matched then insert (id, credit_balance) values (s.id, 10);', true),
@@ -6335,6 +6360,19 @@ begin
       ('a read at the top of a values tuple', 'insert into credit_ledger (client_id, amount) values (p, v.credit_balance);', false),
       ('a read in a source select', 'insert into credit_ledger (client_id, amount) select id, credit_balance from clients where id = p;', false),
       ('default values', e'insert into job_runs default\n   values;', false),
+      -- PostgreSQL reads a comment as whitespace, so a comment between the two
+      -- words is still DEFAULT VALUES (Codex, the sixteenth round): the raw
+      -- reading has to agree, or its match wins the OR.
+      ('default values, a block comment between', 'insert into job_runs default /* use column defaults */ values;', false),
+      ('default values, a line comment between', e'insert into job_runs default -- every column\n  values;', false),
+      ('default values, a comment and no space', 'insert into job_runs default/**/values;', false),
+      ('default values, two comments between', 'insert into job_runs default /* a */ /* b */ values;', false),
+      -- The mirror: a comment whose TEXT ends in `default` is not the keyword.
+      -- Raw reads it as `default` (its lookbehind cannot tell) and excludes the
+      -- insert; the skeleton has no comment left and catches it, which is the
+      -- OR doing its job.
+      ('positional values after a comment ending in default', e'insert into clients -- default\n values (p, 10);', true),
+      ('positional values after default inside a block comment', 'insert into clients /* use default */ values (p, 10);', true),
       -- A column list is not a query, however many parentheses follow it.
       ('a column list, then a doubly parenthesised select', 'insert into credit_ledger (client_id, amount) ((select id, 1 from clients));', false),
       -- The skeleton keeps every real statement boundary: a semicolon a
@@ -6346,7 +6384,7 @@ begin
     execute format(
       'create function public.fn_inv1_probe(p uuid) returns void language plpgsql as $b$ declare v int; begin %s end $b$',
       r.body);
-    if (select pg_temp.fn_inv1_writes(p.oid, v_re, v_lex) from pg_proc p
+    if (select pg_temp.fn_inv1_writes(p.oid, v_re, v_lex) is not null from pg_proc p
          where p.proname = 'fn_inv1_probe' and p.pronamespace = 'public'::regnamespace) is distinct from r.flagged then
       raise exception 'FAIL: the invariant-1 pattern % the % form: %',
         case when r.flagged then 'misses' else 'wrongly flags' end, r.label, r.body;
@@ -6359,10 +6397,30 @@ begin
   -- because PL/pgSQL would end the statement at the body's own semicolon.
   execute 'create function public.fn_inv1_probe_atomic() returns void language sql '
        || 'begin atomic update clients set credit_balance = 0 where false; end';
-  if not pg_temp.fn_inv1_writes('public.fn_inv1_probe_atomic()'::regprocedure, v_re, v_lex) then
+  if pg_temp.fn_inv1_writes('public.fn_inv1_probe_atomic()'::regprocedure, v_re, v_lex) is null then
     raise exception 'FAIL: the invariant-1 pattern misses a SQL-standard body, whose prosrc is empty';
   end if;
   drop function public.fn_inv1_probe_atomic();
+
+  -- Which reading the red names, since the offender message above depends on
+  -- it: a write in the code is 'code'; a match only raw makes — an EXECUTE'd
+  -- literal, or prose — is 'text'.
+  for r in
+    select * from (values
+      ('a write in the code', 'update clients set credit_balance = 0 where id = p;', 'code'),
+      ('an EXECUTE''d literal', 'execute ''update clients set credit_balance = 0 where id = $1'' using p;', 'text'),
+      ('prose in a comment', e'update clients set plan_id = null -- credit_balance moves only through fn_ledger_apply\n where id = p;', 'text')
+    ) as t(label, body, reading)
+  loop
+    execute format(
+      'create function public.fn_inv1_probe(p uuid) returns void language plpgsql as $b$ declare v int; begin %s end $b$',
+      r.body);
+    if (select pg_temp.fn_inv1_writes(p.oid, v_re, v_lex) from pg_proc p
+         where p.proname = 'fn_inv1_probe' and p.pronamespace = 'public'::regnamespace) is distinct from r.reading then
+      raise exception 'FAIL: the invariant-1 red would name the wrong reading for % (expected %): %', r.label, r.reading, r.body;
+    end if;
+    drop function public.fn_inv1_probe(uuid);
+  end loop;
 
   raise notice 'invariant 1: every statement that can write credit_balance is fn_ledger_apply''s, and only clients has the column: OK';
 end $$;

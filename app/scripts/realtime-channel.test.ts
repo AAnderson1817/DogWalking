@@ -32,7 +32,8 @@ import { describe, expect, it } from "vitest";
  *     supabase.channel`), a call through a member it cannot read
  *     (`supabase[name](…)`), and a member taken by destructuring (`const {
  *     channel } = supabase`, or under a key it cannot read), which are how a
- *     call leaves the scan's sight.
+ *     call leaves the scan's sight. Every node is read through parentheses,
+ *     `as`, `satisfies`, `<T>x` and `x!`, which run as what they wrap.
  *   - server: the edge functions publish through `_lib/broadcast.ts` only,
  *     whose `private: true` is pinned by `broadcast_test.ts`. So no function
  *     may open a channel, and no file but that one may name the broadcast
@@ -70,8 +71,34 @@ function parse(file: string, text: string): ts.SourceFile {
 /** A name only running the code would tell: a computed key, `obj[expr]`. */
 const UNREADABLE = Symbol("unreadable");
 
-const literalText = (e: ts.Expression): string | undefined =>
-  ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e) || ts.isNumericLiteral(e) ? e.text : undefined;
+/**
+ * Parentheses, `as`, `satisfies`, `<T>x` and `x!`: nodes that hand their
+ * value on unchanged at run time. Every place the scan tests a node's kind
+ * reads through them (Codex, on #97: `({ config: { private: true } } as
+ * const)` was options the scan could not read, and the channel was private).
+ */
+type Wrapper = ts.ParenthesizedExpression | ts.AsExpression | ts.SatisfiesExpression | ts.TypeAssertion
+  | ts.NonNullExpression;
+const isWrapper = (n: ts.Node): n is Wrapper =>
+  ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isSatisfiesExpression(n)
+  || ts.isTypeAssertionExpression(n) || ts.isNonNullExpression(n);
+
+/** What an expression is underneath every wrapper. */
+function unwrap(e: ts.Expression): ts.Expression {
+  while (isWrapper(e)) e = e.expression;
+  return e;
+}
+
+/** The outermost wrapper around `e`: what a call or an access actually holds. */
+function outermost(e: ts.Expression): ts.Expression {
+  while (isWrapper(e.parent) && e.parent.expression === e) e = e.parent;
+  return e;
+}
+
+const literalText = (e: ts.Expression): string | undefined => {
+  const u = unwrap(e);
+  return ts.isStringLiteral(u) || ts.isNoSubstitutionTemplateLiteral(u) || ts.isNumericLiteral(u) ? u.text : undefined;
+};
 
 /** The name a key spells however it is spelled — `a`, `"a"`, `["a"]`, `` [`a`] `` — or UNREADABLE. */
 function keyOf(name: ts.PropertyName): string | typeof UNREADABLE {
@@ -104,17 +131,22 @@ function member(obj: ts.ObjectLiteralExpression, name: string): Member {
 
 /** Why this call's options do not make the channel private, or null if they do. */
 function privateProblem(call: ts.CallExpression): string | null {
-  const options = call.arguments[1];
+  // A spread can put the options anywhere in the list, so "no options" would
+  // misdescribe it: the red names what the scan could not see.
+  if (call.arguments.some(ts.isSpreadElement)) return "arguments spread from elsewhere, which the scan cannot read";
+  const options = call.arguments[1] && unwrap(call.arguments[1]);
   if (!options) return "no options, so `private` defaults to false";
   if (!ts.isObjectLiteralExpression(options)) return "options the scan cannot read";
   const config = member(options, "config");
   if ("unknown" in config) return `options ${config.unknown}`;
   if ("absent" in config) return "no `config`, so `private` defaults to false";
-  if (!ts.isObjectLiteralExpression(config.value)) return "a `config` the scan cannot read";
-  const flag = member(config.value, "private");
+  const configValue = unwrap(config.value);
+  if (!ts.isObjectLiteralExpression(configValue)) return "a `config` the scan cannot read";
+  const flag = member(configValue, "private");
   if ("unknown" in flag) return `a \`config\` ${flag.unknown}`;
   if ("absent" in flag) return "no `private`, which defaults to false";
-  if (flag.value.kind !== ts.SyntaxKind.TrueKeyword) return `\`private: ${flag.value.getText()}\``;
+  const value = unwrap(flag.value);
+  if (value.kind !== ts.SyntaxKind.TrueKeyword) return `\`private: ${value.getText()}\``;
   return null;
 }
 
@@ -183,7 +215,10 @@ function channelSites(file: string, text: string): Site[] {
     }
     if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
       const name = memberOf(node);
-      const call = ts.isCallExpression(node.parent) && node.parent.expression === node ? node.parent : undefined;
+      // The call holds the access through any wrapper — `(supabase.channel)(t, o)`,
+      // `supabase.channel!(t, o)` — and each keeps `this`, so it is the channel call.
+      const held = outermost(node);
+      const call = ts.isCallExpression(held.parent) && held.parent.expression === held ? held.parent : undefined;
       const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
       if (name === "channel" && call) {
         sites.push({ file, line, problem: privateProblem(call) });
@@ -271,8 +306,7 @@ function foldOf(node: ts.Node, checker: ts.TypeChecker, path: Set<ts.Node> = new
     combiners: [...a.combiners, ...b.combiners],
   });
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return piece(node.text);
-  if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node)
-    || ts.isNonNullExpression(node)) return foldOf(node.expression, checker, path);
+  if (isWrapper(node)) return foldOf(node.expression, checker, path);
   if (ts.isConditionalExpression(node)) {
     const a = foldOf(node.whenTrue, checker, path);
     const b = foldOf(node.whenFalse, checker, path);
@@ -516,6 +550,44 @@ describe("what the channel scan refuses and admits", () => {
     expect(one("supabase.channel(t, { ...base, [key]: x, config: { private: true } });")).toBe("");
     expect(one('supabase.channel(t, { "config": { ["private"]: true } });')).toBe("");
     expect(one("supabase.channel(t, { [`config`]: { [`private`]: true } });")).toBe("");
+  });
+
+  it("reads through parentheses, assertions and non-null wherever it reads a node (Codex, on #97)", () => {
+    const one = (call: string) => client({ [THE_CHANNEL_FILE]: call }).join("\n");
+    // The shape it refused: a private channel whose options are wrapped. `as
+    // const` and the rest are erased at run time, so the channel is private.
+    expect(one("supabase.channel(t, ({ config: { private: true } } as const));")).toBe("");
+    // And every other place the scan tests a node's kind.
+    expect(one("supabase.channel(t, { config: { private: true } } satisfies Options);")).toBe("");
+    expect(one("supabase.channel(t, <Options>{ config: { private: true } });")).toBe("");
+    expect(one("supabase.channel(t, { config: ({ private: true }) });")).toBe("");
+    expect(one("supabase.channel(t, { config: { private: true as const } });")).toBe("");
+    expect(one("supabase.channel(t, { config: { private: (true) } });")).toBe("");
+    expect(one('supabase.channel(t, { ["config" as const]: { [("private")]: true } });')).toBe("");
+    expect(one('supabase[("channel")](t, { config: { private: true } });')).toBe("");
+    expect(one("(supabase.channel)(t, { config: { private: true } });")).toBe("");
+    expect(one("supabase.channel!(t, { config: { private: true } });")).toBe("");
+    expect(one("(supabase.channel as Open)(t, { config: { private: true } });")).toBe("");
+    // A wrapper is read through, not trusted: what it wraps is still judged,
+    // and a call through a wrapped callee is still counted.
+    expect(one("supabase.channel(t, ({ config: { private: false } } as const));")).toMatch(/`private: false`/);
+    expect(one("supabase.channel(t, { config: { private: isPrivate as boolean } });")).toMatch(/`private: isPrivate`/);
+    expect(one("supabase.channel(t, (opts as Options));")).toMatch(/options the scan cannot read/);
+    expect(one("(supabase.channel)(t);")).toMatch(/no options/);
+    expect(one('supabase[("channel")](t);')).toMatch(/no options/);
+    expect(one(`${PRIVATE}\nsupabase.channel!(t);`)).toMatch(/exactly one channel call, found 2/);
+    // A spread can carry the options from anywhere in the list, so the red
+    // says that, rather than "no options".
+    expect(one("supabase.channel(...args);")).toMatch(/arguments spread from elsewhere/);
+    expect(one("supabase.channel(t, ...rest);")).toMatch(/arguments spread from elsewhere/);
+    // The server fold reads through a type assertion too: an edge function is
+    // a .ts file, where `<string>"…"` is legal, and a hole there split the
+    // endpoint in two.
+    const server = serverProblems(new Map([
+      [THE_PUBLISHER, "fetch(`${url}/realtime/v1/api/broadcast`);"],
+      ["complete-walk/index.ts", `fetch(base + <string>"/realtime/v1/api/" + "broadcast");`],
+    ])).problems.join("\n");
+    expect(server).toMatch(/complete-walk\/index\.ts:1 calls the broadcast endpoint directly/);
   });
 
   it("refuses `.channel` taken without a call, where its options would be out of sight", () => {
