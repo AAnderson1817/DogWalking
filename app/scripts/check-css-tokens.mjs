@@ -34,8 +34,8 @@
 // value is actually SET ON A STYLE: a `--x` key in an object literal that flows
 // straight into a JSX `style` prop (through parens, `as`, `satisfies`, a ternary
 // branch, the right of `&&`/`||`/`??`, or a spread into such an object) or is
-// typed or asserted as a type that includes `CSSProperties` (itself, or a union
-// or intersection with it); and `….style.setProperty("--x", …)`. None exists
+// typed or asserted as `CSSProperties`, an intersection with it, or a union
+// whose every non-null member is one; and `….style.setProperty("--x", …)`. None exists
 // today; counting them is what stops the gate going red on a healthy tree the
 // day one does. Counting ANY `--x`-shaped key was the first version, and Codex
 // was right to refuse it: a config or payload object would "define" a token no
@@ -101,15 +101,26 @@ function propertyName(name) {
 
 const CSS_PROPERTIES = /(^|\.)CSSProperties$/;
 
-// A declared type that INCLUDES CSSProperties: itself, or a union or
-// intersection with it (`CSSProperties & { "--gap": string }` is the
-// conventional way to type a custom property). A type alias or a wrapper
-// like `Readonly<…>` is not followed; see the header for why that is loud.
+const isNullish = (type) => (ts.isParenthesizedTypeNode(type) ? isNullish(type.type)
+  : type.kind === ts.SyntaxKind.UndefinedKeyword
+    || (ts.isLiteralTypeNode(type) && type.literal.kind === ts.SyntaxKind.NullKeyword));
+
+// A declared type the object is a STYLE under: CSSProperties itself; an
+// intersection with it, because an intersection value is every member at once
+// (`CSSProperties & { "--gap": string }` is the conventional way to type a
+// custom property); or a union whose every member the object could be is one,
+// because a union value is ONE of its members and nothing says which —
+// `CSSProperties | Payload` does not make a payload a style (Codex, PR #95).
+// null and undefined cannot hold a key, so `CSSProperties | undefined` is a
+// style. A type alias or a wrapper like `Readonly<…>` is not followed; see the
+// header for why that is loud.
 function isCssPropertiesType(type, sf) {
   if (!type) return false;
   if (ts.isParenthesizedTypeNode(type)) return isCssPropertiesType(type.type, sf);
-  if (ts.isUnionTypeNode(type) || ts.isIntersectionTypeNode(type)) {
-    return type.types.some((t) => isCssPropertiesType(t, sf));
+  if (ts.isIntersectionTypeNode(type)) return type.types.some((t) => isCssPropertiesType(t, sf));
+  if (ts.isUnionTypeNode(type)) {
+    const members = type.types.filter((t) => !isNullish(t));
+    return members.length > 0 && members.every((t) => isCssPropertiesType(t, sf));
   }
   return ts.isTypeReferenceNode(type) && CSS_PROPERTIES.test(type.typeName.getText(sf));
 }
@@ -227,6 +238,21 @@ export function check(root) {
   return { missing, floors, counts: { css: css.length, code: code.length, uses: uses.length, defined: defined.size } };
 }
 
+const joinAnd = (xs) => (xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}`);
+
+// "--x is set at a.ts:1 and b.tsx:3", or name by name when a prefix use
+// matched several: "--s-1 is set at a.ts:1 and --s-2 is set at a.ts:2".
+// Sorted by file and line, so the order does not depend on the directory walk.
+function setAt(nearMisses) {
+  const byPlace = (a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.line - b.line);
+  const sorted = [...nearMisses].sort(byPlace);
+  const at = (n) => `${path.relative(process.cwd(), n.file)}:${n.line}`;
+  const names = new Set(sorted.map((n) => n.name));
+  return names.size === 1
+    ? `${sorted[0].name} is set at ${joinAnd(sorted.map(at))}`
+    : joinAnd(sorted.map((n) => `${n.name} is set at ${at(n)}`));
+}
+
 function main() {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const root = path.resolve(process.argv[2] ?? path.join(here, "..", "src"));
@@ -238,18 +264,24 @@ function main() {
     const what = u.prefix
       ? `var(${u.name}…) can name no defined custom property: none starts with ${u.name}`
       : `${u.name} is used but never defined`;
-    let hint = "";
-    const [near, ...more] = u.nearMisses;
-    if (near) {
-      // Conditional on purpose: the key may be a config or payload field, and
-      // telling the reader to type THAT as CSSProperties would coach them into
-      // the silent direction — a token "defined" by an object no style reads.
-      const remedy = near.kind === "setProperty"
-        ? "by setProperty on something that is not `….style`; if that is a style declaration, call it on `….style`"
-        : "but not in a shape this gate reads as a style; if that object is applied as a style, type it CSSProperties";
-      hint = ` — ${near.name} is set at ${path.relative(process.cwd(), near.file)}:${near.line}`
-        + `${more.length ? ` (and ${more.length} more)` : ""}, ${remedy} (header of app/scripts/check-css-tokens.mjs)`;
+    // Every place the name is set, not the first: the first found can be a
+    // config key while the untyped style object that matters comes later
+    // (Codex, PR #95). The remedy is conditional on purpose — the key may be a
+    // config or payload field, and telling the reader to type THAT as
+    // CSSProperties would coach them into the silent direction, a token
+    // "defined" by an object no style reads.
+    const parts = [];
+    const keys = u.nearMisses.filter((n) => n.kind === "key");
+    const calls = u.nearMisses.filter((n) => n.kind === "setProperty");
+    if (keys.length) {
+      parts.push(`${setAt(keys)}, but not in a shape this gate reads as a style; if ${keys.length === 1
+        ? "that object is" : "one of those objects is"} applied as a style, type it CSSProperties`);
     }
+    if (calls.length) {
+      parts.push(`${setAt(calls)}, by setProperty on something that is not \`….style\`; if ${calls.length === 1
+        ? "that is" : "one of those is"} a style declaration, call it on \`….style\``);
+    }
+    const hint = parts.length ? ` — ${parts.join("; and ")} (header of app/scripts/check-css-tokens.mjs)` : "";
     console.log(`FAIL: ${what} (${where}:${u.line})${hint}`);
     if (ci) console.log(`::error file=${where},line=${u.line}::${what}${hint}`);
   }
