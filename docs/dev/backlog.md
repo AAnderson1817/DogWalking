@@ -60,12 +60,16 @@ Not urgent: nothing is broken, and the cost of being wrong here is a deploy
 that fails at `link` or `push`, which is exactly the failure 2.109.1 was
 pinned to avoid.
 
-**Blocked on owner action §2a.** The only real test of a CLI bump is a
-staging deploy, and every staging deploy since run 101 (2026-09-15) has failed
-at `Link project` on the expired `SUPABASE_ACCESS_TOKEN`. Merging a bump now
-would put an unexercised change on the deploy path with nothing able to run
-it — so this waits until the token is renewed and the deploy is green again,
-and then goes first.
+**Unblocked 2026-09-23.** The only real test of a CLI bump is a staging
+deploy, and staging was down from run 101 (2026-09-15) on the expired
+`SUPABASE_ACCESS_TOKEN` until the owner renewed it; run 105 on `4c45ab1` was
+green end to end (owner-actions §2a). That commit also moved the STAGING
+function deploy to `supabase functions deploy --use-api`, bundling server-side
+because GHCR rate limits blocked the Docker bundler image on two fresh runners
+(`docs/dev/staging-recovery-2026-09-23.md`). `deploy-production.yml` still
+bundles with Docker, deliberately, until staging has demonstrated the new path;
+run 105 is one demonstration. Moving production to `--use-api` belongs with this
+item: same workflows, same raise-the-bar argument, same staging-first test.
 
 ### 2. Spec-drift audit follow-up: the next migration
 Found by the audit recorded as `docs(spec-drift)` and verified against HEAD;

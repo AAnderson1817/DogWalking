@@ -114,38 +114,34 @@ warning when this secret is unset. It ran for the first time on `5193e69` and
 Production now refuses to deploy without it; staging stays non-fatal, because
 blocking every staging deploy on a secret only the owner can add would be worse
 than the gap — but it says outright that it proved nothing. Until it is set,
-staging's vault verification is decoration.
+staging's vault verification is decoration. Still unset on 2026-09-23: the
+first green deploy after the token renewal (run 105, `4c45ab1`) printed exactly
+that warning.
 
 ### 2a. `SUPABASE_ACCESS_TOKEN` expires — renew it, and staging is down until you do
 Where: supabase.com/dashboard/account/tokens → mint a personal access token →
 GitHub → Settings → Environments → **staging** → `SUPABASE_ACCESS_TOKEN`.
 
-**This is its second lapse and staging is red right now.** The first was
-2026-08-12 (`ops(staging-auth)`, silent for two weeks). The second was read off
-the Actions API on 2026-09-15: deploy-staging run 101 on `c34df1e` failed at
-`Apply migrations` → `Link project` with
-`Unexpected error retrieving remote project status: {"message":"Unauthorized"}`.
-The last green staging deploy was run 100 on 2026-09-05 (`957319b`), so
-everything merged since then is on `main` and on no staging project.
+**Renewed 2026-09-23, and staging deploys again.** It had lapsed twice: first
+2026-08-12 (`ops(staging-auth)`, silent for two weeks), then from deploy-staging
+run 101 on 2026-09-15 (`c34df1e`, `Link project` →
+`{"message":"Unauthorized"}`) until the renewal. The recovery is recorded in
+`docs/dev/staging-recovery-2026-09-23.md`: the renewed token got the retried
+run 104 past `Link project` and the migrations, its function deploy then failed
+pulling the Docker bundler image (GHCR rate limits), and `4c45ab1` moved the
+staging function deploy to `--use-api`. Run 105 on `4c45ab1` was green end to
+end — migrations, the function deploy, the boot probe, `release/staging`
+advanced and confirmed serving that commit — and the smoke run chained after
+it passed, as did auth-posture on a re-run (§8); all read off the Actions API,
+not recalled.
 
-Nothing is broken and nothing needs cleaning up. The step runs **before** any
-migration, so the database was never touched; `sync-secrets`, `deploy-functions`,
-`verify-functions` and `frontend` all `needs: migrate`, so they skipped, and the
-`Everything actually deployed` job correctly stood down rather than reporting a
-green deploy of nothing. The workflow prints an `::error` naming token expiry and
-the page to renew on, which is exactly what it is for.
-
-Until it is renewed, **every merge to `main` produces a red deploy and no staging
-deploy at all** — so staging-smoke, the auth-posture check and the M4 boot probe
-all stay skipped, and the whole staging rehearsal that the production runbook
-depends on is not running. A token with no expiry, or a calendar reminder a few
-days before one, is the only durable fix; nothing in this repository can mint it.
-
-It also holds back backlog item 1, the Supabase CLI bump: a staging deploy is
-the only thing that can exercise it, so it waits for a green deploy after the
-renewal. The staging-smoke fixture helpers rewritten in the spec-drift PR A
-have likewise been proven against a stub only, and first run for real on that
-deploy.
+What stays open is the part that makes it recur: whether the new token has an
+expiry is not visible from here. A token with no expiry, or a calendar reminder
+a few days before one, is the only durable fix; nothing in this repository can
+mint it. When it lapses, the table row above is the signal, the database is
+never touched (the failure precedes `db push`, and every later job `needs:
+migrate`), and every merge in the meantime lands on `main` and on no staging
+project.
 
 ### 3. Vercel production branches
 Set the production branch to `release/staging` (staging project) and
@@ -236,14 +232,21 @@ deploy.
 
 | Setting | Live | Intended | Confidence |
 | --- | --- | --- | --- |
-| Minimum password length | **6** | 12 | **Verified** 2026-08-29 |
-| `security_update_password_require_current_password` | **false** | true | **Verified** 2026-08-29 |
-| `security_update_password_require_reauthentication` | **false** | true | **Verified** 2026-08-29 |
+| Minimum password length | 12 | 12 | **Verified** 2026-09-23 |
+| `security_update_password_require_current_password` | **false** | true | **Verified** 2026-09-23 |
+| `security_update_password_require_reauthentication` | true | true | **Verified** 2026-09-23 |
+
+The 2026-09-23 reading is auth-posture run 27 on `4c45ab1`: its first attempt
+failed and the re-run two minutes later passed, so the settings changed in
+between. The gate passes on **either** password-change setting and names the
+one it found — `via security_update_password_require_reauthentication` — and it
+checks `require_current_password` first, so that one is still off.
 
 Turning on **either** satisfies the gate, and they are not equivalent: requiring
 the current password *closes* the stolen-session path, requiring
 reauthentication only *narrows* it (GoTrue asks only once a session is more than
-24h old). Turn on the first.
+24h old). Turn on the first — the gate is green on the second, which is the
+weaker of the two.
 
 **Correction to the previous version of this entry**, which stated the second
 row as "off". It was never measured. `check-auth-posture.sh` was asking the
@@ -258,9 +261,9 @@ posture workflow reads them for the first time.
 That defect also meant this gate **could not be satisfied by any dashboard
 change** — so it failed on every run from the day it landed, which is why the
 staging smoke workflow was permanently red and why the posture check now lives
-in its own workflow. Fixing the check was in-repository work and is done; what
-remains for you is the password floor, and whichever of the two password-change
-settings the next run reports as off.
+in its own workflow. Fixing the check was in-repository work and is done, and
+the floor and the reauthentication setting are now on; what remains is
+`require_current_password`.
 
 `config.toml` governs `supabase start` on a laptop and nothing deployed. Wiring
 `config push` is deliberately not done, and `docs/dev/auth-posture.md` says why.
