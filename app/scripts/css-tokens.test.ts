@@ -233,6 +233,40 @@ describe("gate 12: css tokens defined", () => {
     expect(code).toBe(1);
   });
 
+  it("does not count a key whose value removes the property instead of setting it", () => {
+    // Codex on PR #95, round 5: React removes a style declaration whose value is
+    // null, undefined, a boolean or "" (for a custom property it calls
+    // setProperty(name, "")), and setProperty(name, "") or (name, null) removes
+    // one too. Such a key reaches a style and defines nothing.
+    const src = [
+      "declare const el: HTMLElement;",
+      'const vars = { "--missing": undefined, "--nul": null, "--bool": false, "--empty": "", "--tmpl": ``, "--voided": void 0, "--cast": undefined as unknown as string };',
+      'el.style.setProperty("--cleared", "");',
+      'el.style.setProperty("--nulled", null);',
+      'export const S = () => <p className="x" style={{ ...vars, margin: "var(--missing) var(--nul) var(--bool) var(--empty) var(--tmpl) var(--voided) var(--cast) var(--cleared) var(--nulled)" }} />;',
+    ].join("\n");
+    const { code, out } = run(tree({ "styles/tokens.css": CSS, "screens/S.tsx": src }));
+    for (const name of ["--missing", "--nul", "--bool", "--empty", "--tmpl", "--voided", "--cast", "--cleared", "--nulled"]) {
+      expect(out).toContain(`FAIL: ${name} is used but never defined`);
+    }
+    expect(out).toMatch(/--missing is set at .*S\.tsx:2, but to a value that removes the property rather than setting it/);
+    expect(code).toBe(1);
+  });
+
+  it("still counts a value that sets something: a number, and a conditional that may", () => {
+    // 0 is set (only null, undefined, booleans and "" are removed), and a value
+    // that is sometimes undefined still sets the property when it is not: only
+    // a literal that ALWAYS removes is refused.
+    const src = [
+      "declare const on: boolean;",
+      'const vars = { "--zero": 0, "--accent": on ? "red" : undefined };',
+      'export const S = () => <p className="x" style={{ ...vars, margin: "var(--zero) var(--accent)" }} />;',
+    ].join("\n");
+    const { code, out } = run(tree({ "styles/tokens.css": CSS, "screens/S.tsx": src }));
+    expect(out).toContain("PASS:");
+    expect(code).toBe(0);
+  });
+
   it("follows a declaration that refers to itself without looping", () => {
     // Legal syntax, a TDZ error at run time. Without a guard the walk from the
     // object into the const and back through its own initializer never ends.
