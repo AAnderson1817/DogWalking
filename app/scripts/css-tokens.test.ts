@@ -87,17 +87,47 @@ describe("gate 12: css tokens defined", () => {
     expect(code).toBe(1);
   });
 
-  it("counts a custom property set from TS as defined", () => {
+  it("counts a custom property set on a style from TS as defined", () => {
     // None exists today. Without this the gate goes red on a healthy tree the
-    // day one does, which is how a gate gets deleted.
+    // day one does, which is how a gate gets deleted. Each shape here is one
+    // the definition rule must recognise as a STYLE.
     const src = [
+      'import type { CSSProperties } from "react";',
       'export const A = () => <div style={{ "--local": "1px", padding: "var(--local)" } as object} />;',
       'export const B = () => <div style={{ ["--comp" as string]: 1, margin: "var(--comp)" }} />;',
-      'export function c(el: HTMLElement) { el.style.setProperty("--set", "2px"); return "var(--set)"; }',
+      'export const C = (on: boolean) => <div style={on ? { "--cond": "1px" } : undefined} className="var(--cond)" />;',
+      'const vars = { "--viaType": "1px" } as CSSProperties;',
+      'export const D = () => <div style={vars} className="var(--viaType)" />;',
+      'const annotated: React.CSSProperties = { "--annot": "1px" };',
+      'export const E = () => <div style={annotated} className="var(--annot)" />;',
+      'export function f(el: HTMLElement) { el.style.setProperty("--set", "2px"); return "var(--set)"; }',
+      'export function g() { document.documentElement.style.setProperty("--root", "2px"); return "var(--root)"; }',
     ].join("\n");
     const { code, out } = run(tree({ "styles/tokens.css": CSS, "screens/Local.tsx": src }));
     expect(out).toContain("PASS:");
     expect(code).toBe(0);
+  });
+
+  it("does not count a --x key in an ordinary object as a definition", () => {
+    // Codex on PR #95: counting ANY `--x`-shaped key let a config or payload
+    // object "define" a token no stylesheet or style ever sets, so a real
+    // `var(--missing)` elsewhere passed while computing to nothing at runtime.
+    const config = 'export const payload = { "--missing": 1, kind: "config" };';
+    const screen = 'export const S = () => <p className="x" style={{ margin: "var(--missing)" }} />;';
+    const { code, out } = run(tree({ "styles/tokens.css": CSS, "lib/config.ts": config, "screens/S.tsx": screen }));
+    expect(out).toContain("FAIL: --missing is used but never defined");
+    expect(code).toBe(1);
+  });
+
+  it("does not count setProperty on something that is not a style", () => {
+    const src = [
+      'declare const api: { setProperty(k: string, v: number): void };',
+      'api.setProperty("--notstyle", 1);',
+      'export const S = () => <p className="x" style={{ margin: "var(--notstyle)" }} />;',
+    ].join("\n");
+    const { code, out } = run(tree({ "styles/tokens.css": CSS, "screens/S.tsx": src }));
+    expect(out).toContain("FAIL: --notstyle is used but never defined");
+    expect(code).toBe(1);
   });
 
   it("reads token names with underscores whole (the CI copy truncated them)", () => {

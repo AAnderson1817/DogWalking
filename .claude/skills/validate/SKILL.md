@@ -262,9 +262,12 @@ section used to say to "keep identical" had drifted: validate.sh read token
 names as `[A-Za-z0-9_-]` and CI as `[a-zA-Z0-9-]`, which read `var(--a_c)` as
 `--a`. What it checks, and why each rule exists, is in the script's header and
 `app/scripts/css-tokens.test.ts`: uses come from string and template literals
-in the TypeScript AST, so comments and JSX text never count; custom properties
-set from TS (`style={{ "--x": … }}`, `setProperty`) count as definitions; test
-files are fixtures and are not read; and it refuses to pass if it scanned no
+in the TypeScript AST, so comments and JSX text never count; a custom property
+counts as defined from TS only when it is SET ON A STYLE — a `--x` key in an
+object that flows into a `style` prop or is typed `CSSProperties`, or
+`….style.setProperty` — because counting any `--x`-shaped key let a config
+object "define" a token no style ever sets (Codex, PR #95); test files are
+fixtures and are not read; and it refuses to pass if it scanned no
 stylesheets, no TS, or no string literals — a check that saw nothing reports
 agreement. Still scope-blind, as it always was: a token defined under one
 selector satisfies a use anywhere.
