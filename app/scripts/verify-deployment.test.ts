@@ -411,6 +411,26 @@ function typeOnlySpecifier(spec: ts.ImportSpecifier | ts.ExportSpecifier): boole
   return (ts.isImportClause(holder) || ts.isExportDeclaration(holder)) && holder.isTypeOnly;
 }
 
+/**
+ * Whether `id` is a name being DECLARED rather than read: the name of a
+ * variable, parameter, function, class, import, export or property key. A
+ * declaration runs nothing; the name is judged where it is called. Restated
+ * rather than taken from the compiler, whose isDeclarationName is not public
+ * API — a gate that breaks on a compiler upgrade is red on a healthy tree. A
+ * property access's name is judged as the access, and a shorthand property
+ * reads the variable it names, so neither is a declaration here.
+ */
+function declaresName(id: ts.Identifier): boolean {
+  const p = id.parent;
+  if (ts.isPropertyAccessExpression(p) || ts.isShorthandPropertyAssignment(p)) return false;
+  return (p as { name?: ts.Node }).name === id;
+}
+
+/** Whether `id` is the source side of an alias, which is judged at the alias itself. */
+const aliasSource = (id: ts.Identifier): boolean =>
+  (ts.isImportSpecifier(id.parent) || ts.isExportSpecifier(id.parent) || ts.isBindingElement(id.parent))
+  && id.parent.propertyName === id;
+
 /** Whether `node` sits in a type (`typeof serveFunction`), which nothing runs. */
 function inType(node: ts.Node): boolean {
   for (let n = node.parent; n && !ts.isStatement(n) && !ts.isSourceFile(n); n = n.parent) {
@@ -470,8 +490,11 @@ function widening(call: ts.CallExpression): string | null {
  * a function that serves the ordinary way beside a call the scan cannot see
  * never reaches that fallback: `Deno.serve` however it is spelled is a door,
  * called or not; `serveFunction` must be called where it is named, or its
- * options are out of sight (an alias, a renaming import); and a member of
- * `Deno` the scan cannot read could be `serve`. What stays outside: a second
+ * options are out of sight (a bare alias, or a rename away from it on an
+ * import, an export or a destructuring, its source spelled however it can
+ * be — the local side of a rename, and any name being declared, is judged
+ * where it is called instead); and a member of `Deno` the scan cannot read
+ * could be `serve`. What stays outside: a second
  * serve reached through a name the scan never sees at all (`const { serve } =
  * Deno`, an alias of `Deno` itself) beside a first one it does — one serve
  * per function is the shape the runtime runs, and the fallback covers it.
@@ -496,8 +519,28 @@ function getReachable(root: string): Map<string, string> {
           if (member === "serve") door("its own Deno.serve");
           else if (member === UNREADABLE) door("a member of Deno the scan cannot read");
         }
+        // An alias hides serveFunction's calls when it renames serveFunction
+        // AWAY: its source side names serveFunction and its local side does
+        // not — `import { serveFunction as serve }`, `export { serveFunction
+        // as serve }` (the source an identifier or a string), and `const {
+        // serveFunction: serve } = …` (the key spelled however a key can be).
+        // The other side of an alias, serveFunction as the new name for
+        // something else, renames nothing of its away (Codex, on #97); an
+        // alias that keeps the name is no rename; and a type-only specifier
+        // is erased. Judged here, at the alias, so neither side is read again
+        // below as a bare reference.
+        if (runs && (ts.isImportSpecifier(node) || ts.isExportSpecifier(node)) && node.propertyName
+          && node.propertyName.text === "serveFunction" && node.name.text !== "serveFunction"
+          && !typeOnlySpecifier(node)) {
+          door(`serveFunction ${ts.isImportSpecifier(node) ? "imported" : "exported"} under another name, so the scan cannot see its calls`);
+        }
+        if (runs && ts.isBindingElement(node) && node.propertyName && keyOf(node.propertyName) === "serveFunction"
+          && !(ts.isIdentifier(node.name) && node.name.text === "serveFunction")) {
+          door("serveFunction destructured under another name, so the scan cannot see its calls");
+        }
         const namesServeFunction = runs
-          && ((ts.isIdentifier(node) && node.text === "serveFunction") || member === "serveFunction");
+          && ((ts.isIdentifier(node) && node.text === "serveFunction" && !declaresName(node) && !aliasSource(node))
+            || member === "serveFunction");
         if (namesServeFunction) {
           const held = outermost(node as ts.Expression);
           const parent = held.parent;
@@ -505,14 +548,6 @@ function getReachable(root: string): Map<string, string> {
             serves = true;
             const why = widening(parent);
             if (why) found.set(name, why);
-          } else if (ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent)) {
-            // `import { serveFunction }` names it without calling it; renamed,
-            // every call is under a name the scan does not look for. A
-            // type-only specifier is erased, so its alias is no such name.
-            if (parent.propertyName && !typeOnlySpecifier(parent)) {
-              const how = ts.isImportSpecifier(parent) ? "imported" : "exported";
-              door(`serveFunction ${how} under another name, so the scan cannot see its calls`);
-            }
           } else if (!(ts.isPropertyAccessExpression(parent) && parent.name === node)) {
             // (the name of `http.serveFunction` is judged as that access)
             door("serveFunction referenced without being called, so the scan cannot see its options");
@@ -708,6 +743,22 @@ describe("verify-deployment's read-only argument is derived", () => {
     // A value export under another name is still a door — another module calls
     // it under a name the scan does not look for — and the red says exported.
     fn("export-renamed", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(h);\nexport { serveFunction as serve };');
+    // Only a rename AWAY from serveFunction hides its calls. The other side of
+    // an alias — serveFunction as the new name for something else — renames
+    // nothing of its away (Codex, on #97), nor does an alias that keeps the
+    // name; the local serveFunction is judged where it is called.
+    fn("reverse-export", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(h);\n'
+      + 'export { helper as serveFunction } from "./helper.ts";');
+    fn("reverse-import", 'import { serve as serveFunction } from "./serve.ts";\nserveFunction(h);');
+    fn("reverse-destructure", "const { serve: serveFunction } = mod;\nserveFunction(h);");
+    fn("same-name-import", 'import { serveFunction as serveFunction } from "../_lib/http.ts";\nserveFunction(h);');
+    fn("shorthand-destructure", "const { serveFunction } = http;\nserveFunction(h);");
+    // And the source side is read however it is spelled: a string names it in
+    // an import, and a destructured key is a key.
+    fn("string-import", 'import { "serveFunction" as serve } from "../_lib/http.ts";\nserveFunction(h);\n'
+      + 'serve(g, { methods: ["GET"] });');
+    fn("destructured", 'serveFunction(h);\nconst { serveFunction: serve } = http;\nserve(g, { methods: ["GET"] });');
+    fn("destructured-key", 'serveFunction(h);\nconst { ["serveFunction"]: serve } = http;\nserve(g);');
     expect(Object.fromEntries(getReachable(root))).toEqual({
       "element-paren": "serveFunction widened with methods",
       "deno-paren": "its own Deno.serve",
@@ -718,6 +769,9 @@ describe("verify-deployment's read-only argument is derived", () => {
       alias: "serveFunction referenced without being called, so the scan cannot see its options",
       renamed: "serveFunction imported under another name, so the scan cannot see its calls",
       "export-renamed": "serveFunction exported under another name, so the scan cannot see its calls",
+      "string-import": "serveFunction imported under another name, so the scan cannot see its calls",
+      destructured: "serveFunction destructured under another name, so the scan cannot see its calls",
+      "destructured-key": "serveFunction destructured under another name, so the scan cannot see its calls",
       "deno-element": "its own Deno.serve",
       "deno-template": "its own Deno.serve",
       "deno-unreadable": "a member of Deno the scan cannot read",
