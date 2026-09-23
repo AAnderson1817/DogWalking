@@ -1457,10 +1457,15 @@ silently:
   save that caused it — naming the likeliest fix (a typo) and, for a client
   with a login, that the portal inbox still has everything.
 
-  It asks `fn_email_suppressed` for every notification type rather than
-  restating its predicate, so the notice cannot disagree with the sender about
-  case, operator scope or type scope; a per-type row (a preference, which
-  nothing writes yet) is correctly not reported as email being off. It
+  It asks `fn_email_suppressed` rather than restating its predicate, so the
+  notice cannot disagree with the sender about case, operator scope or type
+  scope, and it asks once for every type the sender actually emails —
+  `CLIENT_FACING`, copied into `fn_client_facing_notification_types()` and
+  pinned to the sender's Set by `client_facing_parity_test.ts`. Per-type rows
+  (a preference, which nothing writes yet) covering every emailed type are
+  email being off; covering some of them, or a bell-only type, are not. The
+  first version asked over every enum value, bell-only types included, and so
+  missed the first of those (Codex, PR #96). It
   discloses one boolean — not which business's mail was unsubscribed from, not
   when, no reason text, no enumeration — and there is no write path: an
   operator must never be able to lift a suppression. The address owner cannot

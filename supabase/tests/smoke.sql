@@ -5969,6 +5969,7 @@ declare
   v_sender boolean;
   v_def boolean;
   v_cfg text[];
+  v_emailed notification_type[];
 begin
   reset session authorization;
 
@@ -5976,6 +5977,14 @@ begin
   -- message, which reads as a broken suite rather than a broken rule.
   if to_regprocedure('fn_client_email_suppressed(uuid)') is null then
     raise exception 'FAIL: fn_client_email_suppressed(uuid) does not exist — the operator has no way to learn a client''s address opted out (0052)';
+  end if;
+
+  -- The types the sender emails. The list itself is pinned to the sender's
+  -- CLIENT_FACING by client_facing_parity_test.ts (deno), which can read both;
+  -- what this block pins is what the function does with it.
+  v_emailed := fn_client_facing_notification_types();
+  if cardinality(v_emailed) = 0 or 'card_saved' = any(v_emailed) then
+    raise exception 'FAIL: the emailed-type list is empty or includes the bell-only card_saved (precondition) (0052)';
   end if;
 
   -- Invariant 5: definer, pinned search_path.
@@ -5991,7 +6000,18 @@ begin
     ('smoke-0052-global@example.test', null,  null,            'smoke: one-click'),
     ('smoke-0052-op1@example.test',    v_op1, null,            'smoke: op1 only'),
     ('smoke-0052-op2@example.test',    v_op2, null,            'smoke: op2 only'),
-    ('smoke-0052-typed@example.test',  null,  'walk_complete', 'smoke: one type');
+    ('smoke-0052-typed@example.test',  null,  'walk_complete', 'smoke: one type'),
+    ('smoke-0052-bell@example.test',   null,  'card_saved',    'smoke: a bell-only type');
+  -- Per-type opt-outs from every type the sender emails: nothing is sent, so
+  -- email IS off — the case the first version of 0052 answered false, because
+  -- it also required the bell-only types nobody emails (Codex, PR #96).
+  insert into email_suppressions (email, operator_id, notification_type, reason)
+    select 'smoke-0052-every-type@example.test', null, t, 'smoke: every emailed type'
+      from unnest(v_emailed) as t;
+  -- ...and from all of them but one: that one still goes, so email is not off.
+  insert into email_suppressions (email, operator_id, notification_type, reason)
+    select 'smoke-0052-all-but-one@example.test', null, t, 'smoke: all but one'
+      from unnest(v_emailed[2:]) as t;
 
   for r in
     select * from (values
@@ -6008,6 +6028,12 @@ begin
        'that same suppression, asked by the operator it belongs to'),
       (v_a2, 'smoke-0052-typed@example.test',        v_op1, true,  false,
        'a one-type preference, which leaves every other email deliverable'),
+      (v_a2, 'smoke-0052-every-type@example.test',   v_op1, true,  true,
+       'per-type opt-outs covering every type the sender emails'),
+      (v_a2, 'smoke-0052-all-but-one@example.test',  v_op1, true,  false,
+       'per-type opt-outs from all but one emailed type (that one still goes)'),
+      (v_a2, 'smoke-0052-bell@example.test',         v_op1, true,  false,
+       'an opt-out from a bell-only type, which is never emailed anyway'),
       (v_a2, 'smoke-0052-clean@example.test',        v_op1, true,  false,
        'an address nobody suppressed'),
       (v_a2, null,                                   v_op1, true,  false,
@@ -6021,13 +6047,14 @@ begin
     reset session authorization;
     update clients set email = r.email where id = r.client;
 
-    -- The sender's own answer for this row: every type, the way
-    -- send-notification asks it. Computed as postgres, since the function is
-    -- service-role only.
+    -- The sender's own answer for this row: would it skip every type it
+    -- emails? Asked the way send-notification asks, one type at a time, and
+    -- computed as postgres since fn_email_suppressed is service-role only.
+    -- (Over every enum value, as this first read, it shared 0052's own error.)
     select coalesce(bool_and(fn_email_suppressed(c.email, c.operator_id, ty)), false)
       into v_sender
       from clients c
-     cross join unnest(enum_range(null::notification_type)) as ty
+     cross join unnest(v_emailed) as ty
      where c.id = r.client and c.email is not null;
 
     perform set_config('request.jwt.claims',
