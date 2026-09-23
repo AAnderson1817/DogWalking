@@ -60,44 +60,18 @@ Not urgent: nothing is broken, and the cost of being wrong here is a deploy
 that fails at `link` or `push`, which is exactly the failure 2.109.1 was
 pinned to avoid.
 
-### 2. Spec-drift audit follow-ups (two PRs left, in this order)
-Found by the audit recorded as `docs(spec-drift)`; each was verified against
-HEAD and none is fixed by that PR, which corrected documents only.
+**Blocked on owner action §2a.** The only real test of a CLI bump is a
+staging deploy, and every staging deploy since run 101 (2026-09-15) has failed
+at `Link project` on the expired `SUPABASE_ACCESS_TOKEN`. Merging a bump now
+would put an unexercised change on the deploy path with nothing able to run
+it — so this waits until the token is renewed and the deploy is green again,
+and then goes first.
 
-**PR A — gates that pass for the wrong reason** (tests and CI only):
-- `app/scripts/service-worker.test.ts`: every Supabase fixture is
-  `https://abcdefgh.supabase.co` against a worker origin of `app.sanpo.test`,
-  so `sw.js`'s same-origin gate alone satisfies all five never-cache
-  assertions — replacing `isNeverCache`'s body with `return false` stays
-  green. Add same-origin fixtures for the five families; prove red first.
-- `ci.yml` "Errors go through FormError": greps one literal
-  `className="field__error"`. A bare `<span className="signin__error"
-  role="alert">` slips past. Fail any `role="alert"` outside `fields.tsx` /
-  `StateField`, and any `__error` class outside `fields.tsx`.
-- `ci.yml` invariant-1 catalogue regex: misses `update public.clients set …`
-  and `update clients c set …` (probed; both silent). Allow an optional
-  `public.` and an optional alias; prove with both probe functions.
-- `ci.yml` "the only channel": a second `supabase.channel(` inside
-  `useWalkChannel.ts` passes (`grep -q`), and the server half greps only the
-  literal `private: false`. Count channel calls against `private: true` calls.
-- `docs/dev/session-notes.md` says two gates exist only in CI; there are
-  seven (service worker stamped, build refused without config, vitest
-  orphan, security headers, behavioural tests execute, e2e spec has a step,
-  no-secret-logging grep). Add `scripts/check-gate-lockstep.py` (every
-  `ci.yml` step name appears in `SKILL.md` as a gate or in its §13), wire it
-  as a gate, and point session-notes at §13. Relabel `ci.yml`'s "Secret-leak
-  grep (validate gate 7)" — it is gate 11, and gate 7 is `db reset`.
-- `scripts/gen-definer-catalog.py` still strips comments with the naive regex
-  pair `gen-enum-catalog.py` had to replace (labels containing `--`, nested
-  block comments). Share the state machine rather than copy it.
-- `verify-deployment.test.ts`: assert every function calling `Deno.serve`
-  directly (`stripe-webhook`, `platform-webhook` today) has a `contract_for`
-  case, so the read-only argument is derived rather than enumerated.
-- `staging-smoke.yml` `onboard-repro`: still the single-page `user_id_for`
-  and `|| true` cleanup the claim-replay step was cured of; dead today only
-  because its address is run-scoped.
+### 2. Spec-drift audit follow-up: the next migration
+Found by the audit recorded as `docs(spec-drift)` and verified against HEAD;
+PR A (the gates that passed for the wrong reason) is done — see below.
 
-**PR B — the next migration, invariant 5's REVOKE half** (money/trust path:
+**Invariant 5's REVOKE half** (money/trust path:
 written safety argument, adversarial self-review, red-first smoke):
 `fn_assert_plan_change_intent_tenant`, `fn_assert_tenant_consistency`,
 `fn_cancel_paused_walks` and `fn_refund_cancelled_debit` carry `=X` (PUBLIC)
@@ -108,7 +82,9 @@ for `authenticated` with EXECUTE revoked (measured). Revoke the four; add a
 smoke block asserting no `prosecdef` function in `public` grants EXECUTE to
 `public` or `anon` (red against HEAD first); make
 `scripts/gen-definer-catalog.py` read `revoke` too and render an unrevoked
-function as `PUBLIC` rather than **none**.
+function as `PUBLIC` rather than **none**. The generator now reads migrations
+with the enum generator's SQL reader and has a proof set
+(`scripts/gen-definer-catalog-proofs.py`); add the revoke cases there.
 
 ### 3. Let the address owner turn email back on
 `0052` tells the operator when a client's address has unsubscribed, and the
@@ -127,6 +103,18 @@ own item; the trust questions (what a shared login proves, whether to log
 lifts) want a written argument before code.
 
 ## Done
+
+- **Spec-drift PR A — the gates that passed for the wrong reason.** Eight
+  checks, each proven red-first against the defect the audit named:
+  service-worker fixtures on the app's own origin, so `isNeverCache` is
+  exercised at all; the FormError and walk-channel greps replaced by AST scans
+  in vitest (they run locally now, too); invariant 1 moved into `smoke.sql`
+  with a self-test of its own pattern; `scripts/check-gate-lockstep.py` (gate
+  10g) holding `ci.yml`, `SKILL.md` §13 and `validate.sh` to one another; the
+  definer catalogue on the enum generator's SQL reader, with probes;
+  `verify-deployment`'s read-only argument derived from the source; and one
+  fixture library for both staging replays, driven by a test. See the
+  `ci(gates-that-fail)` status-log entry.
 
 - **Tell the operator when an edited address is already suppressed** —
   migration `0052`'s `fn_client_email_suppressed`, answering for the calling

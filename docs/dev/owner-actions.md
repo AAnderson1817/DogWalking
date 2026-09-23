@@ -141,6 +141,12 @@ all stay skipped, and the whole staging rehearsal that the production runbook
 depends on is not running. A token with no expiry, or a calendar reminder a few
 days before one, is the only durable fix; nothing in this repository can mint it.
 
+It also holds back backlog item 1, the Supabase CLI bump: a staging deploy is
+the only thing that can exercise it, so it waits for a green deploy after the
+renewal. The staging-smoke fixture helpers rewritten in the spec-drift PR A
+have likewise been proven against a stub only, and first run for real on that
+deploy.
+
 ### 3. Vercel production branches
 Set the production branch to `release/staging` (staging project) and
 `release/production` (production project). See `docs/dev/production-cutover.md`.
