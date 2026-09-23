@@ -175,10 +175,24 @@ function tagName(el: ts.JsxOpeningElement | ts.JsxSelfClosingElement): string {
   return el.tagName.getText();
 }
 
-function propName(name: ts.PropertyName | ts.JsxAttributeName): string | undefined {
-  if (ts.isIdentifier(name) || ts.isStringLiteral(name)) return name.text;
-  if (ts.isJsxNamespacedName(name)) return undefined;
-  return undefined;
+function attrName(name: ts.JsxAttributeName): string | undefined {
+  return ts.isIdentifier(name) ? name.text : undefined;
+}
+
+/**
+ * The names a property can be written under. A computed key is read like a
+ * value — `["role"]`, a `const` bound to "role", either arm of a ternary — and
+ * one the scan cannot read is UNREADABLE: it could be `role` as easily as
+ * anything else (Codex, on #97: `{...{ ["role"]: "alert" }}` passed, because
+ * a computed key read as no name at all).
+ */
+function keysOf(name: ts.PropertyName, resolve: Resolve): (string | typeof UNREADABLE)[] {
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNoSubstitutionTemplateLiteral(name)
+    || ts.isNumericLiteral(name)) return [name.text];
+  if (ts.isComputedPropertyName(name)) {
+    return valuesOf(name.expression, resolve).flatMap((v) => (v === null ? [] : [v]));
+  }
+  return [];
 }
 
 const COMPILER_OPTIONS: ts.CompilerOptions = {
@@ -260,17 +274,32 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
     }
   };
 
+  // A property of an object literal, under every name its key can be. On an
+  // element (`jsx`, a spread) a key the scan cannot read is judged as both
+  // `role` and `aria-live`, since it could be either; in a plain object
+  // literal it is no evidence of anything, by the same rule that makes only a
+  // literal "alert" count there.
+  const visitMember = (owner: string | null, name: ts.PropertyName, value: ts.Node, site: ts.Node) => {
+    for (const key of keysOf(name, resolve)) {
+      if (key !== UNREADABLE) visitProps(owner, key, value, site);
+      else if (owner !== null) for (const each of ["role", "aria-live"]) visitProps(owner, each, value, site);
+    }
+  };
+
   // A spread applies each property of the object it names as though it were
   // written on the element, so it is judged with the element's rules — a
   // `role` it cannot read is refused there, as `role={r}` is. Nested spreads
-  // inside that object are followed too.
+  // inside that object are followed too. A getter supplies its value when the
+  // object is spread, and the scan cannot read what it returns, so it is
+  // unreadable; a method or a setter supplies no string at all.
   const visitSpread = (owner: string, expr: ts.Expression, site: ts.Node, seen = new Set<ts.Node>()) => {
     const obj = objectOf(expr, resolve);
     if (!obj || seen.has(obj)) return;
     seen.add(obj);
     for (const prop of obj.properties) {
-      if (ts.isPropertyAssignment(prop)) visitProps(owner, propName(prop.name), prop.initializer, site);
+      if (ts.isPropertyAssignment(prop)) visitMember(owner, prop.name, prop.initializer, site);
       else if (ts.isShorthandPropertyAssignment(prop)) visitProps(owner, prop.name.text, prop.name, site);
+      else if (ts.isGetAccessorDeclaration(prop)) visitMember(owner, prop.name, prop, site);
       else if (ts.isSpreadAssignment(prop)) visitSpread(owner, prop.expression, site, seen);
     }
   };
@@ -279,11 +308,11 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
     if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
       const owner = tagName(node);
       for (const attr of node.attributes.properties) {
-        if (ts.isJsxAttribute(attr)) visitProps(owner, propName(attr.name), valueOf(attr.initializer), attr);
+        if (ts.isJsxAttribute(attr)) visitProps(owner, attrName(attr.name), valueOf(attr.initializer), attr);
         else if (ts.isJsxSpreadAttribute(attr)) visitSpread(owner, attr.expression, attr);
       }
     } else if (ts.isPropertyAssignment(node)) {
-      visitProps(null, propName(node.name), node.initializer, node);
+      visitMember(null, node.name, node.initializer, node);
     } else if (ts.isShorthandPropertyAssignment(node)) {
       // `{ role }`: the value is the binding of the same name.
       visitProps(null, node.name.text, node.name, node);
@@ -424,6 +453,30 @@ describe("what the scan refuses and admits", () => {
     expect(rules(`export const X = () => <span {...{ "aria-live": "assertive" }}>x</span>;`))
       .toEqual(["aria-live", "aria-live"]);
     expect(rules(`const r = "alert"; export const X = () => <span role={r}>x</span>;`)).toEqual(["role"]);
+  });
+
+  it("reads a computed key like a value, and refuses one it cannot read on an element (Codex, on #97)", () => {
+    // The shape it missed: a computed key read as no name at all.
+    expect(rules(`export const X = () => <span {...{ ["role"]: "alert" }}>x</span>;`)).toEqual(["role", "role"]);
+    expect(rules(`const k = "role"; const props = { [k]: "alert" };
+      export const X = () => <span {...props}>x</span>;`)).toEqual(["role", "role"]);
+    expect(rules(`const props = { [\`aria-live\`]: "assertive" }; export const X = () => <b {...props} />;`))
+      .toEqual(["aria-live", "aria-live"]);
+    // A key it cannot read could be role or aria-live, so on an element it is
+    // judged as both — refused when its value could be an alert region…
+    expect(rules(`const props = { [k]: v }; export const X = () => <span {...props}>x</span>;`))
+      .toEqual(["role", "aria-live"]);
+    // …and admitted when the value cannot be one, whatever the key is.
+    expect(rules(`const props = { [k]: "status" }; export const X = () => <span {...props}>x</span>;`)).toEqual([]);
+    // In a plain object literal an unreadable key is no evidence of anything:
+    // a lookup table keyed by a variable is ordinary code.
+    expect(rules(`const MARKS = { [status]: "alert" };`)).toEqual([]);
+    // A getter supplies its value when the object is spread, and the scan
+    // cannot read what it returns.
+    expect(rules(`const props = { get role() { return r; } }; export const X = () => <span {...props}>x</span>;`))
+      .toEqual(["role"]);
+    expect(rules(`const props = { role() { return 1; } }; export const X = () => <span {...props}>x</span>;`))
+      .toEqual([]);
   });
 
   it("admits what a binding says is harmless, and a forwarded spread", () => {
