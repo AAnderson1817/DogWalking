@@ -141,7 +141,8 @@ run "9. append-only migrations" append_only
 
 # ── 10. Generated artefacts are not stale ─────────────────────────────────
 definer_catalog() {
-  python3 scripts/gen-definer-catalog.py && git diff --exit-code -- docs/spec/03-security-model.md
+  python3 scripts/gen-definer-catalog.py && git diff --exit-code -- docs/spec/03-security-model.md \
+    && python3 scripts/gen-definer-catalog-proofs.py
 }
 run "10a. definer catalogue" definer_catalog
 

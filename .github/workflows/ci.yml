@@ -719,6 +719,9 @@ jobs:
             exit 1
           fi
           echo "PASS: the definer catalogue matches the migrations"
+          # The probes: each way the generator's old regex stripper misread a
+          # migration, which the shared SQL reader must keep reading right.
+          python3 scripts/gen-definer-catalog-proofs.py
 
       # Spec 01's enum block was hand-maintained under a heading that said
       # "migration 0001". By 0049 it was missing `disputed` (one of the three
