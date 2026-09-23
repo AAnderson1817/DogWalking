@@ -156,7 +156,8 @@ describe("user_id_for", () => {
     // Only page 1 was ever searched, so "absent" would be a guess — and the
     // claim replay's dead-token check reads absence as its pass (Codex, #97).
     const { base, requests } = await stub({ users: many(100), ignorePage: true });
-    const r = await sh(base, 'rc=0; user_id_for "nobody@sanpo.test" || rc=$?; echo "[exit $rc]"');
+    // The bound is low so that a broken guard fails on its sentence, fast.
+    const r = await sh(base, 'rc=0; USER_LOOKUP_MAX_PAGES=5 user_id_for "nobody@sanpo.test" || rc=$?; echo "[exit $rc]"');
     expect(r.out).toBe("[exit 9]\n");
     expect(r.err).toContain("page 2 repeated page 1");
     expect(requests.filter((q) => q.startsWith("GET")).length).toBe(2);
@@ -164,12 +165,14 @@ describe("user_id_for", () => {
 
   it("exits 9 when it runs out of pages before reaching the end", async () => {
     // The bound stops a huge user table spinning here forever. Reaching it
-    // means the search did not finish, which is not the same as absent.
-    const { base, requests } = await stub({ users: many(5100) });
-    const r = await sh(base, 'rc=0; user_id_for "nobody@sanpo.test" || rc=$?; echo "[exit $rc]"');
+    // means the search did not finish, which is not the same as absent. Three
+    // pages rather than the default fifty: fifty sequential curl and jq
+    // rounds timed out a slower machine at vitest's 5 s (Codex, on #97).
+    const { base, requests } = await stub({ users: many(350) });
+    const r = await sh(base, 'rc=0; USER_LOOKUP_MAX_PAGES=3 user_id_for "nobody@sanpo.test" || rc=$?; echo "[exit $rc]"');
     expect(r.out).toBe("[exit 9]\n");
-    expect(r.err).toContain("50 pages");
-    expect(requests.filter((q) => q.startsWith("GET")).length).toBe(50);
+    expect(r.err).toContain("read 3 pages");
+    expect(requests.filter((q) => q.startsWith("GET")).length).toBe(3);
   });
 });
 

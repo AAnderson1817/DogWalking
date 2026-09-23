@@ -475,15 +475,17 @@ function getReachable(root: string): Map<string, string> {
     for (const file of tsFiles(join(root, name))) {
       const sf = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
       const visit = (node: ts.Node) => {
+        // A type is erased, so nothing in one serves — either name (Codex, on #97).
+        const runs = !inType(node);
         const access = ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node) ? node : undefined;
         const member = access && memberOf(access);
         const receiver = access && unwrap(access.expression);
-        if (receiver && ts.isIdentifier(receiver) && receiver.text === "Deno") {
+        if (runs && receiver && ts.isIdentifier(receiver) && receiver.text === "Deno") {
           if (member === "serve") door("its own Deno.serve");
           else if (member === UNREADABLE) door("a member of Deno the scan cannot read");
         }
-        const namesServeFunction = ((ts.isIdentifier(node) && node.text === "serveFunction") || member === "serveFunction")
-          && !inType(node);
+        const namesServeFunction = runs
+          && ((ts.isIdentifier(node) && node.text === "serveFunction") || member === "serveFunction");
         if (namesServeFunction) {
           const held = outermost(node as ts.Expression);
           const parent = held.parent;
@@ -674,6 +676,11 @@ describe("verify-deployment's read-only argument is derived", () => {
     fn("callee-paren", '(serveFunction)(h, { methods: ["POST"] });');
     // A type is not a reference: nothing runs `typeof serveFunction`.
     fn("type-mention", 'type Serve = typeof serveFunction;\nserveFunction(h);');
+    // Nor for Deno.serve (Codex, on #97). `typeof Deno.serve` parses as a
+    // qualified name, which no branch reads; a computed key in a type literal
+    // is a real property access, and it is erased all the same.
+    fn("deno-type", "serveFunction(h);\ntype Serve = typeof Deno.serve;");
+    fn("deno-type-key", "serveFunction(h);\ntype K = { [Deno.serve.name]: string };");
     expect(Object.fromEntries(getReachable(root))).toEqual({
       "element-paren": "serveFunction widened with methods",
       "deno-paren": "its own Deno.serve",
