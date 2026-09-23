@@ -376,20 +376,28 @@ function memberOf(e: Access): string | typeof UNREADABLE {
   return ts.isPropertyAccessExpression(e) ? e.name.text : literalText(e.argumentExpression) ?? UNREADABLE;
 }
 
+/** An expression with the wrappers that change nothing at run time removed. */
+function unwrap(value: ts.Expression): ts.Expression {
+  let e = value;
+  while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isSatisfiesExpression(e)
+    || ts.isTypeAssertionExpression(e) || ts.isNonNullExpression(e)) e = e.expression;
+  return e;
+}
+
 /**
  * Whether a `methods` value can let a GET through. `handleRequest` admits a
  * method only when the list contains it exactly, so a literal list is a door
  * only if one of its entries is `"GET"` — `["POST"]` and `[]` admit none
- * (Codex, on #97). Anything the scan cannot read — a variable, a spread, an
- * entry that is not a literal — could be `"GET"`, so it is a door.
+ * (Codex, on #97). The list AND each entry are unwrapped the same way, since
+ * `["POST" as const]` is still `["POST"]` (Codex again). Anything the scan
+ * cannot read — a variable, a spread, an entry that is not a literal — could
+ * be `"GET"`, so it is a door.
  */
 function admitsGet(value: ts.Expression): boolean {
-  let e = value;
-  while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isSatisfiesExpression(e)
-    || ts.isTypeAssertionExpression(e)) e = e.expression;
+  const e = unwrap(value);
   if (!ts.isArrayLiteralExpression(e)) return true;
   return e.elements.some((el) => {
-    const text = ts.isSpreadElement(el) ? undefined : literalText(el);
+    const text = ts.isSpreadElement(el) ? undefined : literalText(unwrap(el));
     return text === undefined || text === "GET";
   });
 }
@@ -572,7 +580,19 @@ describe("verify-deployment's read-only argument is derived", () => {
     fn("spread-entry", 'serveFunction(h, { methods: [...EXTRA, "POST"] });');
     fn("variable", "serveFunction(h, { methods: METHODS });");
     fn("accessor", 'serveFunction(h, { get methods() { return ["POST"]; } });');
+    // Each ENTRY is unwrapped too, not only the list (Codex, on #97): a
+    // wrapped "POST" is still "POST", and a wrapped "GET" is still a door.
+    fn("post-entry-as-const", 'serveFunction(h, { methods: ["POST" as const] });');
+    fn("post-entry-paren", 'serveFunction(h, { methods: [("POST")] });');
+    fn("post-entry-satisfies", 'serveFunction(h, { methods: ["POST" satisfies string] });');
+    fn("post-entry-assertion", 'serveFunction(h, { methods: [<const>"POST"] });');
+    fn("post-entry-nested", 'serveFunction(h, { methods: [(("POST") as const)] });');
+    fn("post-list-non-null", 'serveFunction(h, { methods: ["POST"]! });');
+    fn("get-entry-as-const", 'serveFunction(h, { methods: ["GET" as const] });');
+    fn("get-entry-paren", 'serveFunction(h, { methods: [("POST"), (("GET"))] });');
     expect(Object.fromEntries(getReachable(root))).toEqual({
+      "get-entry-as-const": "serveFunction widened with methods",
+      "get-entry-paren": "serveFunction widened with methods",
       "get-as-const": "serveFunction widened with methods",
       "unreadable-entry": "serveFunction widened with methods",
       "spread-entry": "serveFunction widened with methods",
