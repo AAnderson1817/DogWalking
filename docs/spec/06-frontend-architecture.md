@@ -556,6 +556,14 @@ and — in the other direction, so that deleting the handler outright cannot
 satisfy it — that the app shell and navigations still are. Confirmed red by
 reinstating exactly what this section used to prescribe.
 
+Each path family is asserted twice: on Supabase's own origin, which is how it
+is deployed, and on the app's origin, as it would be behind a proxy rewrite.
+Only the second reaches `isNeverCache` at all — the worker never intercepts a
+foreign origin — so until it existed every assertion was satisfied by the
+origin check alone, and an `isNeverCache` answering false for everything
+passed (spec-drift audit). No app route begins with one of these prefixes, so
+on the app's own origin they can only be Supabase traffic.
+
 ## Getting back into an account (review L16)
 
 Before this there was no recovery path. A grep for `resetPasswordForEmail` and
