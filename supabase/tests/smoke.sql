@@ -6135,29 +6135,48 @@ end $$;
 -- both passed silently. It runs here now, so a local validate runs it too,
 -- and it tests its own pattern every time rather than once: a detector
 -- that stops matching fails its self-test, not a future review.
+--
+-- The rule does not read the target table at all. The first rewrite
+-- enumerated spellings of "the clients table" and three rounds found three
+-- more — an upsert and a MERGE (this PR's own review), then `clients *`,
+-- PostgreSQL's optional inheritance marker (Codex), whose grammar siblings
+-- `ONLY (clients)` and a database-qualified name were misses too. Only
+-- `clients` has a `credit_balance` column (asserted below: the rule is exact
+-- only while that holds), so any `update … set …` statement that names the
+-- column is a write to it or an error, whatever the target is spelled —
+-- including an upsert's `do update set` and a MERGE's `then update set`, and
+-- a comment between the tokens. The price, pinned in the self-test: an update
+-- that only READS the balance in the same statement is flagged too. That is
+-- the loud direction, no function in the tree does it, and the remedy is to
+-- read the balance into a variable first. Still outside the rule, and said
+-- rather than implied: SQL assembled at run time, and a comment carrying a
+-- `;` inside the statement.
 do $$
 declare
   -- One pattern, read by the real check and by the self-test below, so the
-  -- two cannot drift apart. Two statements write a column of an existing
-  -- row: an UPDATE, whose optional parts are exactly the spellings of "the
-  -- clients table" it can use — ONLY, a (quoted) schema, a quoted name, an
-  -- alias with or without AS — and an INSERT … ON CONFLICT or a MERGE into
-  -- clients whose action is `update set`. The second arm is from this PR's
-  -- own review: the first version saw only UPDATE, so an upsert or a MERGE
-  -- wrote credit_balance past it (measured, both). Its `[[:space:](]` after
-  -- the name is the boundary the UPDATE arm gets from its own `set`.
-  v_re constant text :=
-    '(update[[:space:]]+(only[[:space:]]+)?'
-    || '("?public"?[[:space:]]*\.[[:space:]]*)?"?clients"?'
-    || '([[:space:]]+(as[[:space:]]+)?"?[[:alpha:]_][[:alnum:]_$]*"?)?'
-    || '[[:space:]]+set'
-    || '|(insert|merge)[[:space:]]+into[[:space:]]+(only[[:space:]]+)?'
-    || '("?public"?[[:space:]]*\.[[:space:]]*)?"?clients"?[[:space:](]'
-    || '[^;]*update[[:space:]]+set)'
-    || '[^;]*credit_balance';
+  -- two cannot drift apart.
+  v_re constant text := '\mupdate\M[^;]*\mset\M[^;]*\mcredit_balance\M';
   v_offenders text;
+  v_tables text;
   r record;
 begin
+  -- The premise: the column exists on `clients` and nowhere else. A second
+  -- table gaining it would make every write to that table read as a write
+  -- to the balance, so the rule has to be revisited, not silently widened.
+  -- Read from pg_attribute, not information_schema, which shows only the
+  -- columns the current role holds a privilege on — a premise that could
+  -- pass by seeing nothing. Tables and foreign tables only: an update
+  -- through a view of clients is still a write to the balance.
+  select string_agg(n.nspname || '.' || c.relname, ', ' order by 1) into v_tables
+    from pg_attribute a
+    join pg_class c on c.oid = a.attrelid
+    join pg_namespace n on n.oid = c.relnamespace
+   where a.attname = 'credit_balance' and not a.attisdropped and a.attnum > 0
+     and c.relkind in ('r', 'p', 'f');
+  if v_tables is distinct from 'public.clients' then
+    raise exception 'FAIL: invariant 1 reads any update of credit_balance as a write to clients.credit_balance, which is exact only while clients alone has the column — it is on: %', v_tables;
+  end if;
+
   -- Positive control on the real catalogue: the pattern must find the one
   -- legitimate writer, or a pattern that matches nothing passes the check.
   if not exists (select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
@@ -6175,10 +6194,10 @@ begin
     raise exception 'FAIL: invariant 1 — credit_balance written outside fn_ledger_apply by: %', v_offenders;
   end if;
 
-  -- The self-test: eight bodies it must flag and six it must not. PL/pgSQL
-  -- resolves table names at execution, so these
-  -- bodies need nothing to exist; they are dropped before the block ends and
-  -- the suite rolls back regardless.
+  -- The self-test: fourteen bodies it must flag and seven it must not.
+  -- PL/pgSQL resolves table names at execution, so these bodies need nothing
+  -- to exist; they are dropped before the block ends and the suite rolls
+  -- back regardless.
   for r in
     select * from (values
       ('plain',      'update clients set credit_balance = credit_balance + 1 where id = p;', true),
@@ -6189,16 +6208,26 @@ begin
       ('multi-line', e'update\n    clients\n   set credit_balance = 0\n where id = p;', true),
       ('upsert',     'insert into clients (id, credit_balance) values (p, 0) on conflict (id) do update set credit_balance = 1;', true),
       ('merge',      'merge into public.clients c using (select p as id) s on c.id = s.id when matched then update set credit_balance = 1;', true),
+      ('inheritance marker', 'update clients * set credit_balance = 0 where id = p;', true),
+      ('only, parenthesised', 'update only (public.clients) set credit_balance = 0 where id = p;', true),
+      ('database-qualified',  'update postgres.public.clients set credit_balance = 0 where id = p;', true),
+      ('a comment between',   e'update clients -- the balance, deliberately\n  set credit_balance = 0 where id = p;', true),
+      ('any target',          'update clients_archive set credit_balance = 0 where id = p;', true),
+      ('a read in the same update (the price)', 'update clients set status = ''frozen'' where credit_balance < 0;', true),
       ('other column',   'update clients set status = ''active'' where id = p;', false),
       ('a read',         'perform credit_balance from clients where id = p;', false),
-      ('another table',  'update clients_archive set credit_balance = 0 where id = p;', false),
       ('next statement', 'update clients set status = ''active''; perform credit_balance from clients;', false),
-      ('upsert of another table',  'insert into clients_archive (id) values (p) on conflict (id) do update set credit_balance = 1;', false),
-      ('upsert of another column', 'insert into clients (id, status) values (p, ''active'') on conflict (id) do update set status = ''active'';', false)
+      ('a row lock',     'select credit_balance into v from clients where id = p for no key update;', false),
+      ('upsert of another column', 'insert into clients (id, status) values (p, ''active'') on conflict (id) do update set status = ''active'';', false),
+      -- The two below are what make `set` and the word boundaries load-bearing:
+      -- a lock's `update` with no assignment after it, and identifiers that
+      -- merely contain the keywords.
+      ('a locking CTE, then a read', 'with c as (select id from clients where id = p for update) select credit_balance into v from clients where id in (select id from c);', false),
+      ('words containing the keywords', 'perform last_updated_at, offset_credit_balance from clients where id = p;', false)
     ) as t(label, body, flagged)
   loop
     execute format(
-      'create function public.fn_inv1_probe(p uuid) returns void language plpgsql as $b$ begin %s end $b$',
+      'create function public.fn_inv1_probe(p uuid) returns void language plpgsql as $b$ declare v int; begin %s end $b$',
       r.body);
     if (select p.prosrc ~* v_re from pg_proc p
          where p.proname = 'fn_inv1_probe' and p.pronamespace = 'public'::regnamespace) is distinct from r.flagged then
@@ -6208,7 +6237,7 @@ begin
     drop function public.fn_inv1_probe(uuid);
   end loop;
 
-  raise notice 'invariant 1: credit_balance is written only by fn_ledger_apply, and the pattern finds every spelling of the write: OK';
+  raise notice 'invariant 1: every update … set … credit_balance statement is fn_ledger_apply''s, and only clients has the column: OK';
 end $$;
 
 rollback;
