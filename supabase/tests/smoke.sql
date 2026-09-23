@@ -6148,14 +6148,36 @@ end $$;
 -- a comment between the tokens. The price, pinned in the self-test: an update
 -- that only READS the balance in the same statement is flagged too. That is
 -- the loud direction, no function in the tree does it, and the remedy is to
--- read the balance into a variable first. Still outside the rule, and said
--- rather than implied: SQL assembled at run time, and a comment carrying a
--- `;` inside the statement.
+-- read the balance into a variable first.
+--
+-- An UPDATE is not the only statement that writes a column (Codex, the fourth
+-- round): `insert into clients (…, credit_balance) values (…, 10)` creates a
+-- balance no ledger row accounts for, and it passed. So the rule has three
+-- more arms, none of which reads the target either:
+--   - an INSERT whose column list names the column — `insert into … ( … )`
+--     and a MERGE's `then insert ( … )`. The column list is the first
+--     parenthesis after the target, so a VALUES tuple that merely READS the
+--     balance (fn_notify_low_credit formats it into a notification) is not a
+--     write and is not flagged;
+--   - an INSERT with no column list at all, which fills every column
+--     positionally — `insert into … values`, `select`, `with`, `table`,
+--     `overriding`, a parenthesised select, a MERGE's `then insert values` —
+--     and so may write this column whatever the target is spelled. Flagged
+--     whatever the target, the conservative direction: no function in the
+--     tree inserts positionally, and the remedy is to name the columns.
+--     `default values` writes each column's default and is not flagged;
+--   - `copy … from`, which loads rows the same way. Nothing here does that.
+-- Still outside the rule, and said rather than implied: SQL assembled at run
+-- time, and a comment carrying a `;` inside the statement.
 do $$
 declare
   -- One pattern, read by the real check and by the self-test below, so the
   -- two cannot drift apart.
-  v_re constant text := '\mupdate\M[^;]*\mset\M[^;]*\mcredit_balance\M';
+  v_re constant text :=
+       '\mupdate\M[^;]*\mset\M[^;]*\mcredit_balance\M'
+    || '|\minsert\M\s+(?:\minto\M[^(;]*)?\((?:[^();]|\([^();]*\))*?\mcredit_balance\M'
+    || '|\minsert\M\s+(?:\minto\M[^(;]*?)?(?:\(\s*)?\m(?:(?<!\mdefault\s+)values|select|with|table|overriding)\M'
+    || '|\mcopy\M[^;]*\mfrom\M';
   v_offenders text;
   v_tables text;
   r record;
@@ -6174,7 +6196,7 @@ begin
    where a.attname = 'credit_balance' and not a.attisdropped and a.attnum > 0
      and c.relkind in ('r', 'p', 'f');
   if v_tables is distinct from 'public.clients' then
-    raise exception 'FAIL: invariant 1 reads any update of credit_balance as a write to clients.credit_balance, which is exact only while clients alone has the column — it is on: %', v_tables;
+    raise exception 'FAIL: invariant 1 reads any write of credit_balance as a write to clients.credit_balance, which is exact only while clients alone has the column — it is on: %', v_tables;
   end if;
 
   -- Positive control on the real catalogue: the pattern must find the one
@@ -6194,7 +6216,7 @@ begin
     raise exception 'FAIL: invariant 1 — credit_balance written outside fn_ledger_apply by: %', v_offenders;
   end if;
 
-  -- The self-test: fourteen bodies it must flag and seven it must not.
+  -- The self-test: twenty-five bodies it must flag and eleven it must not.
   -- PL/pgSQL resolves table names at execution, so these bodies need nothing
   -- to exist; they are dropped before the block ends and the suite rolls
   -- back regardless.
@@ -6214,6 +6236,18 @@ begin
       ('a comment between',   e'update clients -- the balance, deliberately\n  set credit_balance = 0 where id = p;', true),
       ('any target',          'update clients_archive set credit_balance = 0 where id = p;', true),
       ('a read in the same update (the price)', 'update clients set status = ''frozen'' where credit_balance < 0;', true),
+      -- The INSERT arms (Codex, the fourth round).
+      ('insert, column list',        'insert into clients (id, credit_balance) values (p, 10);', true),
+      ('insert, aliased',            'insert into public.clients as c (id, credit_balance) values (p, 10);', true),
+      ('insert, quoted',             'insert into "clients" ("id", "credit_balance") values (p, 10);', true),
+      ('insert, column list across lines', e'insert into clients\n  (id,\n   credit_balance)\n values (p, 10);', true),
+      ('merge, then insert columns', 'merge into clients c using (select p as id) s on c.id = s.id when not matched then insert (id, credit_balance) values (s.id, 10);', true),
+      ('insert, positional values',  'insert into clients values (p, 10);', true),
+      ('insert, positional select',  'insert into clients select * from clients_archive;', true),
+      ('insert, parenthesised select', 'insert into clients (select * from clients_archive);', true),
+      ('merge, then insert values',  'merge into clients c using (select p as id) s on c.id = s.id when not matched then insert values (s.id);', true),
+      ('insert, overriding',         'insert into clients overriding system value values (p, 10);', true),
+      ('copy from',                  'copy clients (id, credit_balance) from ''/tmp/balances.csv'';', true),
       ('other column',   'update clients set status = ''active'' where id = p;', false),
       ('a read',         'perform credit_balance from clients where id = p;', false),
       ('next statement', 'update clients set status = ''active''; perform credit_balance from clients;', false),
@@ -6223,7 +6257,13 @@ begin
       -- a lock's `update` with no assignment after it, and identifiers that
       -- merely contain the keywords.
       ('a locking CTE, then a read', 'with c as (select id from clients where id = p for update) select credit_balance into v from clients where id in (select id from c);', false),
-      ('words containing the keywords', 'perform last_updated_at, offset_credit_balance from clients where id = p;', false)
+      ('words containing the keywords', 'perform last_updated_at, offset_credit_balance from clients where id = p;', false),
+      -- The INSERT arms' own boundaries: a read inside a VALUES tuple or a
+      -- source select is not a write, and neither is DEFAULT VALUES.
+      ('a read in a values tuple (fn_notify_low_credit)', e'insert into notifications (operator_id, client_id, type, title, body)\n  values (v.operator_id, p, ''low_credit'', ''t'', format(''%s has %s'', v.full_name, v.credit_balance));', false),
+      ('a read at the top of a values tuple', 'insert into credit_ledger (client_id, amount) values (p, v.credit_balance);', false),
+      ('a read in a source select', 'insert into credit_ledger (client_id, amount) select id, credit_balance from clients where id = p;', false),
+      ('default values', e'insert into job_runs default\n   values;', false)
     ) as t(label, body, flagged)
   loop
     execute format(
@@ -6237,7 +6277,7 @@ begin
     drop function public.fn_inv1_probe(uuid);
   end loop;
 
-  raise notice 'invariant 1: every update … set … credit_balance statement is fn_ledger_apply''s, and only clients has the column: OK';
+  raise notice 'invariant 1: every statement that can write credit_balance is fn_ledger_apply''s, and only clients has the column: OK';
 end $$;
 
 rollback;
