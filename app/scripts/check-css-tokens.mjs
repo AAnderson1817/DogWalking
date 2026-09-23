@@ -63,7 +63,11 @@
 // followed now, and a type decides nothing. And a key whose literal value
 // REMOVES the property — null, undefined, a boolean or "", which React clears
 // rather than sets, like setProperty(name, "") — defines nothing either
-// (Codex, round 5).
+// (Codex, round 5), and neither does one that a LATER property or spread in
+// the same style removes (round 7): React applies the last value a literal
+// gives a key, so what follows a key is read — a property of the same name, a
+// spread of a literal or of a same-file const — and the key is refused only
+// when that last value definitely removes it.
 //
 // The strict rule's cost is the loud direction, and it is paid on purpose.
 // Every other way a value reaches a style — an import from another file, a
@@ -75,6 +79,15 @@
 // fix is in the message rather than in a reading of this file. That hint never
 // counts as a definition — it only changes what the red says — and its remedy,
 // a default in CSS, is a real definition whatever the object turns out to be.
+//
+// The same boundary holds on the silent side, stated rather than chased: a key
+// is refused only on what this reads. A later spread it cannot read (a prop, a
+// call, an import), a JSX spread attribute that may replace `style` wholesale,
+// and a const mutated after it is created (`vars["--k"] = undefined`, `delete`,
+// `Object.assign`) may each take a key off again, and the definition counts
+// anyway: one that holds sometimes is still a definition, the approximation the
+// removal rule makes, and following every way a value changes after it is
+// written is not a job for a name check.
 //
 // Like the CSS side always has, this is scope-blind: a token defined under one
 // selector satisfies a use anywhere. Fixing that is a different gate.
@@ -163,20 +176,85 @@ function styleTarget(attr, sf) {
   return ts.isIdentifier(tag) && (/^[a-z]/.test(tag.text) || tag.text.includes("-")) ? true : tag.getText(sf);
 }
 
+// React applies the LAST value an object literal gives a key, so a setting
+// followed by a clearing defines nothing (Codex, PR #95 round 7). What follows
+// a key is read as far as it can be: a property of the same name, a spread of
+// an object literal or of a same-file const initialised to one, either arm of
+// a ternary. The answer is "removes" only when that last value DEFINITELY
+// removes. Anything unread, or clearing on one arm only, may leave the key
+// set, and a definition that holds sometimes is still one — the approximation
+// the removal rule already makes for a value computed at run time.
+const nameOf = (name) => (ts.isIdentifier(name) || ts.isPrivateIdentifier(name) || ts.isNumericLiteral(name)
+  ? name.text : propertyName(name));
+
+function touches(element, key, ctx, seen) {
+  if (ts.isSpreadAssignment(element)) return effectiveValue(element.expression, key, ctx, seen);
+  const name = nameOf(element.name);
+  if (name === undefined) return "unknown"; // a computed name this cannot read may be the key
+  if (name !== key) return "absent";
+  if (!ts.isPropertyAssignment(element)) return "unknown"; // a getter or method named the key
+  return reactRemoves(element.initializer) ? "removes" : "sets";
+}
+
+function lastTouch(elements, key, ctx, seen) {
+  for (let i = elements.length - 1; i >= 0; i--) {
+    const value = touches(elements[i], key, ctx, seen);
+    if (value !== "absent") return { value, element: elements[i] };
+  }
+  return { value: "absent" };
+}
+
+function effectiveValue(expr, key, ctx, seen) {
+  const e = bare(expr);
+  if (ts.isObjectLiteralExpression(e)) return lastTouch(e.properties, key, ctx, seen).value;
+  if (ts.isConditionalExpression(e)) {
+    const [a, b] = [effectiveValue(e.whenTrue, key, ctx, seen), effectiveValue(e.whenFalse, key, ctx, seen)];
+    return a === b ? a : "unknown";
+  }
+  const decl = ts.isIdentifier(e) ? ctx.checker.getSymbolAtLocation(e)?.valueDeclaration : undefined;
+  if (decl && ts.isVariableDeclaration(decl) && decl.initializer && !seen.has(decl)
+    && ts.getCombinedNodeFlags(decl) & ts.NodeFlags.Const) {
+    // Taken back off on the way out, so a const reached on both arms of a
+    // ternary is read on both; while it is on, a const read inside its own
+    // initializer stops rather than looping.
+    seen.add(decl);
+    const value = effectiveValue(decl.initializer, key, ctx, seen);
+    seen.delete(decl);
+    return value;
+  }
+  return "unknown";
+}
+
+// The element after `element` in `literal` whose value for `key` is the one
+// that sticks, when that value definitely removes the key; otherwise null.
+function clearedAfter(literal, element, key, ctx) {
+  const later = literal.properties.slice(literal.properties.indexOf(element) + 1);
+  const last = lastTouch(later, key, ctx, new Set());
+  return last.value === "removes" ? last.element : null;
+}
+
 // Walk up from an expression and say where its value lands: `true` on a host
-// element's style, a component's tag when only on a component's `style`, and
-// `false` on neither. `seen` holds the consts already followed: `const x = c ?
-// { … } : x` is legal syntax, and without it the walk from the object into `x`
-// and back through its own initializer never ends.
-function landsOnStyle(start, ctx, seen = new Set()) {
+// element's style, a component's tag when only on a component's `style`,
+// `{ clearedBy }` on a host element's style that a later element takes the key
+// off again, and `false` on none. `key` is the property being asked about;
+// without one (a use, not a definition) nothing is cleared. `seen` holds the
+// consts already followed: `const x = c ? { … } : x` is legal syntax, and
+// without it the walk from the object into `x` and back through its own
+// initializer never ends.
+function landsOnStyle(start, ctx, key, seen = new Set(), clearedBy = null) {
   let node = start;
   for (;;) {
     const p = node.parent;
     if (!p) return false;
     if (passesThrough(p)) { node = p; continue; }
     // `{ ...X, … }` puts X's keys on the containing object: X lands on a
-    // style exactly when that one does.
-    if (ts.isSpreadAssignment(p)) { node = p.parent; continue; }
+    // style exactly when that one does — unless an element after the spread
+    // takes the key off again.
+    if (ts.isSpreadAssignment(p)) {
+      if (key !== undefined) clearedBy ??= clearedAfter(p.parent, p, key, ctx);
+      node = p.parent;
+      continue;
+    }
     if (ts.isConditionalExpression(p) && (p.whenTrue === node || p.whenFalse === node)) { node = p; continue; }
     // Either side of `||`/`??` can be the result, and an object is truthy and
     // never nullish, so an object on the left IS the result; `a && b` is b.
@@ -186,12 +264,18 @@ function landsOnStyle(start, ctx, seen = new Set()) {
     }
     if (ts.isJsxExpression(p)) {
       const attr = p.parent;
-      return ts.isJsxAttribute(attr) && attr.name.getText(ctx.sf) === "style" ? styleTarget(attr, ctx.sf) : false;
+      if (!ts.isJsxAttribute(attr) || attr.name.getText(ctx.sf) !== "style") return false;
+      const target = styleTarget(attr, ctx.sf);
+      return target === true && clearedBy ? { clearedBy } : target;
     }
-    if (ts.isVariableDeclaration(p) && p.initializer === node) return constReachesStyle(p, ctx, seen);
+    if (ts.isVariableDeclaration(p) && p.initializer === node) return constReachesStyle(p, ctx, key, seen, clearedBy);
     return false;
   }
 }
+
+// Which of two answers says more: a host element's style that keeps the key,
+// then one that takes it off again, then a component's, then nothing.
+const rank = (t) => (t === true ? 3 : t && typeof t === "object" ? 2 : typeof t === "string" ? 1 : 0);
 
 // A const lands where a use of it in this file does. By symbol, not by name:
 // a parameter or an inner const of the same name is a different binding, and
@@ -199,7 +283,7 @@ function landsOnStyle(start, ctx, seen = new Set()) {
 // Only a const — a `let` can be replaced before it is used. A host element's
 // style anywhere settles it; a component's is kept in case nothing better
 // turns up, so a red can still say where the value went.
-function constReachesStyle(decl, ctx, seen) {
+function constReachesStyle(decl, ctx, key, seen, clearedBy) {
   if (!ts.isIdentifier(decl.name) || !(ts.getCombinedNodeFlags(decl) & ts.NodeFlags.Const)) return false;
   const symbol = ctx.checker.getSymbolAtLocation(decl.name);
   if (!symbol || seen.has(symbol)) return false;
@@ -207,9 +291,9 @@ function constReachesStyle(decl, ctx, seen) {
   let found = false;
   for (const id of ctx.identifiers().get(decl.name.text) ?? []) {
     if (id === decl.name || ctx.checker.getSymbolAtLocation(id) !== symbol) continue;
-    const target = landsOnStyle(id, ctx, seen);
+    const target = landsOnStyle(id, ctx, key, seen, clearedBy);
     if (target === true) return true;
-    if (target && !found) found = target;
+    if (rank(target) > rank(found)) found = target;
   }
   return found;
 }
@@ -225,7 +309,7 @@ function visiblyStyled(literal, ctx) {
     if (!p) return false;
     if (passesThrough(p) || ts.isBinaryExpression(p) || ts.isTemplateSpan(p) || ts.isTemplateExpression(p)
       || (ts.isConditionalExpression(p) && p.condition !== node)) { node = p; continue; }
-    return ts.isPropertyAssignment(p) && p.initializer === node && landsOnStyle(p.parent, ctx) !== false;
+    return ts.isPropertyAssignment(p) && p.initializer === node && landsOnStyle(p.parent, ctx, undefined) !== false;
   }
 }
 
@@ -310,11 +394,12 @@ function scanTs(sf, checker) {
     if (ts.isPropertyAssignment(node)) {
       const name = propertyName(node.name);
       if (name && TOKEN.test(name)) {
-        const target = landsOnStyle(node.parent, ctx);
+        const target = landsOnStyle(node.parent, ctx, name, new Set(), clearedAfter(node.parent, node, name, ctx));
         const at = { name, file, line: lineOf(node) };
         if (target === false) nearMisses.push({ ...at, kind: "key" });
-        else if (target !== true) nearMisses.push({ ...at, kind: "component", component: target });
+        else if (typeof target === "string") nearMisses.push({ ...at, kind: "component", component: target });
         else if (reactRemoves(node.initializer)) nearMisses.push({ ...at, kind: "removed" });
+        else if (target !== true) nearMisses.push({ ...at, kind: "cleared", clearedAt: lineOf(target.clearedBy) });
         else defs.push(name);
       }
     }
@@ -379,12 +464,13 @@ const joinAnd = (xs) => (xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join("
 
 // By file and line, so no message depends on the order of the directory walk.
 const byPlace = (a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.line - b.line);
+const place = (file, line) => `${path.relative(process.cwd(), file)}:${line}`;
 
 // "--x is set at a.ts:1 and b.tsx:3", or name by name when a prefix use
 // matched several: "--s-1 is set at a.ts:1 and --s-2 is set at a.ts:2".
 function setAt(nearMisses) {
   const sorted = [...nearMisses].sort(byPlace);
-  const at = (n) => `${path.relative(process.cwd(), n.file)}:${n.line}`;
+  const at = (n) => place(n.file, n.line);
   const names = new Set(sorted.map((n) => n.name));
   return names.size === 1
     ? `${sorted[0].name} is set at ${joinAnd(sorted.map(at))}`
@@ -423,6 +509,12 @@ function main() {
       parts.push(`${setAt(components)}, but reaches only the \`style\` of ${joinAnd(tags)}, `
         + `${one ? "a component" : "components"} this gate cannot see into; `
         + `if ${one ? "it passes" : "one of them passes"} \`style\` on to an element, give the property a default in CSS`);
+    }
+    const cleared = u.nearMisses.filter((n) => n.kind === "cleared");
+    if (cleared.length) {
+      const where = [...new Set([...cleared].sort(byPlace).map((n) => place(n.file, n.clearedAt)))];
+      parts.push(`${setAt(cleared)}, but a later property or spread in the same style removes it `
+        + `(at ${joinAnd(where)}); give the property a default in CSS`);
     }
     const removed = u.nearMisses.filter((n) => n.kind === "removed");
     if (removed.length) {
