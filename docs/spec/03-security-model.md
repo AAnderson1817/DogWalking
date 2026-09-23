@@ -536,6 +536,17 @@ Every definer fn: `SECURITY DEFINER SET search_path = public`, then
 REVOKE ALL ON FUNCTION fn_x(…) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION fn_x(…) TO <role list>;
 ```
+The REVOKE is not a formality. A new function is executable by `PUBLIC`
+(PostgreSQL's default) and by `anon`, `authenticated` and `service_role` (the
+platform's default privileges), so a definer function created without it is
+callable by anyone holding the anon key. Four definer trigger functions were,
+from `0012`–`0015` until `0053` — not exploitable, since PostgreSQL refuses to
+call a trigger function directly and no API role can create a trigger, but
+invariant 5 all the same. `0053` revokes them from every API role, which
+cannot break them: EXECUTE on a trigger function is checked when the trigger
+is created, not when it fires (smoke.sql pins that for the three an API role
+can reach). Smoke asserts both halves of invariant 5 against the live
+catalogue, for every definer function.
 This catalogue used to be hand-written and listed **11** functions when there
 were **48** (the generated block below carries the live count). It was presented as the complete grant-audit checklist, so an engineer
 adding a definer function and checking their grants against it had no idea 37
@@ -546,13 +557,30 @@ migrations with `gen-enum-catalog.py`'s SQL reader and scans its skeleton, so a
 string that says "security definer" are all read as PostgreSQL reads them;
 `scripts/gen-definer-catalog-proofs.py` holds a probe for each.
 
-The generator bounds each function's text by the next `create … function`
-rather than by a fixed window, which matters: a naive window reports 52,
-because four trigger and helper functions that are *not* definer
+**It models each function's ACL; it used to collect GRANTs.** Reading grants
+alone, a function nobody granted was rendered **none** — "no API role can call
+it" — and that is how the four trigger functions above were catalogued while
+every API role could execute them (spec-drift audit). So each function starts
+at the platform default, and every `CREATE`, `CREATE OR REPLACE`, `DROP`,
+`GRANT` and `REVOKE` is applied in migration order, keyed by name AND
+argument types: `0026` created a new overload of `fn_apply_invoice_paid` and
+dropped the old one, and a new overload starts at the default, not at the old
+one's revokes. A definer function `PUBLIC` or `anon` can execute fails the
+generator by name, and a statement it cannot read (a routine grant in another
+shape, `ALTER FUNCTION`, `ALTER DEFAULT PRIVILEGES`, a procedure) is refused
+rather than guessed at. What no reading of the migrations can see is a grant
+made by dynamic SQL inside a body, so gate 8e
+(`scripts/check-definer-catalog-live.py`) holds the whole model — every
+function the migrations create, its argument types, its `SECURITY DEFINER`
+flag and the API roles holding EXECUTE — to a reset database.
+
+Each `create function` is read as one statement, bounded on the skeleton
+where the reader has blanked its body, which matters: a fixed window reports
+52, because four trigger and helper functions that are *not* definer
 (`fn_is_service_session`, `fn_ledger_block_mutation`,
 `fn_credential_log_block_mutation`, `fn_default_walk_origin`) sit next to ones
-that are. It also takes each function's LAST definition, since `create or
-replace` in a later migration is what Postgres actually has.
+that are. `create or replace` of an existing signature keeps its ACL and takes
+the new `SECURITY` setting, since that is what Postgres actually has.
 
 <!-- BEGIN GENERATED DEFINER CATALOG -->
 
@@ -560,11 +588,15 @@ replace` in a later migration is what Postgres actually has.
 `scripts/gen-definer-catalog.py`; CI fails if this table and the migrations
 disagree, so adding a definer function without regenerating breaks the build.
 
-*Granted to* is the union of every `GRANT EXECUTE` across all migrations for
-that name. **none** means no API role can call it — service-role and other
-definer functions only, which is the correct default.
+*EXECUTE held by* is each function's ACL after every `CREATE`, `GRANT`,
+`REVOKE` and `DROP` in the migrations, in order, starting from what a new
+function gets on the platform: `PUBLIC` (PostgreSQL's default) plus `anon`,
+`authenticated` and `service_role` (Supabase's default privileges). Only the
+API roles are shown. **none** means no API role can call it — service-role
+and other definer functions only, which is the correct default. `PUBLIC` or
+`anon` would break invariant 5, and the generator refuses it.
 
-| Function | EXECUTE granted to |
+| Function | EXECUTE held by |
 |---|---|
 | `fn_seed_operator_defaults` | **none** |
 | `fn_ledger_apply` | **none** |

@@ -165,6 +165,25 @@ prerequisites as 8c: skipped by name when deno is missing, and inside the
 not running is this repository's most-recorded failure, so a SKIP here is a
 reason to install deno, not to move on.
 
+## 8e. The definer catalogue matches the database (requires `LOCAL_DB_URL`)
+```
+python3 scripts/check-definer-catalog-live.py
+```
+Gate 10a's generator reads the migrations and MODELS each function's ACL:
+what a new function starts with (`PUBLIC`, plus the platform's default
+privileges), what `CREATE OR REPLACE` keeps, what `DROP` and a new overload
+reset. A model written from a reading of PostgreSQL's rules shares that
+reading's mistakes, and so would a test written from the same reading — the
+`check-auth-posture` lesson — so this asks the database gate 7 built: every
+function in `public` the migrations create (extension members are left out
+by `pg_depend`, not by name) must be in the model with the same argument
+types, the same `SECURITY DEFINER` flag and the same API roles holding
+EXECUTE, and the model may name nothing the database lacks. That also covers
+the one thing the generator cannot see, a grant made by dynamic SQL inside a
+body. Needs no deno. Must end with `DEFINER CATALOGUE LIVE PASS`, and refuses
+by name when either side holds fewer than 50 functions, since two empty sides
+agree.
+
 ## 9. Migrations are append-only (invariant 6)
 ```
 git fetch -q origin main
@@ -391,6 +410,7 @@ are; a pair that differs in any of the three is refused too.
 | `Reset — shim + migrations 0001..NNNN + seed` | 7 |
 | `Push endpoint allowlist — both implementations agree` | 8c |
 | `Walk cost parity — TS leaf, fn_walk_cost and the snapshot trigger agree` | 8d |
+| `Spec 03's definer catalogue matches the database` | 8e |
 | ``Would `supabase db push` apply this?`` | 7b |
 | `Smoke suite (credit engine + full spec-03 security matrix)` | 8 |
 | `Materializer suite (idempotency, skips, no resurrection)` | 8 |

@@ -122,6 +122,11 @@ elif [ -n "${LOCAL_DB_URL:-}" ] && have psql; then
     skip_gate "8c. push endpoint parity" "deno is not installed"
     skip_gate "8d. walk cost parity" "deno is not installed"
   fi
+  # 8e holds the definer catalogue's ACL model (gate 10a reads the
+  # migrations) to the database gate 7 just built: a model written from a
+  # reading of PostgreSQL's rules shares that reading's mistakes, and only
+  # the database can say otherwise. Needs no deno, so it never skips here.
+  run "8e. definer catalogue matches the database" python3 scripts/check-definer-catalog-live.py
 else
   skip_gate "7-8. database" "LOCAL_DB_URL is unset or psql is missing — docs/dev/local-stack.md"
 fi
