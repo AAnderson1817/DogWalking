@@ -36,7 +36,15 @@ import { describe, expect, it } from "vitest";
  *   - server: the edge functions publish through `_lib/broadcast.ts` only,
  *     whose `private: true` is pinned by `broadcast_test.ts`. So no function
  *     may open a channel, and no file but that one may name the broadcast
- *     endpoint.
+ *     endpoint — in a literal, or assembled by `+` or a template (`base +
+ *     "/realtime/v1/api/" + "broadcast"` named it in no single literal, Codex
+ *     on #97). The pieces are folded through the constants the scan can read,
+ *     what it cannot compute is a hole, and the text either side of a hole is
+ *     read as it runs; a red is reported once, where the string is formed.
+ *
+ * Both halves catch a mistake made in good faith and refuse what they cannot
+ * read. They do not model every way a string or a call can be assembled at
+ * run time, and are not meant to stop code written to get past them.
  *
  * A second channel is a decision, not an accident: it needs its own policy
  * in a migration, and this test changed in the same commit.
@@ -191,19 +199,151 @@ function channelSites(file: string, text: string): Site[] {
   return sites;
 }
 
-/** Strings in a file that name the broadcast endpoint (comments are not strings). */
-function endpointMentions(file: string, text: string): number[] {
+const COMPILER_OPTIONS: ts.CompilerOptions = {
+  noLib: true,
+  noResolve: true,
+  target: ts.ScriptTarget.Latest,
+  skipLibCheck: true,
+  types: [],
+};
+
+/**
+ * One file, parsed and bound, so a `const` can be followed to its binding —
+ * the FormError scan's shape. Imports are not resolved: a constant from
+ * another file is a hole.
+ */
+function checked(file: string, text: string): { sf: ts.SourceFile; checker: ts.TypeChecker } {
   const sf = parse(file, text);
+  const host: ts.CompilerHost = {
+    getSourceFile: (name) => (name === file ? sf : undefined),
+    getDefaultLibFileName: () => "lib.d.ts",
+    writeFile: () => {},
+    getCurrentDirectory: () => "/",
+    getCanonicalFileName: (f) => f,
+    useCaseSensitiveFileNames: () => true,
+    getNewLine: () => "\n",
+    fileExists: (f) => f === file,
+    readFile: (f) => (f === file ? text : undefined),
+    directoryExists: () => true,
+    getDirectories: () => [],
+  };
+  return { sf, checker: ts.createProgram([file], COMPILER_OPTIONS, host).getTypeChecker() };
+}
+
+/** The initializer a `const` identifier is bound to, by the checker's symbol; undefined for anything else. */
+function constOf(id: ts.Identifier, checker: ts.TypeChecker): ts.Expression | undefined {
+  const symbol = checker.getSymbolAtLocation(id);
+  const decl = symbol?.valueDeclaration ?? symbol?.declarations?.[0];
+  if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer || !ts.isIdentifier(decl.name)) return undefined;
+  const list = decl.parent;
+  return ts.isVariableDeclarationList(list) && (list.flags & ts.NodeFlags.Const) !== 0 ? decl.initializer : undefined;
+}
+
+/** A part of an assembled string the scan cannot compute: a parameter, a call, a `let`, an import. */
+const HOLE = Symbol("hole");
+type Piece = string | typeof HOLE;
+
+/** Past this many alternatives (ternaries multiply) a fold gives up, and reads as a hole. */
+const FOLD_LIMIT = 64;
+
+interface Fold {
+  alts: Piece[][]; // every assembly the expression can take, as pieces
+  literals: string[]; // every literal it read, wherever that is written
+  combiners: ts.Node[]; // every `+` or template it passed through, itself included
+}
+
+const isCombiner = (node: ts.Node): boolean =>
+  ts.isTemplateExpression(node) || (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken);
+
+/**
+ * How a string expression is assembled: literals, `+`, templates, either arm
+ * of a ternary, through parentheses and assertions and a `const` followed to
+ * its binding. What the scan cannot compute is a HOLE rather than the end of
+ * the fold, because the endpoint is usually appended to a base URL nobody
+ * can read: `base + "/realtime/v1/api/" + "broadcast"` is [HOLE,
+ * "/realtime/v1/api/", "broadcast"].
+ */
+function foldOf(node: ts.Node, checker: ts.TypeChecker, path: Set<ts.Node> = new Set()): Fold {
+  const piece = (p: Piece): Fold => ({ alts: [[p]], literals: typeof p === "string" ? [p] : [], combiners: [] });
+  const join = (a: Fold, b: Fold): Fold => ({
+    alts: a.alts.length * b.alts.length > FOLD_LIMIT ? [[HOLE]] : a.alts.flatMap((x) => b.alts.map((y) => [...x, ...y])),
+    literals: [...a.literals, ...b.literals],
+    combiners: [...a.combiners, ...b.combiners],
+  });
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return piece(node.text);
+  if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node)
+    || ts.isNonNullExpression(node)) return foldOf(node.expression, checker, path);
+  if (ts.isConditionalExpression(node)) {
+    const a = foldOf(node.whenTrue, checker, path);
+    const b = foldOf(node.whenFalse, checker, path);
+    return {
+      alts: a.alts.length + b.alts.length > FOLD_LIMIT ? [[HOLE]] : [...a.alts, ...b.alts],
+      literals: [...a.literals, ...b.literals],
+      combiners: [...a.combiners, ...b.combiners],
+    };
+  }
+  if (ts.isIdentifier(node)) {
+    // The path, not every node visited: a constant used twice is read twice,
+    // and only one that leads back to itself (which parses) stops the fold.
+    const init = constOf(node, checker);
+    return init && !path.has(init) ? foldOf(init, checker, new Set([...path, init])) : piece(HOLE);
+  }
+  let folded: Fold | undefined;
+  if (ts.isTemplateExpression(node)) {
+    folded = piece(node.head.text);
+    for (const span of node.templateSpans) {
+      folded = join(join(folded, foldOf(span.expression, checker, path)), piece(span.literal.text));
+    }
+  } else if (isCombiner(node)) {
+    const bin = node as ts.BinaryExpression;
+    folded = join(foldOf(bin.left, checker, path), foldOf(bin.right, checker, path));
+  }
+  return folded ? { ...folded, combiners: [...folded.combiners, node] } : piece(HOLE);
+}
+
+/** Some assembly names the endpoint: the text between holes is read as it runs. */
+function namesEndpoint(fold: Fold): boolean {
+  return fold.alts.some((alt) => {
+    let run = "";
+    for (const p of [...alt, HOLE]) {
+      if (typeof p === "string") run += p;
+      else if (run.includes(BROADCAST_ENDPOINT)) return true;
+      else run = "";
+    }
+    return false;
+  });
+}
+
+/**
+ * Where a file names the broadcast endpoint (comments are not strings): a
+ * literal that carries it, and a concatenation that assembles it — reported
+ * once, at the innermost `+` or template that forms it, never again at a
+ * literal that already carries it or at a concatenation built on one that
+ * formed it.
+ */
+function endpointMentions(file: string, text: string): number[] {
+  const { sf, checker } = checked(file, text);
   const lines: number[] = [];
-  const visit = (node: ts.Node) => {
+  const at = (node: ts.Node) => lines.push(sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1);
+  const literals = (node: ts.Node) => {
     const isString = ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)
       || ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node);
-    if (isString && (node as ts.LiteralLikeNode).text.includes(BROADCAST_ENDPOINT)) {
-      lines.push(sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1);
-    }
-    ts.forEachChild(node, visit);
+    if (isString && (node as ts.LiteralLikeNode).text.includes(BROADCAST_ENDPOINT)) at(node);
+    ts.forEachChild(node, literals);
   };
-  visit(sf);
+  literals(sf);
+  const folds = new Map<ts.Node, Fold>();
+  const fold = (n: ts.Node): Fold => {
+    if (!folds.has(n)) folds.set(n, foldOf(n, checker));
+    return folds.get(n)!;
+  };
+  const forms = (n: ts.Node): boolean =>
+    namesEndpoint(fold(n)) && !fold(n).literals.some((l) => l.includes(BROADCAST_ENDPOINT));
+  const combiners = (node: ts.Node) => {
+    if (isCombiner(node) && forms(node) && !fold(node).combiners.some((c) => c !== node && forms(c))) at(node);
+    ts.forEachChild(node, combiners);
+  };
+  combiners(sf);
   return lines;
 }
 
@@ -400,5 +540,34 @@ describe("what the channel scan refuses and admits", () => {
       .toMatch(/calls the broadcast endpoint directly/);
     // Prose is not a call.
     expect(server({ ...publisher, "complete-walk/index.ts": "// posts to /realtime/v1/api/broadcast" })).toBe("");
+  });
+
+  it("reads the endpoint however the string is assembled (Codex, on #97)", () => {
+    const server = (entries: Record<string, string>) =>
+      serverProblems(new Map(Object.entries(entries))).problems.join("\n");
+    const publisher = { [THE_PUBLISHER]: "fetch(`${url}/realtime/v1/api/broadcast`);" };
+    const direct = /calls the broadcast endpoint directly/;
+    // The shape it missed: no single literal names the endpoint.
+    expect(server({ ...publisher, "complete-walk/index.ts": `fetch(base + "/realtime/v1/api/" + "broadcast");` }))
+      .toMatch(direct);
+    // Through a constant, a template and a ternary.
+    expect(server({ ...publisher, "complete-walk/index.ts": "const API = \"/realtime/v1/api\";\nfetch(`${url}${API}/broadcast`);" }))
+      .toMatch(direct);
+    expect(server({ ...publisher, "complete-walk/index.ts": `fetch(url + "/realtime/v1/api/" + (quiet ? "noop" : "broadcast"));` }))
+      .toMatch(direct);
+    // Reported once, where it is formed — not again by what uses it.
+    expect(server({ ...publisher, "complete-walk/index.ts": `const P = "/realtime/v1/api/" + "broadcast";\nfetch(url + P);` })
+      .split("\n")).toEqual(["complete-walk/index.ts:1 calls the broadcast endpoint directly — use _lib/broadcast.ts"]);
+    // What it cannot compute stays unread, and another endpoint is not this one.
+    expect(server({ ...publisher, "complete-walk/index.ts": "fetch(base + path);" })).toBe("");
+    // The scan does not guess what a hole holds: text either side of one is
+    // read as it runs, and a string split by one is outside it, as the header
+    // says. Joining across the hole would call every URL with a hole in it a
+    // guess at the endpoint.
+    expect(server({ ...publisher, "complete-walk/index.ts": `fetch("/realtime/v1/api" + part + "/broadcast");` })).toBe("");
+    expect(server({ ...publisher, "complete-walk/index.ts": `fetch(url + "/rest/v1/" + "walks");` })).toBe("");
+    // The publisher still names it when it assembles the string itself.
+    expect(serverProblems(new Map([[THE_PUBLISHER, `fetch(url + "/realtime/v1/api/" + "broadcast");`]])).publisherNamesEndpoint)
+      .toBe(true);
   });
 });

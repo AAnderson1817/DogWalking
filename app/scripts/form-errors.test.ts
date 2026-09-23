@@ -611,11 +611,14 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
         else if (ts.isJsxSpreadAttribute(attr)) visitSpread(owner, attr.expression, attr);
       }
     } else if (ts.isCallExpression(node) && factoryCall(node)) {
-      // The element type is the owner (`StateField` may carry the role);
-      // an argument list the scan cannot see is props it cannot see.
+      // The element type is the owner when it names a component
+      // (`StateField` may carry the role, `FormError` its className); a
+      // string type is a host element whatever it spells, so
+      // `createElement("StateField", …)` takes neither exemption (Codex, on
+      // #97). An argument list the scan cannot see is props it cannot see.
       const before = findings.length;
       const [type, props] = node.arguments;
-      const owner = type && (ts.isIdentifier(type) || ts.isStringLiteral(type)) ? type.text : "<element>";
+      const owner = type && ts.isIdentifier(type) ? type.text : "<element>";
       if (node.arguments.some(ts.isSpreadElement)) {
         for (const each of ["role", "aria-live"]) visitProps("<element>", each, node, node);
       } else if (props) {
@@ -971,6 +974,18 @@ describe("what the scan refuses and admits", () => {
     expect(rules(`type F = typeof React.createElement; let g: typeof createElement;`)).toEqual([]);
     // …and a wrapper of the real one is caught where it applies the props.
     expect(rules(`function make(tag, props) { return React.createElement(tag, props); }`)).toEqual(both);
+  });
+
+  it("gives a component's exemption only to the component, never to a string (Codex, on #97)", () => {
+    // A string element type is a host element, whatever it spells: the
+    // StateField exemption for the role…
+    expect(rules(`createElement("StateField", { role: getRole() });`)).toEqual(["role"]);
+    expect(rules(`createElement("StateField", { role: "alert" });`)).toEqual(["role", "role"]);
+    // …and FormError's for its className, the sibling.
+    expect(rules(`createElement("FormError", { className: "x__error" });`)).toEqual(["error-class"]);
+    // The components themselves keep them.
+    expect(rules(`createElement(StateField, { role: getRole() });`)).toEqual([]);
+    expect(rules(`createElement(FormError, { message: m, className: "claim-invite__error" });`)).toEqual([]);
   });
 
   it("admits what a binding says is harmless, and a forwarded spread", () => {
