@@ -141,6 +141,8 @@ describe("gate 12: css tokens defined", () => {
       'export const H = () => <div style={inter} className="var(--gap)" />;',
       'const maybe: (CSSProperties | undefined) = { "--maybe": "1px" };',
       'export const I = () => <div style={maybe} className="var(--maybe)" />;',
+      'const nullable: null | React.CSSProperties = { "--nullable": "1px" };',
+      'export const J = () => <div style={nullable ?? undefined} className="var(--nullable)" />;',
     ].join("\n");
     const { code, out } = run(tree({ "styles/tokens.css": CSS, "screens/Local.tsx": src }));
     expect(out).toContain("PASS:");
@@ -170,6 +172,17 @@ describe("gate 12: css tokens defined", () => {
     const r = run(tree({ "styles/tokens.css": CSS, "screens/U.tsx": built }));
     expect(r.out).toMatch(/FAIL: var\(--sp-…\) can name no defined custom property: none starts with --sp- \(.*U\.tsx:2\) — --sp-1 is set at .*U\.tsx:1/);
     expect(r.code).toBe(1);
+
+    // Several names under one prefix are named one by one, so no location is
+    // attributed to a name that is not set there.
+    const two = [
+      'const steps = { "--sp-1": "4px" };',
+      'const more = { "--sp-2": "8px" };',
+      "export const U = (n: 1 | 2) => <p className=\"x\" style={{ gap: `var(--sp-${n})` }} />;",
+    ].join("\n");
+    const r2 = run(tree({ "styles/tokens.css": CSS, "screens/U.tsx": two }));
+    expect(r2.out).toMatch(/— --sp-1 is set at .*U\.tsx:1 and --sp-2 is set at .*U\.tsx:2, but not in a shape/);
+    expect(r2.code).toBe(1);
   });
 
   it("does not count a --x key in an ordinary object as a definition", () => {
@@ -180,6 +193,41 @@ describe("gate 12: css tokens defined", () => {
     const screen = 'export const S = () => <p className="x" style={{ margin: "var(--missing)" }} />;';
     const { code, out } = run(tree({ "styles/tokens.css": CSS, "lib/config.ts": config, "screens/S.tsx": screen }));
     expect(out).toContain("FAIL: --missing is used but never defined");
+    expect(code).toBe(1);
+  });
+
+  it("reads a union as a style only when every arm the object could be is one", () => {
+    // Codex on PR #95, round 3: a union value is ONE of its arms and nothing
+    // says which, so `CSSProperties | Payload` does not make a payload a style.
+    // An intersection value is every arm at once, which is why one suffices there.
+    const src = [
+      'import type { CSSProperties } from "react";',
+      "type Payload = { kind: string };",
+      'const payload: CSSProperties | Payload = { "--missing": 1, kind: "payload" };',
+      'const none: null | undefined = { "--none": "1px" };',
+      'export const S = () => <p className="x" style={{ margin: "var(--missing)", padding: "var(--none)" }} />;',
+    ].join("\n");
+    const { code, out } = run(tree({ "styles/tokens.css": CSS, "screens/S.tsx": src }));
+    expect(out).toContain("FAIL: --missing is used but never defined");
+    expect(out).toContain("FAIL: --none is used but never defined");
+    expect(code).toBe(1);
+  });
+
+  it("names every place a missing name is set, not only the first", () => {
+    // Codex on PR #95, round 3: with only the first near-miss named, a config
+    // key found before the real (untyped) style object hid the one worth
+    // reading behind "(and 1 more)". Both files are named, whichever is first.
+    const config = 'export const payload = { "--missing": 1, kind: "config" };';
+    const screen = [
+      'const vars = { "--missing": "1px" };',
+      'export const S = () => <p className="x" style={vars} />;',
+      'export const T = () => <p className="x" style={{ margin: "var(--missing)" }} />;',
+    ].join("\n");
+    const { code, out } = run(tree({ "styles/tokens.css": CSS, "lib/config.ts": config, "screens/S.tsx": screen }));
+    const line = out.split("\n").find((l) => l.startsWith("FAIL: --missing")) ?? "";
+    expect(line).toMatch(/config\.ts:1/);
+    expect(line).toMatch(/S\.tsx:1/);
+    expect(line).toContain("if one of those objects is applied as a style, type it CSSProperties");
     expect(code).toBe(1);
   });
 
