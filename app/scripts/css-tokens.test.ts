@@ -270,6 +270,65 @@ describe("gate 12: css tokens defined", () => {
     expect(code).toBe(0);
   });
 
+  it("does not count a key that a later property or spread in the same style removes", () => {
+    // Codex on PR #95, round 7: React applies the LAST value an object literal
+    // gives a key, so a setting followed by a clearing defines nothing — in the
+    // key's own literal, and at every literal it is spread into on the way.
+    const src = [
+      'import type { CSSProperties } from "react";',
+      'const set = { "--missing": "red" } as CSSProperties;',
+      'const clear = { "--missing": undefined } as CSSProperties;',
+      'export const S = () => <div style={{ ...set, ...clear, margin: "var(--missing)" }} />;',
+      'const twice = { "--twice": "red", "--twice": undefined };',
+      "export const T = () => <div style={twice} />;",
+      'const base = { "--based": "red" };',
+      'export const U = () => <div style={{ ...base, "--based": null }} />;',
+      'export const V = () => <div style={{ "--inline": "1px", ...({ "--inline": "" } as object) }} />;',
+      // A host element that clears the key says more than a component that
+      // may drop it, whichever of the two comes first in the file.
+      'const both = { "--both": "red" };',
+      "export const X = () => <Card style={both} />;",
+      'export const Y = () => <div style={{ ...both, "--both": undefined }} />;',
+      'export const W = () => <p className="x" style={{ margin: "var(--twice) var(--based) var(--inline) var(--both)" }} />;',
+    ].join("\n");
+    const { code, out } = run(tree({ "styles/tokens.css": CSS, "screens/S.tsx": src }));
+    const line = (name: string) => out.split("\n").find((l) => l.startsWith(`FAIL: ${name} is used`)) ?? "";
+    for (const name of ["--missing", "--twice", "--based", "--inline", "--both"]) {
+      expect(line(name)).toContain(`FAIL: ${name} is used but never defined`);
+    }
+    // The red names where the value is set AND where it is taken away again.
+    expect(line("--missing")).toMatch(
+      /— --missing is set at .*S\.tsx:2, but a later property or spread in the same style removes it \(at .*S\.tsx:4\); give the property a default in CSS/,
+    );
+    expect(line("--based")).toMatch(/--based is set at .*S\.tsx:7, but a later property or spread in the same style removes it \(at .*S\.tsx:8\)/);
+    expect(line("--both")).toMatch(/--both is set at .*S\.tsx:10, but a later property or spread in the same style removes it \(at .*S\.tsx:12\)/);
+    expect(code).toBe(1);
+  });
+
+  it("still counts a key when what follows it may set it, leaves it alone, or cannot be read", () => {
+    // The last value wins in the other direction too, and only a later value
+    // that DEFINITELY removes is refused: a spread this cannot read, or one
+    // that clears on one arm of a ternary only, may leave the key set — the
+    // approximation the removal rule makes for a value computed at run time.
+    const src = [
+      "declare const on: boolean;",
+      "declare const props: { style?: object };",
+      'const vars = { "--late": undefined, "--late": "red" };',
+      "export const A = () => <div style={vars} />;",
+      'export const B = () => <div style={{ "--forwarded": "1px", ...props.style }} />;',
+      'export const C = () => <div style={{ "--sometimes": "1px", ...(on ? { "--sometimes": undefined } : {}) }} />;',
+      'export const D = () => <div style={{ "--kept": "1px", "--other": undefined, margin: 0 }} />;',
+      // A const cleared on one path and applied whole on another still counts.
+      'const two = { "--two": "1px" };',
+      'export const E = () => <div style={{ ...two, "--two": undefined }} />;',
+      "export const F = () => <div style={two} />;",
+      'export const G = () => <p className="x" style={{ margin: "var(--late) var(--forwarded) var(--sometimes) var(--kept) var(--two)" }} />;',
+    ].join("\n");
+    const { code, out } = run(tree({ "styles/tokens.css": CSS, "screens/S.tsx": src }));
+    expect(out).toContain("PASS:");
+    expect(code).toBe(0);
+  });
+
   it("follows a declaration that refers to itself without looping", () => {
     // Legal syntax, a TDZ error at run time. Without a guard the walk from the
     // object into the const and back through its own initializer never ends.

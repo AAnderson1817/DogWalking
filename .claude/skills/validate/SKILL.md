@@ -276,7 +276,10 @@ flows into one (directly, through a spread, a ternary or `||`/`??`), or a
 is a different binding — or is set by `….style.setProperty`,
 and in either case only to a value that SETS it: a literal `null`,
 `undefined`, boolean or `""` removes the property (React clears it, and so
-does `setProperty` with `""` or `null`), so it defines nothing. A type decides
+does `setProperty` with `""` or `null`), so it defines nothing — nor does a
+key a later property or spread in the same style takes off again, since React
+applies the last value (a later element the gate cannot read, or a const
+mutated after it is created, counts as leaving it set). A type decides
 nothing: counting any `--x`-shaped key let a config object
 "define" a token no style ever sets, and reading a `CSSProperties` annotation
 as evidence let an unused typed object and a `CSSProperties | Payload` union
