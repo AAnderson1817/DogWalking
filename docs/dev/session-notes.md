@@ -164,6 +164,14 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   hides. A grep for it is NOT reliable — shell quoting defeats a crude parser,
   and mine produced a false positive on the first try — so this is a rule to
   remember rather than a gate.
+- **A four-digit backslash-u escape in a tool input reaches the file as the
+  character it names.** A regex class written as those escapes, through the
+  editor and again through a shell heredoc, landed with nine of them turned
+  into the literal punctuation they denote; only the two non-printable ones
+  survived as escapes. It happened to be the same 63 code points, so a green
+  run could not tell the difference, and the text was not what anyone reading
+  it would check. Build such a line with the backslash computed (`chr(92)` in
+  Python) and print it back with `repr` before trusting it.
 - **Tightening a validation rule silently invalidates other suites' fixtures.**
   PR #85 added a push-service host allowlist; `push_delivery_test.ts` went red
   immediately (its fixtures were arbitrary hosts) and was fixed. `concurrency.sh`
