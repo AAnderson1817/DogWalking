@@ -18,7 +18,10 @@ runs here, and this script holds the three files to it:
 
   1. every named `ci.yml` step has exactly one row, and every row names a step
      that exists (a stale row excuses nothing, which is how an exception
-     outlives the thing it excused);
+     outlives the thing it excused). Two steps may share a name only if they
+     are the same step — the two `Install`s run one command in two jobs — or
+     a copied step that runs something else under the old name would be
+     described by a row written for the first (Codex, PR #97);
   2. each row says a SKILL.md gate id, `CI only` (a check with no local gate),
      or `setup` (an install, not a check), and a gate id must be a heading;
   3. every SKILL.md gate is run by `validate.sh` under the same id, and every
@@ -34,6 +37,7 @@ that saw nothing reports agreement (the `column-grants.test.ts` lesson).
 """
 from __future__ import annotations
 
+import json
 import pathlib
 import re
 import sys
@@ -60,7 +64,7 @@ RUN_LABEL = re.compile(r'^\s*run\s+"(\d+[a-z]?)\.', re.M)
 
 
 def ci_steps(doc: dict) -> tuple[set[str], list[str]]:
-    names: set[str] = set()
+    first: dict[str, tuple[str, int, str]] = {}
     problems: list[str] = []
     for job, spec in (doc.get("jobs") or {}).items():
         for i, step in enumerate(spec.get("steps") or [], start=1):
@@ -71,8 +75,17 @@ def ci_steps(doc: dict) -> tuple[set[str], list[str]]:
                         f"ci.yml job `{job}` step {i} runs a command and has no name, so no list can track it"
                     )
                 continue
-            names.add(name)
-    return names, problems
+            # The whole step, not only its command: a copy that changes its
+            # `with:` or `env:` is a different step too.
+            body = json.dumps(step, sort_keys=True, default=str)
+            if name in first and first[name][2] != body:
+                where = first[name]
+                problems.append(
+                    f"ci.yml steps `{name}` in job `{where[0]}` (step {where[1]}) and job `{job}` (step {i}) "
+                    "share a name and differ, so one SKILL.md row would describe both — name them apart"
+                )
+            first.setdefault(name, (job, i, body))
+    return set(first), problems
 
 
 def skill_gates(text: str) -> set[str]:
