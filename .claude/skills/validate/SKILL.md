@@ -60,7 +60,7 @@ SKIP only if a browser genuinely cannot be installed here — say so explicitly,
 because these are the gates whose absence let a broken `fn_book_walk` reach
 production.
 
-## 6. Edge functions
+## 6a / 6b. Edge functions
 ```
 deno check supabase/functions/**/index.ts
 deno test --allow-read=supabase/migrations,supabase/functions ./supabase/functions/_tests/
@@ -250,8 +250,10 @@ sentence the rule names. About half a minute; a FAIL line names the rule.
 python3 scripts/check-gate-lockstep.py
 ```
 Every named `ci.yml` step has a row in §13 saying where it runs here, every
-row names a step that exists, every gate below is run by `validate.sh` and
-every gate `validate.sh` runs is here. `CLAUDE.md` called these three files a
+row names a step that exists, every gate below is run by `validate.sh` under
+the same id, and every gate `validate.sh` runs is here — exactly, so a
+lettered gate never stands in for its parent (the first version let `8b`
+cover a deleted gate 8). `CLAUDE.md` called these three files a
 lockstep for months before anything checked it, and they drifted exactly as
 an unchecked list does: gates 7b and 8b were each missing from `validate.sh`
 until a green local run that CI refused, and this file's own §13 ended "read
@@ -367,8 +369,8 @@ it replaced was a hand-kept selection that told its reader not to trust it.
 | `Today plate responsive candidates` | 5 |
 | `Calendar week geometry` | 5 |
 | `Every e2e spec is actually run by this workflow` | CI only |
-| `Typecheck entrypoints` | 6 |
-| `Tests` | 6 |
+| `Typecheck entrypoints` | 6a |
+| `Tests` | 6b |
 | `Every 5xx throw carries its cause` | CI only |
 | `No secret logging grep (phase 01 gate)` | CI only |
 | `Reset — shim + migrations 0001..NNNN + seed` | 7 |

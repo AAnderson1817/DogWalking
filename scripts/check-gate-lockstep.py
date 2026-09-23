@@ -21,8 +21,12 @@ runs here, and this script holds the three files to it:
      outlives the thing it excused);
   2. each row says a SKILL.md gate id, `CI only` (a check with no local gate),
      or `setup` (an install, not a check), and a gate id must be a heading;
-  3. every SKILL.md gate is run by `validate.sh`, and every gate `validate.sh`
-     runs is a SKILL.md heading — `6` is covered by `6a`/`6b`;
+  3. every SKILL.md gate is run by `validate.sh` under the same id, and every
+     gate `validate.sh` runs is a SKILL.md heading. Exactly: the first version
+     let any lettered gate stand for its parent, so `8b` still "covered" gate
+     8 with gate 8's own run deleted, and an undeclared `7c` passed as part of
+     7 (Codex, PR #97). A heading that holds two gates names both, as
+     `## 6a / 6b.` and `## 10a / 10b.` do;
   4. a `ci.yml` step that runs a command has a name, or no list can track it.
 
 It fails rather than passing when it can read none of the three — a checker
@@ -138,14 +142,11 @@ def main() -> int:
                 f"nor one of {sorted(KINDS)}"
             )
 
-    def covered(gate: str) -> bool:
-        return any(r == gate or (r[:-1] == gate and r[-1].isalpha()) for r in runs)
-
     for gate in sorted(gates_here, key=lambda g: (int(re.match(r"\d+", g).group()), g)):
-        if not covered(gate):
+        if gate not in runs:
             problems.append(f"SKILL.md gate {gate} is not run by validate.sh")
     for run in sorted(runs):
-        if run not in gates and not (run[-1].isalpha() and run[:-1] in gates):
+        if run not in gates:
             problems.append(f"validate.sh runs gate {run}, which has no SKILL.md heading")
 
     if problems:
