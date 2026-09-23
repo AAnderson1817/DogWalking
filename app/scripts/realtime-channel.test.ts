@@ -23,11 +23,14 @@ import { describe, expect, it } from "vitest";
  * reads the calls instead of the text:
  *
  *   - client: every `.channel(` call in `app/src` is counted, wherever its
- *     receiver came from (`supabase.realtime.channel(` included). There must
- *     be exactly one, in `hooks/useWalkChannel.ts`, whose options carry a
- *     literal `config: { private: true }`. A config the scan cannot read is
- *     refused, and so is a bare reference to `.channel` (`const ch =
- *     supabase.channel`), which is how a call leaves the scan's sight.
+ *     receiver came from (`supabase.realtime.channel(` included) and however
+ *     the member is spelled (`["channel"]`, `` [`channel`] ``). There must be
+ *     exactly one, in `hooks/useWalkChannel.ts`, whose options carry a
+ *     literal `config: { private: true }` — read as the LAST definition of
+ *     each key, since that is the one that holds. A config the scan cannot
+ *     read is refused, and so are a bare reference to `.channel` (`const ch =
+ *     supabase.channel`) and a call through a member it cannot read
+ *     (`supabase[name](…)`), which are how a call leaves the scan's sight.
  *   - server: the edge functions publish through `_lib/broadcast.ts` only,
  *     whose `private: true` is pinned by `broadcast_test.ts`. So no function
  *     may open a channel, and no file but that one may name the broadcast
@@ -54,14 +57,39 @@ function parse(file: string, text: string): ts.SourceFile {
   return ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind);
 }
 
-function propertyNamed(obj: ts.ObjectLiteralExpression, name: string): ts.Expression | undefined | null {
-  for (const p of obj.properties) {
-    if (ts.isSpreadAssignment(p)) return null; // a spread could carry anything
-    if (!ts.isPropertyAssignment(p)) continue;
-    const key = ts.isIdentifier(p.name) || ts.isStringLiteral(p.name) ? p.name.text : undefined;
-    if (key === name) return p.initializer;
+/** A name only running the code would tell: a computed key, `obj[expr]`. */
+const UNREADABLE = Symbol("unreadable");
+
+const literalText = (e: ts.Expression): string | undefined =>
+  ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e) || ts.isNumericLiteral(e) ? e.text : undefined;
+
+/** The name a key spells however it is spelled — `a`, `"a"`, `["a"]`, `` [`a`] `` — or UNREADABLE. */
+function keyOf(name: ts.PropertyName): string | typeof UNREADABLE {
+  if (ts.isComputedPropertyName(name)) return literalText(name.expression) ?? UNREADABLE;
+  return name.text;
+}
+
+type Member = { value: ts.Expression } | { absent: true } | { unknown: string };
+
+/**
+ * What an object literal gives `name`. The LAST definition is the one that
+ * holds at run time, so the properties are read from the end, and anything
+ * after the last definition that could also define `name` — a spread, a key
+ * the scan cannot read — makes the answer unknown rather than the earlier
+ * value. Reading from the front took `{ config: { private: true }, ...extra }`
+ * as private while `extra` could replace it.
+ */
+function member(obj: ts.ObjectLiteralExpression, name: string): Member {
+  for (const p of [...obj.properties].reverse()) {
+    if (ts.isSpreadAssignment(p)) return { unknown: "spread from elsewhere" };
+    const key = keyOf(p.name);
+    if (key === UNREADABLE) return { unknown: "with a key the scan cannot read" };
+    if (key !== name) continue;
+    if (ts.isPropertyAssignment(p)) return { value: p.initializer };
+    if (ts.isShorthandPropertyAssignment(p)) return { value: p.name };
+    return { unknown: `with \`${name}\` defined by an accessor or a method` };
   }
-  return undefined;
+  return { absent: true };
 }
 
 /** Why this call's options do not make the channel private, or null if they do. */
@@ -69,34 +97,44 @@ function privateProblem(call: ts.CallExpression): string | null {
   const options = call.arguments[1];
   if (!options) return "no options, so `private` defaults to false";
   if (!ts.isObjectLiteralExpression(options)) return "options the scan cannot read";
-  const config = propertyNamed(options, "config");
-  if (config === null) return "options spread from elsewhere";
-  if (config === undefined) return "no `config`, so `private` defaults to false";
-  if (!ts.isObjectLiteralExpression(config)) return "a `config` the scan cannot read";
-  const flag = propertyNamed(config, "private");
-  if (flag === null) return "a `config` spread from elsewhere";
-  if (flag === undefined) return "no `private`, which defaults to false";
-  if (flag.kind !== ts.SyntaxKind.TrueKeyword) return `\`private: ${flag.getText()}\``;
+  const config = member(options, "config");
+  if ("unknown" in config) return `options ${config.unknown}`;
+  if ("absent" in config) return "no `config`, so `private` defaults to false";
+  if (!ts.isObjectLiteralExpression(config.value)) return "a `config` the scan cannot read";
+  const flag = member(config.value, "private");
+  if ("unknown" in flag) return `a \`config\` ${flag.unknown}`;
+  if ("absent" in flag) return "no `private`, which defaults to false";
+  if (flag.value.kind !== ts.SyntaxKind.TrueKeyword) return `\`private: ${flag.value.getText()}\``;
   return null;
 }
 
-const isChannelAccess = (n: ts.Node): n is ts.PropertyAccessExpression | ts.ElementAccessExpression =>
-  (ts.isPropertyAccessExpression(n) && n.name.text === "channel")
-  || (ts.isElementAccessExpression(n) && ts.isStringLiteral(n.argumentExpression)
-    && n.argumentExpression.text === "channel");
+/** The member an access names — `a.b`, `a["b"]`, `` a[`b`] `` — or UNREADABLE. */
+function memberOf(e: ts.PropertyAccessExpression | ts.ElementAccessExpression): string | typeof UNREADABLE {
+  return ts.isPropertyAccessExpression(e) ? e.name.text : literalText(e.argumentExpression) ?? UNREADABLE;
+}
 
-/** Every `.channel` in a file: a call is judged on its options, anything else is refused. */
+/**
+ * Every `.channel` in a file: a call is judged on its options, anything else
+ * is refused. The member is read however it is spelled — the shipped scan
+ * knew `a["channel"]` and not `` a[`channel`] `` (Codex, on #97) — and a CALL
+ * through a member the scan cannot read (`a[name](…)`) could be `.channel(`,
+ * so it is refused too. Indexing that is not called is ordinary code and is
+ * not counted; a member taken that way and called later is outside the scan.
+ */
 function channelSites(file: string, text: string): Site[] {
   const sf = parse(file, text);
   const sites: Site[] = [];
   const visit = (node: ts.Node) => {
-    if (isChannelAccess(node)) {
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      const name = memberOf(node);
+      const call = ts.isCallExpression(node.parent) && node.parent.expression === node ? node.parent : undefined;
       const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
-      const call = node.parent;
-      if (ts.isCallExpression(call) && call.expression === node) {
+      if (name === "channel" && call) {
         sites.push({ file, line, problem: privateProblem(call) });
-      } else {
+      } else if (name === "channel") {
         sites.push({ file, line, problem: "`.channel` referenced without being called, so the scan cannot see its options" });
+      } else if (name === UNREADABLE && call) {
+        sites.push({ file, line, problem: "a call through a member the scan cannot read, which could be `.channel(`" });
       }
     }
     ts.forEachChild(node, visit);
@@ -217,6 +255,39 @@ describe("what the channel scan refuses and admits", () => {
     expect(client({ "screens/Other.tsx": PRIVATE }).join("\n")).toMatch(/outside hooks\/useWalkChannel\.ts/);
     expect(client({ [THE_CHANNEL_FILE]: "supabase.realtime.channel(t);" }).join("\n")).toMatch(/no options/);
     expect(client({ [THE_CHANNEL_FILE]: 'supabase["channel"](t);' }).join("\n")).toMatch(/no options/);
+  });
+
+  it("counts a member however it is spelled, and refuses a call through one it cannot read (Codex, on #97)", () => {
+    // A template literal is a spelling of the name, not an expression: the
+    // shipped scan read only a string literal, so this second, public channel
+    // left the count at one.
+    const second = client({ [THE_CHANNEL_FILE]: `${PRIVATE}\nsupabase[\`channel\`](t);` }).join("\n");
+    expect(second).toMatch(/:2 is not private: no options/);
+    expect(second).toMatch(/exactly one channel call, found 2/);
+    // A call through a member the scan cannot read could be `.channel(`.
+    expect(client({ [THE_CHANNEL_FILE]: `${PRIVATE}\nsupabase[method](t);` }).join("\n"))
+      .toMatch(/:2 is not private: a call through a member the scan cannot read/);
+    // Indexing that is not called is ordinary code, and is not counted.
+    expect(client({ [THE_CHANNEL_FILE]: `${PRIVATE}\nconst row = rows[i];\nconst v = row[\`id\`];` })).toEqual([]);
+  });
+
+  it("reads the definition that wins — the last one — and refuses what could override it", () => {
+    const one = (call: string) => client({ [THE_CHANNEL_FILE]: call }).join("\n");
+    // A spread after the definition may replace it at run time.
+    expect(one("supabase.channel(t, { config: { private: true }, ...extra });")).toMatch(/options spread from elsewhere/);
+    expect(one("supabase.channel(t, { config: { private: true, ...flags } });")).toMatch(/a `config` spread from elsewhere/);
+    // A later definition of the same key is the one that counts.
+    expect(one('supabase.channel(t, { config: { private: true }, ["config"]: { private: false } });'))
+      .toMatch(/`private: false`/);
+    expect(one("supabase.channel(t, { config: { private: true }, [key]: x });"))
+      .toMatch(/options with a key the scan cannot read/);
+    expect(one("supabase.channel(t, { get config() { return { private: true }; } });"))
+      .toMatch(/`config` defined by an accessor or a method/);
+    // And the healthy direction: what comes before the definition is overridden by it,
+    // and a key spelled some other way is still the key.
+    expect(one("supabase.channel(t, { ...base, [key]: x, config: { private: true } });")).toBe("");
+    expect(one('supabase.channel(t, { "config": { ["private"]: true } });')).toBe("");
+    expect(one("supabase.channel(t, { [`config`]: { [`private`]: true } });")).toBe("");
   });
 
   it("refuses `.channel` taken without a call, where its options would be out of sight", () => {
