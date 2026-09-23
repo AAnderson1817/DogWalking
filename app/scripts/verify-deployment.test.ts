@@ -399,6 +399,18 @@ function unwrap(value: ts.Expression): ts.Expression {
   return e;
 }
 
+/**
+ * Whether an import or export specifier is type-only — `import type { … }`,
+ * `export type { … }`, or a `type` modifier on the specifier itself. It is
+ * erased like a type, so an alias it declares names nothing that runs (Codex,
+ * on #97: `import type { serveFunction as Serve }` read as a renaming import).
+ */
+function typeOnlySpecifier(spec: ts.ImportSpecifier | ts.ExportSpecifier): boolean {
+  if (spec.isTypeOnly) return true;
+  const holder = spec.parent.parent; // NamedImports → ImportClause, NamedExports → ExportDeclaration
+  return (ts.isImportClause(holder) || ts.isExportDeclaration(holder)) && holder.isTypeOnly;
+}
+
 /** Whether `node` sits in a type (`typeof serveFunction`), which nothing runs. */
 function inType(node: ts.Node): boolean {
   for (let n = node.parent; n && !ts.isStatement(n) && !ts.isSourceFile(n); n = n.parent) {
@@ -495,8 +507,12 @@ function getReachable(root: string): Map<string, string> {
             if (why) found.set(name, why);
           } else if (ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent)) {
             // `import { serveFunction }` names it without calling it; renamed,
-            // every call is under a name the scan does not look for.
-            if (parent.propertyName) door("serveFunction imported under another name, so the scan cannot see its calls");
+            // every call is under a name the scan does not look for. A
+            // type-only specifier is erased, so its alias is no such name.
+            if (parent.propertyName && !typeOnlySpecifier(parent)) {
+              const how = ts.isImportSpecifier(parent) ? "imported" : "exported";
+              door(`serveFunction ${how} under another name, so the scan cannot see its calls`);
+            }
           } else if (!(ts.isPropertyAccessExpression(parent) && parent.name === node)) {
             // (the name of `http.serveFunction` is judged as that access)
             door("serveFunction referenced without being called, so the scan cannot see its options");
@@ -681,6 +697,17 @@ describe("verify-deployment's read-only argument is derived", () => {
     // is a real property access, and it is erased all the same.
     fn("deno-type", "serveFunction(h);\ntype Serve = typeof Deno.serve;");
     fn("deno-type-key", "serveFunction(h);\ntype K = { [Deno.serve.name]: string };");
+    // A type-only import or export is erased too, so its alias names nothing
+    // that runs (Codex, on #97): beside an ordinary POST-only call, none of
+    // these is a door, however the `type` is written.
+    fn("type-import", 'import type { serveFunction as Serve } from "../_lib/http.ts";\n'
+      + 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(h);');
+    fn("type-specifier", 'import { type serveFunction as Serve, serveFunction } from "../_lib/http.ts";\nserveFunction(h);');
+    fn("type-export", 'export type { serveFunction as Serve } from "../_lib/http.ts";\nserveFunction(h);');
+    fn("type-export-specifier", 'export { type serveFunction as Serve } from "../_lib/http.ts";\nserveFunction(h);');
+    // A value export under another name is still a door — another module calls
+    // it under a name the scan does not look for — and the red says exported.
+    fn("export-renamed", 'import { serveFunction } from "../_lib/http.ts";\nserveFunction(h);\nexport { serveFunction as serve };');
     expect(Object.fromEntries(getReachable(root))).toEqual({
       "element-paren": "serveFunction widened with methods",
       "deno-paren": "its own Deno.serve",
@@ -690,6 +717,7 @@ describe("verify-deployment's read-only argument is derived", () => {
       element: "serveFunction widened with methods",
       alias: "serveFunction referenced without being called, so the scan cannot see its options",
       renamed: "serveFunction imported under another name, so the scan cannot see its calls",
+      "export-renamed": "serveFunction exported under another name, so the scan cannot see its calls",
       "deno-element": "its own Deno.serve",
       "deno-template": "its own Deno.serve",
       "deno-unreadable": "a member of Deno the scan cannot read",
