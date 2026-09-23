@@ -2,12 +2,12 @@
 """Regenerate spec 03's SECURITY DEFINER catalogue from the migrations.
 
 Review H21: the catalogue was hand-maintained, presented as "the complete
-grant-audit checklist", and listed 11 functions out of 52. An engineer adding a
-definer function and checking their grants against it had no idea 41 peers
+grant-audit checklist", and listed 11 functions out of 48. An engineer adding a
+definer function and checking their grants against it had no idea 37 peers
 existed — which is the opposite of what a checklist is for.
 
-A hand-maintained list of 52 entries would rot again by the next migration, so
-it is generated instead, and CI asserts the committed file matches (the same
+A hand-maintained list would rot again by the next migration, so it is
+generated instead, and CI asserts the committed file matches (the same
 shape as the `gen-types.py` drift check). Adding a definer function without
 regenerating fails the build, and the failure names the function.
 
@@ -51,13 +51,24 @@ created a new overload of `fn_apply_invoice_paid` and then dropped the old
 one, which a name-keyed model reads as the function disappearing — and the new
 overload starts at the default ACL, not at the old one's revokes.
 
+It refuses two things invariant 5 forbids: a definer function PUBLIC or anon
+can execute, and one `authenticated` can execute only because the platform's
+default privileges gave it — `revoke … from public, anon` leaves exactly that
+behind, and it is how a service-role-only function becomes callable by every
+signed-in user (PR B review).
+
 What it cannot read it REFUSES by name rather than modelling (the enum
 generator's rule): a routine grant in any other shape, ALTER FUNCTION,
 ALTER DEFAULT PRIVILEGES, procedures, a quoted or non-public name, a parameter
 mode, a `%type` or quoted argument, `with grant option`, `granted by`, a role
-only known at run time. What it cannot see
-is dynamic SQL inside a body — the reader blanks bodies — which is why gate 8e
-exists: a grant made that way fails the build there, by name.
+only known at run time — and the statements that change functions without
+naming them: a DROP … CASCADE on a type, table, schema or anything else a
+function can depend on, a range type (whose constructors no statement names),
+and a `drop function if exists` of a signature it does not know while the name
+exists with another. What it cannot see is dynamic SQL inside a body — the
+reader blanks bodies. Gate 8e is the backstop for both kinds of blindness: it
+compares this model with a reset database, so a grant made in a body, or a
+statement this model misread, fails the build there by name.
 
 The reader blanks every DO and function body, which hid a function created and
 granted by dynamic SQL inside one: a publicly executable definer function this
@@ -75,6 +86,7 @@ from __future__ import annotations
 
 import collections
 import importlib.util
+import os
 import pathlib
 import re
 import sys
@@ -131,6 +143,23 @@ REVOKE_TAIL = sql_re(r"\s+(?:cascade|restrict)$", re.I)
 GRANT_EXTRAS = sql_re(IS + r"(?:with\s+grant\s+option|granted\s+by)" + IE, re.I)
 SECURITY_DEFINER = sql_re(IS + r"security\s+definer" + IE, re.I)
 DROP_TAIL = sql_re(r"\s+(?:cascade|restrict)\s*$", re.I)
+# A CASCADE on an object functions can depend on drops those functions too —
+# a function taking a dropped type, a table's row type, anything in a dropped
+# schema — and nothing in the statement says which. Postgres knows; this model
+# would keep them (PR B review: the catalogue then said **none** for a
+# function the database held open).
+DROP_CASCADE = sql_re(
+    r"\s*drop\s+(?:type|domain|schema|extension|table|foreign\s+table|view|materialized\s+view|owned)"
+    + IE + r".*" + IS + r"cascade" + IE + r"\s*$",
+    re.I | re.S,
+)
+# A range type creates constructor functions in its schema that no statement
+# names.
+CREATE_RANGE = sql_re(r"\s*create\s+type\s+.*" + IS + r"as\s+range" + IE, re.I | re.S)
+# float(p) is `real` up to 24 bits of precision and `double precision` above;
+# read before the typmod is dropped, because the typmod is what decides it.
+FLOAT_P = sql_re(IS + r"float\s*\(\s*(\d+)\s*\)", re.I)
+ARRAY_BOUNDS = sql_re(r"(?:\[\d*\])+$")
 NAME = sql_re(
     r"\s*(?:([A-Za-z_][A-Za-z0-9_$]*)" + IE + r"\s*\.\s*)?([A-Za-z_][A-Za-z0-9_$]*)" + IE + r"\s*", re.I
 )
@@ -148,14 +177,14 @@ TYPE_ALIASES = {
     "int": "integer", "int4": "integer",
     "int8": "bigint", "int2": "smallint",
     "bool": "boolean",
-    "float4": "real", "float8": "double precision",
-    "decimal": "numeric",
+    "float4": "real", "float8": "double precision", "float": "double precision",
+    "decimal": "numeric", "dec": "numeric",
     "varchar": "character varying",
     "timestamptz": "timestamp with time zone",
     "timestamp": "timestamp without time zone",
     "timetz": "time with time zone",
     "time": "time without time zone",
-    "char": "character", "bpchar": "character",
+    "char": "character", "bpchar": "character", "nchar": "character",
 }
 # The standard's multi-word type names, as `format_type` prints them. A type
 # is matched as the longest of these at the END of an argument, so what is
@@ -169,7 +198,23 @@ MULTI_WORD_TYPES = {
     ("timestamp", "without", "time", "zone"): "timestamp without time zone",
     ("time", "with", "time", "zone"): "time with time zone",
     ("time", "without", "time", "zone"): "time without time zone",
+    ("national", "character", "varying"): "character varying",
+    ("national", "char", "varying"): "character varying",
+    ("nchar", "varying"): "character varying",
+    ("national", "character"): "character",
+    ("national", "char"): "character",
 }
+# PostgreSQL's type keywords that are col_name_keywords: its grammar will not
+# take one as a parameter NAME, so an argument that begins with one is all
+# type — `interval day`, `double precision` — never a name and then a type.
+TYPE_KEYWORDS = {
+    "bigint", "bit", "boolean", "char", "character", "dec", "decimal", "double", "float", "int",
+    "integer", "interval", "national", "nchar", "numeric", "real", "smallint", "time", "timestamp",
+    "varchar",
+}
+# An interval's fields are a typmod: `format_type` prints `interval` whatever
+# follows it in an argument list.
+INTERVAL_FIELDS = {"year", "month", "day", "hour", "minute", "second", "to"}
 IDENT = sql_re(r"[A-Za-z_][A-Za-z0-9_$]*")
 
 
@@ -223,9 +268,10 @@ def top_level_commas(skel: str, a: int, b: int) -> list[tuple[int, int]]:
     parts, depth, start = [], 0, a
     for j in range(a, b):
         c = skel[j]
-        if c == "(":
+        # Brackets too: a default of `array[1, 2]` is one argument.
+        if c in "([":
             depth += 1
-        elif c == ")":
+        elif c in ")]":
             depth -= 1
         elif c == "," and depth == 0:
             parts.append((start, j))
@@ -235,6 +281,10 @@ def top_level_commas(skel: str, a: int, b: int) -> list[tuple[int, int]]:
 
 
 def normal_type(token: str) -> str:
+    # `char` is `character`, but `pg_catalog.char` is the one-byte internal
+    # type, which `format_type` prints as `"char"`.
+    if token.lower() == "pg_catalog.char":
+        return '"char"'
     m = TYPE.fullmatch(token)
     if not m:
         raise Unreadable(f"a type it cannot read: {token!r}")
@@ -242,11 +292,12 @@ def normal_type(token: str) -> str:
     return TYPE_ALIASES.get(base, base) + m.group(2)
 
 
-def arg_types(clean: str, skel: str, a: int, b: int, *, named: bool) -> tuple[str, ...]:
+def arg_types(clean: str, skel: str, a: int, b: int) -> tuple[str, ...]:
     """The argument TYPES of a signature, which is what identifies a function.
-    `named`: a CREATE, where every argument here carries a name; elsewhere the
-    name is optional. A default is cut off first — on the skeleton, so an `=`
-    inside a string literal is not one."""
+    A name is optional everywhere, as it is to PostgreSQL: `f(uuid)` is a
+    healthy CREATE, and refusing it was a red on a healthy migration (PR B
+    review). A default is cut off first — on the skeleton, so an `=` inside a
+    string literal is not one."""
     if not skel[a:b].strip():
         return ()
     types = []
@@ -255,40 +306,55 @@ def arg_types(clean: str, skel: str, a: int, b: int, *, named: bool) -> tuple[st
         text = clean[s : d.start() if d else e]
         if '"' in text or "%" in text:
             raise Unreadable(f"an argument it cannot read: {' '.join(text.split())!r}")
+        text = FLOAT_P.sub(lambda f: "real" if int(f.group(1)) <= 24 else "double precision", text)
         tokens = TYPMOD.sub("", text).split()
         if tokens and tokens[0].lower() in MODES:
             raise Unreadable(f"an argument with a mode: {' '.join(text.split())!r}")
         name, typ = split_argument(tokens)
-        if typ is None or (named and name is None) or (name is not None and not IDENT.fullmatch(name)):
+        if typ is None or (name is not None and not IDENT.fullmatch(name)):
             raise Unreadable(f"an argument it cannot read: {' '.join(text.split())!r}")
         types.append(typ)
     return tuple(types)
 
 
 def split_argument(tokens: list[str]) -> tuple[str | None, str | None]:
-    """-> (name or None, normalised type or None). The type is the longest
-    known multi-word name at the end, else the last token; at most one token
-    may stand in front of it, and that is the name."""
+    """-> (name or None, normalised type or None).
+
+    Array bounds and dimensions go first, as `format_type` drops them: any
+    array is one `[]`, `int[3][4]` included, and so is a trailing ARRAY. Then
+    PostgreSQL's own rule decides the name: a type keyword cannot be one, so
+    an argument that starts with one is all type; otherwise one token in front
+    of the type is the name. The type is a known multi-word name, an interval
+    with its fields, or a single token."""
     if not tokens:
         return None, None
-    last = tokens[-1]
-    arrays = ""
-    while last.endswith("[]"):
-        last, arrays = last[:-2], arrays + "[]"
-    words = [t.lower() for t in tokens[:-1]] + [last.lower()]
-    for size in (4, 2):
-        if len(words) >= size and tuple(words[-size:]) in MULTI_WORD_TYPES:
-            rest = tokens[:-size]
-            if len(rest) > 1:
-                return None, None
-            return (rest[0] if rest else None), MULTI_WORD_TYPES[tuple(words[-size:])] + arrays
-    rest = tokens[:-1]
-    if len(rest) > 1:
+    tokens = list(tokens)
+    arrays = False
+    if tokens[-1].lower() == "array" or ARRAY_BOUNDS.sub("", tokens[-1]).lower() == "array":
+        arrays = True
+        tokens.pop()
+    elif ARRAY_BOUNDS.search(tokens[-1]):
+        arrays = True
+        tokens[-1] = ARRAY_BOUNDS.sub("", tokens[-1])
+    if not tokens or not tokens[-1]:
         return None, None
-    return (rest[0] if rest else None), normal_type(tokens[-1])
+    if tokens[0].lower() in TYPE_KEYWORDS or len(tokens) == 1:
+        name, rest = None, tokens
+    else:
+        name, rest = tokens[0], tokens[1:]
+    words = [w.lower() for w in rest]
+    if tuple(words) in MULTI_WORD_TYPES:
+        typ = MULTI_WORD_TYPES[tuple(words)]
+    elif words[0] == "interval" and all(w in INTERVAL_FIELDS for w in words[1:]):
+        typ = "interval"
+    elif len(rest) == 1:
+        typ = normal_type(rest[0])
+    else:
+        return None, None
+    return name, typ + ("[]" if arrays else "")
 
 
-def signature(clean: str, skel: str, i: int, *, named: bool) -> tuple[str, tuple[str, ...], int]:
+def signature(clean: str, skel: str, i: int) -> tuple[str, tuple[str, ...], int]:
     """At `i`: a function name and its parenthesised argument list.
     -> (name, argument types, index after the list)."""
     m = NAME.match(skel, i)
@@ -299,14 +365,14 @@ def signature(clean: str, skel: str, i: int, *, named: bool) -> tuple[str, tuple
     if m.end() >= len(skel) or skel[m.end()] != "(":
         raise Unreadable(f"{m.group(2)} without an argument list")
     close = close_paren(skel, m.end())
-    return m.group(2).lower(), arg_types(clean, skel, m.end() + 1, close, named=named), close + 1
+    return m.group(2).lower(), arg_types(clean, skel, m.end() + 1, close), close + 1
 
 
 def signatures(clean: str, skel: str, a: int, b: int) -> list[tuple[str, tuple[str, ...]]]:
     """A comma-separated list of `name(args)` filling [a, b) exactly."""
     out, i = [], a
     while True:
-        name, sig, i = signature(clean, skel, i, named=False)
+        name, sig, i = signature(clean, skel, i)
         out.append((name, sig))
         rest = skel[i:b]
         if not rest.strip():
@@ -354,7 +420,12 @@ class Model:
                 raise Unreadable(f"create function {fmt(key)}, which already exists — PostgreSQL refuses this")
             self.funcs[key]["definer"] = definer
         else:
-            self.funcs[key] = {"definer": definer, "acl": set(DEFAULT_ACL)}
+            # `explicit`: the roles a GRANT has named since this function was
+            # created. `authenticated` holding EXECUTE with no GRANT behind it
+            # is the platform default talking. A REVOKE need not unrecord it:
+            # the role then leaves the ACL, and only a GRANT (which records it)
+            # or a fresh CREATE (which resets this) can put it back.
+            self.funcs[key] = {"definer": definer, "acl": set(DEFAULT_ACL), "explicit": set()}
         self._seen(key)
 
     def drop(self, key, if_exists: bool) -> None:
@@ -362,6 +433,16 @@ class Model:
             del self.funcs[key]
         elif not if_exists:
             raise Unreadable(f"drop function {fmt(key)}, which no earlier migration creates")
+        elif any(name == key[0] for name, _ in self.funcs):
+            # IF EXISTS on a signature this model does not know, while the name
+            # exists under another: either a genuine no-op, or the model spells
+            # a type differently from PostgreSQL and the database is dropping
+            # the function the model keeps (PR B review, `float` against
+            # `double precision`). It cannot tell which, so it does not guess.
+            raise Unreadable(
+                f"drop function if exists {fmt(key)}, a signature it does not know while {key[0]} exists"
+                " with another — a no-op, or an argument type spelt in a way this model reads differently"
+            )
 
     def change(self, key, grant: bool, who: set[str]) -> None:
         if key not in self.funcs:
@@ -372,6 +453,7 @@ class Model:
         acl = self.funcs[key]["acl"]
         if grant:
             acl |= who
+            self.funcs[key]["explicit"] |= who
         else:
             # REVOKE FROM PUBLIC takes nothing from a role that holds its own
             # grant, which is why the platform default's anon and authenticated
@@ -391,7 +473,7 @@ def apply(model: Model, clean: str, skel: str, a: int, b: int) -> None:
     stmt = skel[a:b]
     if m := CREATE_FN.match(stmt):
         i = a + m.end()
-        name, sig, _ = signature(clean, skel, i, named=True)
+        name, sig, _ = signature(clean, skel, i)
         model.create((name, sig), replace=bool(m.group(1)), definer=bool(SECURITY_DEFINER.search(stmt)))
         return
     if m := DROP_FN.match(stmt):
@@ -402,6 +484,8 @@ def apply(model: Model, clean: str, skel: str, a: int, b: int) -> None:
             model.drop(key, if_exists=bool(m.group(1)))
         return
     for refuse, what in (
+        (DROP_CASCADE, "a DROP … CASCADE on an object functions can depend on, which drops them without naming them"),
+        (CREATE_RANGE, "a range type, which creates constructor functions no statement names"),
         (CREATE_PROC, "a procedure — the catalogue models functions"),
         (DROP_ROUTINE, "a DROP ROUTINE or DROP PROCEDURE"),
         (ALTER_ROUTINE, "an ALTER FUNCTION, which can rename it, change its owner or its SECURITY"),
@@ -463,7 +547,9 @@ def render(model: Model) -> str:
         "`authenticated` and `service_role` (Supabase's default privileges). Only the",
         "API roles are shown. **none** means no API role can call it — service-role",
         "and other definer functions only, which is the correct default. `PUBLIC` or",
-        "`anon` would break invariant 5, and the generator refuses it.",
+        "`anon` would break invariant 5, and so would `authenticated` holding it only",
+        "through the default privileges; the generator refuses both. Gate 8e holds",
+        "this reading to a reset database.",
         "",
         "| Function | EXECUTE held by |",
         "|---|---|",
@@ -488,6 +574,19 @@ def open_to_anon(model: Model) -> list[tuple[str, list[str]]]:
     return out
 
 
+def default_only(model: Model) -> list[str]:
+    """The definer functions `authenticated` can execute only because the
+    platform's default privileges gave it — never granted to it, never revoked
+    from it. Invariant 5 grants EXECUTE explicitly and only where required,
+    and the house pattern `revoke … from public, anon` leaves exactly this
+    behind: a service-role-only function callable by every signed-in user,
+    with every other check green (PR B review). None exists today."""
+    return [
+        fmt(k) for k in model.definers()
+        if "authenticated" in model.funcs[k]["acl"] and "authenticated" not in model.funcs[k]["explicit"]
+    ]
+
+
 def main() -> int:
     model = collect()
     block = render(model)
@@ -502,13 +601,23 @@ def main() -> int:
     if updated != spec:
         SPEC.write_text(updated)
     keys = model.definers()
-    print(f"{len(keys)} SECURITY DEFINER functions catalogued in {SPEC.relative_to(ROOT)}")
+    # relpath, not relative_to: the proofs drive main() against a copy of the spec outside the tree.
+    print(f"{len(keys)} SECURITY DEFINER functions catalogued in {os.path.relpath(SPEC, ROOT)}")
     open_to = open_to_anon(model)
     if open_to:
         print(
             "FAIL: invariant 5 — SECURITY DEFINER functions executable by PUBLIC or anon: "
             + "; ".join(f"{f} ({', '.join(SHOWN.get(r, r) for r in rs)})" for f, rs in open_to)
-            + " — `revoke all on function … from public, anon`, and grant only the role that calls it",
+            + " — `revoke all on function … from public, anon, authenticated`, then grant only the role that calls it",
+            file=sys.stderr,
+        )
+        return 1
+    implicit = default_only(model)
+    if implicit:
+        print(
+            "FAIL: invariant 5 — SECURITY DEFINER functions authenticated can execute only through the"
+            " platform's default privileges: " + "; ".join(implicit)
+            + " — revoke from public, anon, authenticated, then grant authenticated explicitly if it is the caller",
             file=sys.stderr,
         )
         return 1

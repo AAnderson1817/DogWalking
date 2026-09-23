@@ -20,13 +20,30 @@
 -- (PR B of the audit), and refuses a definer function PUBLIC or anon can
 -- execute; smoke.sql asserts the same rule against the live catalogue.
 --
--- NOT EXPLOITABLE, which is why this is hygiene rather than an incident, and
--- measured rather than assumed:
---   - PostgreSQL refuses to call a trigger function directly ("trigger
---     functions can only be called as triggers"), from SQL or through
---     PostgREST's /rpc;
---   - no API role holds CREATE on schema public or TRIGGER on any table in it,
---     so none of them can attach one of these to a table of its own.
+-- WHAT THE OPEN EXECUTE ALLOWED, measured rather than assumed. A direct call
+-- is refused ("trigger functions can only be called as triggers"), and no API
+-- role holds CREATE on `public` or TRIGGER on any table in it. The first
+-- version of this header stopped there and called it not exploitable, and it
+-- was wrong: PUBLIC holds TEMP on the database by default, a role owns every
+-- temp table it creates, and an owner may put a trigger on its own table. So
+-- a SQL session as `anon`, with EXECUTE on `fn_refund_cancelled_debit`, could
+-- create a temp table shaped like `walks`, attach this function to it, and
+-- "cancel" a row claiming 1000 debited credits against a real walk. The body
+-- runs as its owner and wrote the refund: a client's balance went from 4 to
+-- 1004, refunding a debit that never happened — invariant 1 broken from an API role
+-- (measured on the pre-0053 ACL, inside a rolled-back transaction; with this
+-- migration applied the same CREATE TRIGGER is refused, "permission denied
+-- for function"). PR B's review found it; the reason it was never reachable
+-- is the channel, not the privileges:
+--   - `anon` and `authenticated` are NOLOGIN (measured), so nobody opens a
+--     SQL session as either; PostgREST connects as `authenticator`, switches
+--     role, and issues no DDL;
+--   - no function an API role can execute runs dynamic SQL (measured: none
+--     outside an extension carries an EXECUTE statement).
+-- So this closes a hole no deployed path could reach, and invariant 5 holds
+-- without depending on that argument. The TEMP privilege itself, and the
+-- `search_path` that lets a temp table shadow `public` inside a definer body,
+-- are recorded in docs/dev/backlog.md rather than changed here.
 --
 -- WHY REVOKING CANNOT BREAK THEM. The EXECUTE privilege on a trigger function
 -- is checked when the trigger is CREATED, not when it FIRES: the trigger runs
@@ -39,18 +56,23 @@
 -- The fourth guards `plan_change_intents`, which no API role can write.
 --
 -- `authenticated` is revoked too, matching the other thirteen: EXECUTE on a
--- trigger function is never required by an API role, and invariant 5 grants
--- only where required. service_role keeps what the platform default gave it,
--- as the other thirteen do.
+-- trigger function is never required by an API role, and the attack above
+-- works for any role that holds it. smoke.sql now refuses a definer trigger
+-- function ANY API role can execute. service_role keeps what the platform
+-- default gave it, as the other thirteen do.
 
 revoke all on function fn_cancel_paused_walks() from public, anon, authenticated;
 revoke all on function fn_refund_cancelled_debit() from public, anon, authenticated;
 revoke all on function fn_assert_tenant_consistency() from public, anon, authenticated;
 revoke all on function fn_assert_plan_change_intent_tenant() from public, anon, authenticated;
 
--- Refuse if it did not take — a revoke that silently named another signature
--- would deploy green and change nothing. `has_function_privilege` answers for
--- the role AND for PUBLIC, which anon and authenticated are members of.
+-- Refuse if it did not take. A misspelt signature is not the risk (that is an
+-- error, and the deploy stops). The silent case is a deploy role that does
+-- not own a function yet holds EXECUTE through PUBLIC — exactly the state
+-- this migration starts from — where REVOKE warns "no privileges could be
+-- revoked", succeeds, and changes nothing (measured; a role holding nothing
+-- at all gets an error instead). `has_function_privilege` answers for the
+-- role AND for PUBLIC, which anon and authenticated are members of.
 do $$
 declare
   v_open text;

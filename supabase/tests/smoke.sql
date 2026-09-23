@@ -497,7 +497,11 @@ begin
             v_service_op1, date '2026-07-08', '10:00', '11:00', 'scheduled');
     raise exception 'FAIL: cross-tenant client UUID accepted on walk';
   exception when raise_exception then
-    if sqlerrm not like 'tenant consistency:%' then raise; end if;
+    -- The exact message, not the prefix: with the walks trigger dropped this
+    -- insert succeeds and its notification is refused by the same function
+    -- on `notifications` ("notification client must belong to operator"),
+    -- which a prefix match accepted (measured, PR B review).
+    if sqlerrm <> 'tenant consistency: walk client must belong to operator' then raise; end if;
   end;
 
   begin
@@ -509,7 +513,7 @@ begin
             v_service_op1, date '2026-07-08', '10:00', '11:00', 'scheduled');
     raise exception 'FAIL: wrong-client property UUID accepted on walk';
   exception when raise_exception then
-    if sqlerrm not like 'tenant consistency:%' then raise; end if;
+    if sqlerrm <> 'tenant consistency: walk property must belong to client/operator' then raise; end if;
   end;
 
   begin
@@ -521,7 +525,7 @@ begin
             v_service_op2, date '2026-07-08', '10:00', '11:00', 'scheduled');
     raise exception 'FAIL: cross-tenant service UUID accepted on walk';
   exception when raise_exception then
-    if sqlerrm not like 'tenant consistency:%' then raise; end if;
+    if sqlerrm <> 'tenant consistency: walk service must belong to operator' then raise; end if;
   end;
 
   insert into walks (operator_id, client_id, property_id, service_type_id,
@@ -538,7 +542,7 @@ begin
             '99999999-0000-4000-a000-000000000001');
     raise exception 'FAIL: cross-tenant pet UUID accepted on walk_pet';
   exception when raise_exception then
-    if sqlerrm not like 'tenant consistency:%' then raise; end if;
+    if sqlerrm <> 'tenant consistency: walk_pet pet must belong to walk client/operator' then raise; end if;
   end;
 
   reset session authorization;
@@ -6426,7 +6430,8 @@ begin
 end $$;
 
 -- ── Invariant 5 · every SECURITY DEFINER function pins search_path = public
---    and is not executable by PUBLIC or anon ─────────────────────────────
+--    and is not executable by PUBLIC or anon; no API role executes a definer
+--    trigger function ─────────────────────────────────────────────────────
 -- CLAUDE.md invariant 5, both halves, against what Postgres installed. Until
 -- the spec-drift audit neither half was asserted anywhere but per function,
 -- and four trigger functions had kept EXECUTE for PUBLIC and anon since 0012
@@ -6440,6 +6445,24 @@ end $$;
 -- `has_function_privilege('anon', …)` is true when anon holds EXECUTE itself
 -- OR through PUBLIC, and it reads a NULL `proacl` as the default it stands
 -- for — EXECUTE to PUBLIC — which a hand-read `aclexplode(proacl)` would miss.
+--
+-- `public, pg_temp` is accepted beside `public`. It is the form PostgreSQL's
+-- documentation recommends for a definer function: with pg_temp unlisted it
+-- is searched FIRST for relations, so a session holding TEMP (PUBLIC does, by
+-- default) can shadow `clients` inside a definer function with a temp table
+-- of its own (measured on `my_client_id()`, PR B review). No API role has a
+-- SQL session, so that is not reachable through PostgREST, and moving the
+-- definer functions over is backlog work; this check must not forbid it.
+-- A single-quoted `'public, pg_temp'` is one schema of that literal name and
+-- still fails.
+--
+-- A definer TRIGGER function must not be executable by ANY API role,
+-- authenticated included. EXECUTE on a trigger function is checked when a
+-- trigger is created, and every role may create a temp table and attach a
+-- trigger to it: so an API role holding EXECUTE on `fn_ledger_apply` can run
+-- its body, as the owner, on rows it chose (measured: a balance moved 4 → 254
+-- with no ledger row, PR B review). Only 0053's own deploy check looked at
+-- `authenticated`, and only for its four.
 do $$
 declare
   v_n     int;
@@ -6450,7 +6473,12 @@ begin
   create function pg_temp.inv5_open(p oid) returns boolean language sql stable as
     $f$ select has_function_privilege('anon', p, 'EXECUTE') $f$;
   create function pg_temp.inv5_unpinned(p oid) returns boolean language sql stable as
-    $f$ select not ('search_path=public' = any(coalesce((select proconfig from pg_proc where oid = p), '{}'))) $f$;
+    $f$ select not (coalesce((select proconfig from pg_proc where oid = p), '{}')
+                    && array['search_path=public', 'search_path=public, pg_temp']) $f$;
+  create function pg_temp.inv5_trigger_open(p oid) returns boolean language sql stable as
+    $f$ select (select prorettype from pg_proc where oid = p) = 'trigger'::regtype
+               and (has_function_privilege('anon', p, 'EXECUTE')
+                    or has_function_privilege('authenticated', p, 'EXECUTE')) $f$;
 
   -- Precondition: a query that sees nothing agrees with everything.
   select count(*) into v_n from pg_proc p join pg_namespace n on n.oid = p.pronamespace
@@ -6473,6 +6501,13 @@ begin
     raise exception 'FAIL: invariant 5 — SECURITY DEFINER functions that do not set search_path = public: %', v_bad;
   end if;
 
+  select string_agg(p.oid::regprocedure::text, ', ' order by 1) into v_bad
+    from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+   where n.nspname = 'public' and p.prosecdef and pg_temp.inv5_trigger_open(p.oid);
+  if v_bad is not null then
+    raise exception 'FAIL: invariant 5 — SECURITY DEFINER trigger functions an API role can execute: % — revoke all on function … from public, anon, authenticated', v_bad;
+  end if;
+
   -- The self-test: each predicate asked about probes whose answer is known.
   -- A probe is created, judged and dropped one at a time; the suite rolls
   -- back regardless.
@@ -6483,7 +6518,10 @@ begin
       ('revoked from anon only — PUBLIC still holds it', 'revoke all on function public.fn_inv5_probe() from anon;', true, false),
       ('revoked, then granted to anon',        'revoke all on function public.fn_inv5_probe() from public, anon; grant execute on function public.fn_inv5_probe() to anon;', true, false),
       ('no set search_path',                   'revoke all on function public.fn_inv5_probe() from public, anon; alter function public.fn_inv5_probe() reset search_path;', false, true),
-      ('search_path = public, pg_temp',        'revoke all on function public.fn_inv5_probe() from public, anon; alter function public.fn_inv5_probe() set search_path = public, pg_temp;', false, true)
+      ('search_path = public, pg_temp',        'revoke all on function public.fn_inv5_probe() from public, anon; alter function public.fn_inv5_probe() set search_path = public, pg_temp;', false, false),
+      ('search_path = pg_temp, public',        'revoke all on function public.fn_inv5_probe() from public, anon; alter function public.fn_inv5_probe() set search_path = pg_temp, public;', false, true),
+      ('search_path = ''public, pg_temp'' (one quoted schema)', 'revoke all on function public.fn_inv5_probe() from public, anon; alter function public.fn_inv5_probe() set search_path = ''public, pg_temp'';', false, true),
+      ('search_path = public, extensions',     'revoke all on function public.fn_inv5_probe() from public, anon; alter function public.fn_inv5_probe() set search_path = public, extensions;', false, true)
     ) as t(label, after, open, unpinned)
   loop
     execute 'create function public.fn_inv5_probe() returns void language sql security definer set search_path = public as $b$ select 1 $b$';
@@ -6499,6 +6537,29 @@ begin
     end if;
     if pg_temp.inv5_unpinned(v_probe) is distinct from r.unpinned then
       raise exception 'FAIL: the invariant-5 search_path predicate % the % form', case when r.unpinned then 'misses' else 'wrongly flags' end, r.label;
+    end if;
+    drop function public.fn_inv5_probe();
+  end loop;
+
+  -- The trigger predicate's self-test, on a definer TRIGGER probe: open to
+  -- authenticated alone is flagged, as is the default; revoked from every
+  -- API role it is not; and a definer function that is NOT a trigger, open
+  -- to authenticated, is the other predicates' business, not this one's.
+  for r in
+    select * from (values
+      ('trigger, the platform default',            'returns trigger language plpgsql', '$b$ begin return null; end $b$', '',                                                                              true),
+      ('trigger, revoked from public, anon only',  'returns trigger language plpgsql', '$b$ begin return null; end $b$', 'revoke all on function public.fn_inv5_probe() from public, anon;',               true),
+      ('trigger, revoked from every API role',     'returns trigger language plpgsql', '$b$ begin return null; end $b$', 'revoke all on function public.fn_inv5_probe() from public, anon, authenticated;', false),
+      ('trigger, then granted to authenticated',   'returns trigger language plpgsql', '$b$ begin return null; end $b$', 'revoke all on function public.fn_inv5_probe() from public, anon, authenticated; grant execute on function public.fn_inv5_probe() to authenticated;', true),
+      ('not a trigger, open to authenticated',     'returns void language sql',        '$b$ select $b$', 'revoke all on function public.fn_inv5_probe() from public, anon;',               false)
+    ) as t(label, shape, body, after, open)
+  loop
+    execute format('create function public.fn_inv5_probe() %s security definer set search_path = public as %s', r.shape, r.body);
+    if r.after <> '' then execute r.after; end if;
+    select p.oid into v_probe from pg_proc p
+     where p.proname = 'fn_inv5_probe' and p.pronamespace = 'public'::regnamespace;
+    if pg_temp.inv5_trigger_open(v_probe) is distinct from r.open then
+      raise exception 'FAIL: the invariant-5 trigger predicate % the % form', case when r.open then 'misses' else 'wrongly flags' end, r.label;
     end if;
     drop function public.fn_inv5_probe();
   end loop;
@@ -6521,7 +6582,7 @@ begin
   end if;
   drop function public.fn_inv5_probe();
 
-  raise notice 'invariant 5: all % SECURITY DEFINER functions set search_path = public and none is executable by PUBLIC or anon: OK', v_n;
+  raise notice 'invariant 5: all % SECURITY DEFINER functions pin search_path, none is executable by PUBLIC or anon, and no API role executes a definer trigger function: OK', v_n;
 end $$;
 
 -- ── 0053 · a trigger fires whatever EXECUTE says ──────────────────────────
@@ -6576,12 +6637,18 @@ begin
   set local session authorization authenticated;
 
   -- fn_cancel_paused_walks: pausing the schedule cancels the walk inside it.
+  -- Read back as the suite's own role and NULL-safe: under the caller's RLS a
+  -- walk it cannot see reads NULL, and `NULL <> 'cancelled'` is not true, so
+  -- the check passed with the trigger dropped and a policy hiding the walk
+  -- (measured, PR B review). Case 2 below always read back this way.
   update recurring_schedules set paused_from = v_day - 1, paused_until = v_day + 1 where id = v_sched;
-  if (select status from walks where id = v_paused) <> 'cancelled' then
+  reset session authorization;
+  if (select status from walks where id = v_paused) is distinct from 'cancelled' then
     raise exception 'FAIL: pausing a schedule as authenticated no longer cancels the walk inside the window (0053)';
   end if;
 
   -- fn_refund_cancelled_debit: cancelling a debited walk refunds its credit.
+  set local session authorization authenticated;
   update walks set status = 'cancelled' where id = v_debit;
   reset session authorization;
   if not exists (select 1 from credit_ledger

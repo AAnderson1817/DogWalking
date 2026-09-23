@@ -17,6 +17,18 @@ in order, keyed by name and argument types, and refuses what it cannot read.
 Each probe below is a rule of that model; gate 8e holds the whole model to a
 live database.
 
+The third family is PR B's own review, which read that model the way the audit
+had read the regex: healthy SQL it misread, and statements that change a
+function without naming it. A CREATE with unnamed arguments was refused; a
+type PostgreSQL prints one way was spelt another (`float`, `dec`, `nchar`,
+`interval day`, `int[3]`, `pg_catalog.char`); a default with a comma inside
+brackets split one argument in two; a DROP … CASCADE on a type or a schema
+dropped functions the model kept; and `revoke … from public, anon` — the
+pattern spec 03 used to teach — leaves `authenticated` holding the platform
+default, which the model now refuses by name. Each is below, and `main()` is
+driven for the two refusals, so a check that is computed and never consulted
+fails here too.
+
 Every probe group runs inside `probe()`: a group that RAISES is one failed
 proof carrying its title and the exception, and the groups after it still
 run. Run against the grant-collecting generator this replaced, the first
@@ -202,6 +214,19 @@ with probe("a literal is not code"):
     check("a comment saying 'security definer' makes no function a definer",
           entry is not None and entry["definer"] is False, f"read as {entry}")
     check("a literal saying 'create function' creates nothing", ("fn_probe_phantom", ()) not in model.funcs)
+with probe("a default that says security definer"):
+    model = collect_with("create function public.fn_probe_dflt(p text default 'security definer') returns void"
+                         " language sql set search_path = public as $$ select 1 $$;\n")
+    entry = model.funcs.get(("fn_probe_dflt", ("text",)))
+    check("a parameter default saying 'security definer' makes no function a definer",
+          entry is not None and entry["definer"] is False, f"read as {entry}")
+with probe("a semicolon inside a literal"):
+    model = collect_with(
+        fn("fn_probe_semi")
+        + "comment on function fn_probe_semi() is 'x; grant execute on function fn_probe_semi() to anon; y';\n"
+    )
+    check("a ; inside a literal ends no statement, and the grant it quotes is not made",
+          held(model, "fn_probe_semi") == [], f"held by {held(model, 'fn_probe_semi')}")
 
 # ── A quoted role is read as its name ─────────────────────────────────────
 with probe("a quoted role"):
@@ -257,6 +282,90 @@ with probe("a revoke after a grant"):
     check("a revoke after a grant takes it away", held(model, "fn_probe_order") == [],
           f"held by {held(model, 'fn_probe_order')}")
 
+# ── PUBLIC alone is open to anon ──────────────────────────────────────────
+with probe("PUBLIC alone"):
+    model = collect_with(fn("fn_probe_pub", revoke=False) + "revoke all on function fn_probe_pub() from anon, authenticated;\n")
+    check("a function only PUBLIC holds is refused: anon is a member of PUBLIC",
+          held(model, "fn_probe_pub") == ["public"]
+          and any(f.startswith("fn_probe_pub(") for f, _ in gen.open_to_anon(model)),
+          f"held by {held(model, 'fn_probe_pub')}, refused {gen.open_to_anon(model)}")
+
+# ── authenticated by the platform default alone ──────────────────────────
+# `revoke … from public, anon` was the pattern spec 03 taught. It leaves
+# authenticated holding EXECUTE with no GRANT behind it: a function meant for
+# the service role, callable by every signed-in user, with every other check
+# green (PR B review).
+with probe("authenticated by the default alone"):
+    model = collect_with(fn("fn_probe_implicit", revoke=False) + "revoke all on function fn_probe_implicit() from public, anon;\n")
+    check("authenticated holding a definer function only by the platform default is refused",
+          "fn_probe_implicit()" in gen.default_only(model), f"{gen.default_only(model)}")
+    model = collect_with(fn("fn_probe_explicit") + "grant execute on function fn_probe_explicit() to authenticated;\n")
+    check("... and an explicit grant after the full revoke is not",
+          held(model, "fn_probe_explicit") == ["authenticated"] and "fn_probe_explicit()" not in gen.default_only(model),
+          f"held by {held(model, 'fn_probe_explicit')}, refused {gen.default_only(model)}")
+    model = collect_with(fn("fn_probe_ontop", revoke=False) + "revoke all on function fn_probe_ontop() from public, anon;\n"
+                         + "grant execute on function fn_probe_ontop() to authenticated;\n")
+    check("... nor a grant to authenticated on top of the default", "fn_probe_ontop()" not in gen.default_only(model),
+          f"{gen.default_only(model)}")
+    model = collect_with(fn("fn_probe_dropped", revoke=False) + "grant execute on function fn_probe_dropped() to authenticated;\n"
+                         + "revoke all on function fn_probe_dropped() from public, anon, authenticated;\n"
+                         + "drop function fn_probe_dropped();\n" + fn("fn_probe_dropped", revoke=False)
+                         + "revoke all on function fn_probe_dropped() from public, anon;\n")
+    check("... and a grant to an earlier function of the same signature does not survive its drop",
+          "fn_probe_dropped()" in gen.default_only(model), f"{gen.default_only(model)}")
+    model = collect_with(fn("fn_probe_invoker", definer="", revoke=False) + "revoke all on function fn_probe_invoker() from public, anon;\n")
+    check("... and an invoker function is no definer function", "fn_probe_invoker()" not in gen.default_only(model),
+          f"{gen.default_only(model)}")
+
+
+def run_main(probe_sql: str | None) -> tuple[int | None, str]:
+    """main() over the real migrations plus one probe, writing a copy of the
+    spec rather than the real one. -> (exit code, stdout + stderr)."""
+    d = S / f"run{next(RUNS)}"
+    shutil.copytree(MIGRATIONS, d)
+    if probe_sql is not None:
+        (d / f"{NEXT:04d}_probe.sql").write_text(probe_sql)
+    spec = S / f"spec{next(RUNS)}.md"
+    shutil.copyfile(gen.SPEC, spec)
+    saved = gen.MIGRATIONS, gen.SPEC
+    gen.MIGRATIONS, gen.SPEC = d, spec
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = gen.main()
+    finally:
+        gen.MIGRATIONS, gen.SPEC = saved
+    return code, out.getvalue()
+
+
+# A refusal computed and never consulted is no refusal: main() is what CI
+# runs, so each check is driven through it.
+with probe("main() on the real tree"):
+    code, out = run_main(None)
+    check("main() passes on the real migrations", code == 0, f"exit {code}: {out.strip()[:160]!r}")
+with probe("main() refuses a definer function PUBLIC holds"):
+    code, out = run_main(fn("fn_probe_mainopen", revoke=False))
+    check("main() exits 1 naming a definer function PUBLIC and anon can execute",
+          code == 1 and "fn_probe_mainopen()" in out and "PUBLIC or anon" in out, f"exit {code}: {out.strip()[-200:]!r}")
+with probe("main() refuses the default-only leftover"):
+    code, out = run_main(fn("fn_probe_mainimplicit", revoke=False)
+                         + "revoke all on function fn_probe_mainimplicit() from public, anon;\n")
+    check("main() exits 1 naming a definer function authenticated holds only by the default",
+          code == 1 and "fn_probe_mainimplicit()" in out and "default privileges" in out,
+          f"exit {code}: {out.strip()[-200:]!r}")
+
+# ── DROP IF EXISTS: a signature it does not know ─────────────────────────
+# A no-op, or a type this model spells differently from PostgreSQL — then the
+# database drops the function the model keeps. It cannot tell, so it refuses.
+with probe("drop if exists: an unknown signature of a known name"):
+    code, err = refused(fn("fn_probe_amb", "p_a uuid", "uuid") + "drop function if exists fn_probe_amb(text);\n")
+    check("refuses DROP IF EXISTS of a signature it does not know while the name exists with another",
+          code == 1 and "a signature it does not know" in err, f"exit {code}, stderr {err.strip()[:160]!r}")
+with probe("drop if exists: an unknown name"):
+    model = collect_with("drop function if exists fn_probe_never(uuid);\n")
+    check("... while DROP IF EXISTS of a name nothing created is the no-op it is",
+          not any(name == "fn_probe_never" for name, _ in model.funcs))
+
 # ── CREATE OR REPLACE keeps the ACL; DROP and CREATE reset it ─────────────
 with probe("create or replace"):
     model = collect_with(fn("fn_probe_keep") + FN.format(name="fn_probe_keep", args="", definer="security definer")
@@ -303,6 +412,36 @@ with probe("a default"):
     check("a default — with a comma inside a literal — is not part of the signature",
           held(model, "fn_probe_default", "integer", "text") == [],
           f"held by {held(model, 'fn_probe_default', 'integer', 'text')}")
+with probe("unnamed arguments"):
+    model = collect_with(fn("fn_probe_unnamed", "uuid, int", "uuid, integer"))
+    check("a CREATE with unnamed arguments is read, as PostgreSQL reads it",
+          held(model, "fn_probe_unnamed", "uuid", "integer") == [],
+          f"held by {held(model, 'fn_probe_unnamed', 'uuid', 'integer')}")
+with probe("type keywords"):
+    model = collect_with(fn("fn_probe_kw", "interval day, double precision, p_i interval hour to minute",
+                            "interval, float8, interval"))
+    check("an argument that starts with a type keyword is all type, and an interval's fields are dropped",
+          held(model, "fn_probe_kw", "interval", "double precision", "interval") == [],
+          f"held by {held(model, 'fn_probe_kw', 'interval', 'double precision', 'interval')}")
+with probe("a default with brackets"):
+    model = collect_with(fn("fn_probe_arr", "p_a int[] default array[1, 2], p_b text", "int[], text"))
+    check("a default with a comma inside brackets is one argument",
+          held(model, "fn_probe_arr", "integer[]", "text") == [],
+          f"held by {held(model, 'fn_probe_arr', 'integer[]', 'text')}")
+with probe("the spellings format_type folds"):
+    # Each pair measured against `format_type` on a database: float, float(p)
+    # either side of 24 bits, dec, nchar, national, every array spelling, and
+    # the one-byte internal "char".
+    spelt = ("double precision", "real", "double precision", "numeric", "integer[]", "integer[]",
+             "integer[]", '"char"', "character varying", "character")
+    model = collect_with(fn(
+        "fn_probe_spell",
+        "p_a float, p_b float(10), p_c float(30), p_d dec, p_e int[][], p_f int[3], p_g integer array[4],"
+        " p_h pg_catalog.char, p_i national character varying, p_j nchar",
+        "float8, float4, double precision, numeric, int[], int[], int[], pg_catalog.char, varchar, char",
+    ))
+    check("every spelling of one type reads as the type format_type prints",
+          held(model, "fn_probe_spell", *spelt) == [], f"held by {held(model, 'fn_probe_spell', *spelt)}")
 
 # ── Two functions in one statement, and the grammar's other spellings ─────
 with probe("two functions in one statement"):
@@ -335,6 +474,13 @@ for label, sql, needle in (
      fn("fn_probe_nosig") + "revoke all on function fn_probe_nosig(uuid) from public;\n", "no earlier migration creates"),
     ("a role only known at run time", fn("fn_probe_cu") + "grant execute on function fn_probe_cu() to current_user;\n",
      "run time"),
+    ("a DROP naming a signature nobody created",
+     fn("fn_probe_dropnone") + "drop function fn_probe_dropnone(uuid);\n", "no earlier migration creates"),
+    ("a DROP TYPE … CASCADE", "drop type if exists probe_t cascade;\n", "CASCADE"),
+    ("a DROP SCHEMA … CASCADE", "drop schema if exists probe_s cascade;\n", "CASCADE"),
+    ("a DROP TABLE … CASCADE", "drop table if exists probe_tbl cascade;\n", "CASCADE"),
+    ("a DROP OWNED … CASCADE", "drop owned by probe_role cascade;\n", "CASCADE"),
+    ("a range type", "create type probe_r as range (subtype = int4);\n", "range type"),
 ):
     with probe(f"refuses {label}"):
         code, err = refused(sql)
@@ -412,6 +558,15 @@ for label, sql in (
 ):
     code, err = collect_code(sql)
     check(label, code is None, f"exit {code}, stderr {err.strip()[:160]!r}")
+
+# ── … and not the same statements without the part that decides it ──────
+with probe("a drop without CASCADE, and a type that is no range"):
+    model = collect_with(
+        "drop type if exists probe_t;\ndrop table if exists probe_tbl restrict;\n"
+        "create type probe_e as enum ('as range');\ncreate type probe_c as (a int);\n"
+    )
+    check("a DROP without CASCADE, an enum and a composite type are read without refusal",
+          gen.render(model) == gen.render(collect_with(None)))
 
 total = passed + len(failures)
 for f in failures:

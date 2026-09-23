@@ -13,10 +13,11 @@ After a reset to the migrations, every function in `public` that the
 migrations create must be in the model with the same argument types, the same
 SECURITY DEFINER flag, and the same API roles holding EXECUTE (PUBLIC, anon,
 authenticated); and the model may name nothing the database lacks. That also
-covers the one thing the generator cannot see — a GRANT or REVOKE made by
-dynamic SQL inside a body, which the shared SQL reader blanks — because the
-database has applied it and the model has not, and they then disagree here,
-by name.
+covers what the generator cannot see — a GRANT or REVOKE made by dynamic SQL
+inside a body, which the shared SQL reader blanks — and what it misreads: a
+statement it takes for a no-op, or a type it spells differently from
+`format_type`. The database has applied what the migrations said, the model
+has applied what it read, and the two then disagree here, by name.
 
 Functions an extension installed (pgcrypto's live in `public`) are not the
 migrations' and are left out by `pg_depend`, not by name.
@@ -74,10 +75,16 @@ def main() -> int:
         for (name, sig), entry in model.funcs.items()
     }
 
-    run = subprocess.run(
-        ["psql", url, "-X", "-A", "-t", "-F", "\t", "-v", "ON_ERROR_STOP=1", "-c", LIVE],
-        capture_output=True, text=True,
-    )
+    try:
+        run = subprocess.run(
+            ["psql", url, "-X", "-A", "-t", "-F", "\t", "-v", "ON_ERROR_STOP=1", "-c", LIVE],
+            capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        # Exit 2 means "could not ask"; a traceback exits 1, which reads as a
+        # disagreement (PR B review).
+        print("FAIL: psql is not on PATH — gate 8e asks the database through it", file=sys.stderr)
+        return 2
     if run.returncode != 0:
         print(f"FAIL: the catalogue query failed — {run.stderr.strip()[:300]}", file=sys.stderr)
         return 2
@@ -113,7 +120,8 @@ def main() -> int:
             show = lambda rs: ", ".join(gen.SHOWN.get(r, r) for r in rs) or "none"  # noqa: E731
             problems.append(f"{gen.fmt(key)}: the model says EXECUTE is held by {show(w_roles)},"
                             f" the database by {show(h_roles)} — a grant or revoke the generator"
-                            " cannot see, such as one made by dynamic SQL in a body")
+                            " cannot see (dynamic SQL in a body) or misread (a statement it took for a"
+                            " no-op, a type it spells differently)")
     if problems:
         for p in problems:
             print(f"FAIL: {p}", file=sys.stderr)
