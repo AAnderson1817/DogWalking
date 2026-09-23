@@ -67,8 +67,11 @@ import { describe, expect, it } from "vitest";
  *     at all, and the spread that applied it was skipped. A `let`, a
  *     parameter, an import or a call stays unreadable.
  *
- * `fields.tsx` and `StateField.tsx` are the implementations, so they are the
- * only files exempt. Test files are fixtures and are not read.
+ * The implementations are exempt as DECLARATIONS, not as files: the top-level
+ * `FormError` in `fields.tsx` and `StateField` in `StateField.tsx`, and
+ * nothing else in either. A whole-file exemption let any component added
+ * beside them render a bare alert region unchecked (Codex, on #97). Test
+ * files are fixtures and are not read.
  *
  * `StateField` and `FormError` are the approved components by BINDING, not by
  * spelling (Codex, on #97): the exemption goes to an element type that is a
@@ -82,13 +85,28 @@ import { describe, expect, it } from "vitest";
  */
 
 const SRC = join(import.meta.dirname, "..", "src");
-const IMPLEMENTATIONS = new Set(["components/fields.tsx", "components/StateField.tsx"]);
 
 /** Each approved component, and the module (under src/, no extension) it is exported from. */
 const APPROVED: Readonly<Record<string, string>> = {
   StateField: "components/StateField",
   FormError: "components/fields",
 };
+
+/**
+ * The top-level declarations of the approved components this file implements:
+ * each one's own body is the exemption. A variable statement contributes only
+ * the declarator that names the component, so a helper declared beside it in
+ * the same statement is still checked.
+ */
+function approvedBodies(sf: ts.SourceFile, file: string): ts.Node[] {
+  const here = posix.normalize(file).replace(/\.[cm]?[jt]sx?$/, "");
+  const names = new Set(Object.entries(APPROVED).filter(([, mod]) => mod === here).map(([name]) => name));
+  return sf.statements.flatMap((s): ts.Node[] => {
+    if (ts.isFunctionDeclaration(s)) return s.name && names.has(s.name.text) ? [s] : [];
+    if (!ts.isVariableStatement(s)) return [];
+    return s.declarationList.declarations.filter((d) => ts.isIdentifier(d.name) && names.has(d.name.text));
+  });
+}
 
 /** The module a specifier names, under src/ and without an extension, or undefined for a package. */
 function moduleOf(specifier: string, file: string): string | undefined {
@@ -552,12 +570,15 @@ function checked(file: string, text: string): { sf: ts.SourceFile; checker: ts.T
  * "read nothing".
  */
 function scan(file: string, text: string): { findings: Finding[]; alertRoles: number } {
-  if (IMPLEMENTATIONS.has(file)) return { findings: [], alertRoles: 0 };
   const { sf, checker } = checked(file, text);
   const resolve = resolverFor(checker);
   const findings: Finding[] = [];
   let alertRoles = 0;
-  const at = (node: ts.Node, rule: Finding["rule"], note?: string) =>
+  // Applied where every finding is recorded, so no walk, present or future,
+  // can bypass it.
+  const exempt = approvedBodies(sf, file);
+  const at = (node: ts.Node, rule: Finding["rule"], note?: string) => {
+    if (exempt.some((d) => node.getStart(sf) >= d.getStart(sf) && node.end <= d.end)) return;
     findings.push({
       file,
       line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1,
@@ -565,6 +586,7 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
       text: node.getText(sf).replace(/\s+/g, " ").slice(0, 100),
       ...(note ? { note } : {}),
     });
+  };
   // A factory the scan cannot follow could apply either attribute.
   const refuse = (site: ts.Node, note: string) => {
     at(site, "role", note);
@@ -1094,10 +1116,23 @@ describe("what the scan refuses and admits", () => {
     expect(rules(`<p>role="alert" x__error</p>`)).toEqual([]);
   });
 
-  it("exempts the two implementations and nothing else", () => {
-    const bare = `<span role="alert" className="field__error" />`;
-    expect(rules(bare, "components/fields.tsx")).toEqual([]);
-    expect(rules(bare, "components/StateField.tsx")).toEqual([]);
-    expect(rules(bare, "components/fieldsx.tsx")).toEqual(["role", "error-class"]);
+  it("exempts the approved components' own bodies, not the files they live in (Codex, on #97)", () => {
+    const formError = `export function FormError() { return <span role="alert" className="form-error field__error" />; }\n`;
+    const stateField = `export function StateField({ role }: { role?: "status" | "alert" }) {\n`
+      + `  return <section role={role} aria-live={role === "alert" ? "assertive" : undefined} />;\n}\n`;
+    // Each implementation, as it is written, is exempt in its own module.
+    expect(rules(formError, "components/fields.tsx")).toEqual([]);
+    expect(rules(stateField, "components/StateField.tsx")).toEqual([]);
+    expect(rules(`export const FormError = () => <span role="alert" className="field__error" />;`, "components/fields.tsx"))
+      .toEqual([]);
+    // Anything else in those files is another component, checked like any other.
+    const helper = `export const Review = () => <span role="alert" className="review__error" />;`;
+    expect(rules(formError + helper, "components/fields.tsx")).toEqual(["role", "error-class"]);
+    expect(rules(stateField + helper, "components/StateField.tsx")).toEqual(["role", "error-class"]);
+    expect(rules(`export const FormError = () => <span />, Review = () => <span role="alert" />;`, "components/fields.tsx"))
+      .toEqual(["role"]);
+    // An approved name is exempt only in the module that implements it.
+    expect(rules(`export function StateField() { return <span role="alert" />; }`, "components/fields.tsx")).toEqual(["role"]);
+    expect(rules(formError, "components/fieldsx.tsx")).toEqual(["role", "error-class"]);
   });
 });
