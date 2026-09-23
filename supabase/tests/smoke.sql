@@ -6204,7 +6204,7 @@ declare
   v_re constant text :=
        '\mupdate\M[^;]*\mset\M[^;]*\mcredit_balance\M'
     || '|\minsert\M\s+(?:\minto\M[^(;]*)?\((?:[^();]|\([^();]*\))*?\mcredit_balance\M'
-    || '|\minsert\M\s+(?:\minto\M[^(;]*?)?(?:\(\s*)?\m(?:(?<!\mdefault\s+)values|select|with|table|overriding)\M'
+    || '|\minsert\M\s+(?:\minto\M[^(;]*?)?(?:\(\s*)*\m(?:(?<!\mdefault\s+)values|select|with|table|overriding)\M'
     || '|\mcopy\M[^;]*\mfrom\M';
   -- A quoted identifier (group 1, kept); an escape string, whose E is not the
   -- tail of an identifier (the lexer's rule: letters, digits, `_`, `$` and
@@ -6261,7 +6261,7 @@ begin
     raise exception 'FAIL: invariant 1 — credit_balance written outside fn_ledger_apply by: %', v_offenders;
   end if;
 
-  -- The self-test: forty bodies it must flag and thirteen it must not, plus a
+  -- The self-test: forty-four bodies it must flag and fourteen it must not, plus a
   -- SQL-standard body after the loop. PL/pgSQL resolves table names at
   -- execution, so these bodies need nothing to exist; they are dropped before
   -- the block ends and the suite rolls back regardless.
@@ -6290,6 +6290,11 @@ begin
       ('insert, positional values',  'insert into clients values (p, 10);', true),
       ('insert, positional select',  'insert into clients select * from clients_archive;', true),
       ('insert, parenthesised select', 'insert into clients (select * from clients_archive);', true),
+      -- A parenthesised query nests to any depth (Codex, the tenth round).
+      ('insert, a doubly parenthesised select', 'insert into clients ((select * from clients_archive));', true),
+      ('insert, a triply parenthesised values', 'insert into clients (((values (p, 10))));', true),
+      ('insert, a parenthesised table, spaced', 'insert into clients ( ( table clients_archive ) );', true),
+      ('insert, a doubly parenthesised with', 'insert into clients ((with s as (select * from clients_archive) select * from s));', true),
       ('merge, then insert values',  'merge into clients c using (select p as id) s on c.id = s.id when not matched then insert values (s.id);', true),
       ('insert, overriding',         'insert into clients overriding system value values (p, 10);', true),
       ('copy from',                  'copy clients (id, credit_balance) from ''/tmp/balances.csv'';', true),
@@ -6330,6 +6335,8 @@ begin
       ('a read at the top of a values tuple', 'insert into credit_ledger (client_id, amount) values (p, v.credit_balance);', false),
       ('a read in a source select', 'insert into credit_ledger (client_id, amount) select id, credit_balance from clients where id = p;', false),
       ('default values', e'insert into job_runs default\n   values;', false),
+      -- A column list is not a query, however many parentheses follow it.
+      ('a column list, then a doubly parenthesised select', 'insert into credit_ledger (client_id, amount) ((select id, 1 from clients));', false),
       -- The skeleton keeps every real statement boundary: a semicolon a
       -- literal or a comment carried was never one, and one outside them is.
       ('a literal carrying a semicolon, then a read', 'update clients set status = ''a;b'' where id = p; perform credit_balance from clients where id = p;', false),
