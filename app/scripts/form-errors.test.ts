@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, posix, relative } from "node:path";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
@@ -69,10 +69,51 @@ import { describe, expect, it } from "vitest";
  *
  * `fields.tsx` and `StateField.tsx` are the implementations, so they are the
  * only files exempt. Test files are fixtures and are not read.
+ *
+ * `StateField` and `FormError` are the approved components by BINDING, not by
+ * spelling (Codex, on #97): the exemption goes to an element type that is a
+ * named import of that export from its implementation module, under any local
+ * name, and to nothing else. A local component that happens to be called
+ * `StateField` and forwards its props to a `<span>` is another component, and
+ * so is one imported from anywhere else. The tree imports both by name, by
+ * the `@/` alias or relatively from inside `components/`; a default,
+ * namespace or re-exported import gets no exemption, which is the loud
+ * direction.
  */
 
 const SRC = join(import.meta.dirname, "..", "src");
 const IMPLEMENTATIONS = new Set(["components/fields.tsx", "components/StateField.tsx"]);
+
+/** Each approved component, and the module (under src/, no extension) it is exported from. */
+const APPROVED: Readonly<Record<string, string>> = {
+  StateField: "components/StateField",
+  FormError: "components/fields",
+};
+
+/** The module a specifier names, under src/ and without an extension, or undefined for a package. */
+function moduleOf(specifier: string, file: string): string | undefined {
+  const path = specifier.startsWith("@/") ? specifier.slice(2)
+    : specifier.startsWith(".") ? posix.join(posix.dirname(file), specifier)
+    : undefined;
+  return path === undefined ? undefined : posix.normalize(path).replace(/\.[cm]?[jt]sx?$/, "");
+}
+
+/**
+ * The approved component an element type is, by its binding: a named import
+ * of that export from the module that implements it, whatever it is called
+ * locally. Anything else — a local declaration, an import from elsewhere, a
+ * member, a string — is null.
+ */
+function approvedAs(type: ts.Node, file: string, checker: ts.TypeChecker): string | null {
+  if (!ts.isIdentifier(type)) return null;
+  const decl = checker.getSymbolAtLocation(type)?.declarations?.[0];
+  if (!decl || !ts.isImportSpecifier(decl) || decl.isTypeOnly || decl.parent.parent.isTypeOnly) return null;
+  const spec = decl.parent.parent.parent.moduleSpecifier;
+  if (!ts.isStringLiteral(spec)) return null;
+  const imported = exportNameText(decl.propertyName ?? decl.name);
+  const mod = moduleOf(spec.text, file);
+  return mod !== undefined && APPROVED[imported] === mod ? imported : null;
+}
 
 interface Finding {
   file: string;
@@ -605,20 +646,23 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
 
   const visit = (node: ts.Node) => {
     if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
-      const owner = tagName(node);
+      // An approved component is the owner by its binding; any other element
+      // is its tag in brackets, which no exemption names.
+      const owner = approvedAs(node.tagName, file, checker) ?? `<${tagName(node)}>`;
       for (const attr of node.attributes.properties) {
         if (ts.isJsxAttribute(attr)) visitProps(owner, attrName(attr.name), valueOf(attr.initializer), attr);
         else if (ts.isJsxSpreadAttribute(attr)) visitSpread(owner, attr.expression, attr);
       }
     } else if (ts.isCallExpression(node) && factoryCall(node)) {
-      // The element type is the owner when it names a component
-      // (`StateField` may carry the role, `FormError` its className); a
-      // string type is a host element whatever it spells, so
-      // `createElement("StateField", …)` takes neither exemption (Codex, on
-      // #97). An argument list the scan cannot see is props it cannot see.
+      // The element type is the owner when it is an approved component by
+      // its binding (`StateField` may carry the role, `FormError` its
+      // className); a string type is a host element whatever it spells, so
+      // `createElement("StateField", …)` takes neither exemption, and neither
+      // does a local component of the same name (Codex, on #97). An argument
+      // list the scan cannot see is props it cannot see.
       const before = findings.length;
       const [type, props] = node.arguments;
-      const owner = type && ts.isIdentifier(type) ? type.text : "<element>";
+      const owner = (type && approvedAs(type, file, checker)) ?? "<element>";
       if (node.arguments.some(ts.isSpreadElement)) {
         for (const each of ["role", "aria-live"]) visitProps("<element>", each, node, node);
       } else if (props) {
@@ -743,6 +787,10 @@ describe("every error goes through FormError or StateField", () => {
 
 describe("what the scan refuses and admits", () => {
   const rules = (text: string, file = "screens/Probe.tsx") => scanSource(file, text).map((f) => f.rule);
+  // The approved components, imported the way the tree imports them: a
+  // fixture that means the real StateField or FormError says so.
+  const APPROVED_IMPORTS = 'import { StateField } from "@/components/StateField";\n'
+    + 'import { FormError } from "@/components/fields";\n';
 
   it("refuses the bare span FormError exists to replace", () => {
     // The shape the old grep passed: neither `field__error` nor on one line.
@@ -771,8 +819,8 @@ describe("what the scan refuses and admits", () => {
     expect(rules(`<span role={undefined}>x</span>`)).toEqual([]);
     expect(rules(`<span role={open && "dialog"}>x</span>`)).toEqual([]);
     expect(rules(`<div role={t ? "timer" : undefined}>x</div>`)).toEqual([]);
-    expect(rules(`<StateField role="alert" title="x" />`)).toEqual([]);
-    expect(rules(`<StateField\n  title="x"\n  detail={d}\n  role="alert"\n/>`)).toEqual([]);
+    expect(rules(APPROVED_IMPORTS + `<StateField role="alert" title="x" />`)).toEqual([]);
+    expect(rules(APPROVED_IMPORTS + `<StateField\n  title="x"\n  detail={d}\n  role="alert"\n/>`)).toEqual([]);
   });
 
   it("refuses an assertive live region, which is the same region without the role", () => {
@@ -809,11 +857,11 @@ describe("what the scan refuses and admits", () => {
     expect(rules(`const cls = "walk-card__" + "error-count";`)).toEqual([]);
     expect(rules("const cls = `walk-card__${state}`;")).toEqual([]);
     // FormError's own className may still carry it, however it is assembled.
-    expect(rules(`<FormError message={e} className={"claim-invite__" + "error"} />`)).toEqual([]);
+    expect(rules(APPROVED_IMPORTS + `<FormError message={e} className={"claim-invite__" + "error"} />`)).toEqual([]);
   });
 
   it("admits a layout class on FormError itself", () => {
-    expect(rules(`<FormError message={e} className="claim-invite__error" />`)).toEqual([]);
+    expect(rules(APPROVED_IMPORTS + `<FormError message={e} className="claim-invite__error" />`)).toEqual([]);
   });
 
   it("reads object literals, which is how spread props and createElement carry a role", () => {
@@ -876,7 +924,7 @@ describe("what the scan refuses and admits", () => {
     expect(rules(`export const X = ({ p }) => <span {...p}>x</span>;`)).toEqual(["role", "aria-live"]);
     expect(rules(`let p = {}; export const X = () => <Card {...p}>x</Card>;`)).toEqual(["role", "aria-live"]);
     // StateField may carry the role, but not an assertive live region.
-    expect(rules(`export const X = () => <StateField {...getProps()} title="x" />;`)).toEqual(["aria-live"]);
+    expect(rules(APPROVED_IMPORTS + `export const X = () => <StateField {...getProps()} title="x" />;`)).toEqual(["aria-live"]);
     // What the scan can see is judged, not refused: both arms, the right of
     // &&, and a spread of nothing.
     expect(rules(`const a = { role: "status" }; const b = { title: "x" };
@@ -915,7 +963,7 @@ describe("what the scan refuses and admits", () => {
     expect(rules(`React.createElement("span", getProps());`)).toEqual(["role", "aria-live"]);
     expect(rules(`createElement(...args);`)).toEqual(["role", "aria-live"]);
     // The element type is the owner, and forwarding is forwarding here too.
-    expect(rules(`createElement(StateField, { role: r, title: "x" });`)).toEqual([]);
+    expect(rules(APPROVED_IMPORTS + `createElement(StateField, { role: r, title: "x" });`)).toEqual([]);
     expect(rules(`export function Wrap(props) { return createElement("span", props); }`)).toEqual([]);
     // The DOM's own createElement takes no props.
     expect(rules(`const a = document.createElement("a");`)).toEqual([]);
@@ -984,8 +1032,39 @@ describe("what the scan refuses and admits", () => {
     // …and FormError's for its className, the sibling.
     expect(rules(`createElement("FormError", { className: "x__error" });`)).toEqual(["error-class"]);
     // The components themselves keep them.
-    expect(rules(`createElement(StateField, { role: getRole() });`)).toEqual([]);
-    expect(rules(`createElement(FormError, { message: m, className: "claim-invite__error" });`)).toEqual([]);
+    expect(rules(APPROVED_IMPORTS + `createElement(StateField, { role: getRole() });`)).toEqual([]);
+    expect(rules(APPROVED_IMPORTS + `createElement(FormError, { message: m, className: "claim-invite__error" });`)).toEqual([]);
+  });
+
+  it("gives the exemptions to the approved components by binding, not by spelling (Codex, on #97)", () => {
+    // A local component that happens to be called StateField, forwarding its
+    // props to a span: the region it renders is bare.
+    expect(rules(`const StateField = (p) => <span {...p} />;\nexport const X = () => <StateField role="alert" />;`))
+      .toEqual(["role"]);
+    expect(rules(`function StateField(p) { return <span {...p} />; }\ncreateElement(StateField, { role: getRole() });`))
+      .toEqual(["role"]);
+    // FormError's className exemption, the sibling.
+    expect(rules(`function FormError(p) { return <p {...p} />; }\nexport const X = () => <FormError className="x__error" />;`))
+      .toEqual(["error-class"]);
+    // The right name from the wrong module is another component too…
+    expect(rules(`import { StateField } from "./my-fields";\nexport const X = () => <StateField role="alert" />;`))
+      .toEqual(["role"]);
+    expect(rules(`import { FormError } from "@/components/StateField";\nexport const X = () => <FormError className="x__error" />;`))
+      .toEqual(["error-class"]);
+    // …and a type-only import is no binding for an element at all.
+    expect(rules(`import type { StateField } from "@/components/StateField";\nexport const X = () => <StateField role="alert" />;`))
+      .toEqual(["role"]);
+    // The real component under another local name keeps its exemption,
+    // relatively from inside components/ as the tree imports it there.
+    expect(rules(`import { StateField as Panel } from "@/components/StateField";\nexport const X = () => <Panel role="alert" title="x" />;`))
+      .toEqual([]);
+    expect(rules(`import { FormError } from "./fields";\nexport const X = () => <FormError message={m} className="claim-invite__error" />;`, "components/Probe.tsx"))
+      .toEqual([]);
+    expect(rules(`import { StateField } from "../components/StateField.tsx";\nexport const X = () => <StateField role="alert" title="x" />;`))
+      .toEqual([]);
+    // A namespace import is not a named one: the loud direction, stated.
+    expect(rules(`import * as F from "@/components/fields";\nexport const X = () => <F.FormError className="x__error" />;`))
+      .toEqual(["error-class"]);
   });
 
   it("admits what a binding says is harmless, and a forwarded spread", () => {
@@ -995,7 +1074,7 @@ describe("what the scan refuses and admits", () => {
     expect(rules(`export function Card({ children, ...rest }) { return <div {...rest}>{children}</div>; }`))
       .toEqual([]);
     // StateField may carry it however it arrives.
-    expect(rules(`const props = { role: r }; export const X = () => <StateField {...props} title="x" />;`))
+    expect(rules(APPROVED_IMPORTS + `const props = { role: r }; export const X = () => <StateField {...props} title="x" />;`))
       .toEqual([]);
   });
 
