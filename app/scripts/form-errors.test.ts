@@ -125,7 +125,7 @@ function moduleOf(specifier: string, file: string): string | undefined {
 function approvedAs(type: ts.Node, file: string, checker: ts.TypeChecker): string | null {
   if (!ts.isIdentifier(type)) return null;
   const decl = checker.getSymbolAtLocation(type)?.declarations?.[0];
-  if (!decl || !ts.isImportSpecifier(decl) || decl.isTypeOnly || decl.parent.parent.isTypeOnly) return null;
+  if (!decl || !ts.isImportSpecifier(decl) || typeOnlySpecifier(decl)) return null;
   const spec = decl.parent.parent.parent.moduleSpecifier;
   if (!ts.isStringLiteral(spec)) return null;
   const imported = exportNameText(decl.propertyName ?? decl.name);
@@ -151,6 +151,18 @@ type Value = string | null | typeof UNREADABLE;
  * constant is the parameter.
  */
 type Resolve = (id: ts.Identifier) => ts.Expression | undefined;
+
+/**
+ * Whether an import or export specifier is type-only — `import type { … }`,
+ * `export type { … }`, or a `type` modifier on the specifier itself. It is
+ * erased, so it binds nothing that runs: it takes no exemption, and an alias
+ * it declares is no factory under another name.
+ */
+function typeOnlySpecifier(spec: ts.ImportSpecifier | ts.ExportSpecifier): boolean {
+  if (spec.isTypeOnly) return true;
+  const holder = spec.parent.parent; // NamedImports → ImportClause, NamedExports → ExportDeclaration
+  return (ts.isImportClause(holder) || ts.isExportDeclaration(holder)) && holder.isTypeOnly;
+}
 
 /**
  * Parentheses, `as`, `satisfies`, `x!` and `<T>x`: nodes that hand their
@@ -707,7 +719,7 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
       && namesFactory(node, checker) && !callOf(node)) refuse(node, TAKEN);
     // A factory taken under another name: renamed on import or export, or
     // destructured under another key, or under a key the scan cannot read.
-    if ((ts.isImportSpecifier(node) || ts.isExportSpecifier(node)) && node.propertyName
+    if ((ts.isImportSpecifier(node) || ts.isExportSpecifier(node)) && node.propertyName && !typeOnlySpecifier(node)
       && ELEMENT_FACTORIES.has(exportNameText(node.propertyName)) && exportNameText(node.propertyName) !== node.name.text) {
       refuse(node, RENAMED);
     }
@@ -1042,6 +1054,13 @@ describe("what the scan refuses and admits", () => {
     expect(notes(`const h = React.createElement;`)[0]).toMatch(/taken as a value/);
     expect(rules(`import { createElement as h } from "react";`)).toEqual(both);
     expect(rules(`export { createElement as h } from "react";`)).toEqual(both);
+    // A type-only import or export is erased, so its alias names no factory
+    // that runs (the verify-deployment scan's finding on #97, and its sibling
+    // here), however the `type` is written.
+    expect(rules(`import type { createElement as h } from "react";`)).toEqual([]);
+    expect(rules(`import { type createElement as h } from "react";`)).toEqual([]);
+    expect(rules(`export type { createElement as h } from "react";`)).toEqual([]);
+    expect(rules(`export { type createElement as h } from "react";`)).toEqual([]);
     expect(rules(`const { createElement: h } = React;`)).toEqual(both);
     expect(rules(`const { ["cloneElement"]: c } = React;`)).toEqual(both);
     expect(notes(`const { createElement: h } = React;`)[0]).toMatch(/under another name/);
