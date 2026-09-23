@@ -70,7 +70,9 @@ come from.
                    also says when every email to the client's address is
                    suppressed (0052; spec 04, `unsubscribe`), in a live region
                    that is always mounted, since the text usually arrives just
-                   after the save that caused it.
+                   after the save that caused it. The answer is filed under the
+                   address the database says it checked, never the one on
+                   screen.
 /walks/:id/live    WalkMode  (.walkmode theme)
 /vault             AccessVault
 /billing           BillingConsole (phase 07: renewals, failed payments, plan changes)

@@ -672,13 +672,22 @@ export async function revokeInvite(clientId: string): Promise<void> {
  * operator cannot read, so without this the operator never finds out
  * (0052).
  *
- * Answers only about the calling operator's OWN client and is false for
- * anyone else's, so it is not a lookup over the suppression list.
+ * The answer names the address the database CHECKED, which is not always the
+ * one the caller has on screen: the row may have changed since it was loaded
+ * (another tab, or the caller's own save racing this call). Key on `email`,
+ * never on what you asked about.
+ *
+ * Only the calling operator's OWN client with an address gets an answer; for
+ * anyone else's, or a client with no address, this is null — so it is not a
+ * lookup over the suppression list.
  */
-export async function clientEmailSuppressed(clientId: string): Promise<boolean> {
+export async function clientEmailSuppressed(
+  clientId: string,
+): Promise<{ email: string; suppressed: boolean } | null> {
   const { data, error } = await supabase.rpc("fn_client_email_suppressed", { p_client: clientId });
   if (error) throw new Error(error.message);
-  return data === true;
+  const row = data?.[0];
+  return row ? { email: row.o_email, suppressed: row.o_suppressed === true } : null;
 }
 
 /** The one place the claim URL is built, so Roster and ClientDetail agree. */

@@ -656,7 +656,9 @@ reason to move it.
 an operator reads anything derived from `email_suppressions`, a table no API
 role can read (`0038`), and its tenancy check is what stops it being a lookup
 over that list: it answers only for a client whose `operator_id` is the caller,
-only about that client's current address, and only as one boolean. A
+only about that client's current address, and only as one boolean labelled
+with the address it checked — `clients.email`, which the operator's column
+grant already lets them read, so the label discloses nothing. A
 platform-wide suppression is the address owner's instruction to every operator
 and nobody's list, so each operator it binds may learn that it binds them; an
 operator-scoped one is consulted only for its own operator, here exactly as in

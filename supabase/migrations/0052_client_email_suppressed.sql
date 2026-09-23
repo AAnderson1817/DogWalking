@@ -30,8 +30,10 @@
 --     through the same predicate: operator Y can learn nothing about X's rows.
 --
 -- What leaves the function is one boolean about the caller's OWN client's
--- CURRENT address: not which business's mail was unsubscribed from, not when,
--- not the reason text, and no way to enumerate or to change the list, which
+-- CURRENT address, labelled with that address (a column the operator can
+-- already read — see below): not which business's mail was unsubscribed
+-- from, not when, not the reason text, and no way to enumerate or to change
+-- the list, which
 -- stays unreadable and unwritable by every API role (0038). Stated plainly
 -- rather than implied: the operator controls the address, so a determined one
 -- can still test any address by writing it into their own client row first —
@@ -67,10 +69,22 @@
 -- compares it with the Set the sender imports, so changing either alone fails
 -- the build.
 --
--- Not a raise for a client that is not the caller's: answering false leaks
--- nothing (it is also the answer for "yours, and deliverable"), and a lookup
--- that could error is one more way for an advisory notice to take down the
--- screen it sits on — the M39 lesson.
+-- ── The answer names the address it checked ──────────────────────────────
+--
+-- The function reads the address the row holds when the statement runs. The
+-- caller's copy can be older: another tab edited it, or this tab's own save
+-- landed between the screen loading the client and the check running. A bare
+-- boolean would then be filed under the address on screen while describing a
+-- different one — a notice on a deliverable address, or none on a suppressed
+-- one (Codex, PR #96, second round). So each row carries `o_email`, the
+-- address actually checked, and the screen keys on that. It discloses nothing:
+-- `clients.email` is in the operator's column grant and every client read
+-- already selects it.
+--
+-- Not a raise for a client that is not the caller's, and not a row either: no
+-- row is also the answer for a client with no address, so it leaks nothing,
+-- and a lookup that could error is one more way for an advisory notice to take
+-- down the screen it sits on — the M39 lesson.
 
 create function fn_client_facing_notification_types()
 returns notification_type[]
@@ -92,18 +106,21 @@ comment on function fn_client_facing_notification_types() is
   'The notification types send-notification emails to a client — a copy of CLIENT_FACING in send-notification/handler.ts, pinned to it by client_facing_parity_test.ts (0052).';
 
 create function fn_client_email_suppressed(p_client uuid)
-returns boolean
+returns table (o_email text, o_suppressed boolean)
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  select coalesce(bool_and(fn_email_suppressed(c.email, c.operator_id, t.value)), false)
+  select c.email,
+         coalesce((
+           select bool_and(fn_email_suppressed(c.email, c.operator_id, t.value))
+             from unnest(fn_client_facing_notification_types()) as t(value)
+         ), false)
     from clients c
-   cross join unnest(fn_client_facing_notification_types()) as t(value)
    where c.id = p_client
      -- The caller check IS the scoping. Only the client's own operator may
-     -- ask; a client persona, another operator or an unknown id gets false.
+     -- ask; a client persona, another operator or an unknown id gets no row.
      and c.operator_id = (select auth.uid())
      and c.email is not null;
 $$;
@@ -112,4 +129,4 @@ revoke all on function fn_client_email_suppressed(uuid) from public, anon;
 grant execute on function fn_client_email_suppressed(uuid) to authenticated;
 
 comment on function fn_client_email_suppressed(uuid) is
-  'True when every email the sender would send to the calling operator''s own client''s current address is suppressed. Asks fn_email_suppressed for each type in fn_client_facing_notification_types(), so the notice cannot disagree with the sender; false for anyone else''s client (0052, spec 04).';
+  'For the calling operator''s own client: the address checked, and whether every email the sender would send to it is suppressed. Asks fn_email_suppressed for each type in fn_client_facing_notification_types(), so the notice cannot disagree with the sender; no row for anyone else''s client or a client with no address (0052, spec 04).';

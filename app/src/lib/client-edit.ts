@@ -200,7 +200,8 @@ export const isEditable = (c: ClientEditable): boolean => !c.purged_at;
  * is suppressed (`0052`) — typically right after saving it.
  *
  * It does not say which business's mail was unsubscribed from, or when: the
- * function behind it answers one boolean, and the suppression is usually a
+ * function behind it answers one boolean (labelled with the address it
+ * checked), and the suppression is usually a
  * platform-wide one that no single operator owns. It names the likeliest fix
  * (a typo — 0038 exists because operators mistype addresses) and, for a
  * client who has claimed their account, where the updates still arrive: the

@@ -135,7 +135,7 @@ lifts) want a written argument before code.
   suppression list to another — is answered in spec 03: a platform-wide row is
   the address owner's instruction to everyone and nobody's list, an
   operator-scoped row is consulted only for its own operator, and one boolean
-  leaves the function. It asks the sender's own `fn_email_suppressed` for each
+  leaves the function, labelled with the address it checked. It asks the sender's own `fn_email_suppressed` for each
   type the sender emails (a copy of `CLIENT_FACING`, pinned to it by a deno
   parity test), so the notice and the skip cannot disagree. See the
   `feat(email-suppressed)` status-log entry.

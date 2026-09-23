@@ -1292,7 +1292,7 @@ export type Database = {
         Args: {
           p_client: string;
         };
-        Returns: boolean;
+        Returns: Array<{ o_email: string; o_suppressed: boolean }>;
       };
       fn_client_facing_notification_types: {
         Args: Record<string, never>;

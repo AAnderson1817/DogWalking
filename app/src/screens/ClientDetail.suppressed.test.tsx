@@ -20,6 +20,9 @@ const state = vi.hoisted(() => ({
   // What `fn_client_email_suppressed` answers, by address. A promise per
   // address so a test can hold one back and choose when it arrives.
   answers: {} as Record<string, Promise<boolean>>,
+  // When set, the database holds a different address from the one the screen
+  // loaded — another tab changed it — and the check answers for THAT one.
+  dbEmail: undefined as string | undefined,
   asked: [] as string[],
 }));
 const updateClient = vi.fn();
@@ -48,10 +51,13 @@ vi.mock("@/lib/api", async () => {
     createSetupCheckout: vi.fn(),
     createTopupCheckout: vi.fn(),
     updateClient: (...a: unknown[]) => updateClient(...a),
+    // Answers for the address the database holds when it runs, and says
+    // which one — as the real function does.
     clientEmailSuppressed: (id: string) => {
-      const email = String(state.client.email);
+      const email = String(state.dbEmail ?? state.client.email);
       state.asked.push(`${id} ${email}`);
-      return state.answers[email] ?? Promise.resolve(false);
+      return (state.answers[email] ?? Promise.resolve(false))
+        .then((suppressed) => ({ email, suppressed }));
     },
   };
 });
@@ -127,6 +133,7 @@ async function changeEmailTo(email: string) {
 beforeEach(() => {
   state.client = { ...CLIENT };
   state.answers = {};
+  state.dbEmail = undefined;
   state.asked = [];
   updateClient.mockReset().mockImplementation(async (_id: string, patch: Record<string, unknown>) => {
     state.client = { ...state.client, ...patch, updated_at: "2026-08-02T00:00:00Z" };
@@ -228,6 +235,19 @@ describe("ClientDetail — a client's address has opted out of email", () => {
     pending.resolve(true);
     await new Promise((r) => setTimeout(r, 0));
     expect(headerStatus().textContent).toMatch(NOTICE);
+  });
+
+  it("files an answer under the address the database checked, not the one on screen", async () => {
+    // Codex, PR #96. The row changed after this screen loaded it — another
+    // tab, or a save racing the check — so the database answered for the
+    // address it holds now. Filed under the address on screen, a deliverable
+    // address would read as unsubscribed.
+    state.dbEmail = "typo@gmial.test";
+    state.answers["typo@gmial.test"] = Promise.resolve(true);
+    await show();
+    await waitFor(() => expect(state.asked).toEqual(["c-1 typo@gmial.test"]));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(headerStatus().textContent).toBe("");
   });
 
   it("does not let a slow answer for the previous address overwrite the current one", async () => {

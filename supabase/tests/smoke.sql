@@ -5966,6 +5966,8 @@ declare
   v_f2   uuid := '99999999-0000-4000-c000-0000000000f2';  -- op2
   r record;
   v_got boolean;
+  v_checked text;
+  v_rows int;
   v_sender boolean;
   v_def boolean;
   v_cfg text[];
@@ -6061,13 +6063,28 @@ begin
       format('{"sub":"%s","role":"authenticated"}', r.asker)::text, true);
     set local session authorization authenticated;
     begin
-      v_got := fn_client_email_suppressed(r.client);
+      select o_suppressed, o_email into v_got, v_checked
+        from fn_client_email_suppressed(r.client);
+      get diagnostics v_rows = row_count;
     exception when others then
       raise exception 'FAIL: fn_client_email_suppressed raised "%" for %, where it must answer (0052)',
         sqlerrm, r.label;
     end;
     reset session authorization;
 
+    -- A row only for the owner, and only when there is an address to check;
+    -- anyone else, and an owner whose client has none, get no row at all.
+    if v_rows <> (case when r.owner_asks and r.email is not null then 1 else 0 end) then
+      raise exception 'FAIL: % — expected % row(s), got % (0052)', r.label,
+        case when r.owner_asks and r.email is not null then 1 else 0 end, v_rows;
+    end if;
+    -- The answer names the address it checked, so a screen holding an older
+    -- copy of the row cannot file it under the wrong one (Codex, PR #96).
+    if v_rows = 1 and v_checked is distinct from r.email then
+      raise exception 'FAIL: % — the answer names "%" but the address it checked is "%" (0052)',
+        r.label, v_checked, r.email;
+    end if;
+    v_got := coalesce(v_got, false);
     if v_got is distinct from r.want then
       raise exception 'FAIL: % — expected %, got % (0052)', r.label, r.want, v_got;
     end if;
@@ -6080,16 +6097,17 @@ begin
     end if;
   end loop;
 
-  -- An id that is nobody's client answers like "yours and deliverable":
-  -- no existence oracle over client ids, and nothing to raise.
+  -- An id that is nobody's client gets no row, like another operator's
+  -- client: no existence oracle over client ids, and nothing to raise.
   perform set_config('request.jwt.claims',
     format('{"sub":"%s","role":"authenticated"}', v_op1)::text, true);
   set local session authorization authenticated;
-  if fn_client_email_suppressed('00000000-0000-4000-8000-000000000000') then
-    reset session authorization;
-    raise exception 'FAIL: an unknown client id reported a suppressed address (0052)';
-  end if;
+  select count(*) into v_rows
+    from fn_client_email_suppressed('00000000-0000-4000-8000-000000000000');
   reset session authorization;
+  if v_rows <> 0 then
+    raise exception 'FAIL: an unknown client id got an answer (0052)';
+  end if;
 
   -- Not callable without a session (invariant 5: REVOKE from PUBLIC and anon).
   perform set_config('request.jwt.claims', '{"role":"anon"}', true);
