@@ -83,15 +83,31 @@ const isWrapper = (n: ts.Node): n is Wrapper =>
   ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isSatisfiesExpression(n)
   || ts.isTypeAssertionExpression(n) || ts.isNonNullExpression(n);
 
-/** What an expression is underneath every wrapper. */
+/**
+ * A comma evaluates its operands in order and yields the last, so `(0, f)`
+ * is `f`, the shape a bundler writes. Its right operand is read through
+ * wherever a wrapper is: the deploy scan's finding on #97, and its sibling
+ * here, where `(0, supabase[k])(t)` read as indexing that is not called.
+ */
+const isComma = (n: ts.Node): n is ts.BinaryExpression =>
+  ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.CommaToken;
+
+/** Whether `parent` hands `child`'s value on unchanged: a wrapper around it, or a comma it ends. */
+const handsOn = (parent: ts.Node, child: ts.Node): boolean =>
+  (isWrapper(parent) && parent.expression === child) || (isComma(parent) && parent.right === child);
+
+/** What an expression is underneath every wrapper and comma. */
 function unwrap(e: ts.Expression): ts.Expression {
-  while (isWrapper(e)) e = e.expression;
-  return e;
+  for (;;) {
+    if (isWrapper(e)) e = e.expression;
+    else if (isComma(e)) e = e.right;
+    else return e;
+  }
 }
 
-/** The outermost wrapper around `e`: what a call or an access actually holds. */
+/** The outermost node handing `e`'s value on: what a call or an access actually holds. */
 function outermost(e: ts.Expression): ts.Expression {
-  while (isWrapper(e.parent) && e.parent.expression === e) e = e.parent;
+  while (e.parent && handsOn(e.parent, e)) e = e.parent as ts.Expression;
   return e;
 }
 
@@ -307,6 +323,7 @@ function foldOf(node: ts.Node, checker: ts.TypeChecker, path: Set<ts.Node> = new
   });
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return piece(node.text);
   if (isWrapper(node)) return foldOf(node.expression, checker, path);
+  if (isComma(node)) return foldOf(node.right, checker, path);
   if (ts.isConditionalExpression(node)) {
     const a = foldOf(node.whenTrue, checker, path);
     const b = foldOf(node.whenFalse, checker, path);
@@ -586,6 +603,26 @@ describe("what the channel scan refuses and admits", () => {
     const server = serverProblems(new Map([
       [THE_PUBLISHER, "fetch(`${url}/realtime/v1/api/broadcast`);"],
       ["complete-walk/index.ts", `fetch(base + <string>"/realtime/v1/api/" + "broadcast");`],
+    ])).problems.join("\n");
+    expect(server).toMatch(/complete-walk\/index\.ts:1 calls the broadcast endpoint directly/);
+  });
+
+  it("reads a comma as the value it yields, its right operand (the deploy scan's finding on #97)", () => {
+    const one = (call: string) => client({ [THE_CHANNEL_FILE]: call }).join("\n");
+    // The silent one: a call through a member the scan cannot read, held by a
+    // comma, read as indexing that is not called.
+    expect(one(`${PRIVATE}\n(0, supabase[method])(t);`)).toMatch(/:2 is not private: a call through a member the scan cannot read/);
+    // And every other place the scan reads a value: a comma-held callee is a
+    // call, and comma-held options are the options.
+    expect(one("(0, supabase.channel)(t, { config: { private: true } });")).toBe("");
+    expect(one("supabase.channel(t, (0, { config: { private: true } }));")).toBe("");
+    expect(one("supabase.channel(t, { config: { private: (0, true) } });")).toBe("");
+    expect(one("(0, supabase.channel)(t);")).toMatch(/no options/);
+    expect(one("supabase.channel(t, { config: { private: (0, false) } });")).toMatch(/`private: false`/);
+    // The server fold reads a comma's right operand too.
+    const server = serverProblems(new Map([
+      [THE_PUBLISHER, "fetch(`${url}/realtime/v1/api/broadcast`);"],
+      ["complete-walk/index.ts", `fetch(base + "/realtime/v1/api/" + (0, "broadcast"));`],
     ])).problems.join("\n");
     expect(server).toMatch(/complete-walk\/index\.ts:1 calls the broadcast endpoint directly/);
   });

@@ -392,11 +392,27 @@ function isWrapper(n: ts.Node): n is Wrapper {
     || ts.isTypeAssertionExpression(n) || ts.isNonNullExpression(n);
 }
 
-/** An expression with its wrappers removed. */
+/**
+ * A comma evaluates its operands in order and yields the last, so `(0, f)`
+ * is `f`, the shape a bundler writes. The scan reads its right operand
+ * wherever it reads through a wrapper, down into a value and up from one
+ * (Codex, on #97: `(0, http[name])(…)` read as indexing that is not called).
+ */
+const isComma = (n: ts.Node): n is ts.BinaryExpression =>
+  ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.CommaToken;
+
+/** Whether `parent` hands `child`'s value on unchanged: a wrapper around it, or a comma it ends. */
+const handsOn = (parent: ts.Node, child: ts.Node): boolean =>
+  (isWrapper(parent) && parent.expression === child) || (isComma(parent) && parent.right === child);
+
+/** An expression with its wrappers removed, and a comma read as its right operand. */
 function unwrap(value: ts.Expression): ts.Expression {
   let e = value;
-  while (isWrapper(e)) e = e.expression;
-  return e;
+  for (;;) {
+    if (isWrapper(e)) e = e.expression;
+    else if (isComma(e)) e = e.right;
+    else return e;
+  }
 }
 
 /**
@@ -494,10 +510,10 @@ function inType(node: ts.Node): boolean {
   return false;
 }
 
-/** The outermost wrapper around `node`: what a call or an access actually holds. */
+/** The outermost node handing `node`'s value on: what a call or an access actually holds. */
 function outermost(node: ts.Expression): ts.Expression {
   let e = node;
-  while (isWrapper(e.parent) && e.parent.expression === e) e = e.parent;
+  while (e.parent && handsOn(e.parent, e)) e = e.parent as ts.Expression;
   return e;
 }
 
@@ -854,6 +870,18 @@ describe("verify-deployment's read-only argument is derived", () => {
     // A default is evaluated, not assigned to: serveFunction as a shorthand's
     // default is read, and handed to `serve`.
     fn("assigned-default-read", 'serveFunction(h);\nlet serve;\n({ serve = serveFunction } = mod);\nserve(g, { methods: ["GET"] });');
+    // A comma yields its right operand, so `(0, f)(…)` calls f, the shape a
+    // bundler writes (Codex, on #97). The right operand is the value wherever
+    // the scan reads one: a callee, a receiver, the options. The left operand
+    // is evaluated and dropped, so a reference there is not a call.
+    fn("comma-indexed", 'serveFunction(h);\n(0, http[name])(g, { methods: ["GET"] });');
+    fn("comma-deno", "serveFunction(h);\n(0, Deno).serve(g);");
+    fn("comma-deno-unreadable", "serveFunction(h);\n(0, Deno)[k](g);");
+    fn("comma-callee-get", '(0, serveFunction)(h, { methods: ["GET"] });');
+    fn("comma-options-get", 'serveFunction(h, (0, { methods: ["GET"] }));');
+    fn("comma-left", "(serveFunction, other)(h);");
+    fn("comma-callee-post", '(0, serveFunction)(h, { methods: ["POST"] });');
+    fn("comma-options-post", 'serveFunction(h, (0, { methods: ["POST"] }));');
     // Not doors. A destructuring assignment that keeps the name, or assigns
     // something else TO serveFunction, is the declaration forms' twin: the
     // local serveFunction is written, and judged where it is called — as is a
@@ -895,6 +923,12 @@ describe("verify-deployment's read-only argument is derived", () => {
       "assigned-nested": "serveFunction destructured under another name, so the scan cannot see its calls",
       "indexed-unreadable": "a call through a member the scan cannot read could be serveFunction, so the scan cannot see its options",
       "assigned-default-read": "serveFunction referenced without being called, so the scan cannot see its options",
+      "comma-indexed": "a call through a member the scan cannot read could be serveFunction, so the scan cannot see its options",
+      "comma-deno": "its own Deno.serve",
+      "comma-deno-unreadable": "a member of Deno the scan cannot read",
+      "comma-callee-get": "serveFunction widened with methods",
+      "comma-options-get": "serveFunction widened with methods",
+      "comma-left": "serveFunction referenced without being called, so the scan cannot see its options",
     });
   });
 });
