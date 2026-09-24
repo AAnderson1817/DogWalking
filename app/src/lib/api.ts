@@ -1394,9 +1394,12 @@ export async function listCredentialLog(credentialId: string): Promise<Credentia
  * — `credential_access_log_client_select` in 0030 joins credential → property →
  * client — so this passes no ids and cannot be widened from here.
  *
- * Deliberately NOT selecting `ip` or `user_agent`: those describe the operator's
- * device, and a client does not need their walker's IP address to know their
- * door was opened.
+ * `ip` and `user_agent` describe the operator's device, and a client does not
+ * need their walker's IP address to know their door was opened. Leaving them
+ * out of this list used to be the only thing keeping them from a client: 0004's
+ * table-level grant covered both. Since 0056 the grant is a column list that
+ * withholds them from every API role, so naming either here is a 42501 on
+ * every read of the trail, and `column-grants.test.ts` refuses it.
  */
 export async function listMyCredentialLog(limit = 100): Promise<CredentialLogRow[]> {
   const { data, error } = await supabase

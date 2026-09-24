@@ -9,7 +9,8 @@
 // Deliberately shows no IP or user agent. Those describe the operator's device;
 // a client does not need their walker's IP address to know their door was
 // opened, and putting it on screen would make the trail feel like surveillance
-// of the walker rather than a record for the homeowner.
+// of the walker rather than a record for the homeowner. Not showing them is not
+// what keeps them from a client: since 0056 no API role may select either one.
 import { dateTimeLocal } from "@/lib/format";
 import type { CredentialLogRow } from "@/lib/api";
 import { accessActionLabel, accessActionTone } from "./access-trail-treatment";

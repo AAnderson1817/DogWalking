@@ -861,7 +861,7 @@ Body-level tenancy check is mandatory in every definer fn (RLS does not apply in
 - **Rotation** is `fn_vault_rewrap_batch` → decrypt/re-encrypt in the edge function → `fn_vault_rewrap_apply`, a compare-and-swap on the exact ciphertext read. The work queue is the data (`key_id <> current`), so a rewrap is idempotent, resumable and needs no journal. Retirement is gated on `fn_vault_census`, which returns four numbers rather than one: `on_other = 0` alone is also true when nothing is visible, so the parts must add up to the whole. Runbook: `docs/dev/vault-key-rotation.md`.
 - Write path: operator submits plaintext over TLS to credential-vault (action `put`) → encrypt → insert/update row. Plaintext never persisted, never logged.
 - Read path: credential-vault (action `get`) → verifies fresh re-auth (operator supplies password; function verifies via Auth admin sign-in check; reject if fail; rate-limit 5/min/user) → calls `fn_read_credential` which (a) asserts operator owns the credential, (b) validates any `walk_id` against operator AND property, (c) logs a `read` row with purpose, IP and user agent, (d) returns ciphertext to service role → decrypt → return plaintext fields in response body only.
-- Client persona: **selects their own property's credential metadata and its audit trail** (0030), and never `ciphertext`. Secrets remain operator-entered; new codes still travel out-of-band or via `properties.access_notes_public`.
+- Client persona: **selects their own property's credential metadata and its audit trail** (0030), and never `ciphertext`, `ip` or `user_agent` (0056). Secrets remain operator-entered; new codes still travel out-of-band or via `properties.access_notes_public`.
 
 ### The audit trail (revised — review H3)
 
@@ -876,6 +876,14 @@ audit trail, and it is what an insurance underwriter examines hardest.
 - **Every row carries IP and user agent.** The only IP previously captured lived
   in `vault_rate_limit_attempts` and was deleted by the next attempt past the
   60-second window.
+- **Only the service role reads them** (0056). They describe the walker's
+  device, not the client's door, and 0004's table-level SELECT had covered
+  both, so a client session read their walker's IP address and device for
+  every row on their property while the portal declined to show them. The grant
+  to `authenticated` is a column list now, and column privileges are role-wide,
+  so the operator's API reads lose the two columns as well. Nothing in the app
+  read them for either persona; a screen showing an operator the devices that
+  opened their vault would be a definer function scoped to the operator.
 - **`walk_id` is optional and validated.** The purpose is typed by whoever is
   reading; the walk is the half the system can vouch for. A reference to a walk
   that was not this operator visiting this property is refused, because it would

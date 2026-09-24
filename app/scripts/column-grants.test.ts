@@ -213,6 +213,29 @@ export function firstSelectArg(region: string): string | null {
   return out.trim();
 }
 
+/**
+ * Resolve `.select(COLS)` where COLS is a module-level string const in the
+ * same file, including one built by `+`-concatenating literals.
+ *
+ * Load-bearing rather than a nicety, twice over. `send-notification` selects a
+ * const, so without this `select-columns.test.ts` would have skipped the exact
+ * query it was written to catch. And `api.ts` reads the entry-code trail
+ * through `CRED_LOG`, so without it the check below could not see that list
+ * name a column 0056 withholds.
+ */
+export function resolveConst(src: string, name: string): string | null {
+  const re = new RegExp(`const\\s+${name}\\s*(?::[^=]+)?=\\s*([\\s\\S]*?);`, "m");
+  const m = re.exec(src);
+  if (!m) return null;
+  const expr = m[1].trim();
+  // Only a chain of string literals joined by `+`. Anything else (a call, a
+  // template with a hole, an array join) is not statically knowable, and
+  // guessing would produce false failures on healthy code.
+  const parts = expr.split("+").map((p) => p.trim());
+  if (!parts.every((p) => /^(["'`])[^"'`]*\1$/.test(p))) return null;
+  return parts.map((p) => p.slice(1, -1)).join("");
+}
+
 /** Every `from("<table>") … .select(<arg>)` reachable in the app source. */
 function selectsByTable(): Array<{ file: string; table: string; arg: string }> {
   const found: Array<{ file: string; table: string; arg: string }> = [];
@@ -296,9 +319,11 @@ export function selectsWildcard(arg: string): boolean {
 describe("column-level SELECT grants and wildcard selects", () => {
   it("finds the tables whose SELECT is column-restricted", () => {
     // A guard that matched nothing would pass for the wrong reason. These
-    // three are the whole set today, and each is deliberate: invariant 2
+    // four are the whole set today, and each is deliberate: invariant 2
     // withholds the vault ciphertext, 0038/0043 withhold the four client
-    // columns, and 0049 withholds the per-device push encryption secrets.
+    // columns, 0049 withholds the per-device push encryption secrets, and
+    // 0056 withholds the walker's IP address and device from the entry-code
+    // trail.
     //
     // This list is meant to be edited when a table joins the set — that edit
     // is the moment somebody notices a new table can never be read with
@@ -306,8 +331,19 @@ describe("column-level SELECT grants and wildcard selects", () => {
     expect([...columnRestrictedTables().keys()].sort()).toEqual([
       "access_credentials",
       "clients",
+      "credential_access_log",
       "push_subscriptions",
     ]);
+  });
+
+  it("withholds the walker's IP address and device from the trail", () => {
+    // The table-level grant 0004 wrote covered both, and the portal's choice
+    // not to select them was the only thing keeping them from a client.
+    const granted = columnRestrictedTables().get("credential_access_log");
+    expect(granted).toBeDefined();
+    expect(granted).toContain("purpose");
+    expect(granted!.has("ip")).toBe(false);
+    expect(granted!.has("user_agent")).toBe(false);
   });
 
   it("parses 0038's multi-line grant rather than skipping it", () => {
@@ -359,10 +395,31 @@ describe("column-level SELECT grants and wildcard selects", () => {
       }
     };
     for (const s of selectsByTable()) {
-      if (s.arg.startsWith('"') || s.arg.startsWith("'")) check(s.file, s.table, s.arg);
-      for (const [table, innerSel] of embedsOf(s.arg)) check(s.file, table, innerSel);
+      // A list read through a module-level const (`CRED_LOG`) is checked like
+      // a literal. Skipping identifiers, as this test first did, left the
+      // trail's column list unchecked, which is the one list 0056 constrains.
+      let arg = s.arg;
+      if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(arg)) {
+        const resolved = resolveConst(readFileSync(s.file, "utf8"), arg);
+        if (resolved === null) continue;
+        arg = JSON.stringify(resolved);
+      }
+      if (arg.startsWith('"') || arg.startsWith("'")) check(s.file, s.table, arg);
+      for (const [table, innerSel] of embedsOf(arg)) check(s.file, table, innerSel);
     }
     expect(offenders).toEqual([]);
+  });
+
+  it("checks a select list read through a const", () => {
+    // Pins the resolution the test above depends on: without it, `CRED_LOG`
+    // naming `ip` would pass here and fail in production as a 42501 on every
+    // read of the trail, for both personas.
+    const src = 'const CRED_LOG = "id, credential_id, " +\n  "ip";\n';
+    expect(resolveConst(src, "CRED_LOG")).toBe("id, credential_id, ip");
+    const api = readFileSync(API, "utf8");
+    const trail = resolveConst(api, "CRED_LOG");
+    expect(trail, "CRED_LOG not found in api.ts").not.toBeNull();
+    expect(namedColumns(JSON.stringify(trail))).toContain("purpose");
   });
 
   it("understands every relation grant in the migrations", () => {

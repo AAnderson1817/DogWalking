@@ -2987,7 +2987,13 @@ begin
   perform set_config('request.jwt.claims',
     format('{"sub":"%s","role":"authenticated"}', v_client_user), true);
 
-  select count(*) into v_visible from credential_access_log;
+  -- A refusal here is the grant gone, not an empty trail, and says so rather
+  -- than aborting the suite with a bare permission error.
+  begin
+    select count(*) into v_visible from credential_access_log;
+  exception when insufficient_privilege then
+    raise exception 'FAIL: the client is refused their own door''s activity outright: the trail''s SELECT grant is gone';
+  end;
   if v_visible = 0 then
     raise exception 'FAIL: the client cannot see any of their own door''s activity';
   end if;
@@ -7431,6 +7437,88 @@ begin
   end;
 
   raise notice 'the claim replay''s fixture is held by its claim trail until the purge, and deletes cleanly after it (staging smoke): OK';
+end $$;
+
+-- ═══ The walker's IP and device stay out of every API role's reach (0056) ═══
+-- 0030 recorded `ip` and `user_agent` on every trail row and gave the client a
+-- SELECT policy on their own property's trail; the portal then chose not to
+-- show the two columns. But 0004's table-level SELECT covered them, so a
+-- client session read their walker's IP address and device through the API.
+-- The client's own trail must still read (the columns the portal selects), and
+-- the two device columns must be refused to both personas.
+do $$
+declare
+  v_op     uuid := '99999999-0000-4000-a000-0000000056a1';
+  v_user   uuid := '99999999-0000-4000-a000-0000000056c1';
+  v_client uuid := '99999999-0000-4000-c000-0000000056c1';
+  v_prop   uuid := '99999999-0000-4000-d000-0000000056d1';
+  v_cred   uuid := gen_random_uuid();
+  v_n      int;
+  v_who    text;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  insert into auth.users (id, email) values
+    (v_op, 'h56-op@sanpo.test'), (v_user, 'h56-client@sanpo.test');
+  insert into operators (id, business_name, display_name, email)
+    values (v_op, 'H56 Walks', 'H56', 'h56-op@sanpo.test');
+  insert into clients (id, operator_id, full_name, email, auth_user_id)
+    values (v_client, v_op, 'H56 Client', 'h56-client@sanpo.test', v_user);
+  insert into properties (id, operator_id, client_id, label, address_line1, city, postcode)
+    values (v_prop, v_op, v_client, 'Home', '1 H56 St', 'Chicago', '60601');
+  perform fn_write_credential(v_cred, v_op, v_prop, 'lockbox',
+    decode('000102030405060708090a0b101112131415161718191a1b1c1dff', 'hex'),
+    'Front door', '198.51.100.23', 'walker-phone/1.0');
+
+  -- The premise: the row carries both values. Without them, a refusal below
+  -- would prove nothing about what the grant withholds.
+  if not exists (select 1 from credential_access_log
+                  where credential_id = v_cred and ip = '198.51.100.23'::inet
+                    and user_agent = 'walker-phone/1.0') then
+    raise exception 'FAIL: precondition — the fixture''s trail row does not carry an IP and a user agent';
+  end if;
+
+  foreach v_who in array array['client', 'operator'] loop
+    set local role authenticated;
+    perform set_config('request.jwt.claims',
+      format('{"sub":"%s","role":"authenticated"}',
+             case v_who when 'client' then v_user else v_op end), true);
+
+    -- The trail itself still reads, through the columns the app selects
+    -- (`CRED_LOG` in api.ts).
+    begin
+      select count(*) into v_n from (
+        select id, credential_id, accessed_by, action, purpose, accessed_at, walk_id
+          from credential_access_log where credential_id = v_cred) t;
+    exception when insufficient_privilege then
+      raise exception 'FAIL: the % is refused the entry-code trail outright: a column the app selects is no longer granted', v_who;
+    end;
+    if v_n <> 1 then
+      raise exception 'FAIL: the % can no longer read the entry-code trail (% rows)', v_who, v_n;
+    end if;
+
+    begin
+      perform ip from credential_access_log where credential_id = v_cred;
+      raise exception 'FAIL: the % read the walker''s IP address from the entry-code trail', v_who;
+    exception when insufficient_privilege then null;
+    end;
+    begin
+      perform user_agent from credential_access_log where credential_id = v_cred;
+      raise exception 'FAIL: the % read the walker''s device from the entry-code trail', v_who;
+    exception when insufficient_privilege then null;
+    end;
+    reset role;
+  end loop;
+
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+
+  -- The grant is a column list, so a column added to the table later is
+  -- withheld until a migration names it. A table-level grant would hand it
+  -- over silently, which is how `ip` reached the client in the first place.
+  if has_table_privilege('authenticated', 'public.credential_access_log', 'SELECT') then
+    raise exception 'FAIL: authenticated holds a table-level SELECT on credential_access_log again, which covers every column added to it';
+  end if;
+
+  raise notice 'the entry-code trail reads without the walker''s IP address or device, for both personas (0056): OK';
 end $$;
 
 rollback;
