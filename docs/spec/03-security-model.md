@@ -96,9 +96,10 @@ accepted" would make the record worthless in the one direction that matters.
 
 ### Erasure and retention (review H5)
 
-A client's personal data can be exported (`fn_export_client_data`) and destroyed
-(`fn_purge_client` + `fn_purge_client_photos`). Both are operator-scoped definer
-functions; a foreign caller gets `no such client`, not a different error.
+A client's personal data can be exported (`fn_export_client_data` +
+`fn_export_client_routes`, the next section) and destroyed (`fn_purge_client`
++ `fn_purge_client_photos`). All are operator-scoped definer functions; a
+foreign caller gets `no such client`, not a different error.
 
 **The rule: the credentials and the GPS traces MUST be destroyable; the
 financial ledger must NOT be.** What the referential graph permits follows from
@@ -328,6 +329,119 @@ and an object names no client (backlog).
 disables). Completed only: a walk still in progress, or abandoned and awaiting
 an operator (0036), keeps its points however old, because deleting the trace of
 a walk nobody finished destroys the only record of what happened on it.
+
+### The client's copy (0059)
+
+**Who makes the copy, and who reads it.** The privacy notice sends every
+request to know to the walker, and the walker is the business, so
+`fn_export_client_data` runs as the walker and answers the question for them.
+Whatever the copy holds, the walker reads on its way to the client. That
+decides the rule: **the copy holds everything Sanpo holds about the client
+that the walker can already read, plus the walker's own note about them**
+(`clients.notes`, which 0043 withheld from both personas because grants are
+role-wide; it is the walker's note about the client, and a request to know
+covers it).
+
+It leaves out four kinds of thing, each for a reason the copy gives the client
+in its own words (`not_included`):
+
+1. **What describes someone else**: the walker's IP address and device on the
+   entry-code log (0056), whether the walker read their notices, and the
+   address typed and network address used on each attempt at the invite link
+   (the client's own included; the copy says whether each attempt came from
+   the client's account).
+2. **Secrets whose copy is a liability**: the vault ciphertext (invariant 2),
+   the keys in the invite and unsubscribe links, a device's push keys.
+3. **What the walker must not learn**: the messages Sanpo sent the client, the
+   record of an opt-out or of turning email back on (the walker is shown one
+   bit, 0052, and the copy carries that bit), and the client's devices. The
+   client can read the messages in their own account. The opt-out and lift
+   record reaches them by no path yet: `fn_my_email_status` answers only the
+   address and a state, and no API role reads `email_suppressions` or
+   `email_suppression_lifts` (backlog).
+4. **What is about the system rather than the person**: delivery bookkeeping,
+   claim tokens, `updated_at`, Stripe's identifiers, and how a plan change was
+   carried out (the plans before and after each change, and every charge, are
+   in the copy). A credit entry's note is copied as written, and some writers
+   put the payment's Stripe id in it; the copy says so.
+
+Two things are outside the walker's reach and the copy says so: the client's
+sign-in account, and the Stripe event payloads Sanpo keeps (backlog).
+
+**The notice quotes the list.** The privacy notice's section on the copy
+quotes those `not_included` sentences word for word, and
+`legal-version.test.ts` parses them out of the last definition of
+`fn_export_client_data` and fails if the notice differs. The notice used to
+describe the list in its own words, and said the email setting was left out
+while the copy carried it.
+
+**The walker's notices are in it, all of them.** The copy holds every notice
+the walker received about the client (0057's subject), including the ones
+about the walker's own setup ("Walk for <name> could not be billed — check
+your setup", B6 and H13). They concern the client's walks and charges, and a
+request to know covers them.
+
+**Not for an erased client.** Both functions refuse a client whose erasure
+has begun. What is left then is either being destroyed (the photos, until
+the erasure's second phase) or kept only as the walker's financial record,
+and packaging either as the client's data would undo the erasure. The screen
+offers no copy of an erased client and says to make the copy first.
+
+**It cannot fall behind again.** 0040's copy held nineteen migrations' worth
+less than the schema, because nothing asked it to keep up. `smoke.sql` holds a
+manifest of every column of every table that holds a client's data — the
+tables reached from `clients` through foreign keys, plus the opt-out list,
+which is keyed by address — and each column is decided exactly once: exported,
+with the path it reaches in the copy; derived, with the expression that says
+what the copy holds for it; or left out with one of the four reasons. A column
+added anywhere in that set fails smoke until somebody decides. A fixture fills
+every column the manifest checks, and the checks compare values:
+
+- each exported value must be found at its path, not merely something there
+  (a path that reaches another column's value is the defect this is for);
+- a derived value is compared as its expression says (a plan id is the plan's
+  name, a coordinate is rounded to six places), and a child row's parent must
+  hold exactly as many children as the database gives it, so rows pulled in
+  from elsewhere, another client's among them, fail;
+- each value that must stay out must appear nowhere in the copy, searched for
+  as the copy's JSON would spell it (an `inet` without its `/32`), and a
+  `bytea` also as hex and base64.
+
+**Routes come separately.** A client with two years of walks at 400 points
+each (292,000 points) exports as one 20 MB document in 2.9 s locally, close
+enough to the hosted 8 s statement timeout that a slower instance would lose
+the whole copy. So the record carries each walk's point count and
+`fn_export_client_routes` returns the points for a batch of the client's walks
+(at most 200 a call; the browser sizes batches to about 20,000 points and
+stops if a walk it asked for does not come back). Coordinates are rounded to
+six decimal places, about 11 cm.
+
+**Photos are everything Storage holds for the client.** SQL cannot read an
+object, so the record lists every object in the client's walk and pet folders
+(`stored_photos`, read the way 0058's erasure reads them, with the size
+Storage recorded) and the walker's browser fetches each one into the archive.
+That includes a pet's earlier photos and a visit photo whose row was never
+written: Sanpo holds them, so the copy does. A photo that cannot be fetched is
+marked missing and counted rather than stopping the export; a row whose object
+is no longer stored is marked as such. storage-js puts a path into the URL as
+it is, so an object whose name holds `?`, `#` or `%` cannot be fetched and is
+marked missing; Sanpo's uploaders only write `{walker}/{id}/{uuid}.jpg`.
+Listing the objects is one pass over the bucket, as the erasure's is: 0.12 s
+at 200,000 objects, growing with the platform rather than with the client.
+
+**In the browser.** Before fetching anything, the browser refuses a copy with
+more files or recorded bytes than a ZIP without ZIP64 can hold. The walker can
+cancel a copy, and leaving the screen cancels it; either way nothing is saved.
+The archive is assembled in the tab's memory, so a browser that cannot hold it
+fails with an error. The status region announces each stage once; the count
+of photos fetched is on screen but not announced, or a long copy would be read
+out one photo at a time.
+
+**The archive** is a ZIP written in the browser (`lib/zip.ts`, STORE only,
+UTF-8 names), checked in tests by a reader this repository did not write:
+Python's `zipfile`. `record.json` is indented for reading, with each route on
+one line: indenting every point more than doubled a long-standing client's
+file.
 
 ### The invite lifecycle (review H4)
 
@@ -770,7 +884,7 @@ the new `SECURITY` setting, since that is what Postgres actually has.
 
 <!-- BEGIN GENERATED DEFINER CATALOG -->
 
-79 `SECURITY DEFINER` functions, in migration order. Generated by
+80 `SECURITY DEFINER` functions, in migration order. Generated by
 `scripts/gen-definer-catalog.py`; CI fails if this table and the migrations
 disagree, so adding a definer function without regenerating breaks the build.
 
@@ -865,6 +979,7 @@ this reading to a reset database.
 | `fn_notification_subject` | **none** |
 | `fn_purge_client_status` | `authenticated` |
 | `fn_guard_erased_pet` | **none** |
+| `fn_export_client_routes` | `authenticated` |
 
 <!-- END GENERATED DEFINER CATALOG -->
 

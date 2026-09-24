@@ -3893,7 +3893,10 @@ begin
   if not (v_export::text like '%phenobarbital%') then
     raise exception 'FAIL: export omitted the medication notes';
   end if;
-  if v_export::text like '%\\x00%' then
+  -- The fixture's ciphertext is forty 0x01 bytes, looked for as the hex a
+  -- bytea becomes in jsonb. Until 0059 this line looked for `\x00`, which
+  -- the fixture never contains, so it could not fail.
+  if position(encode(repeat('\001', 40)::bytea, 'hex') in v_export::text) > 0 then
     raise exception 'FAIL: export leaked vault ciphertext';
   end if;
 
@@ -8253,6 +8256,863 @@ begin
   end;
 
   raise notice 'a notice about an erased client is not written, and none can be moved onto one (0057): OK';
+end $$;
+
+-- ═══ 0059: the client's copy holds what Sanpo holds about them ═══════════
+-- `fn_export_client_data` fell behind the schema for nineteen migrations
+-- because nothing asked it to keep up. This block is what asks now: a
+-- manifest of every column of every table that holds a client's data, each
+-- either exported (with the path it reaches in the copy) or left out with
+-- one of four reasons. A column added anywhere in that set fails here until
+-- somebody decides what the copy does with it. A fixture fills every column
+-- the manifest checks: each exported value must be found at its path (a value
+-- the copy transforms says how, and is checked the same way), and each value
+-- that must stay out must appear nowhere in the copy. Each fails by name.
+do $$
+declare
+  v_op     uuid := '00000000-0000-4000-a000-000000000001';
+  v_other_op uuid := '99999999-0000-4000-a000-000000000002';
+  v_user   uuid := '77777777-0000-4000-a000-000000000059';
+  v_stranger uuid := '77777777-0000-4000-a000-000000000060';
+  v_cl     uuid := '77777777-0000-4000-c000-000000000059';
+  v_cl2    uuid := '77777777-0000-4000-c000-000000000060';
+  v_prop   uuid := '77777777-0000-4000-b000-000000000059';
+  v_prop2  uuid := '77777777-0000-4000-b000-000000000060';
+  v_cred   uuid := '77777777-0000-4000-e000-000000000059';
+  v_pet    uuid := '77777777-0000-4000-d000-000000000059';
+  v_sched  uuid := '77777777-0000-4000-9000-000000000059';
+  v_walk   uuid := '77777777-0000-4000-f000-000000000059';
+  v_walk2  uuid := '77777777-0000-4000-f000-000000000060';
+  v_walk3  uuid := '77777777-0000-4000-f000-000000000061';
+  v_svc    uuid;
+  v_plan   uuid;
+  v_plan2  uuid;
+  v_record jsonb;
+  v_routes jsonb;
+  v_doc    jsonb;
+  r record;
+  v_missing text[];
+  v_stale  text[];
+  v_empty  text[] := '{}';
+  v_n      int;
+  v_values text[];
+  v_value  text;
+  v_msg    text;
+  v_many   uuid[];
+  v_jvalues jsonb[];
+  v_jvalue jsonb;
+  v_found  boolean;
+  v_unfound text[];
+  v_leaked text[];
+  v_bad    text[];
+begin
+  reset session authorization;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  select id into v_svc from service_types where operator_id = v_op order by id limit 1;
+  select id into v_plan from plans where operator_id = v_op order by id limit 1;
+  select id into v_plan2 from plans where operator_id = v_op and id <> v_plan order by id limit 1;
+  if v_svc is null or v_plan is null or v_plan2 is null then
+    raise exception 'FAIL: precondition — the seed operator needs a service and two plans';
+  end if;
+
+  -- ── a client with a row in every table that holds a client's data ─────
+  insert into auth.users (id, email, email_confirmed_at)
+  values (v_user, 'n59-manifest@sanpo.test', now()),
+         (v_stranger, 'n59-stranger@sanpo.test', now());
+  insert into clients (id, operator_id, full_name, email, phone, notes, status, auth_user_id,
+                       plan_id, subscription_status, current_period_end,
+                       invite_expires_at, invite_revoked_at, notice_accepted_at, notice_version,
+                       stripe_customer_id, stripe_subscription_id)
+  values (v_cl, v_op, 'Manifest Fixture', 'n59-manifest@sanpo.test', '+1 555 0159', 'walker note',
+          'active', v_user, v_plan, 'active', now() + interval '20 days',
+          now() + interval '14 days', now(), now(), '2026-09-24',
+          'cus_N59FIXTURE', 'sub_N59FIXTURE');
+  insert into properties (id, operator_id, client_id, label, address_line1, address_line2,
+                          city, postcode, access_notes_public, lat, lng)
+  values (v_prop, v_op, v_cl, 'Home', '1 Fixture Way', 'Unit 2', 'Chicago', '60601',
+          'side gate', 41.88, -87.63);
+  insert into access_credentials (id, operator_id, property_id, entry_method, label, ciphertext,
+                                  rotated_at, revoked_at)
+  values (v_cred, v_op, v_prop, 'door_code', 'Front door', repeat('\001', 40)::bytea, now(), now());
+  insert into pets (id, operator_id, client_id, name, breed, size, temperament, medical_notes,
+                    feeding_notes, medication_notes, vet_name, vet_phone, is_reactive,
+                    is_escape_risk, photo_path, active)
+  values (v_pet, v_op, v_cl, 'Rex', 'Collie', 'large', 'calm', 'epileptic', 'twice a day',
+          'phenobarbital', 'Dr Vet', '+1 555 0160', true, true,
+          v_op || '/' || v_pet || '/rex.jpg', true);
+  insert into recurring_schedules (id, operator_id, client_id, property_id, service_type_id,
+                                   days_of_week, window_start, window_end, start_date, end_date,
+                                   paused_from, paused_until, active)
+  values (v_sched, v_op, v_cl, v_prop, v_svc, array[1,3], '09:00', '10:00',
+          current_date - 30, current_date + 300, current_date + 100, current_date + 107, true);
+  insert into schedule_pets (schedule_id, pet_id, operator_id) values (v_sched, v_pet, v_op);
+
+  insert into walks (id, operator_id, client_id, property_id, service_type_id, schedule_id,
+                     scheduled_date, origin_date, window_start, window_end, status,
+                     started_at, ended_at, credits_debited, is_overage, distance_m, notes,
+                     potty_pee, potty_poo, fed, watered, report_sent_at, abandoned_at,
+                     cost_credits, overage_rate_pence, visit_price_pence)
+  values (v_walk, v_op, v_cl, v_prop, v_svc, v_sched, current_date - 3, current_date - 3,
+          '09:00', '10:00', 'completed', now() - interval '3 days',
+          now() - interval '3 days' + interval '1 hour',
+          1, true, 2400, 'a good walk', true, true, true, true, now() - interval '3 days',
+          now() - interval '3 days', 1, 2500, 3000);
+  insert into walks (id, operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status, cancel_reason)
+  values (v_walk2, v_op, v_cl, v_prop, v_svc, current_date + 5, '09:00', '10:00',
+          'cancelled', 'on holiday');
+  insert into walk_pets (walk_id, pet_id, operator_id) values (v_walk, v_pet, v_op);
+  -- Two points, the second after a gap; the first carries more decimals
+  -- than the copy keeps, so the rounding is visible.
+  insert into walk_gps_points (walk_id, operator_id, recorded_at, lat, lng, accuracy_m, gap_before)
+  values (v_walk, v_op, now() - interval '3 days', 41.881234567, -87.631234567, 5, false),
+         (v_walk, v_op, now() - interval '3 days' + interval '5 minutes', 41.8813, -87.6313, 8, true);
+  insert into walk_photos (walk_id, operator_id, storage_path, caption, taken_at, sha256, byte_size)
+  values (v_walk, v_op, v_op || '/' || v_walk || '/a.jpg', 'at the park', now() - interval '3 days',
+          repeat('ab', 32), 1234);
+  insert into credential_access_log (operator_id, credential_id, accessed_by, purpose, action,
+                                     walk_id, ip, user_agent)
+  values (v_op, v_cred, v_op, 'let the dog out', 'read', v_walk, '203.0.113.9', 'Fixture/1.0');
+
+  insert into credit_ledger (operator_id, client_id, entry_type, amount, expires_at, note, walk_id)
+  values (v_op, v_cl, 'grant', 5, now() + interval '60 days', 'cycle grant', v_walk);
+  insert into payments (operator_id, client_id, walk_id, type, amount_pence, currency, status,
+                        receipt_url, refunded_amount_pence, reversed_at, reversal_reason,
+                        credits_reversed, credits_unrecovered, superseded_at,
+                        stripe_payment_intent_id, stripe_invoice_id, stripe_charge_id)
+  values (v_op, v_cl, v_walk, 'overage', 3000, 'usd', 'refunded', 'https://pay.example/r/1',
+          1000, now(), 'requested_by_customer', 1, 1, now(),
+          'pi_N59FIXTURE', 'in_N59FIXTURE', 'ch_N59FIXTURE');
+  -- The client's own claim, a stranger's, and a claim-signup refusal, which
+  -- records no account at all (0045).
+  insert into invite_claim_attempts (operator_id, client_id, attempted_by, attempted_email, outcome)
+  values (v_op, v_cl, v_user, 'n59-typed@sanpo.test', 'claimed'),
+         (v_op, v_cl, v_stranger, 'n59-stranger@sanpo.test', 'email_mismatch'),
+         (v_op, v_cl, null, 'n59-before-signup@sanpo.test', 'email_mismatch');
+  -- One notice for the walker about the client, and one for the client.
+  -- The copy holds the first; the walker cannot read the second. Each is
+  -- marked read at a time nothing else in the fixture holds, so a copy that
+  -- said whether the walker read theirs would show it.
+  insert into notifications (operator_id, client_id, type, title, body, walk_id, read_at)
+  values (v_op, null, 'walk_complete', 'Manifest Fixture''s walk is done', 'a note', v_walk,
+          '2001-02-03 04:05:06+00'),
+         (v_op, v_cl, 'walk_complete', 'n59 a message for the client alone',
+          'n59 client-only body', v_walk, '2001-02-03 04:05:07+00');
+
+  insert into push_subscriptions (operator_id, client_id, endpoint, p256dh, auth, user_agent,
+                                  last_seen_at, failure_count, last_failure_at, last_error)
+  values (v_op, v_cl, 'https://fcm.googleapis.com/fcm/send/n59-device-endpoint',
+          'n59-p256dh-key', 'n59-auth-secret', 'N59Phone/1.0',
+          '2006-07-08 09:10:11+00', 3, '2006-07-08 09:10:12+00', 'n59 push error');
+  insert into invite_signup_attempts (client_id, ip, attempted_at)
+  values (v_cl, '198.51.100.77', '2007-08-09 10:11:12+00');
+  insert into plan_change_intents (operator_id, client_id, requested_by, old_plan_id, new_plan_id,
+                                   stripe_subscription_id, stripe_update_idempotency_key,
+                                   remaining_fraction, status, stripe_event_id, applied_at)
+  values (v_op, v_cl, v_op, v_plan, v_plan2, 'sub_N59INTENT', 'n59-idem-key', 0.5, 'applied',
+          'evt_N59FIXTURE', now() - interval '1 day');
+  insert into email_suppressions (email, operator_id, reason, created_at, last_requested_at)
+  values ('n59-manifest@sanpo.test', v_op, 'n59 suppression reason',
+          '2005-06-07 08:09:10+00', '2005-06-07 08:09:11+00');
+  insert into email_suppression_lifts (email, client_id, lifted_by, lifted_at, suppressed_at,
+                                       last_requested_at, suppression_reason)
+  values ('n59-manifest@sanpo.test', v_cl, v_user, '2004-05-06 07:08:09+00',
+          '2004-05-05 07:08:09+00', '2004-05-05 08:08:09+00', 'n59 lift reason');
+
+  -- Another client of the same walker, whose walk the routes call must refuse.
+  insert into clients (id, operator_id, full_name, status)
+  values (v_cl2, v_op, 'n59 Someone Else', 'active');
+  insert into properties (id, operator_id, client_id, label, address_line1, city, postcode)
+  values (v_prop2, v_op, v_cl2, 'Home', '2 Other Way', 'Chicago', '60601');
+  insert into walks (id, operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status)
+  values (v_walk3, v_op, v_cl2, v_prop2, v_svc, current_date + 6, '09:00', '10:00', 'scheduled');
+
+  -- What Storage holds in the client's folders: two more photos than the rows
+  -- name (a pet's earlier photo, a visit photo whose row was never written),
+  -- and one in another client's walk folder that is not theirs.
+  -- Each with the size Storage records, where it records one: the copy
+  -- carries a whole-number size and null for anything else.
+  insert into storage.objects (bucket_id, name, metadata) values
+    ('walk-photos', v_op || '/' || v_walk || '/a.jpg', '{"size": 1234}'),
+    ('walk-photos', v_op || '/' || v_walk || '/unattached.jpg', null),
+    ('pet-photos',  v_op || '/' || v_pet || '/rex.jpg', '{"size": "2048"}'),
+    ('pet-photos',  v_op || '/' || v_pet || '/earlier.jpg', '{"size": "about 3 KB"}'),
+    ('walk-photos', v_op || '/' || v_walk3 || '/theirs.jpg', '{"size": 99}');
+
+  -- ── as the walker ───────────────────────────────────────────────────────
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  set local session authorization authenticated;
+  v_record := fn_export_client_data(v_cl);
+  v_routes := fn_export_client_routes(v_cl, array[v_walk, v_walk2]);
+
+  -- The routes call answers for the walks it was asked about, and only for
+  -- this client's.
+  begin
+    perform fn_export_client_routes(v_cl, array[v_walk, v_walk3]);
+    raise exception 'FAIL: the routes call answered for another client''s walk';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    if v_msg like 'FAIL:%' then raise; end if;
+    if v_msg not like '%a walk that is not this client''s%' then
+      raise exception 'FAIL: another client''s walk was refused for the wrong reason: %', v_msg;
+    end if;
+  end;
+  begin
+    perform fn_export_client_routes(v_cl, array[v_walk, null]);
+    raise exception 'FAIL: the routes call answered for a walk named as null';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    if v_msg like 'FAIL:%' then raise; end if;
+    if v_msg not like '%a walk that is not this client''s%' then
+      raise exception 'FAIL: a null walk was refused for the wrong reason: %', v_msg;
+    end if;
+  end;
+  select array_agg(v_walk) into v_many from generate_series(1, 201);
+  begin
+    perform fn_export_client_routes(v_cl, v_many);
+    raise exception 'FAIL: the routes call answered for 201 walks at once';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    if v_msg like 'FAIL:%' then raise; end if;
+    if v_msg not like '%at most 200 walks per call%' then
+      raise exception 'FAIL: 201 walks were refused for the wrong reason: %', v_msg;
+    end if;
+  end;
+
+  -- Another walker is refused both calls, by the same sentence an unknown
+  -- client gets.
+  reset session authorization;
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_other_op), true);
+  set local session authorization authenticated;
+  begin
+    perform fn_export_client_routes(v_cl, array[v_walk]);
+    raise exception 'FAIL: another walker fetched this client''s routes';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    if v_msg like 'FAIL:%' then raise; end if;
+    if v_msg not like '%no such client%' then
+      raise exception 'FAIL: another walker was refused the routes for the wrong reason: %', v_msg;
+    end if;
+  end;
+  begin
+    perform fn_export_client_data(v_cl);
+    raise exception 'FAIL: another walker exported this client';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    if v_msg like 'FAIL:%' then raise; end if;
+    if v_msg not like '%no such client%' then
+      raise exception 'FAIL: another walker was refused the copy for the wrong reason: %', v_msg;
+    end if;
+  end;
+
+  -- The client is refused too: this is the walker's tool, and a client's own
+  -- session would otherwise read their walker's notices about them.
+  reset session authorization;
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_user), true);
+  set local session authorization authenticated;
+  begin
+    perform fn_export_client_data(v_cl);
+    raise exception 'FAIL: the client ran the walker''s export';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    if v_msg like 'FAIL:%' then raise; end if;
+    if v_msg not like '%no such client%' then
+      raise exception 'FAIL: the client was refused the export for the wrong reason: %', v_msg;
+    end if;
+  end;
+  begin
+    perform fn_export_client_routes(v_cl, array[v_walk]);
+    raise exception 'FAIL: the client fetched routes through the walker''s export';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    if v_msg like 'FAIL:%' then raise; end if;
+    if v_msg not like '%no such client%' then
+      raise exception 'FAIL: the client was refused the routes for the wrong reason: %', v_msg;
+    end if;
+  end;
+  reset session authorization;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+
+  v_doc := jsonb_build_object('record', v_record, 'routes', v_routes);
+
+  -- ── what the copy says, beyond having a value ──────────────────────────
+  -- Every comparison below is NULL-safe: a copy missing a key must fail,
+  -- and `NULL <> x` is not true.
+  if (v_record ->> 'format') is distinct from 'sanpo.client-export'
+     or (v_record ->> 'version') is distinct from '2' then
+    raise exception 'FAIL: the copy does not say what it is: % %',
+      v_record ->> 'format', v_record ->> 'version';
+  end if;
+  if (select (w ->> 'route_points')::int from jsonb_array_elements(v_record -> 'walks') w
+       where w ->> 'id' = v_walk::text) is distinct from 2 then
+    raise exception 'FAIL: the copy counts the walk''s route as % points, not 2',
+      (select w ->> 'route_points' from jsonb_array_elements(v_record -> 'walks') w
+        where w ->> 'id' = v_walk::text);
+  end if;
+  if jsonb_array_length(v_routes -> v_walk::text) is distinct from 2
+     or (v_routes -> v_walk2::text) is distinct from '[]'::jsonb then
+    raise exception 'FAIL: the routes call did not answer each walk it was asked about: %', v_routes;
+  end if;
+  if (v_routes -> v_walk::text -> 0 ->> 1) is distinct from '41.881235'
+     or (v_routes -> v_walk::text -> 0 ->> 2) is distinct from '-87.631235'
+     or (v_routes -> v_walk::text -> 1 ->> 4) is distinct from 'true' then
+    raise exception 'FAIL: a route point reads %, not rounded to six places with its gap kept',
+      v_routes -> v_walk::text;
+  end if;
+  if (v_record #>> '{client,email_turned_off}') is distinct from 'true' then
+    raise exception 'FAIL: the copy does not say email to the client is off (%)',
+      v_record #>> '{client,email_turned_off}';
+  end if;
+  if (select count(*) from jsonb_array_elements(v_record -> 'invite_claims') a
+       where a -> 'by_this_account' = 'true'::jsonb) is distinct from 1
+     or (select count(*) from jsonb_array_elements(v_record -> 'invite_claims') a
+          where a -> 'by_this_account' = 'false'::jsonb) is distinct from 2
+     or jsonb_array_length(v_record -> 'invite_claims') is distinct from 3 then
+    raise exception 'FAIL: the copy does not say, for each attempt, whether it was the client''s own (an attempt with no account is not): %',
+      v_record -> 'invite_claims';
+  end if;
+  if position('n59 a message for the client alone' in v_doc::text) > 0
+     or position('n59 client-only body' in v_doc::text) > 0 then
+    raise exception 'FAIL: the copy holds a message Sanpo sent the client, which the walker cannot read';
+  end if;
+  if jsonb_array_length(v_record -> 'walker_notices') is distinct from 1 then
+    raise exception 'FAIL: the copy holds % of the walker''s notices about the client, not 1',
+      jsonb_array_length(v_record -> 'walker_notices');
+  end if;
+  if position('n59 Someone Else' in v_doc::text) > 0 or position('2 Other Way' in v_doc::text) > 0 then
+    raise exception 'FAIL: the copy holds another client''s data';
+  end if;
+  if jsonb_typeof(v_record -> 'not_included') is distinct from 'array'
+     or coalesce(jsonb_array_length(v_record -> 'not_included'), 0) = 0 then
+    raise exception 'FAIL: the copy does not say what it leaves out';
+  end if;
+  -- Every photo Sanpo holds for the client, not only those a row points at.
+  if (select array_agg(p order by p)
+        from (select (e ->> 'bucket') || '/' || (e ->> 'path') as p
+                from jsonb_array_elements(v_record -> 'stored_photos') e) x)
+     is distinct from array[
+       'pet-photos/' || v_op || '/' || v_pet || '/earlier.jpg',
+       'pet-photos/' || v_op || '/' || v_pet || '/rex.jpg',
+       'walk-photos/' || v_op || '/' || v_walk || '/a.jpg',
+       'walk-photos/' || v_op || '/' || v_walk || '/unattached.jpg'] then
+    raise exception 'FAIL: the copy lists % as the photos Sanpo holds for the client',
+      v_record -> 'stored_photos';
+  end if;
+  if (select jsonb_object_agg((e ->> 'bucket') || '/' || (e ->> 'path'), e -> 'bytes')
+        from jsonb_array_elements(v_record -> 'stored_photos') e)
+     is distinct from jsonb_build_object(
+       'pet-photos/' || v_op || '/' || v_pet || '/earlier.jpg', null,
+       'pet-photos/' || v_op || '/' || v_pet || '/rex.jpg', 2048,
+       'walk-photos/' || v_op || '/' || v_walk || '/a.jpg', 1234,
+       'walk-photos/' || v_op || '/' || v_walk || '/unattached.jpg', null) then
+    raise exception 'FAIL: the copy gives the stored photos'' sizes as %, not the whole numbers Storage recorded',
+      v_record -> 'stored_photos';
+  end if;
+
+  -- ── the manifest: every column of every table holding the client's data ──
+  -- decision: exported (the value, at `detail`), derived (`expr` turns the
+  -- row into what the copy holds at `detail`, or, when `detail` reads `$v`,
+  -- into the variables that path reads: the parent a child row names must
+  -- hold exactly as many children as the database gives it), or left out
+  -- with one of the four reasons. `absent`: the value must appear nowhere in
+  -- the copy.
+  create temp table export_manifest (tbl text, col text, decision text, detail text, absent boolean,
+                                     expr text)
+    on commit drop;
+  insert into export_manifest (tbl, col, decision, detail, absent) values
+    -- clients
+    ('clients','id','system','Sanpo''s key for the record',false),
+    ('clients','operator_id','system','the walker, named once as held_by',false),
+    ('clients','auth_user_id','derived','$.record.client.has_account',false),
+    ('clients','full_name','exported','$.record.client.full_name',false),
+    ('clients','email','exported','$.record.client.email',false),
+    ('clients','phone','exported','$.record.client.phone',false),
+    ('clients','status','exported','$.record.client.status',false),
+    ('clients','notes','exported','$.record.client.notes',false),
+    ('clients','invite_token','secret','the key in the invite link',true),
+    ('clients','stripe_customer_id','system','Stripe''s identifier, which the walker cannot read (0043)',true),
+    ('clients','plan_id','derived','$.record.client.plan.name',false),
+    ('clients','subscription_status','exported','$.record.client.subscription_status',false),
+    ('clients','stripe_subscription_id','system','Stripe''s identifier, which the walker cannot read (0043)',true),
+    ('clients','credit_balance','exported','$.record.client.credit_balance',false),
+    ('clients','created_at','exported','$.record.client.created_at',false),
+    ('clients','updated_at','system','when the row last changed',false),
+    ('clients','current_period_end','exported','$.record.client.current_period_end',false),
+    ('clients','unsubscribe_token','secret','the key in every unsubscribe link',true),
+    ('clients','invite_expires_at','exported','$.record.client.invite.expires_at',false),
+    ('clients','invite_revoked_at','exported','$.record.client.invite.withdrawn_at',false),
+    ('clients','purged_at','system','set only when the client is erased, and an erased client''s copy is refused',false),
+    ('clients','notice_accepted_at','exported','$.record.client.privacy_notice.accepted_at',false),
+    ('clients','notice_version','exported','$.record.client.privacy_notice.version',false),
+    -- properties
+    ('properties','id','exported','$.record.properties[*].id',false),
+    ('properties','operator_id','system','the walker',false),
+    ('properties','client_id','system','the client, whose file this is',false),
+    ('properties','label','exported','$.record.properties[*].label',false),
+    ('properties','address_line1','exported','$.record.properties[*].address_line1',false),
+    ('properties','address_line2','exported','$.record.properties[*].address_line2',false),
+    ('properties','city','exported','$.record.properties[*].city',false),
+    ('properties','postcode','exported','$.record.properties[*].postcode',false),
+    ('properties','access_notes_public','exported','$.record.properties[*].access_notes',false),
+    ('properties','lat','exported','$.record.properties[*].lat',false),
+    ('properties','lng','exported','$.record.properties[*].lng',false),
+    ('properties','created_at','exported','$.record.properties[*].created_at',false),
+    ('properties','updated_at','system','when the row last changed',false),
+    -- access_credentials
+    ('access_credentials','id','exported','$.record.entry_credentials[*].id',false),
+    ('access_credentials','operator_id','system','the walker',false),
+    ('access_credentials','property_id','exported','$.record.entry_credentials[*].property_id',false),
+    ('access_credentials','entry_method','exported','$.record.entry_credentials[*].entry_method',false),
+    ('access_credentials','ciphertext','secret','the entry code, which only the vault can read (invariant 2)',true),
+    ('access_credentials','label','exported','$.record.entry_credentials[*].label',false),
+    ('access_credentials','rotated_at','exported','$.record.entry_credentials[*].rotated_at',false),
+    ('access_credentials','revoked_at','exported','$.record.entry_credentials[*].revoked_at',false),
+    ('access_credentials','created_at','exported','$.record.entry_credentials[*].created_at',false),
+    ('access_credentials','updated_at','system','when the row last changed',false),
+    ('access_credentials','key_id','system','which vault key encrypted the code',false),
+    -- credential_access_log
+    ('credential_access_log','id','system','Sanpo''s key for the row',false),
+    ('credential_access_log','operator_id','system','the walker',false),
+    ('credential_access_log','credential_id','derived','$.record.entry_credentials[*] ? (@.id == $v && @.activity.size() == $n)',false),
+    ('credential_access_log','accessed_by','someone_else','the account of whoever opened it: the walker',false),
+    ('credential_access_log','purpose','exported','$.record.entry_credentials[*].activity[*].purpose',false),
+    ('credential_access_log','accessed_at','exported','$.record.entry_credentials[*].activity[*].at',false),
+    ('credential_access_log','created_at','system','when the row was written',false),
+    ('credential_access_log','action','exported','$.record.entry_credentials[*].activity[*].action',false),
+    ('credential_access_log','ip','someone_else','the walker''s IP address (0056)',true),
+    ('credential_access_log','user_agent','someone_else','the walker''s device (0056)',true),
+    ('credential_access_log','walk_id','exported','$.record.entry_credentials[*].activity[*].walk_id',false),
+    -- credit_ledger
+    ('credit_ledger','id','system','Sanpo''s key for the row',false),
+    ('credit_ledger','seq','system','the ledger''s order, which the file keeps',false),
+    ('credit_ledger','operator_id','system','the walker',false),
+    ('credit_ledger','client_id','system','the client, whose file this is',false),
+    ('credit_ledger','entry_type','exported','$.record.ledger[*].entry_type',false),
+    ('credit_ledger','amount','exported','$.record.ledger[*].amount',false),
+    ('credit_ledger','balance_after','exported','$.record.ledger[*].balance_after',false),
+    ('credit_ledger','walk_id','exported','$.record.ledger[*].walk_id',false),
+    ('credit_ledger','expires_at','exported','$.record.ledger[*].expires_at',false),
+    ('credit_ledger','note','exported','$.record.ledger[*].note',false),
+    ('credit_ledger','created_at','exported','$.record.ledger[*].at',false),
+    ('credit_ledger','stripe_invoice_id','system','Stripe''s identifier for the invoice',false),
+    -- email_suppression_lifts
+    ('email_suppression_lifts','id','walker_cannot_read','a record of turning email back on (0054)',false),
+    ('email_suppression_lifts','email','walker_cannot_read','a record of turning email back on (0054)',false),
+    ('email_suppression_lifts','client_id','walker_cannot_read','a record of turning email back on (0054)',false),
+    ('email_suppression_lifts','lifted_by','walker_cannot_read','a record of turning email back on (0054)',false),
+    ('email_suppression_lifts','lifted_at','walker_cannot_read','a record of turning email back on (0054)',true),
+    ('email_suppression_lifts','suppressed_at','walker_cannot_read','a record of turning email back on (0054)',true),
+    ('email_suppression_lifts','last_requested_at','walker_cannot_read','a record of turning email back on (0054)',true),
+    ('email_suppression_lifts','suppression_reason','walker_cannot_read','a record of turning email back on (0054)',true),
+    -- email_suppressions (keyed by address, not by a foreign key)
+    ('email_suppressions','id','walker_cannot_read','an opt-out; the walker learns only whether email is off (0052)',false),
+    ('email_suppressions','email','walker_cannot_read','an opt-out; the walker learns only whether email is off (0052)',false),
+    ('email_suppressions','operator_id','walker_cannot_read','an opt-out; the walker learns only whether email is off (0052)',false),
+    ('email_suppressions','notification_type','walker_cannot_read','an opt-out; the walker learns only whether email is off (0052)',false),
+    ('email_suppressions','reason','walker_cannot_read','an opt-out; the walker learns only whether email is off (0052)',true),
+    ('email_suppressions','created_at','walker_cannot_read','an opt-out; the walker learns only whether email is off (0052)',true),
+    ('email_suppressions','last_requested_at','walker_cannot_read','an opt-out; the walker learns only whether email is off (0052)',true),
+    -- invite_claim_attempts
+    ('invite_claim_attempts','id','system','Sanpo''s key for the row',false),
+    ('invite_claim_attempts','operator_id','system','the walker',false),
+    ('invite_claim_attempts','client_id','system','the client, whose file this is',false),
+    ('invite_claim_attempts','attempted_by','derived','$.record.invite_claims[*].by_this_account',false),
+    ('invite_claim_attempts','attempted_email','someone_else','the address typed by whoever tried the link',true),
+    ('invite_claim_attempts','outcome','exported','$.record.invite_claims[*].outcome',false),
+    ('invite_claim_attempts','created_at','exported','$.record.invite_claims[*].at',false),
+    -- invite_signup_attempts
+    ('invite_signup_attempts','id','system','a rate-limit ledger kept for the hour (0048)',false),
+    ('invite_signup_attempts','client_id','system','a rate-limit ledger kept for the hour (0048)',false),
+    ('invite_signup_attempts','ip','someone_else','the IP address of whoever tried the link',true),
+    ('invite_signup_attempts','attempted_at','system','a rate-limit ledger kept for the hour (0048)',true),
+    -- notifications
+    ('notifications','id','system','Sanpo''s key for the row',false),
+    ('notifications','operator_id','system','the walker',false),
+    ('notifications','client_id','system','who a notice is for; only the walker''s are here',false),
+    ('notifications','type','exported','$.record.walker_notices[*].type',false),
+    ('notifications','title','exported','$.record.walker_notices[*].title',false),
+    ('notifications','body','exported','$.record.walker_notices[*].body',false),
+    ('notifications','walk_id','exported','$.record.walker_notices[*].walk_id',false),
+    ('notifications','read_at','someone_else','whether the walker read it',true),
+    ('notifications','created_at','exported','$.record.walker_notices[*].at',false),
+    ('notifications','updated_at','system','when the row last changed',false),
+    ('notifications','email_status','system','delivery bookkeeping',false),
+    ('notifications','email_attempts','system','delivery bookkeeping',false),
+    ('notifications','email_sent_at','system','delivery bookkeeping',false),
+    ('notifications','email_last_error','system','delivery bookkeeping',false),
+    ('notifications','push_status','system','delivery bookkeeping',false),
+    ('notifications','push_attempts','system','delivery bookkeeping',false),
+    ('notifications','push_sent_at','system','delivery bookkeeping',false),
+    ('notifications','push_last_error','system','delivery bookkeeping',false),
+    ('notifications','email_claimed_at','system','delivery bookkeeping',false),
+    ('notifications','push_claimed_at','system','delivery bookkeeping',false),
+    ('notifications','email_claim_token','system','delivery bookkeeping',false),
+    ('notifications','push_claim_token','system','delivery bookkeeping',false),
+    ('notifications','subject_client_id','system','who a notice is about, which is how these were found (0057)',false),
+    -- payments
+    ('payments','id','system','Sanpo''s key for the row',false),
+    ('payments','operator_id','system','the walker',false),
+    ('payments','client_id','system','the client, whose file this is',false),
+    ('payments','walk_id','exported','$.record.payments[*].walk_id',false),
+    ('payments','type','exported','$.record.payments[*].type',false),
+    ('payments','amount_pence','exported','$.record.payments[*].amount_cents',false),
+    ('payments','currency','exported','$.record.payments[*].currency',false),
+    ('payments','stripe_payment_intent_id','system','Stripe''s identifier for the payment',true),
+    ('payments','stripe_invoice_id','system','Stripe''s identifier for the invoice',true),
+    ('payments','status','exported','$.record.payments[*].status',false),
+    ('payments','receipt_url','exported','$.record.payments[*].receipt_url',false),
+    ('payments','created_at','exported','$.record.payments[*].at',false),
+    ('payments','updated_at','system','when the row last changed',false),
+    ('payments','refunded_amount_pence','exported','$.record.payments[*].refunded_cents',false),
+    ('payments','reversed_at','exported','$.record.payments[*].reversed_at',false),
+    ('payments','reversal_reason','exported','$.record.payments[*].reversal_reason',false),
+    ('payments','credits_reversed','exported','$.record.payments[*].credits_reversed',false),
+    ('payments','credits_unrecovered','exported','$.record.payments[*].credits_not_recovered',false),
+    ('payments','reversal_needs_review','system','a flag for the walker''s own follow-up',false),
+    ('payments','stripe_charge_id','system','Stripe''s identifier for the charge',true),
+    ('payments','superseded_at','exported','$.record.payments[*].settled_by_a_later_payment_at',false),
+    -- pets
+    ('pets','id','exported','$.record.pets[*].id',false),
+    ('pets','operator_id','system','the walker',false),
+    ('pets','client_id','system','the client, whose file this is',false),
+    ('pets','name','exported','$.record.pets[*].name',false),
+    ('pets','breed','exported','$.record.pets[*].breed',false),
+    ('pets','size','exported','$.record.pets[*].size',false),
+    ('pets','temperament','exported','$.record.pets[*].temperament',false),
+    ('pets','medical_notes','exported','$.record.pets[*].medical_notes',false),
+    ('pets','feeding_notes','exported','$.record.pets[*].feeding_notes',false),
+    ('pets','medication_notes','exported','$.record.pets[*].medication_notes',false),
+    ('pets','vet_name','exported','$.record.pets[*].vet_name',false),
+    ('pets','vet_phone','exported','$.record.pets[*].vet_phone',false),
+    ('pets','is_reactive','exported','$.record.pets[*].reactive',false),
+    ('pets','is_escape_risk','exported','$.record.pets[*].escape_risk',false),
+    ('pets','photo_path','exported','$.record.pets[*].photo_path',false),
+    ('pets','active','exported','$.record.pets[*].active',false),
+    ('pets','created_at','exported','$.record.pets[*].created_at',false),
+    ('pets','updated_at','system','when the row last changed',false),
+    -- plan_change_intents: the client's plan history is in the copy; how
+    -- Stripe was asked to carry it out is not
+    ('plan_change_intents','id','system','Sanpo''s key for the row',false),
+    ('plan_change_intents','operator_id','system','the walker',false),
+    ('plan_change_intents','client_id','system','the client, whose file this is',false),
+    ('plan_change_intents','requested_by','system','the walker, who asked for the change',false),
+    ('plan_change_intents','old_plan_id','derived','$.record.plan_changes[*].from_plan',false),
+    ('plan_change_intents','new_plan_id','derived','$.record.plan_changes[*].to_plan',false),
+    ('plan_change_intents','stripe_subscription_id','system','Stripe''s identifier for the subscription',true),
+    ('plan_change_intents','stripe_update_idempotency_key','system','how Sanpo asked Stripe for the change, once',true),
+    ('plan_change_intents','remaining_fraction','system','how much of the period was left, which the charge already reflects',false),
+    ('plan_change_intents','status','exported','$.record.plan_changes[*].status',false),
+    ('plan_change_intents','stripe_event_id','system','Stripe''s identifier for the event that applied it',true),
+    ('plan_change_intents','requested_at','exported','$.record.plan_changes[*].requested_at',false),
+    ('plan_change_intents','applied_at','exported','$.record.plan_changes[*].applied_at',false),
+    ('plan_change_intents','created_at','system','when the row was written',false),
+    -- push_subscriptions
+    ('push_subscriptions','id','walker_cannot_read','the client''s devices; the walker sees only their own',false),
+    ('push_subscriptions','operator_id','walker_cannot_read','the client''s devices; the walker sees only their own',false),
+    ('push_subscriptions','client_id','walker_cannot_read','the client''s devices; the walker sees only their own',false),
+    ('push_subscriptions','endpoint','secret','a device''s push address, which delivers to it',true),
+    ('push_subscriptions','p256dh','secret','a device''s push key',true),
+    ('push_subscriptions','auth','secret','a device''s push secret',true),
+    ('push_subscriptions','user_agent','walker_cannot_read','the client''s devices; the walker sees only their own',true),
+    ('push_subscriptions','created_at','walker_cannot_read','the client''s devices; the walker sees only their own',false),
+    ('push_subscriptions','last_seen_at','walker_cannot_read','the client''s devices; the walker sees only their own',true),
+    ('push_subscriptions','failure_count','walker_cannot_read','the client''s devices; the walker sees only their own',false),
+    ('push_subscriptions','last_failure_at','walker_cannot_read','the client''s devices; the walker sees only their own',true),
+    ('push_subscriptions','last_error','walker_cannot_read','the client''s devices; the walker sees only their own',true),
+    -- recurring_schedules
+    ('recurring_schedules','id','exported','$.record.schedules[*].id',false),
+    ('recurring_schedules','operator_id','system','the walker',false),
+    ('recurring_schedules','client_id','system','the client, whose file this is',false),
+    ('recurring_schedules','property_id','exported','$.record.schedules[*].property_id',false),
+    ('recurring_schedules','service_type_id','derived','$.record.schedules[*].service',false),
+    ('recurring_schedules','days_of_week','exported','$.record.schedules[*].days_of_week',false),
+    ('recurring_schedules','window_start','exported','$.record.schedules[*].window_start',false),
+    ('recurring_schedules','window_end','exported','$.record.schedules[*].window_end',false),
+    ('recurring_schedules','start_date','exported','$.record.schedules[*].start_date',false),
+    ('recurring_schedules','end_date','exported','$.record.schedules[*].end_date',false),
+    ('recurring_schedules','paused_from','exported','$.record.schedules[*].paused_from',false),
+    ('recurring_schedules','paused_until','exported','$.record.schedules[*].paused_until',false),
+    ('recurring_schedules','active','exported','$.record.schedules[*].active',false),
+    ('recurring_schedules','created_at','exported','$.record.schedules[*].created_at',false),
+    ('recurring_schedules','updated_at','system','when the row last changed',false),
+    -- schedule_pets
+    ('schedule_pets','schedule_id','derived','$.record.schedules[*] ? (@.id == $v && @.pet_ids.size() == $n)',false),
+    ('schedule_pets','pet_id','exported','$.record.schedules[*].pet_ids[*]',false),
+    ('schedule_pets','operator_id','system','the walker',false),
+    ('schedule_pets','created_at','system','when the pet was added to the schedule',false),
+    -- walk_gps_points (fn_export_client_routes)
+    ('walk_gps_points','id','system','Sanpo''s key for the row',false),
+    ('walk_gps_points','walk_id','derived','$.routes.keyvalue() ? (@.key == $v && @.value.size() == $n)',false),
+    ('walk_gps_points','operator_id','system','the walker',false),
+    ('walk_gps_points','recorded_at','exported','$.routes.*[*][0]',false),
+    ('walk_gps_points','lat','derived','$.routes.*[*][1]',false),
+    ('walk_gps_points','lng','derived','$.routes.*[*][2]',false),
+    ('walk_gps_points','accuracy_m','exported','$.routes.*[*][3]',false),
+    ('walk_gps_points','created_at','system','when the server received the point; recorded_at is when it was taken',false),
+    ('walk_gps_points','gap_before','exported','$.routes.*[*][4]',false),
+    -- walk_pets
+    ('walk_pets','walk_id','derived','$.record.walks[*] ? (@.id == $v && @.pet_ids.size() == $n)',false),
+    ('walk_pets','pet_id','exported','$.record.walks[*].pet_ids[*]',false),
+    ('walk_pets','operator_id','system','the walker',false),
+    ('walk_pets','created_at','system','when the pet was added to the walk',false),
+    -- walk_photos
+    ('walk_photos','id','exported','$.record.walks[*].photos[*].id',false),
+    ('walk_photos','walk_id','derived','$.record.walks[*] ? (@.id == $v && @.photos.size() == $n)',false),
+    ('walk_photos','operator_id','system','the walker',false),
+    ('walk_photos','storage_path','exported','$.record.walks[*].photos[*].storage_path',false),
+    ('walk_photos','caption','exported','$.record.walks[*].photos[*].caption',false),
+    ('walk_photos','taken_at','exported','$.record.walks[*].photos[*].taken_at',false),
+    ('walk_photos','created_at','system','when the row was written',false),
+    ('walk_photos','sha256','exported','$.record.walks[*].photos[*].sha256',false),
+    ('walk_photos','byte_size','exported','$.record.walks[*].photos[*].byte_size',false),
+    -- walks
+    ('walks','id','exported','$.record.walks[*].id',false),
+    ('walks','operator_id','system','the walker',false),
+    ('walks','client_id','system','the client, whose file this is',false),
+    ('walks','property_id','exported','$.record.walks[*].property_id',false),
+    ('walks','service_type_id','derived','$.record.walks[*].service',false),
+    ('walks','schedule_id','exported','$.record.walks[*].schedule_id',false),
+    ('walks','scheduled_date','exported','$.record.walks[*].scheduled_date',false),
+    ('walks','window_start','exported','$.record.walks[*].window_start',false),
+    ('walks','window_end','exported','$.record.walks[*].window_end',false),
+    ('walks','status','exported','$.record.walks[*].status',false),
+    ('walks','started_at','exported','$.record.walks[*].started_at',false),
+    ('walks','ended_at','exported','$.record.walks[*].ended_at',false),
+    ('walks','credits_debited','exported','$.record.walks[*].credits_debited',false),
+    ('walks','is_overage','exported','$.record.walks[*].charged_as_overage',false),
+    ('walks','distance_m','exported','$.record.walks[*].distance_m',false),
+    ('walks','notes','exported','$.record.walks[*].notes',false),
+    ('walks','potty_pee','exported','$.record.walks[*].care.pee',false),
+    ('walks','potty_poo','exported','$.record.walks[*].care.poo',false),
+    ('walks','fed','exported','$.record.walks[*].care.fed',false),
+    ('walks','watered','exported','$.record.walks[*].care.watered',false),
+    ('walks','report_sent_at','exported','$.record.walks[*].report_sent_at',false),
+    ('walks','created_at','exported','$.record.walks[*].created_at',false),
+    ('walks','updated_at','system','when the row last changed',false),
+    ('walks','origin_date','exported','$.record.walks[*].originally_scheduled',false),
+    ('walks','cancel_reason','exported','$.record.walks[*].cancel_reason',false),
+    ('walks','abandoned_at','exported','$.record.walks[*].left_unfinished_at',false),
+    ('walks','cost_credits','exported','$.record.walks[*].cost_credits',false),
+    ('walks','overage_rate_pence','exported','$.record.walks[*].overage_rate_cents',false),
+    ('walks','visit_price_pence','exported','$.record.walks[*].visit_price_cents',false);
+
+  -- What a derived column becomes in the copy, as SQL over the fixture row.
+  update export_manifest m set expr = d.expr
+    from (values
+      ('clients','auth_user_id','to_jsonb(auth_user_id is not null)'),
+      ('clients','plan_id','(select to_jsonb(pl.name) from plans pl where pl.id = plan_id)'),
+      ('invite_claim_attempts','attempted_by',
+       'to_jsonb(coalesce(attempted_by = (select c.auth_user_id from clients c where c.id = client_id), false))'),
+      ('plan_change_intents','old_plan_id','(select to_jsonb(pl.name) from plans pl where pl.id = old_plan_id)'),
+      ('plan_change_intents','new_plan_id','(select to_jsonb(pl.name) from plans pl where pl.id = new_plan_id)'),
+      ('recurring_schedules','service_type_id','(select to_jsonb(st.name) from service_types st where st.id = service_type_id)'),
+      ('walks','service_type_id','(select to_jsonb(st.name) from service_types st where st.id = service_type_id)'),
+      -- Six decimal places, about 11 cm: the rounding the copy promises.
+      ('walk_gps_points','lat','to_jsonb(round(lat::numeric, 6))'),
+      ('walk_gps_points','lng','to_jsonb(round(lng::numeric, 6))'),
+      -- A child row's parent, with how many children the database gives it.
+      -- A count rather than presence: a parent that picked up rows it does
+      -- not own, another client's among them, still "has children".
+      ('credential_access_log','credential_id',
+       'jsonb_build_object(''v'', credential_id, ''n'', (select count(*) from credential_access_log x where x.credential_id = credential_access_log.credential_id))'),
+      ('schedule_pets','schedule_id',
+       'jsonb_build_object(''v'', schedule_id, ''n'', (select count(*) from schedule_pets x where x.schedule_id = schedule_pets.schedule_id))'),
+      ('walk_gps_points','walk_id',
+       'jsonb_build_object(''v'', walk_id, ''n'', (select count(*) from walk_gps_points x where x.walk_id = walk_gps_points.walk_id))'),
+      ('walk_pets','walk_id',
+       'jsonb_build_object(''v'', walk_id, ''n'', (select count(*) from walk_pets x where x.walk_id = walk_pets.walk_id))'),
+      ('walk_photos','walk_id',
+       'jsonb_build_object(''v'', walk_id, ''n'', (select count(*) from walk_photos x where x.walk_id = walk_photos.walk_id))')
+    ) d(tbl, col, expr)
+   where m.tbl = d.tbl and m.col = d.col;
+
+  -- The tables: everything that references a client, directly or through a
+  -- table that does, plus the opt-out list, which is keyed by address.
+  create temp table export_tables on commit drop as
+  with recursive fk as (
+    select c.conrelid::regclass::text as child, c.confrelid::regclass::text as parent
+      from pg_constraint c
+     where c.contype = 'f' and c.connamespace = 'public'::regnamespace
+  ), s(tbl) as (
+    select 'clients'::text
+    union
+    select fk.child from fk join s on fk.parent = s.tbl
+  )
+  select tbl from s union select 'email_suppressions';
+
+  -- (0) each column is decided once, and each decision is one the checks
+  -- below can read
+  select array_agg(tbl || '.' || col order by tbl, col) into v_bad
+    from (select tbl, col from export_manifest group by tbl, col having count(*) > 1) d;
+  if v_bad is not null then
+    raise exception 'FAIL: the manifest decides % more than once', v_bad;
+  end if;
+  select array_agg(tbl || '.' || col order by tbl, col) into v_bad
+    from export_manifest
+   where decision not in ('exported', 'derived', 'system', 'secret', 'someone_else', 'walker_cannot_read')
+      or (decision = 'derived' and expr is null)
+      or (decision <> 'derived' and expr is not null)
+      or (decision = 'exported' and strpos(detail, '$v') > 0)
+      or (decision in ('exported', 'derived') and absent);
+  if v_bad is not null then
+    raise exception 'FAIL: the manifest''s decision for % is not one the checks can read', v_bad;
+  end if;
+
+  -- (1) every column is decided
+  select array_agg(t.tbl || '.' || a.attname order by t.tbl, a.attname) into v_missing
+    from export_tables t
+    join pg_attribute a on a.attrelid = t.tbl::regclass and a.attnum > 0 and not a.attisdropped
+   where not exists (select 1 from export_manifest m where m.tbl = t.tbl and m.col = a.attname);
+  if v_missing is not null then
+    raise exception 'FAIL: nobody has decided whether the client''s copy holds %', v_missing;
+  end if;
+  select array_agg(m.tbl || '.' || m.col order by m.tbl, m.col) into v_stale
+    from export_manifest m
+   where not exists (select 1 from export_tables t
+                       join pg_attribute a on a.attrelid = t.tbl::regclass
+                                          and a.attnum > 0 and not a.attisdropped
+                      where t.tbl = m.tbl and a.attname = m.col);
+  if v_stale is not null then
+    raise exception 'FAIL: the manifest decides columns that do not exist: %', v_stale;
+  end if;
+
+  -- The fixture's rows, table by table. A table added to the set above
+  -- without a line here fails below, by name: its columns cannot be proved
+  -- until the fixture holds a row of it.
+  create temp table export_fixture (tbl text primary key, pred text) on commit drop;
+  insert into export_fixture values
+    ('clients', format('id = %L', v_cl)),
+    ('properties', format('client_id = %L', v_cl)),
+    ('access_credentials', format('property_id = %L', v_prop)),
+    ('credential_access_log', format('credential_id = %L', v_cred)),
+    ('credit_ledger', format('client_id = %L', v_cl)),
+    ('email_suppression_lifts', format('client_id = %L', v_cl)),
+    ('email_suppressions', format('email = %L', 'n59-manifest@sanpo.test')),
+    ('invite_claim_attempts', format('client_id = %L', v_cl)),
+    ('invite_signup_attempts', format('client_id = %L', v_cl)),
+    ('notifications', format('subject_client_id = %L and client_id is null', v_cl)),
+    ('payments', format('client_id = %L', v_cl)),
+    ('pets', format('client_id = %L', v_cl)),
+    ('plan_change_intents', format('client_id = %L', v_cl)),
+    ('push_subscriptions', format('client_id = %L', v_cl)),
+    ('recurring_schedules', format('client_id = %L', v_cl)),
+    ('schedule_pets', format('schedule_id = %L', v_sched)),
+    ('walk_gps_points', format('walk_id in (%L, %L)', v_walk, v_walk2)),
+    ('walk_pets', format('walk_id in (%L, %L)', v_walk, v_walk2)),
+    ('walk_photos', format('walk_id in (%L, %L)', v_walk, v_walk2)),
+    ('walks', format('client_id = %L', v_cl));
+  select array_agg(t.tbl order by t.tbl) into v_missing
+    from export_tables t where not exists (select 1 from export_fixture f where f.tbl = t.tbl);
+  if v_missing is not null then
+    raise exception 'FAIL: the fixture holds no row of %, so nothing proves what the copy does with it', v_missing;
+  end if;
+
+  for r in select m.*, f.pred from export_manifest m join export_fixture f using (tbl)
+            where m.decision in ('exported', 'derived') or m.absent order by m.tbl, m.col loop
+    execute format('select count(*) from %I where (%s) and %I is not null', r.tbl, r.pred, r.col)
+      into v_n;
+    if v_n = 0 then
+      v_empty := v_empty || (r.tbl || '.' || r.col);
+    end if;
+  end loop;
+  if cardinality(v_empty) > 0 then
+    raise exception 'FAIL: the fixture leaves % empty, so the check below proves nothing about them', v_empty;
+  end if;
+
+  -- (2) every exported value is in the copy, at its path. Every fixture
+  -- value, not merely something non-null there: a path that reaches another
+  -- column's value is the defect this is for. A derived column is compared
+  -- as its expression says the copy holds it; a `$v` path is asked with the
+  -- expression's variables instead.
+  for r in select m.*, f.pred from export_manifest m join export_fixture f using (tbl)
+            where m.decision in ('exported', 'derived') order by m.tbl, m.col loop
+    execute format('select array_agg(distinct %s) from %I where (%s) and %I is not null',
+                   coalesce(r.expr, format('to_jsonb(%I)', r.col)), r.tbl, r.pred, r.col)
+      into v_jvalues;
+    foreach v_jvalue in array v_jvalues loop
+      if strpos(r.detail, '$v') > 0 then
+        v_found := jsonb_path_exists(v_doc, r.detail::jsonpath, v_jvalue);
+      else
+        v_found := exists (select 1 from jsonb_path_query(v_doc, r.detail::jsonpath) x
+                            where x = v_jvalue);
+      end if;
+      if not v_found then
+        v_unfound := coalesce(v_unfound, '{}')
+                     || (r.tbl || '.' || r.col || ' = ' || v_jvalue::text || ' at ' || r.detail);
+      end if;
+    end loop;
+  end loop;
+  if v_unfound is not null then
+    raise exception 'FAIL: the copy says it holds %, and does not', v_unfound;
+  end if;
+
+  -- (3) what must stay out, stays out: its value appears nowhere in the copy.
+  -- Searched for as the copy's JSON text would spell it (an inet without its
+  -- /32, a string with its quotes escaped), and a bytea also as hex and
+  -- base64, the two ways SQL writes one out as text.
+  for r in select m.*, f.pred, a.atttypid = 'bytea'::regtype as is_bytea
+             from export_manifest m join export_fixture f using (tbl)
+             join pg_attribute a on a.attrelid = m.tbl::regclass and a.attname = m.col
+            where m.absent order by m.tbl, m.col loop
+    execute format(
+      'select array_agg(distinct v) from ('
+      || 'select case when jsonb_typeof(to_jsonb(%1$I)) = ''string'' '
+      || 'then substr(to_jsonb(%1$I)::text, 2, length(to_jsonb(%1$I)::text) - 2) '
+      || 'else to_jsonb(%1$I)::text end as v from %2$I where (%3$s) and %1$I is not null'
+      || case when r.is_bytea then
+           ' union all select encode(%1$I, ''hex'') from %2$I where (%3$s) and %1$I is not null'
+           || ' union all select translate(encode(%1$I, ''base64''), E''\n'', '''')'
+           || ' from %2$I where (%3$s) and %1$I is not null'
+         else '' end
+      || ') x', r.col, r.tbl, r.pred) into v_values;
+    foreach v_value in array v_values loop
+      if position(v_value in v_doc::text) > 0 then
+        v_leaked := coalesce(v_leaked, '{}') || (r.tbl || '.' || r.col);
+      end if;
+    end loop;
+  end loop;
+  if v_leaked is not null then
+    raise exception 'FAIL: the copy holds % (%)', v_leaked, 'values the manifest keeps out';
+  end if;
+
+  -- (4) an erased client's copy is refused, both halves of it: what is left
+  -- is being destroyed or kept only as the walker's financial record.
+  update clients set purged_at = now() where id = v_cl;
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  set local session authorization authenticated;
+  begin
+    perform fn_export_client_data(v_cl);
+    raise exception 'FAIL: the walker made a copy of an erased client';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    if v_msg like 'FAIL:%' then raise; end if;
+    if v_msg not like '%this client has been erased%' then
+      raise exception 'FAIL: an erased client''s copy was refused for the wrong reason: %', v_msg;
+    end if;
+  end;
+  begin
+    perform fn_export_client_routes(v_cl, array[v_walk]);
+    raise exception 'FAIL: the walker fetched an erased client''s routes';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    if v_msg like 'FAIL:%' then raise; end if;
+    if v_msg not like '%this client has been erased%' then
+      raise exception 'FAIL: an erased client''s routes were refused for the wrong reason: %', v_msg;
+    end if;
+  end;
+  reset session authorization;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+
+  raise notice 'the client''s copy decides % columns of % tables: % exported, % derived, % kept out and checked absent (0059): OK',
+    (select count(*) from export_manifest), (select count(*) from export_tables),
+    (select count(*) from export_manifest where decision = 'exported'),
+    (select count(*) from export_manifest where decision = 'derived'),
+    (select count(*) from export_manifest where absent);
 end $$;
 
 rollback;

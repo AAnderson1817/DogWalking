@@ -13,8 +13,15 @@
 // ── What this text is, and is not ──────────────────────────────────────────
 //
 // It is a factually accurate description of what this system actually does with
-// data, written from the code: the tables, the edge functions, and the five
-// services that receive it. Every claim below was checked against a call site.
+// data, written from the code: the tables, the edge functions, the five
+// services that receive it, and the push service a browser uses once
+// notifications are on. Every claim below was checked against a call site.
+//
+// What a copy leaves out is quoted, not described: the bullets under "A copy
+// of your data" are the `not_included` sentences `fn_export_client_data`
+// writes into every copy, and `app/scripts/legal-version.test.ts` fails if
+// the two differ. Described in this file's own words, the notice once said
+// the email setting was left out while the copy carried it.
 //
 // It is NOT legal advice and has not been reviewed by a lawyer. That is
 // recorded as an owner action in `docs/dev/owner-actions.md`, not buried here,
@@ -39,9 +46,9 @@ export interface LegalDocument {
 }
 
 export const PRIVACY: LegalDocument = {
-  version: "2026-09-24",
+  version: "2026-09-25",
   title: "Privacy notice",
-  updated: "24 September 2026",
+  updated: "25 September 2026",
   intro:
     "Sanpo is the software your walker uses to run their business. This notice describes what the software holds about you, who else it reaches, and how to get a copy or have it erased.",
   sections: [
@@ -64,12 +71,13 @@ export const PRIVACY: LegalDocument = {
         "Your pets: name, breed, size, temperament, medical notes, medication, feeding notes, and your vet's details.",
         "Each visit: the date and time, how long it lasted, a route recorded from your walker's phone, photos they take, and any notes they leave.",
         "Billing: your plan, your credit balance, and a record of each payment.",
+        "If you turn on notifications in your Sanpo account: the address your browser gives Sanpo for sending them to that device, and which browser it is.",
       ],
     },
     {
       heading: "Who else it reaches",
       paragraphs: [
-        "Sanpo uses five other services to run. Each receives only what it needs:",
+        "Sanpo uses five other services to run, and a sixth once you turn on notifications. Each receives only what it needs:",
       ],
       bullets: [
         "Supabase — the database, sign-in, file storage and live updates. Everything described above is stored here.",
@@ -77,6 +85,7 @@ export const PRIVACY: LegalDocument = {
         "Resend — email delivery. Receives your email address and the contents of the messages sent to you.",
         "Mapbox — map imagery. When a map is displayed, Mapbox receives requests for the map tiles around that location, which reveals roughly where the visit took place.",
         "Vercel — hosting for the website itself, which receives ordinary web request logs.",
+        "If you turn on notifications, each one reaches your device through the push service your browser uses (Google's, for Chrome). It is encrypted so that only your browser can read it; the push service learns that a message was sent to your device, and when.",
       ],
     },
     {
@@ -87,10 +96,25 @@ export const PRIVACY: LegalDocument = {
       ],
     },
     {
+      heading: "A copy of your data",
+      paragraphs: [
+        "You can ask your walker for a copy of what Sanpo holds about you, and they can produce it as a file from within Sanpo: your details, addresses and pets, your schedules, each visit with its route and photos, when your entry codes were viewed or changed and why, your plan and its changes, your credits and payments, and the notes and notifications your walker keeps about you.",
+        "The file lists what it leaves out, and why, in these words:",
+      ],
+      bullets: [
+        "The entry codes themselves: they are encrypted, and only the vault can read them.",
+        "Your walker's IP address and device on the entry-code log, and whether your walker has read their notifications about you: those describe your walker, not you.",
+        "The address typed, and the network address used, on each attempt to use your invite link, yours included. The file says when each attempt was made, how it ended, and whether it came from your account.",
+        "The messages Sanpo sent you, the record of when and why your email was turned off or back on, and the devices you turned notifications on for: your walker cannot see these, so a copy your walker makes cannot hold them. The file says only whether email to you is turned off, which is all your walker is shown. You can read your messages in your Sanpo account; for the rest, ask your walker to ask Sanpo.",
+        "Keys that only work inside Sanpo or Stripe: the keys in your invite and unsubscribe links, your devices' notification keys, and Stripe's identifiers for you and your payments. A note on a credit entry is copied as it was written, and sometimes names the payment it came from.",
+        "Bookkeeping: when each notification was delivered, when each row last changed, and how a plan change was carried out. The plans before and after each change, and every charge, are in the file.",
+        "Your sign-in account (the address you sign in with, and when), and the copies Sanpo keeps of the payment messages Stripe sends it, which hold your name, email and billing address as Stripe has them. Your walker cannot read either; ask them to ask Sanpo.",
+      ],
+    },
+    {
       heading: "Your choices",
       paragraphs: [
-        "You can ask your walker for a copy of your details, your address, your pets, your visits and your billing records, and they can produce it as a file in a few seconds. That file does not hold everything described above yet: route traces, photos and the log of who viewed your entry codes are left out of it. If you have a Sanpo account you can see all three there; otherwise ask your walker.",
-        "You can ask them to erase it. Erasure is immediate and cannot be undone.",
+        "You can ask your walker to erase what Sanpo holds about you. Erasure is immediate and cannot be undone. Ask for a copy first if you want one: once your data is erased, a copy can no longer be made.",
         "Every email carries an unsubscribe link that works without signing in, including if you received it by mistake and have no account here.",
         "If you unsubscribe and later want email again, you can turn it back on from your Sanpo account, as long as it is the address you sign in with and, after unsubscribing, you sign in by opening a link sent to it. Sanpo records the address, the account that turned it back on, when, and when you had unsubscribed.",
       ],

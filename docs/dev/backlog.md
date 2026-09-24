@@ -25,32 +25,7 @@ before you hit them.
 
 ## Open
 
-### 1. The client export leaves out much of what Sanpo holds about a client
-`fn_export_client_data` (`0040`), the export the operator runs, returns six
-named fields of the client row (name, email, phone, status, credit balance,
-created), the properties' address fields and public access notes, pets, walks
-(date, status, times, distance, notes), credential labels, the ledger and
-payments. It leaves out route traces (`walk_gps_points`), photos
-(`walk_photos`, `pets.photo_path`), `clients.notes`, `properties.lat`/`lng`,
-`pets.is_reactive`/`is_escape_risk`, `recurring_schedules`, the walks' care
-flags, notifications, `push_subscriptions`, the credential access log, the
-consent record (`notice_accepted_at`, `notice_version`), invite claim
-attempts, the address's suppression and `email_suppression_lifts` (`0054`).
-
-Until `0054` the privacy notice promised "a copy of everything held about
-you". Its review caught the new notice version repeating that sentence while
-this item recorded it as false, so version `2026-09-24` says instead what the
-file holds and names route traces, photos and the entry-code log as left out
-(the client can see all three in their own account). The notice is now true.
-What remains is whether the export grows, and that is not free: route traces
-and the access log are the operator's evidence as well as the client's data,
-and suppression history is the one thing `0052` deliberately tells an operator
-almost nothing about, so it belongs in a copy the client receives rather than
-one the operator can read. A written argument before code, and growing the
-export lets the notice's promise grow with it (`legal-version.test.ts` keeps
-"everything" out until then).
-
-### 2. Revoke TEMP from PUBLIC
+### 1. Revoke TEMP from PUBLIC
 `PUBLIC` holds TEMP on the database (PostgreSQL's default). `0055` closed the
 path by which that let a temp table shadow a table inside a definer function:
 every function that pins a `search_path` now pins `public, pg_temp`, which
@@ -69,7 +44,7 @@ configure. Not reachable through the product either way: `anon` and
 `authenticated` are NOLOGIN, PostgREST issues no DDL, and no function an API
 role can execute runs dynamic SQL.
 
-### 3. An erasure leaves the Stripe event payloads and the client's sign-in account
+### 2. An erasure leaves the Stripe event payloads and the client's sign-in account
 Found by the independent review of 0057; both predate it, and spec 03 now
 names them rather than claiming otherwise.
 
@@ -90,7 +65,7 @@ admin API (the migrations cannot assume the deploy role may delete from
 `auth.users`), so it is an edge-function step in the erasure flow, ordered
 after the purge commits.
 
-### 4. A stale tab can write personal data back into an erased client's rows
+### 3. A stale tab can write personal data back into an erased client's rows
 An erasure redacts the client, property and credential rows in place and
 keeps them, because retained walks reference them. The UI withholds every
 edit surface from an erased client (spec 03), but a tab opened before the
@@ -109,7 +84,7 @@ Stripe webhook's subscription status, the ledger's balance), so its rule is
 about the personal columns only. The credential row takes its writes through
 `fn_write_credential`, which can refuse an erased client's property itself.
 
-### 5. A walk deleted through the API leaves its photos with no name
+### 4. A walk deleted through the API leaves its photos with no name
 `0058` made the rows the index of the photo folders: an erasure finds a
 client's photos through the folders of their walks and pets. A pet row can no
 longer be deleted (`trg_pets_erased`, Codex's third round on PR #106), and
@@ -122,7 +97,35 @@ erasure of the client cannot find them. Nothing in the product deletes a
 walk. The fix is the pet rule's shape: refuse deleting a walk whose folder
 could hold photos, or revoke the grant, which nothing uses.
 
+### 5. The client's own copy, from the portal
+The walker's copy (`0059`) leaves out three things because the walker must
+not learn them: the messages Sanpo sent the client, the record of an opt-out
+or of turning email back on (`0052` shows the walker one bit, and the copy
+carries that bit), and the client's devices. A client can read the messages
+in their own account but cannot download them. The opt-out and lift record
+reaches the client by no path at all: `fn_my_email_status()` answers only the
+address and a state, and no API role can read `email_suppressions` or
+`email_suppression_lifts`. No copy anywhere holds the devices. A copy the
+client makes for themselves, from the portal, could hold all three, because
+it never passes through the walker. It needs its own definer function scoped
+to `my_client_id()`, and the same manifest discipline as `0059`: every column
+decided, with the fourth reason (about the system) still applied.
+
 ## Done
+
+- **The client's copy holds what Sanpo holds about them** — migration `0059`.
+  The export the walker makes for a client had fallen nineteen migrations
+  behind the schema: no routes, no photos, no entry-code log, no schedules, no
+  consent record. It now holds everything Sanpo keeps about the client that
+  the walker can already read, plus the walker's own note about them, as a ZIP
+  written in the browser: the record, every route (fetched in batches, so two
+  years of walks stay inside the statement timeout), and every photo Storage
+  holds in the client's folders, earlier pet photos included. What it leaves
+  out is listed in the copy with one of four reasons, and the privacy notice
+  quotes that list word for word. A manifest in `smoke.sql` decides every
+  column of every table that holds a client's data and checks the values
+  themselves, so a column added later fails smoke until somebody decides. An
+  erased client's copy is refused. See the `privacy(0059)` status-log entry.
 
 - **A failed read of the entry-code trail says so, with a retry.** The
   portal and the operator's audit sheet caught the error into an empty list:

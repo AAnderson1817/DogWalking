@@ -6,16 +6,31 @@
 //
 // Export comes first, deliberately: an operator asked to delete a client should
 // be able to hand them their record on the way out.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "./Button";
 import { FormError, Input } from "./fields";
 import { Sheet } from "./Sheet";
-import { exportClientData, getErasureStatus, purgeClient,
+import { downloadPhoto, exportClientData, exportClientRoutes, getErasureStatus, purgeClient,
   type ClientRecord, type ErasureStatus,
 } from "@/lib/api";
+import {
+  buildClientExport, ExportCancelled, exportProgressCount, exportProgressText, type ExportProgress,
+} from "@/lib/client-export";
 
 /** Typed to confirm. Not a yes/no — this destroys a person's record. */
 const CONFIRM_WORD = "DELETE";
+
+/** Hand the browser a file to save. */
+function saveFile(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  // Revoked on the next tick rather than immediately: revoking before the
+  // browser has started the download cancels it.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
 
 export function ClientDataPanel({
   client,
@@ -29,6 +44,16 @@ export function ClientDataPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // The copy being made, if one is, and how far it has got. The controller
+  // is what Cancel aborts, and what leaving the screen aborts too: a copy the
+  // walker can no longer see finishing should not arrive as a download later.
+  const [progress, setProgress] = useState<ExportProgress | null>(null);
+  const run = useRef<AbortController | null>(null);
+  useEffect(() => {
+    const current = run;
+    return () => current.current?.abort();
+  }, []);
+  const exporting = progress !== null;
   // What the database says about an erasure that has begun (0058). The first
   // phase marks the client erased before any photo is deleted, so `purged_at`
   // alone cannot say the erasure finished — this screen used to read it that
@@ -56,21 +81,39 @@ export function ClientDataPanel({
 
   const unfinished = purged && status !== null && (status === "unknown" || !status.finished);
 
+  // The copy (0059): the record, every route in batches, and every photo
+  // Storage holds for the client, packed into one ZIP in the browser. Not
+  // offered once the client is erased: the database refuses it, because
+  // what is left then is being destroyed or kept only as the walker's
+  // financial record.
   async function download() {
+    const controller = new AbortController();
+    run.current = controller;
     setError(null);
+    setNotice(null);
+    setProgress({ stage: "record", done: 0, total: 1 });
     try {
-      const bundle = await exportClientData(client.id);
-      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `sanpo-${client.full_name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.json`;
-      a.click();
-      // Revoked on the next tick rather than immediately: revoking before the
-      // browser has started the download cancels it.
-      setTimeout(() => URL.revokeObjectURL(url), 0);
+      const out = await buildClientExport(client.id, {
+        record: exportClientData,
+        routes: exportClientRoutes,
+        download: downloadPhoto,
+        now: () => new Date(),
+        progress: (p) => { if (!controller.signal.aborted) setProgress(p); },
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) throw new ExportCancelled("The copy was cancelled.");
+      saveFile(out.blob, out.fileName);
+      setNotice(
+        out.photosMissing > 0
+          ? `The copy is ready. ${out.photosMissing} photo(s) could not be fetched; the copy marks each one as missing, and a new copy can try again.`
+          : "The copy is ready.",
+      );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Export failed.");
+      if (err instanceof ExportCancelled) setNotice("The copy was cancelled. Nothing was saved.");
+      else setError(err instanceof Error ? err.message : "Export failed.");
+    } finally {
+      if (run.current === controller) run.current = null;
+      setProgress(null);
     }
   }
 
@@ -116,23 +159,41 @@ export function ClientDataPanel({
         </p>
       ) : (
         <p className="client-data-panel__detail">
-          Give this client a copy of their records, or erase them. The copy
-          holds their details, address, pets, visits and billing, and leaves
-          out route traces, photos and the entry-code log. Erasure removes
-          their address, entry codes, pet notes, route traces and photos. The
-          billing ledger is kept — it is a financial record.
+          Give this client a copy of their records, or erase them. The copy is
+          a ZIP file of what Sanpo holds about them that you can see: their
+          details, addresses, pets and schedules, each visit with its route
+          and photos, the entry-code log, credits and payments. It lists what
+          it leaves out, and why. Make it before erasing: once their data is
+          erased, a copy can no longer be made. Erasure removes their address,
+          entry codes, pet notes, route traces and photos. The billing ledger
+          is kept — it is a financial record.
         </p>
       )}
 
       <FormError message={error} />
-      {notice && <p className="client-data-panel__detail" role="status">{notice}</p>}
+      {/* Always mounted: a live region that arrives with its text is announced
+          far less reliably than one whose text changes. It changes only with
+          the stage; the count below it is on screen but not announced. */}
+      <p className="client-data-panel__detail" role="status">
+        {progress ? exportProgressText(progress) : (notice ?? "")}
+      </p>
+      {progress && exportProgressCount(progress) && (
+        <p className="client-data-panel__detail">{exportProgressCount(progress)}</p>
+      )}
 
       <div className="client-data-panel__actions">
-        <Button variant="ghost" onClick={() => void download()}>
-          Export their data
-        </Button>
         {!purged && (
-          <Button variant="ghost" onClick={() => setOpen(true)}>
+          <Button variant="ghost" disabled={exporting || busy} onClick={() => void download()}>
+            {exporting ? "Making the copy…" : "Export their data"}
+          </Button>
+        )}
+        {exporting && (
+          <Button variant="ghost" onClick={() => run.current?.abort()}>
+            Cancel the copy
+          </Button>
+        )}
+        {!purged && (
+          <Button variant="ghost" disabled={exporting} onClick={() => setOpen(true)}>
             Erase their data
           </Button>
         )}
@@ -158,7 +219,7 @@ export function ClientDataPanel({
           <FormError message={error} />
           <Button
             full
-            disabled={typed !== CONFIRM_WORD || busy}
+            disabled={typed !== CONFIRM_WORD || busy || exporting}
             onClick={() => void erase()}
           >
             {busy ? "Erasing…" : "Erase permanently"}
