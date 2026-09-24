@@ -21,7 +21,13 @@ runs here, and this script holds the three files to it:
      outlives the thing it excused). Two steps may share a name only if they
      are the same step — the two `Install`s run one command in two jobs — or
      a copied step that runs something else under the old name would be
-     described by a row written for the first (Codex, PR #97);
+     described by a row written for the first (Codex, PR #97). The same step
+     in the same SETTING: a step identical as written runs differently under
+     another job's `env`, `defaults`, `container`, `services`, `strategy`
+     or runner, or after other steps, so those are compared too (Codex, PR
+     #97). Only the job keys that decide whether, when or for how long a job
+     runs, or what it reports, are not; a key this script does not know is
+     compared, which errs toward asking for a second name;
   2. each row says a SKILL.md gate id, `CI only` (a check with no local gate),
      or `setup` (an install, not a check), and a gate id must be a heading;
   3. every SKILL.md gate is run by `validate.sh` under the same id, and every
@@ -63,11 +69,18 @@ ROW = re.compile(r"^\|\s*(`{1,2})(.+?)\1\s*\|\s*([^|]*?)\s*\|\s*$", re.M)
 RUN_LABEL = re.compile(r'^\s*run\s+"(\d+[a-z]?)\.', re.M)
 
 
+# Job keys that decide whether, when or for how long a job runs, or what it
+# reports — not how a step in it runs. Every other key is compared.
+NOT_EXECUTION = {"name", "if", "needs", "timeout-minutes", "continue-on-error", "concurrency", "outputs", "steps"}
+
+
 def ci_steps(doc: dict) -> tuple[set[str], list[str]]:
-    first: dict[str, tuple[str, int, str]] = {}
+    first: dict[str, tuple[str, int, str, dict, str]] = {}
     problems: list[str] = []
     for job, spec in (doc.get("jobs") or {}).items():
-        for i, step in enumerate(spec.get("steps") or [], start=1):
+        setting = {k: v for k, v in spec.items() if k not in NOT_EXECUTION}
+        steps = spec.get("steps") or []
+        for i, step in enumerate(steps, start=1):
             name = step.get("name")
             if name is None:
                 if "run" in step:
@@ -78,13 +91,25 @@ def ci_steps(doc: dict) -> tuple[set[str], list[str]]:
             # The whole step, not only its command: a copy that changes its
             # `with:` or `env:` is a different step too.
             body = json.dumps(step, sort_keys=True, default=str)
-            if name in first and first[name][2] != body:
-                where = first[name]
-                problems.append(
-                    f"ci.yml steps `{name}` in job `{where[0]}` (step {where[1]}) and job `{job}` (step {i}) "
-                    "share a name and differ, so one SKILL.md row would describe both — name them apart"
-                )
-            first.setdefault(name, (job, i, body))
+            before = json.dumps(steps[: i - 1], sort_keys=True, default=str)
+            if name in first:
+                where_job, where_i, where_body, where_setting, where_before = first[name]
+                why = None
+                if where_body != body:
+                    why = "share a name and differ"
+                elif where_setting != setting:
+                    keys = sorted(k for k in set(where_setting) | set(setting)
+                                  if where_setting.get(k) != setting.get(k))
+                    why = ("are written alike but run in different settings (job "
+                           + ", ".join(f"`{k}`" for k in keys) + (" differs)" if len(keys) == 1 else " differ)"))
+                elif where_before != before:
+                    why = "are written alike but run after different steps"
+                if why:
+                    problems.append(
+                        f"ci.yml steps `{name}` in job `{where_job}` (step {where_i}) and job `{job}` (step {i}) "
+                        f"{why}, so one SKILL.md row would describe both — name them apart"
+                    )
+            first.setdefault(name, (job, i, body, setting, before))
     return set(first), problems
 
 

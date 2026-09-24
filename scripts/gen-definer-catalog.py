@@ -28,6 +28,16 @@ are masked, so a `COMMENT ON` string that says "security definer" or "create
 function" is not read as code; names and roles are read from the clean text at
 the same spans. `scripts/gen-definer-catalog-proofs.py` holds the probes.
 
+The reader blanks every DO and function body, which hid a function created and
+granted by dynamic SQL inside one: a publicly executable definer function this
+catalogue never saw (Codex, on #97). So the reader refuses a body that creates,
+alters or drops a routine, or grants or revokes on one, by name, and the
+statement belongs at top level, where this file reads it. At top level it reads
+`create [or replace] function` and `grant execute on function <name>(…) to …`,
+and nothing else: revokes are not applied, which over-reports rather than
+hides, while ALTER FUNCTION, a grant in any other shape, ALTER DEFAULT
+PRIVILEGES and procedures are not modelled at all.
+
 Writes between the markers in docs/spec/03-security-model.md. Idempotent.
 """
 from __future__ import annotations
@@ -85,7 +95,9 @@ def read_migration(path: pathlib.Path) -> tuple[str, str]:
         return READER.strip_sql(path.read_text())
     except READER.HiddenDDL as e:
         print(
-            f"FAIL: {path.name}: the SQL reader shared with gen-enum-catalog.py refused it — {e}",
+            f"FAIL: {path.name}: the SQL reader shared with gen-enum-catalog.py refused it — {e}. "
+            "It blanks every DO and function body, so a routine created, altered, dropped, granted "
+            "or revoked inside one is refused rather than left unseen; lift the statement to top level",
             file=sys.stderr,
         )
         raise SystemExit(1)
