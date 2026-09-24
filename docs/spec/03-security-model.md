@@ -347,9 +347,10 @@ in its own words (`not_included`):
 
 1. **What describes someone else**: the walker's IP address and device on the
    entry-code log (0056), whether the walker read their notices, and the
-   address typed and network address used on each attempt at the invite link
-   (the client's own included; the copy says whether each attempt came from
-   the client's account).
+   address typed on every claim of the account through the invite link and on
+   every attempt the invite refused (the client's own included; the copy says
+   when each was made, how it ended, and whether it came from the client's
+   account).
 2. **Secrets whose copy is a liability**: the vault ciphertext (invariant 2),
    the keys in the invite and unsubscribe links, a device's push keys.
 3. **What the walker must not learn**: the messages Sanpo sent the client, the
@@ -365,8 +366,16 @@ in its own words (`not_included`):
    in the copy). A credit entry's note is copied as written, and some writers
    put the payment's Stripe id in it; the copy says so.
 
-Two things are outside the walker's reach and the copy says so: the client's
-sign-in account, and the Stripe event payloads Sanpo keeps (backlog).
+Three things are outside the walker's reach, and the copy says so: the
+client's sign-in account; the Stripe event payloads Sanpo keeps (backlog);
+and 0048's rate-limit ledger, which holds the time and network address of
+each request to create an account through the invite link. That ledger keeps
+a client's rows until the link is next tried after the hour, or is reissued,
+so a claimed client's rows can last for good. A request that passed the check
+and was never followed by a claim is recorded there and nowhere else, because
+the check logs only refusals (0045). So the copy's list gives times only for
+the claims and refusals the file holds, and names the ledger in a sentence of
+its own.
 
 **The notice quotes the list.** The privacy notice's section on the copy
 quotes those `not_included` sentences word for word, and
@@ -405,7 +414,11 @@ every column the manifest checks, and the checks compare values:
   from elsewhere, another client's among them, fail;
 - each value that must stay out must appear nowhere in the copy, searched for
   as the copy's JSON would spell it (an `inet` without its `/32`), and a
-  `bytea` also as hex and base64.
+  `bytea` also as hex and base64;
+- each column left out because the walker cannot read it is read back as the
+  walker: no grant may reach the column, or no policy the fixture's row. A
+  control first shows the same read reaches the walker's own client, so a
+  refusal is the walker being refused and not the read reaching nobody.
 
 **Routes come separately.** A client with two years of walks at 400 points
 each (292,000 points) exports as one 20 MB document in 2.9 s locally, close

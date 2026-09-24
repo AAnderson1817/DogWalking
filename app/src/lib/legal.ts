@@ -104,7 +104,8 @@ export const PRIVACY: LegalDocument = {
       bullets: [
         "The entry codes themselves: they are encrypted, and only the vault can read them.",
         "Your walker's IP address and device on the entry-code log, and whether your walker has read their notifications about you: those describe your walker, not you.",
-        "The address typed, and the network address used, on each attempt to use your invite link, yours included. The file says when each attempt was made, how it ended, and whether it came from your account.",
+        "The address typed on every claim of your account through your invite link, and on every attempt your invite refused, yours included. The file says when each was made, how it ended, and whether it came from your account.",
+        "The time and network address Sanpo keeps for requests to create an account through your invite link, yours included, to limit how often the link can be tried. Your walker cannot read them; ask them to ask Sanpo.",
         "The messages Sanpo sent you, the record of when and why your email was turned off or back on, and the devices you turned notifications on for: your walker cannot see these, so a copy your walker makes cannot hold them. The file says only whether email to you is turned off, which is all your walker is shown. You can read your messages in your Sanpo account; for the rest, ask your walker to ask Sanpo.",
         "Keys that only work inside Sanpo or Stripe: the keys in your invite and unsubscribe links, your devices' notification keys, and Stripe's identifiers for you and your payments. A note on a credit entry is copied as it was written, and sometimes names the payment it came from.",
         "Bookkeeping: when each notification was delivered, when each row last changed, and how a plan change was carried out. The plans before and after each change, and every charge, are in the file.",

@@ -40,8 +40,10 @@ const PINNED: Record<string, Record<string, string>> = {
     "2026-09-24": "dd6b0cdf77eaeb9539fc634d05e8daa2520556f8bd8bfc17a7c5c222e8eaa48e",
     // 0059: the export holds what the walker can read, and the notice quotes
     // the copy's own list of what it leaves out; the devices a client turns
-    // notifications on for.
-    "2026-09-25": "53c044f19d70f25b917641871ac1801b0baa627827785937b14dfd268b5372dd",
+    // notifications on for. Re-pinned before merge (Codex on PR #109): the
+    // invite-link sentence promised a time for every attempt, while 0048's
+    // rate-limit ledger holds some the copy leaves out.
+    "2026-09-25": "014f3413e84a2915b34914d7db4f403209f4d733d3444200a7972ec8234022ea",
   },
   terms: {
     "2026-08-29": "c3c4bf9a14fc266090630d49a45629d87c009ffebc54962d509e0e6016a63707",
