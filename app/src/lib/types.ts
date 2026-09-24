@@ -1410,6 +1410,13 @@ export type Database = {
         };
         Returns: Json;
       };
+      fn_export_client_routes: {
+        Args: {
+          p_client: string;
+          p_walks: string[];
+        };
+        Returns: Json;
+      };
       fn_forget_purged_email_lifts: {
         Args: Record<string, never>;
         Returns: unknown;

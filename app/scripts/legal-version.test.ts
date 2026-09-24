@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { LEGAL_DOCUMENTS, type LegalDocument } from "../src/lib/legal.js";
+import { lastFunctionBody, sqlLiteralList } from "./migration-functions.ts";
 
 /**
  * Review H6. A consent record stores WHICH version of a document somebody
@@ -37,6 +38,10 @@ const PINNED: Record<string, Record<string, string>> = {
     // 0054: turning email back on, what survives erasure of an unsubscribe,
     // and what the export file holds.
     "2026-09-24": "dd6b0cdf77eaeb9539fc634d05e8daa2520556f8bd8bfc17a7c5c222e8eaa48e",
+    // 0059: the export holds what the walker can read, and the notice quotes
+    // the copy's own list of what it leaves out; the devices a client turns
+    // notifications on for.
+    "2026-09-25": "53c044f19d70f25b917641871ac1801b0baa627827785937b14dfd268b5372dd",
   },
   terms: {
     "2026-08-29": "c3c4bf9a14fc266090630d49a45629d87c009ffebc54962d509e0e6016a63707",
@@ -127,20 +132,41 @@ describe("legal documents", () => {
   });
 
   /**
-   * The export (`fn_export_client_data`, 0040) holds the client row's contact
-   * fields, properties, pets, walks, entry-credential labels, the ledger and
-   * payments. It does not hold route traces, photos or the credential access
-   * log, among other things, so a notice promising "everything" is false, and
-   * this notice said so until 0054's review caught the new version repeating
-   * it. Growing the export would let the claim come back; until then it stays
-   * out, and the notice names what the file leaves out.
+   * The export (`fn_export_client_data`, 0059) holds what Sanpo keeps about
+   * the client that the walker can read, and the copy lists what it leaves
+   * out. The notice must not promise everything: a notice promising
+   * "everything" was false for 0040's export, which 0054's review caught.
    */
-  it("the privacy notice does not promise an export of everything", () => {
+  it("the privacy notice does not promise everything", () => {
     const text = renderedText(LEGAL_DOCUMENTS.privacy).toLowerCase();
     expect(text).not.toMatch(/copy of everything|everything held about you/);
-    for (const omitted of ["route traces", "photos", "who viewed your entry codes"]) {
-      expect(text).toContain(`${omitted}`);
-    }
-    expect(text).toContain("left out");
+  });
+
+  /**
+   * And what it says the copy leaves out is the copy's own list, word for
+   * word. The notice once described that list in its own words and said the
+   * email setting was left out, while the copy carried it (0059's review). A
+   * notice that quotes the copy cannot disagree with it; this is what makes
+   * it quote.
+   */
+  it("the privacy notice quotes the copy's own list of what it leaves out", () => {
+    const section = LEGAL_DOCUMENTS.privacy.sections.find((s) => s.heading === "A copy of your data");
+    expect(section, "the notice has no section on the copy").toBeDefined();
+    expect(section!.bullets).toEqual(notIncludedFromMigrations());
   });
 });
+
+/**
+ * The `not_included` sentences of the last definition of
+ * `fn_export_client_data` in supabase/migrations, as SQL would read them.
+ * Throws rather than returning nothing: a parser that found no list would
+ * otherwise compare an empty notice section with an empty list and agree.
+ */
+function notIncludedFromMigrations(): string[] {
+  const body = lastFunctionBody("fn_export_client_data");
+  const at = /'not_included'\s*,\s*jsonb_build_array\s*\(/.exec(body);
+  if (!at) throw new Error("the last fn_export_client_data carries no not_included list");
+  const sentences = sqlLiteralList(body, at.index + at[0].length - 1);
+  if (sentences.length === 0) throw new Error("the not_included list is empty");
+  return sentences;
+}

@@ -7,12 +7,15 @@ import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ClientRecord } from "@/lib/api";
+import { ExportCancelled } from "@/lib/client-export";
 import { ClientDataPanel } from "./ClientDataPanel";
 
 const API = vi.hoisted(() => ({
   getErasureStatus: vi.fn(),
   purgeClient: vi.fn(),
   exportClientData: vi.fn(),
+  exportClientRoutes: vi.fn(),
+  downloadPhoto: vi.fn(),
 }));
 
 vi.mock("@/lib/api", async (importOriginal) => ({
@@ -20,6 +23,14 @@ vi.mock("@/lib/api", async (importOriginal) => ({
   getErasureStatus: API.getErasureStatus,
   purgeClient: API.purgeClient,
   exportClientData: API.exportClientData,
+  exportClientRoutes: API.exportClientRoutes,
+  downloadPhoto: API.downloadPhoto,
+}));
+
+const EXPORT = vi.hoisted(() => ({ build: vi.fn() }));
+vi.mock("@/lib/client-export", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/client-export")>()),
+  buildClientExport: EXPORT.build,
 }));
 
 const client = (purged: boolean, id = "c-1") =>
@@ -33,6 +44,9 @@ beforeEach(() => {
   API.getErasureStatus.mockReset();
   API.purgeClient.mockReset();
   API.exportClientData.mockReset();
+  EXPORT.build.mockReset();
+  URL.createObjectURL = vi.fn(() => "blob:copy");
+  URL.revokeObjectURL = vi.fn();
 });
 
 describe("ClientDataPanel, an erased client", () => {
@@ -166,3 +180,125 @@ describe("ClientDataPanel, erasing", () => {
     expect(onPurged).toHaveBeenCalled();
   });
 });
+
+describe("ClientDataPanel, the copy", () => {
+  const done = { blob: new Blob(["zip"]), fileName: "sanpo-jane-doe-2026-09-24.zip", photos: 3, photosMissing: 0 };
+
+  it("makes the copy from the record, the routes and the photos, and saves it", async () => {
+    EXPORT.build.mockResolvedValue(done);
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    render(<ClientDataPanel client={client(false)} onPurged={() => {}} />);
+    await userEvent.click(screen.getByRole("button", { name: "Export their data" }));
+    expect(await screen.findByText("The copy is ready.")).toBeInTheDocument();
+    const [clientId, deps] = EXPORT.build.mock.calls[0]!;
+    expect(clientId).toBe("c-1");
+    expect(deps.record).toBe(API.exportClientData);
+    expect(deps.routes).toBe(API.exportClientRoutes);
+    expect(deps.download).toBe(API.downloadPhoto);
+    expect(click).toHaveBeenCalled();
+    click.mockRestore();
+  });
+
+  it("says what it is doing while it works, and cannot be started twice", async () => {
+    let finish: (v: unknown) => void = () => {};
+    EXPORT.build.mockImplementation((_c: string, deps: { progress: (p: unknown) => void }) => {
+      deps.progress({ stage: "photos", done: 1, total: 3 });
+      return new Promise((r) => { finish = r; });
+    });
+    render(<ClientDataPanel client={client(false)} onPurged={() => {}} />);
+    await userEvent.click(screen.getByRole("button", { name: "Export their data" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Fetching their photos…");
+    expect(screen.getByText("1 of 3 photos")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Making the copy…" })).toBeDisabled();
+    // An erasure started now would delete the photos the copy is fetching.
+    expect(screen.getByRole("button", { name: "Erase their data" })).toBeDisabled();
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    await act(async () => finish(done));
+    expect(screen.getByRole("button", { name: "Export their data" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Erase their data" })).toBeEnabled();
+    click.mockRestore();
+  });
+
+  /** A status region that spoke once per photo would read the copy out photo by photo. */
+  it("announces the stage, not each photo", async () => {
+    let report: (p: unknown) => void = () => {};
+    EXPORT.build.mockImplementation((_c: string, deps: { progress: (p: unknown) => void }) => {
+      report = deps.progress;
+      return new Promise(() => {});
+    });
+    render(<ClientDataPanel client={client(false)} onPurged={() => {}} />);
+    await userEvent.click(screen.getByRole("button", { name: "Export their data" }));
+    await act(async () => report({ stage: "photos", done: 1, total: 40 }));
+    const said = screen.getByRole("status").textContent;
+    await act(async () => report({ stage: "photos", done: 2, total: 40 }));
+    expect(screen.getByRole("status").textContent).toBe(said);
+    expect(screen.getByText("2 of 40 photos")).toBeInTheDocument();
+  });
+
+  it("stops the copy when the walker cancels it, and saves nothing", async () => {
+    let signal: AbortSignal | undefined;
+    EXPORT.build.mockImplementation((_c: string, deps: { signal: AbortSignal }) => {
+      signal = deps.signal;
+      return new Promise((_r, reject) => {
+        deps.signal.addEventListener("abort", () => reject(new ExportCancelled("The copy was cancelled.")));
+      });
+    });
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    render(<ClientDataPanel client={client(false)} onPurged={() => {}} />);
+    await userEvent.click(screen.getByRole("button", { name: "Export their data" }));
+    await userEvent.click(screen.getByRole("button", { name: "Cancel the copy" }));
+    expect(signal?.aborted).toBe(true);
+    expect(await screen.findByText("The copy was cancelled. Nothing was saved.")).toBeInTheDocument();
+    // Not a failure: the error region stays empty.
+    for (const region of screen.getAllByRole("alert")) expect(region).toBeEmptyDOMElement();
+    expect(click).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Export their data" })).toBeEnabled();
+    click.mockRestore();
+  });
+
+  /** A copy the walker left behind should not arrive as a download later. */
+  it("stops the copy when the walker leaves the screen", async () => {
+    let signal: AbortSignal | undefined;
+    EXPORT.build.mockImplementation((_c: string, deps: { signal: AbortSignal }) => {
+      signal = deps.signal;
+      return new Promise(() => {});
+    });
+    const { unmount } = render(<ClientDataPanel client={client(false)} onPurged={() => {}} />);
+    await userEvent.click(screen.getByRole("button", { name: "Export their data" }));
+    expect(signal?.aborted).toBe(false);
+    unmount();
+    expect(signal?.aborted).toBe(true);
+  });
+
+  /** The database refuses it; the screen does not offer it. */
+  it("offers no copy of an erased client, finished or not", async () => {
+    API.getErasureStatus.mockResolvedValueOnce({ erased: true, finished: true, photosLeft: 0 });
+    const { unmount } = render(<ClientDataPanel client={client(true)} onPurged={() => {}} />);
+    expect(await screen.findByText(/personal data was erased/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Export their data" })).toBeNull();
+    unmount();
+    API.getErasureStatus.mockResolvedValueOnce({ erased: true, finished: false, photosLeft: 2 });
+    render(<ClientDataPanel client={client(true)} onPurged={() => {}} />);
+    expect(await screen.findByRole("button", { name: "Finish erasing" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Export their data" })).toBeNull();
+  });
+
+  it("says how many photos the copy is missing", async () => {
+    EXPORT.build.mockResolvedValue({ ...done, photosMissing: 2 });
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    render(<ClientDataPanel client={client(false)} onPurged={() => {}} />);
+    await userEvent.click(screen.getByRole("button", { name: "Export their data" }));
+    expect(await screen.findByText(/2 photo\(s\) could not be fetched/)).toBeInTheDocument();
+    click.mockRestore();
+  });
+
+  it("shows why a copy could not be made, and lets the walker try again", async () => {
+    EXPORT.build.mockRejectedValue(new Error("A walk's route did not come back, so the copy would be incomplete."));
+    render(<ClientDataPanel client={client(false)} onPurged={() => {}} />);
+    await userEvent.click(screen.getByRole("button", { name: "Export their data" }));
+    expect(await screen.findByText(/route did not come back/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export their data" })).toBeEnabled();
+    expect(screen.queryByText("The copy is ready.")).toBeNull();
+  });
+});
+

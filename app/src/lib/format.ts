@@ -23,6 +23,22 @@ export function dateLocal(ts: string | Date): string {
   }).format(typeof ts === "string" ? new Date(ts) : ts);
 }
 
+/**
+ * "2026-07-05T03:30:00Z" → "2026-07-04": the Central calendar date as
+ * YYYY-MM-DD, for a file name. Read from the formatter's parts rather than
+ * from a locale that happens to print year-first.
+ */
+export function isoDateLocal(ts: string | Date): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: DISPLAY_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(typeof ts === "string" ? new Date(ts) : ts);
+  const part = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
 /** "2026-07-05T16:30:00Z" → "11:30 AM" (Central wall clock, 12h). */
 export function timeLocal(ts: string | Date): string {
   return new Intl.DateTimeFormat("en-US", {

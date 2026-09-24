@@ -813,10 +813,40 @@ export async function previewInvite(
 
 // ── data export and erasure (review H5) ────────────────────────────────────
 
-/** The whole of a client's record as one JSON document, for portability. */
+/**
+ * The client's record for their copy (0059): everything but the routes,
+ * which come in batches, and the photos, which Storage holds.
+ */
 export async function exportClientData(clientId: string): Promise<unknown> {
   const { data, error } = await supabase.rpc("fn_export_client_data", { p_client: clientId });
   if (error) throw new Error(error.message);
+  return data;
+}
+
+/** One batch of the client's routes, walk id to points (0059). */
+export async function exportClientRoutes(clientId: string, walkIds: string[]): Promise<unknown> {
+  const { data, error } = await supabase.rpc("fn_export_client_routes", {
+    p_client: clientId,
+    p_walks: walkIds,
+  });
+  if (error) throw new Error(error.message);
+  return data;
+}
+
+/**
+ * A stored photo's bytes, for the client's copy. Throws rather than returning
+ * nothing. storage-js puts the path into the URL as it is, so a name holding
+ * `?`, `#` or `%` cannot be fetched and the copy marks it missing; Sanpo's
+ * uploaders only ever write `{walker}/{id}/{uuid}.jpg`.
+ */
+export async function downloadPhoto(
+  bucket: "walk-photos" | "pet-photos",
+  path: string,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  const { data, error } = await supabase.storage.from(bucket).download(path, undefined, signal ? { signal } : undefined);
+  if (error) throw new Error(error.message);
+  if (!data) throw new Error("Storage returned no data.");
   return data;
 }
 
