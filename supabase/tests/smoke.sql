@@ -6712,6 +6712,8 @@ declare
   v_sender boolean;
   v_notice boolean;
   v_made timestamptz;
+  v_asked timestamptz;
+  v_between jsonb;
   v_token uuid;
   v_lift record;
 begin
@@ -7021,9 +7023,13 @@ begin
   delete from email_suppressions where email like 'smoke-0054-%';
   update auth.users set email_confirmed_at = now() where id = v_user;
   update clients set email = v_owner where id = v_a;
-  insert into email_suppressions (email, operator_id, notification_type, reason, created_at)
-  values (v_owner, null, null, 'one-click unsubscribe', now() - interval '40 days')
-  returning created_at into v_made;
+  -- First made forty days ago, asked for again ten days ago: two dates, so the
+  -- record is shown to copy each into its own column.
+  insert into email_suppressions
+    (email, operator_id, notification_type, reason, created_at, last_requested_at)
+  values (v_owner, null, null, 'one-click unsubscribe',
+          now() - interval '40 days', now() - interval '10 days')
+  returning created_at, last_requested_at into v_made, v_asked;
   -- Another operator's own stop, and a stop for a type the sender never
   -- emails: neither holds this client's email off, and a lift must leave both.
   insert into email_suppressions (email, operator_id, notification_type, reason) values
@@ -7055,7 +7061,8 @@ begin
   end if;
   select * into v_lift from email_suppression_lifts order by lifted_at desc, id desc limit 1;
   if v_lift.email <> v_owner or v_lift.client_id <> v_a or v_lift.lifted_by <> v_user
-     or v_lift.suppressed_at <> v_made or v_lift.suppression_reason <> 'one-click unsubscribe' then
+     or v_lift.suppressed_at <> v_made or v_lift.last_requested_at <> v_asked
+     or v_lift.suppression_reason <> 'one-click unsubscribe' then
     raise exception 'FAIL: the lift record is wrong: % (0054)', row_to_json(v_lift);
   end if;
   -- Email is on again, for every type the sender emails, which is what the
@@ -7116,6 +7123,63 @@ begin
     raise exception 'FAIL: the row fn_unsubscribe_by_token writes read %, want ready: the reason the lift matches is not the one one-click writes (0054)', v_state;
   end if;
 
+  -- ── A repeated opt-out moves the boundary too (Codex on #101) ──────────
+  -- The address asks again while its row is still there. One-click used to
+  -- do nothing on conflict, so the row kept the first request's time, and a
+  -- session whose link was opened between the two requests could lift. The
+  -- request must write no second row, keep the first one's reason and date,
+  -- and move the time a lift has to be newer than.
+  reset session authorization;
+  delete from email_suppressions where email like 'smoke-0054-%';
+  insert into email_suppressions
+    (email, operator_id, notification_type, reason, created_at, last_requested_at)
+  values (v_owner, null, null, 'one-click unsubscribe',
+          now() - interval '40 days', now() - interval '40 days');
+  -- A session opened a day ago: after the first request, before the next.
+  v_between := jsonb_build_array(jsonb_build_object('method', 'otp',
+    'timestamp', extract(epoch from now() - interval '1 day')::bigint));
+  perform set_config('request.jwt.claims',
+    jsonb_build_object('sub', v_user, 'role', 'authenticated', 'amr', v_between)::text, true);
+  set local session authorization authenticated;
+  select o_state into v_state from fn_my_email_status();
+  reset session authorization;
+  if v_state is distinct from 'ready' then
+    raise exception 'FAIL: PRECONDITION: before the repeated request, a session opened after the first read %, want ready (0054)', v_state;
+  end if;
+  -- The real writer again. The address may have changed since the token was
+  -- read above, and changing it rotates the token (0046), so read it again.
+  select unsubscribe_token into v_token from clients where id = v_a;
+  perform fn_unsubscribe_by_token(v_token);
+  if (select count(*) from email_suppressions where email = v_owner) <> 1
+     or not exists (
+       select 1 from email_suppressions
+        where email = v_owner and operator_id is null and notification_type is null
+          and reason = 'one-click unsubscribe'
+          and created_at < now() - interval '39 days'
+          and last_requested_at = now()) then
+    raise exception 'FAIL: a repeated one-click request did not keep one row with its first reason and date and move last_requested_at to the request (0054)';
+  end if;
+  perform set_config('request.jwt.claims',
+    jsonb_build_object('sub', v_user, 'role', 'authenticated', 'amr', v_between)::text, true);
+  set local session authorization authenticated;
+  select o_state into v_state from fn_my_email_status();
+  select o_result into v_got from fn_lift_my_email_suppression();
+  reset session authorization;
+  if v_state is distinct from 'needs_link_sign_in' or v_got is distinct from 'needs_link_sign_in'
+     or not exists (select 1 from email_suppressions
+                     where email = v_owner and operator_id is null and notification_type is null) then
+    raise exception 'FAIL: after a repeated unsubscribe, a session opened between the two requests read % and lifted % (want needs_link_sign_in for both, the row intact): a lift would undo the latest opt-out (0054)', v_state, v_got;
+  end if;
+  -- A link opened after the repeated request is the proof again.
+  perform set_config('request.jwt.claims',
+    jsonb_build_object('sub', v_user, 'role', 'authenticated', 'amr', v_link)::text, true);
+  set local session authorization authenticated;
+  select o_state into v_state from fn_my_email_status();
+  reset session authorization;
+  if v_state is distinct from 'ready' then
+    raise exception 'FAIL: after a repeated unsubscribe, a session opened after it read %, want ready (0054)', v_state;
+  end if;
+
   -- ── The lift removes the row the sender matches, not a trimmed one ──────
   -- With a trailing space on the contact address, the row the sender asks
   -- about carries the space. A lift that trimmed would remove the other row
@@ -7155,11 +7219,12 @@ begin
      'smoke-0054-moved@example.test', '99999999-0000-4000-a000-000000005402'),
     ('99999999-0000-4000-c000-000000005403', v_op2, '0054 Elsewhere', 'active',
      null, null);
-  insert into email_suppression_lifts (email, client_id, lifted_by, suppressed_at, suppression_reason) values
+  insert into email_suppression_lifts
+    (email, client_id, lifted_by, suppressed_at, last_requested_at, suppression_reason) values
     ('smoke-0054-erased@example.test', '99999999-0000-4000-c000-000000005401',
-     '99999999-0000-4000-a000-000000005401', now(), 'smoke: erased client'),
+     '99999999-0000-4000-a000-000000005401', now(), now(), 'smoke: erased client'),
     ('smoke-0054-moved@example.test', '99999999-0000-4000-c000-000000005402',
-     '99999999-0000-4000-a000-000000005402', now(), 'smoke: released client');
+     '99999999-0000-4000-a000-000000005402', now(), now(), 'smoke: released client');
 
   -- op1 releases the second client's account, and op2's client claims it.
   perform set_config('request.jwt.claims',

@@ -217,6 +217,7 @@ export type Database = {
           lifted_by: string;
           lifted_at: string;
           suppressed_at: string;
+          last_requested_at: string;
           suppression_reason: string;
         };
         Insert: {
@@ -226,6 +227,7 @@ export type Database = {
           lifted_by: string;
           lifted_at?: string;
           suppressed_at: string;
+          last_requested_at: string;
           suppression_reason: string;
         };
         Update: {
@@ -235,6 +237,7 @@ export type Database = {
           lifted_by?: string;
           lifted_at?: string;
           suppressed_at?: string;
+          last_requested_at?: string;
           suppression_reason?: string;
         };
         Relationships: [];
@@ -247,6 +250,7 @@ export type Database = {
           notification_type: Database["public"]["Enums"]["notification_type"] | null;
           reason: string;
           created_at: string;
+          last_requested_at: string;
         };
         Insert: {
           id?: string;
@@ -255,6 +259,7 @@ export type Database = {
           notification_type?: Database["public"]["Enums"]["notification_type"] | null;
           reason: string;
           created_at?: string;
+          last_requested_at?: string;
         };
         Update: {
           id?: string;
@@ -263,6 +268,7 @@ export type Database = {
           notification_type?: Database["public"]["Enums"]["notification_type"] | null;
           reason?: string;
           created_at?: string;
+          last_requested_at?: string;
         };
         Relationships: [];
       };

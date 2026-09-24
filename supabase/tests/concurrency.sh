@@ -1179,6 +1179,68 @@ expect_eq "the suppression was not lifted for an erased client" \
 expect_eq "no lift record outlived the erasure" \
   "$(q "select count(*) from email_suppression_lifts where client_id = '${NS}-000000000112'")" "0"
 
+echo
+echo "== case 11c: a repeated opt-out in flight holds the row a lift would remove =="
+
+# Codex on #101. One-click used to do nothing when an address that was
+# already suppressed asked again, so the row kept the first request's time,
+# and a session whose link was opened between the two requests could lift.
+# One-click now moves last_requested_at on every request, and the lift checks
+# the session against it twice: in the decision, and again in the delete.
+# This case is for the second check. The repeated request is in flight when
+# the lift starts, so the lift's decision cannot see it yet and answers ready.
+# Its delete then waits on the row the request holds. Once the request
+# commits, the delete must read the row the request wrote and leave it, and
+# the lift must answer the new decision.
+psql "$DB" -v ON_ERROR_STOP=1 -q -c "
+  insert into auth.users (id, email, email_confirmed_at) values
+    ('${NS}-000000001103', 'cc-lift3@sanpo.test', now());
+  insert into clients (id, operator_id, auth_user_id, full_name, email, status) values
+    ('${NS}-000000000113', '${NS}-000000000001', '${NS}-000000001103', 'CC Lifter 3', 'cc-lift3@sanpo.test', 'active');
+  insert into email_suppressions
+    (email, operator_id, notification_type, reason, created_at, last_requested_at) values
+    ('cc-lift3@sanpo.test', null, null, 'one-click unsubscribe', now() - interval '2 hours', now() - interval '2 hours');"
+
+# A session opened by a link half an hour ago: after the first request, and
+# before the repeated one below.
+LINK_BETWEEN="$(( $(date +%s) - 1800 ))"
+CLAIMS_11C="{\"sub\":\"${NS}-000000001103\",\"role\":\"authenticated\",\"amr\":[{\"method\":\"otp\",\"timestamp\":${LINK_BETWEEN}}]}"
+TOKEN_11C="$(q "select unsubscribe_token from clients where id = '${NS}-000000000113'")"
+
+expect_eq "PRECONDITION: before the repeated request, this session may lift" \
+  "$(psql "$DB" -q -At -v ON_ERROR_STOP=1 -c "
+     set local request.jwt.claims = '${CLAIMS_11C}';
+     select o_state from fn_my_email_status();" 2>&1 | tail -1)" "ready"
+
+cat >&3 <<SQL
+begin;
+select o_applied from fn_unsubscribe_by_token('${TOKEN_11C}');
+SQL
+expect_eq "PRECONDITION: the repeated request has run and holds its transaction open" \
+  "$(wait_until_idle_in_txn fn_unsubscribe_by_token)" "holding"
+
+psql "$DB" -q -At -v ON_ERROR_STOP=1 -c "
+  set local request.jwt.claims = '${CLAIMS_11C}';
+  select o_result from fn_lift_my_email_suppression();" >"$WORK/b11c.out" 2>&1 &
+B11C_PID=$!
+# The detector is the three outcomes below; this is the proof the interleave
+# happened. With one-click back on its old do-nothing insert, the request
+# holds no row and the lift never waits, which fails here.
+expect_eq "PRECONDITION: the lift is waiting on the row the repeated request holds" \
+  "$(wait_until_blocked fn_lift_my_email_suppression)" "blocked"
+
+cat >&3 <<SQL
+commit;
+SQL
+wait $B11C_PID || true
+
+expect_eq "the lift answered the new decision rather than lifting" \
+  "$(tail -1 "$WORK/b11c.out")" "needs_link_sign_in"
+expect_eq "the row the repeated request moved survived the lift that waited on it" \
+  "$(q "select count(*) from email_suppressions where email = 'cc-lift3@sanpo.test'")" "1"
+expect_eq "no lift was recorded" \
+  "$(q "select count(*) from email_suppression_lifts where client_id = '${NS}-000000000113'")" "0"
+
 exec 3>&-
 wait $A_PID 2>/dev/null || true
 
