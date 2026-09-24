@@ -116,7 +116,17 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   only once in the code. Checking the raw text reported the fix present while
   the database was running the sabotaged body — the same mention-versus-use
   defect 0046's second Codex round found in a migration's own assertion.
-  `regexp_replace(def, '--[^\n]*', '', 'g')` first.
+  `regexp_replace(def, '--[^\n]*', '', 'g')` first. Committed guards too:
+  smoke's 0037 lock-order check read raw definitions until the 0057 review,
+  and `fn_purge_client`'s own comment "Walks before clients (0037)." kept it
+  from ever being compared. Smoke's guards that read function bodies share
+  `pg_temp.fn_sql_lex()` now; a new one should too.
+- **An erased client still exists.** `fn_purge_client` redacts the client row
+  and keeps it (the ledger references it), so "the client exists and belongs
+  to this operator" is true of an erased one. Anything that writes about a
+  client has to ask about `purged_at`, under a lock that waits for a purge in
+  flight: 0057's first version asked only whether the row existed, and a
+  notice written during an erasure survived it (Codex on PR #105).
 - **A vitest file claimed by neither project runs nowhere, silently.** `node`
   takes `src/lib/**/*.test.ts` and `scripts/**/*.test.ts`; `dom` takes
   components / screens / hooks / prototypes plus `src/lib/**/*.test.tsx`. The

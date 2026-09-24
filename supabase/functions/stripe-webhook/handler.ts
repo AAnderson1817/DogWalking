@@ -777,10 +777,14 @@ async function reverse(
   });
   if (result.outcome === "noop") return { status: "processed" };
 
+  // No subject: the alert names no one (an amount and what happened to the
+  // credits), and a dispute has a deadline the walker must answer in Stripe.
+  // A subject would let the client's erasure delete it, and would stop one
+  // arriving after the erasure from being written at all (0057).
   await deps.insertNotification({
     operator_id: payment.operator_id,
     client_id: null,
-    subject_client_id: payment.client_id,
+    subject_client_id: null,
     type: kind === "dispute" ? "payment_disputed" : "payment_refunded",
     title: kind === "dispute" ? "Payment disputed" : "Payment refunded",
     body: reversalBody(kind, result),

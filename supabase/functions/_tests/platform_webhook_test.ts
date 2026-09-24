@@ -359,6 +359,22 @@ Deno.test("subscription.deleted cancels and tells the operator — once", async 
   );
 });
 
+Deno.test("subscription.updated carrying canceled tells the operator, about no client", async () => {
+  // The same terminal write and bell as the deleted arm, reached from the
+  // updated arm. No test reached this bell before 0057's review, so a wrong
+  // subject here went unseen.
+  const bound = makeDeps({ opBySub: LIVE_OP, updateCount: 1 });
+  await handlePlatformEvent(
+    event("customer.subscription.updated", { id: "sub_1", status: "canceled" }),
+    bound.deps,
+  );
+  const upd = bound.recorded.find((r) => r.call === "updateOperator");
+  assertEquals(upd?.args[1], { platform_subscription_status: "cancelled" });
+  const note = bound.recorded.find((r) => r.call === "insertNotification");
+  assert(note, "no cancellation notification from the updated arm");
+  assertEquals((note.args[0] as { type: string }).type, "subscription_cancelled");
+});
+
 Deno.test("invoice.payment_failed marks past_due and notifies the OPERATOR — transition-gated", async () => {
   const first = makeDeps({ opBySub: LIVE_OP, updateCount: 1 });
   await handlePlatformEvent(

@@ -498,9 +498,11 @@ begin
     raise exception 'FAIL: cross-tenant client UUID accepted on walk';
   exception when raise_exception then
     -- The exact message, not the prefix: with the walks trigger dropped this
-    -- insert succeeds and its notification is refused by the same function
-    -- on `notifications` ("notification client must belong to operator"),
-    -- which a prefix match accepted (measured, PR B review).
+    -- insert succeeds and its notification is refused on `notifications`,
+    -- which a prefix match accepted (measured, PR B review). Since 0057 the
+    -- refusal comes from the subject trigger, which fires first ("notification
+    -- subject must belong to operator"); before, it was the tenant check
+    -- ("notification client must belong to operator").
     if sqlerrm <> 'tenant consistency: walk client must belong to operator' then raise; end if;
   end;
 
@@ -3197,6 +3199,29 @@ end $$;
 
 
 
+-- ── One SQL lexer for the guards that read function bodies as code ───────
+-- The 0037 lock-order guard (next) and invariant 1 (further down) both read
+-- a function's text for statements, and both have to tell code from comment
+-- and literal text. One lexer serves both, so what one learns the other
+-- does too.
+--
+-- A quoted identifier (group 1, kept); an escape string, whose E is not the
+-- tail of an identifier (the lexer's rule: letters, digits, `_`, `$` and
+-- every non-ASCII character continue one); a standard literal; a line
+-- comment; a block comment. All but group 1 become one space, through
+-- `regexp_replace(text, pg_temp.fn_sql_lex(), '\1 ', 'g')`. Its alternatives
+-- each open on their own character, so the leftmost wins the way the
+-- lexer's does: a `--` inside a literal is not a comment, and a `'` inside a
+-- comment opens no literal. Not modelled: a nested block comment, and a
+-- dollar-quoted string inside a body, which reads as code.
+create function pg_temp.fn_sql_lex() returns text language sql immutable as $lex$
+  select '("(?:[^"]|"")*")'
+    || '|(?<![^\u0001-\u0023\u0025-\u002f\u003a-\u0040\u005b-\u005e\u0060\u007b-\u007f])[Ee]''(?:[^''\\]|\\.|'''')*'''
+    || '|''(?:[^'']|'''')*'''
+    || '|--[^\n]*'
+    || '|/\*(?:[^*]|\*+[^*/])*\*+/'
+$lex$;
+
 -- ── 0037 · one lock order for walks and clients ──────────────────────────
 -- Review M32. `fn_refund_cancelled_debit` is a BEFORE UPDATE trigger on
 -- `walks`, so its body runs with the walk tuple already locked and can only
@@ -3218,28 +3243,85 @@ end $$;
 -- violation: `fn_debit_walk` opened with an UNLOCKED `from walks where id =
 -- p_walk`, so the first mention of `walks` preceded the `clients` lock and the
 -- order read as compliant. `[^;]*?` keeps each match inside one statement.
+--
+-- Every row-lock mode counts, not only FOR UPDATE (0057). A deadlock needs
+-- two locks that conflict, and FOR KEY SHARE on a client row conflicts with
+-- the FOR UPDATE the purge takes on it; `fn_notification_subject` takes KEY
+-- SHARE on both tables, which a guard reading FOR UPDATE alone cannot see.
+--
+-- And the text is read as code: comments removed and literals blanked, by
+-- the shared lexer above. Until 0057 it was read raw, and `fn_purge_client`'s
+-- own comment "Walks before clients (0037)." sits in the same statement as
+-- its walks lock, so the pattern took `clients` from the comment and read
+-- the function as {clients, clients}. As far as the guard could tell it
+-- locked no walk, so it was never checked: the only function this block had
+-- ever compared was `fn_debit_walk`. The positive control below names the
+-- functions that must be compared, so a reading that loses one says which.
 do $$
 declare
   r record;
   v_locks text[];
   v_bad text[] := '{}';
-  v_scanned int := 0;
+  v_scanned text[] := '{}';
+  v_missing text;
+  v_got text[];
 begin
+  -- The lock sequence of one text, read by the real check and the self-test
+  -- through one function so the two cannot drift apart.
+  create function pg_temp.fn_0037_locks(p_src text) returns text[]
+  language sql stable as $f$
+    select array_agg(m[1] order by ord)
+      from regexp_matches(regexp_replace(p_src, pg_temp.fn_sql_lex(), '\1 ', 'g'),
+                          '\m(clients|walks)\M[^;]*?\yfor (?:update|no key update|share|key share)\y',
+                          'g')
+           with ordinality as t(m, ord)
+  $f$;
+
+  -- The self-test: what the reading must make of text shaped like the
+  -- statements it guards. Each row is a body and the sequence it must read.
+  for r in
+    select * from (values
+      ('key share, clients first',
+       'select 1 from clients where id = p for key share; select 1 from walks where id = w for key share;',
+       array['clients', 'walks']),
+      ('each mode',
+       'select 1 from walks for update; select 1 from clients for no key update; '
+       || 'select 1 from walks for share; select 1 from clients for key share;',
+       array['walks', 'clients', 'walks', 'clients']),
+      ('a comment naming a table in the statement it precedes',
+       E'-- Walks before clients (0037).\nperform 1 from walks where c = p for update;\n'
+       || 'perform 1 from clients where id = p for update;',
+       array['walks', 'clients']),
+      ('a block comment',
+       'perform 1 /* clients */ from walks where c = p for update; perform 1 from clients for update;',
+       array['walks', 'clients']),
+      ('a literal naming a lock',
+       'raise exception ''clients for update''; perform 1 from walks for update; perform 1 from clients for update;',
+       array['walks', 'clients']),
+      ('an unlocked read is not a lock',
+       'select client_id from walks where id = w; perform 1 from clients where id = p for update;',
+       array['clients'])
+    ) as t(label, body, want)
+  loop
+    v_got := pg_temp.fn_0037_locks(r.body);
+    if v_got is distinct from r.want then
+      raise exception 'FAIL: the lock-order reading of "%" is % — expected %',
+        r.label, coalesce(v_got::text, 'nothing'), r.want;
+    end if;
+  end loop;
+
   for r in
     select p.oid, p.proname
       from pg_proc p
       join pg_namespace n on n.oid = p.pronamespace
      where n.nspname = 'public' and p.prokind = 'f'
   loop
-    select array_agg(m[1] order by ord) into v_locks
-      from regexp_matches(pg_get_functiondef(r.oid),
-                          '\m(clients|walks)\M[^;]*?\yfor update\y', 'g')
-           with ordinality as t(m, ord);
+    v_locks := pg_temp.fn_0037_locks(pg_get_functiondef(r.oid));
 
     if v_locks @> array['clients'] and v_locks @> array['walks'] then
-      v_scanned := v_scanned + 1;
+      v_scanned := v_scanned || r.proname::text;
       if array_position(v_locks, 'clients') < array_position(v_locks, 'walks') then
-        v_bad := v_bad || r.proname;
+        v_bad := v_bad || r.proname::text;
       end if;
     end if;
   end loop;
@@ -3250,10 +3332,15 @@ begin
       array_to_string(v_bad, ', ');
   end if;
 
-  -- Vacuity guard. With no function locking both tables the loop above proves
-  -- nothing, which is exactly what a typo in the pattern produces.
-  if v_scanned = 0 then
-    raise exception 'FAIL: the lock-order check matched no function at all — the pattern is broken';
+  -- Positive control. These lock both tables, so each must have been
+  -- compared; one missing means the reading lost it, which is what a typo in
+  -- the pattern, a lock mode left out, or a comment read as code produces.
+  select string_agg(f, ', ' order by f) into v_missing
+    from unnest(array['fn_debit_walk', 'fn_purge_client', 'fn_notification_subject']) f
+   where f <> all (v_scanned);
+  if v_missing is not null then
+    raise exception 'FAIL: the lock-order check did not read % as locking both walks and clients, so it never compared the order (it compared: %)',
+      v_missing, coalesce(array_to_string(v_scanned, ', '), 'nothing');
   end if;
 
   raise notice 'walks is locked before clients everywhere (0037): OK';
@@ -6228,16 +6315,9 @@ declare
     || '|\minsert\M\s+(?:\minto\M[^(;]*)?\((?:[^();]|\([^();]*\))*?\mcredit_balance\M'
     || '|\minsert\M\s+(?:\minto\M[^(;]*?)?(?:\(\s*)*\m(?:(?<!\mdefault(?:\s|--[^\n]*\n|/\*(?:[^*]|\*+[^*/])*\*+/)+)values|select|with|table|overriding)\M'
     || '|\mcopy\M[^;]*\mfrom\M';
-  -- A quoted identifier (group 1, kept); an escape string, whose E is not the
-  -- tail of an identifier (the lexer's rule: letters, digits, `_`, `$` and
-  -- every non-ASCII character continue one); a standard literal; a line
-  -- comment; a block comment. All but group 1 become one space.
-  v_lex constant text :=
-       '("(?:[^"]|"")*")'
-    || '|(?<![^\u0001-\u0023\u0025-\u002f\u003a-\u0040\u005b-\u005e\u0060\u007b-\u007f])[Ee]''(?:[^''\\]|\\.|'''')*'''
-    || '|''(?:[^'']|'''')*'''
-    || '|--[^\n]*'
-    || '|/\*(?:[^*]|\*+[^*/])*\*+/';
+  -- The lexer is pg_temp.fn_sql_lex(), defined above the 0037 block, where
+  -- the lock-order guard reads function bodies through the same one.
+  v_lex constant text := pg_temp.fn_sql_lex();
   v_offenders text;
   v_tables text;
   r record;
@@ -7616,18 +7696,33 @@ begin
 end $$;
 
 -- The subject is checked on the way in: a wrong one would make an erasure
--- delete another client's notices and keep this one's.
+-- delete another client's notices and keep this one's. The client erased
+-- above is not used here: a notice about them is not written at all, which
+-- is the next block's subject.
 do $$
 declare
   v_op     uuid := '99999999-0000-4000-a000-0000000057a1';
   v_foreign_client uuid;
   v_client uuid := '99999999-0000-4000-c000-0000000057c2';
+  v_third  uuid := '99999999-0000-4000-c000-0000000057c3';
+  v_prop   uuid := '99999999-0000-4000-d000-0000000057d2';
   v_walk   uuid;
   v_msg    text;
 begin
   perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
   select id into v_foreign_client from clients where operator_id <> v_op limit 1;
-  select id into v_walk from walks where operator_id = v_op limit 1;
+  insert into clients (id, operator_id, full_name, credit_balance)
+    values (v_third, v_op, 'Octavia Third', 0);
+  insert into properties (id, operator_id, client_id, label, address_line1, city, postcode)
+    values (v_prop, v_op, v_client, 'Home', '2 N57 St', 'Chicago', '60601');
+  insert into walks (operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status)
+  select v_op, v_client, v_prop, st.id, current_date + 4, '10:00', '11:00', 'scheduled'
+    from service_types st where st.operator_id = v_op and st.is_default
+  returning id into v_walk;
+  if v_walk is null then
+    raise exception 'FAIL: precondition — no walk was created for the live client';
+  end if;
 
   -- A client-facing row is about its own client, filled in by the trigger.
   insert into notifications (operator_id, client_id, type, title, body)
@@ -7652,7 +7747,7 @@ begin
 
   begin
     insert into notifications (operator_id, client_id, subject_client_id, type, title, body)
-      values (v_op, v_client, '99999999-0000-4000-c000-0000000057c1', 'low_credit', 't', 'b');
+      values (v_op, v_client, v_third, 'low_credit', 't', 'b');
     raise exception 'FAIL: a client-facing notice was filed about a different client';
   exception when raise_exception then
     get stacked diagnostics v_msg = message_text;
@@ -7664,21 +7759,16 @@ begin
 
   -- A row naming a walk is about the walk's client, filled in the same way,
   -- and a subject that disagrees with the walk is refused.
-  select id into v_walk from walks
-   where client_id = '99999999-0000-4000-c000-0000000057c1' limit 1;
-  if v_walk is null then
-    raise exception 'FAIL: precondition — the previous block''s walk is missing';
-  end if;
   insert into notifications (operator_id, client_id, type, title, body, walk_id)
     values (v_op, null, 'walk_cancelled', 't', 'b', v_walk);
   if not exists (select 1 from notifications
                   where walk_id = v_walk and client_id is null and type = 'walk_cancelled'
-                    and subject_client_id = '99999999-0000-4000-c000-0000000057c1') then
+                    and subject_client_id = v_client) then
     raise exception 'FAIL: a notice naming a walk did not record the walk''s client as its subject';
   end if;
   begin
     insert into notifications (operator_id, client_id, subject_client_id, type, title, body, walk_id)
-      values (v_op, null, v_client, 'walk_cancelled', 't', 'b', v_walk);
+      values (v_op, null, v_third, 'walk_cancelled', 't', 'b', v_walk);
     raise exception 'FAIL: a notice was filed about a client other than the one its walk belongs to';
   exception when raise_exception then
     get stacked diagnostics v_msg = message_text;
@@ -7693,7 +7783,7 @@ begin
   -- written with the trigger off, so it is one the check would refuse.
   alter table notifications disable trigger trg_notifications_subject;
   insert into notifications (operator_id, client_id, subject_client_id, type, title, body, walk_id)
-    values (v_op, null, v_client, 'walk_cancelled', 'n57 skip', 'b', v_walk);
+    values (v_op, null, v_third, 'walk_cancelled', 'n57 skip', 'b', v_walk);
   alter table notifications enable trigger trg_notifications_subject;
   begin
     update notifications set read_at = now() where title = 'n57 skip';
@@ -7702,7 +7792,114 @@ begin
     raise exception 'FAIL: marking a notification read re-ran the subject check: %', v_msg;
   end;
 
+  -- A change of operator IS re-checked (0057 review). The tenant check on
+  -- notifications lists only client_id and walk_id, so without this a row
+  -- moved to another walker kept its subject under the old one.
+  insert into notifications (operator_id, client_id, subject_client_id, type, title, body)
+    values (v_op, null, v_client, 'card_saved', 'n57 move', 'b');
+  begin
+    update notifications
+       set operator_id = (select c.operator_id from clients c where c.id = v_foreign_client)
+     where title = 'n57 move';
+    raise exception 'FAIL: a notice was moved to another walker with its subject left behind';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    if v_msg like 'FAIL:%' then raise; end if;
+    if v_msg not like 'tenant consistency: notification subject must belong to operator%' then
+      raise exception 'FAIL: moving a notice to another walker was refused for the wrong reason: %', v_msg;
+    end if;
+  end;
+
   raise notice 'a notification''s subject is filled from what the row records, and checked (0057): OK';
+end $$;
+
+-- A notice about an erased client is not written (Codex on PR #105). A
+-- writer can read the client before an erasure and insert after it: the
+-- Stripe webhook looks the client up, then inserts. The purge keeps the
+-- client row, so a check asking only whether the client exists let the name
+-- the erasure had removed back into the walker's inbox. This is the
+-- sequential half, the notice arriving after the erasure committed;
+-- concurrency.sh case 12 is the notice written while it is in flight.
+do $$
+declare
+  v_op     uuid := '99999999-0000-4000-a000-0000000057a1';
+  v_erased uuid := '99999999-0000-4000-c000-0000000057c1';
+  v_live   uuid := '99999999-0000-4000-c000-0000000057c2';
+  v_walk   uuid;
+  v_n      int;
+  v_msg    text;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  if not exists (select 1 from clients where id = v_erased and purged_at is not null) then
+    raise exception 'FAIL: precondition — the first 0057 block''s client is not erased';
+  end if;
+  select id into v_walk from walks where client_id = v_erased limit 1;
+  if v_walk is null then
+    raise exception 'FAIL: precondition — the erased client''s walk is missing';
+  end if;
+
+  -- Control: the same insert about a live client IS written, so the rows
+  -- below are refused for the erasure and not for their shape.
+  insert into notifications (operator_id, client_id, subject_client_id, type, title, body)
+    values (v_op, null, v_live, 'card_saved', 'n57 late control', 'b');
+  get diagnostics v_n = row_count;
+  if v_n <> 1 then
+    raise exception 'FAIL: precondition — a notice about a live client was not written';
+  end if;
+
+  -- As the Stripe webhook writes it: operator-facing, the subject named.
+  insert into notifications (operator_id, client_id, subject_client_id, type, title, body)
+    values (v_op, null, v_erased, 'card_saved', 'n57 late webhook',
+            'Wilhelmina Erasure can now be charged for visits their credits do not cover.');
+  get diagnostics v_n = row_count;
+  if v_n <> 0 then
+    raise exception 'FAIL: a notice naming its erased subject was written after the erasure';
+  end if;
+
+  -- Client-facing: the subject filled from client_id.
+  insert into notifications (operator_id, client_id, type, title, body)
+    values (v_op, v_erased, 'renewal_upcoming', 'n57 late client', 'b');
+  get diagnostics v_n = row_count;
+  if v_n <> 0 then
+    raise exception 'FAIL: a client-facing notice was written to an erased client';
+  end if;
+
+  -- Naming the erased client's walk: the subject filled from the walk.
+  insert into notifications (operator_id, client_id, type, title, body, walk_id)
+    values (v_op, null, 'walk_cancelled', 'n57 late walk', 'b', v_walk);
+  get diagnostics v_n = row_count;
+  if v_n <> 0 then
+    raise exception 'FAIL: a notice naming an erased client''s walk was written after the erasure';
+  end if;
+
+  -- The low-credit writer: the erased client still reads 0 credits, so it
+  -- tries both its rows.
+  perform fn_notify_low_credit(v_erased);
+
+  select count(*) into v_n from notifications
+   where subject_client_id = v_erased
+      or client_id = v_erased
+      or walk_id = v_walk
+      or title like '%Wilhelmina%' or body like '%Wilhelmina%';
+  if v_n > 0 then
+    raise exception 'FAIL: % notice(s) about the erased client were written after the erasure', v_n;
+  end if;
+
+  -- Moving an existing row onto an erased client is refused outright: no
+  -- code path does it, and skipping an update would report a change it
+  -- never made.
+  begin
+    update notifications set subject_client_id = v_erased where title = 'n57 late control';
+    raise exception 'FAIL: moving a notice onto an erased client was not refused';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    if v_msg like 'FAIL:%' then raise; end if;
+    if v_msg not like '%that client has been erased%' then
+      raise exception 'FAIL: moving a notice onto an erased client was refused for the wrong reason: %', v_msg;
+    end if;
+  end;
+
+  raise notice 'a notice about an erased client is not written, and none can be moved onto one (0057): OK';
 end $$;
 
 rollback;

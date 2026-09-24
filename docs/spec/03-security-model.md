@@ -125,16 +125,27 @@ So four things are redacted in place (`clients` to a tombstone, `walks.notes`,
 the property address and access notes, the credential ciphertext) and
 everything else is destroyed: `walk_gps_points`, `walk_photos`, `walk_pets`,
 `schedule_pets`, `recurring_schedules`, `plan_change_intents`, `notifications`,
-`invite_claim_attempts`, and `pets`. Notifications go by SUBJECT, not by
-`client_id` (0057). `client_id` says who may read a row, so a row the walker
+`invite_claim_attempts`, and `pets`. Notifications go by SUBJECT as well as
+by `client_id` (0057). `client_id` says who may read a row, so a row the walker
 reads carries NULL there. Until 0057 such a row named its client only in its
 title, and the purge, deleting by `client_id`, left "<name> is low on credits"
 and "<name> booked a walk" in the walker's inbox after the erasure. Each row
-now records `subject_client_id`, and the purge deletes by it. Rows written
-before 0057 got a subject where they recorded one (a `client_id` or a walk);
-a walker notice that named its client only in text could not be linked
-without guessing from a name, and stays. Production has never run, so none
-exists outside staging's fixtures. `invite_signup_attempts` (0048) is
+now records `subject_client_id`, and the purge deletes by it. A notice about
+an erased client is not written at all: a writer can read the client before
+the erasure and insert after it (the Stripe webhook looks the client up, then
+inserts), and the purge keeps the client row, so the same trigger takes that
+row `FOR KEY SHARE`, which waits for an erasure in flight, and skips the
+insert when `purged_at` is set (Codex on PR #105). Skipped rather than
+refused, because the writers are money paths and a failed insert would fail
+them; the price is that the walker gets no bell for what happens to an erased
+client's account afterwards, which the Money screen still shows. A refund or
+dispute alert records no subject: it names no one, and a dispute has a
+deadline the walker answers in Stripe, so an erasure neither deletes it nor
+stops the next one. Rows written before 0057 got a subject where they recorded one (a
+`client_id` or a walk), and those about a client already erased were deleted,
+as the purge now would; a walker notice that named its client only in text
+could not be linked without guessing from a name, and stays. Production has
+never run, so none exists outside staging's fixtures. `invite_signup_attempts` (0048) is
 destroyed too, and not by `fn_purge_client` naming it: the purge rotates
 `invite_token`, and `trg_clients_reset_invite_signup_budget` clears the
 client's rows whenever that column changes. Those rows carry an `ip`, so
@@ -159,13 +170,19 @@ to that address again. Redaction here is not a weaker
 deletion; it is the only form the graph allows without dismantling the tax
 record or the audit trail. What remains carries no readable secret, and no
 personal data beyond an unsubscribed address, kept so that it stays
-unsubscribed. Two exceptions are text the walker typed into records kept whole
-on purpose: the reason given for revealing an entry code
+unsubscribed, with four exceptions. Two are text the walker typed into
+records kept whole on purpose: the reason given for revealing an entry code
 (`credential_access_log.purpose`) and a note on a credit adjustment
 (`credit_ledger.note`). Both are immutable, so the purge cannot redact them,
 and a walker who wrote a client's name into either has written it into a
-record that outlives the client. This sentence was false for notifications
-until 0057.
+record that outlives the client. The other two are outside what the purge
+reaches, and are open (backlog): the Stripe webhook stores every event whole
+in `stripe_events.payload`, which is never pruned, and a checkout session, an
+invoice or a charge carries the customer's name, email and billing address as
+Stripe sent them; and the client's own sign-in account in `auth.users` keeps
+its email, because the purge only unbinds it (`auth_user_id = null`). This
+sentence was false for notifications until 0057, and named neither of the
+last two until the 0057 review.
 
 **Nothing in the database stops a purged record being re-personalised.** The
 `0004` UPDATE grant still covers `full_name`, `email` and `phone` after

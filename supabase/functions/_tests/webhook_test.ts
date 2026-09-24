@@ -120,8 +120,11 @@ function makeMockDeps(
     },
     insertNotification(row) {
       calls.push({ fn: "insertNotification", args: [row] });
-      // Every notice this webhook writes is about the fixture's client.
-      return checkSubject(row, "client-1");
+      // Every notice this webhook writes is about the fixture's client,
+      // except a refund or dispute alert: it names no one, and the client's
+      // erasure must not take it (0057).
+      const reversal = row.type === "payment_refunded" || row.type === "payment_disputed";
+      return checkSubject(row, reversal ? null : "client-1");
     },
     findPaymentForReversal(ref) {
       calls.push({ fn: "findPaymentForReversal", args: [ref] });
@@ -502,6 +505,22 @@ Deno.test("invoice.payment_failed marks past_due, stamps currency, notifies both
   assertEquals(notifs.length, 2);
   const targets = notifs.map((n) => (n.args[0] as Record<string, unknown>).client_id);
   assert(targets.includes("client-1") && targets.includes(null));
+});
+
+Deno.test("invoice.upcoming tells the client, about the client", async () => {
+  // The one client-facing notice this webhook writes. No test reached it
+  // before 0057's review, so a wrong subject here went unseen.
+  const { deps, calls } = makeMockDeps();
+  const result = await handleStripeEvent(
+    event("invoice.upcoming", { id: "in_up", customer: "cus_1", subscription: "sub_1" }),
+    deps,
+  );
+  assertEquals(result.status, "processed");
+  const note = calls.find((c) => c.fn === "insertNotification");
+  assert(note, "no renewal reminder");
+  const row = note.args[0] as { client_id: string | null; type: string };
+  assertEquals(row.client_id, "client-1");
+  assertEquals(row.type, "renewal_upcoming");
 });
 
 Deno.test("unknown customer is ignored, never throws", async () => {

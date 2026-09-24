@@ -88,6 +88,27 @@ configure. Not reachable through the product either way: `anon` and
 `authenticated` are NOLOGIN, PostgREST issues no DDL, and no function an API
 role can execute runs dynamic SQL.
 
+### 5. An erasure leaves the Stripe event payloads and the client's sign-in account
+Found by the independent review of 0057; both predate it, and spec 03 now
+names them rather than claiming otherwise.
+
+`stripe-webhook` stores every event whole: `claimEvent(event.id, event.type,
+event)` writes it to `stripe_events.payload`, and nothing prunes that table. A
+checkout session carries `customer_details` (name, email, address, phone), an
+invoice `customer_name` / `customer_email` / `customer_address`, and a charge
+`billing_details`, so each client's contact details survive their erasure in
+the idempotency ledger. Nothing in the tree reads `payload` (checked: every
+`stripe_events` access is the claim, the read of its status, the takeover and
+the mark-processed), so the likely fix is to stop storing it and null what is
+there. It is still a change to the webhook's claim ledger, which is a money
+path, so it gets its own argument rather than riding along here.
+
+`fn_purge_client` unbinds the client's account (`auth_user_id = null`) and
+leaves the `auth.users` row, with its email, in place. Deleting it needs the
+admin API (the migrations cannot assume the deploy role may delete from
+`auth.users`), so it is an edge-function step in the erasure flow, ordered
+after the purge commits.
+
 ## Done
 
 - **An erasure removes the walker's notices about the client** — migration
@@ -96,8 +117,10 @@ role can execute runs dynamic SQL.
   deleting by `client_id`, left "<name> is low on credits" in the walker's
   inbox after the client's record was erased. Each row now records
   `subject_client_id` (filled from `client_id` or the walk by a trigger, set by
-  the writers whose rows record neither) and the purge deletes by it. Found
-  while designing the export. See the `privacy(0057)` status-log entry.
+  the writers whose rows record neither) and the purge deletes by it. A
+  notice about an erased client is not written, and one written while the
+  erasure is in flight waits for it (Codex on PR #105). Found while designing
+  the export. See the `privacy(0057)` status-log entry.
 
 - **The claim replay deletes its fixtures.** Every staging smoke run left an
   operator, a claimed client and two auth users behind, with four warnings
