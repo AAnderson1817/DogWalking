@@ -18,6 +18,7 @@ import {
   isPermanentSendFailure,
   type NotificationRow,
   type Outcome,
+  pushForRequest,
   recordPatch,
   type SendDeps,
 } from "../send-notification/handler.ts";
@@ -42,7 +43,7 @@ interface Opts {
   suppressed?: boolean;
   /** The suppression list itself is unreadable. */
   suppressionError?: boolean;
-  send?: () => Promise<{ ok: true } | { ok: false; status: number; detail: string }>;
+  send?: () => Promise<{ ok: true } | { ok: false; status: number }>;
   /** Model a deployment with no RESEND_API_KEY (H17). */
   emailUnconfigured?: boolean;
   backlog?: string[];
@@ -87,7 +88,19 @@ function makeDeps(opts: Opts = {}) {
       }),
     isSuppressed: (email, operatorId, type) => {
       suppressionAsked.push([email, operatorId, type]);
-      if (opts.suppressionError) return Promise.reject(new Error("suppression lookup failed"));
+      if (opts.suppressionError) {
+        // The shape the real wiring throws (deps.ts): the database's error in
+        // `cause`, the operator and the type in `context`.
+        return Promise.reject(
+          new HttpError(
+            500,
+            "db_error",
+            "suppression lookup failed",
+            new Error("permission denied for table email_suppressions"),
+            { operator_id: operatorId, type },
+          ),
+        );
+      }
       return Promise.resolve(opts.suppressed === true);
     },
     unsubscribeUrl: (token) => `https://fn.test/functions/v1/unsubscribe?t=${token}`,
@@ -127,27 +140,37 @@ Deno.test("a provider rejection is recorded, not lost", async () => {
   // The whole defect. The DB webhook does not retry on a non-2xx, so if the row
   // is not stamped here the email is gone and nothing anywhere says so.
   const { deps, recorded } = makeDeps({
-    send: () => Promise.resolve({ ok: false as const, status: 500, detail: "upstream boom" }),
+    send: () => Promise.resolve({ ok: false as const, status: 500 }),
   });
   const outcome = await deliverNotification(ROW, deps);
   assertEquals(outcome.kind, "failed");
   assertEquals(recorded.length, 1, "a failure must still be recorded");
   const rec = recorded[0].outcome as Extract<Outcome, { kind: "failed" }>;
-  assert(rec.error.includes("500"), rec.error);
-  assert(rec.error.includes("upstream boom"), "the provider's own words are the diagnosis");
+  // Ours, and only ours. `email_last_error` is selectable by `authenticated`,
+  // so a client reads it on their own notices; the provider's words go to the
+  // log where they are read (deps.ts), as the push arm's have since PR #85.
+  assertEquals(rec.error, "the email provider answered 500");
 });
 
 Deno.test("an unreachable provider is recorded as retryable", async () => {
   // Before this it threw out of the handler and the webhook forgot the email
   // had ever been owed.
   const { deps, recorded } = makeDeps({
-    send: () => Promise.reject(new Error("dns failure")),
+    send: () => Promise.reject(new Error("dns failure resolving api.resend.com via 10.0.0.1")),
   });
-  const outcome = await deliverNotification(ROW, deps);
+  let outcome!: Outcome;
+  const lines = await captureLines(async () => {
+    outcome = await deliverNotification(ROW, deps);
+  });
   assertEquals(outcome.kind, "failed");
   const rec = recorded[0].outcome as Extract<Outcome, { kind: "failed" }>;
   assertFalse(rec.permanent, "a network failure may succeed tomorrow");
-  assert(rec.error.includes("dns failure"));
+  // The runtime's own error is infrastructure detail, and this row is the
+  // client's to read. It goes to the log, with the notification it concerns.
+  assertEquals(rec.error, "the request to the email provider did not complete");
+  const logged = lines.find((l) => l.includes("dns failure resolving"));
+  assert(logged, "the transport error was not logged");
+  assertEquals(JSON.parse(logged).context?.notification_id, ROW.id);
 });
 
 Deno.test("an operator-only notification is SKIPPED, never left pending", async () => {
@@ -205,7 +228,7 @@ Deno.test("a skip does NOT increment the attempt count", () => {
 });
 
 Deno.test("a failure increments attempts — that is what bounds the retrying", () => {
-  const patch = recordPatch({ kind: "failed", error: "resend 500", permanent: false }, 2);
+  const patch = recordPatch({ kind: "failed", error: "the email provider answered 500", permanent: false }, 2);
   assertEquals(patch.email_attempts, 3);
   assertEquals(patch.email_status, "failed");
 });
@@ -242,7 +265,7 @@ Deno.test("a drain carries on past a failure", () => {
     send: () => {
       call += 1;
       return call === 2
-        ? Promise.resolve({ ok: false as const, status: 500, detail: "boom" })
+        ? Promise.resolve({ ok: false as const, status: 500 })
         : Promise.resolve({ ok: true as const });
     },
   });
@@ -344,9 +367,9 @@ Deno.test("an empty backlog is a no-op", async () => {
 
 Deno.test("a single-notification failure surfaces as a 502 naming the row", async () => {
   // The 502 is what tells the webhook, and an operator retrying by hand, that
-  // something is wrong. The row already carries the detail.
+  // something is wrong. The row carries our sentence; the log, the provider's.
   const { deps } = makeDeps({
-    send: () => Promise.resolve({ ok: false as const, status: 422, detail: "domain not verified" }),
+    send: () => Promise.resolve({ ok: false as const, status: 422 }),
   });
   const outcome = await deliverNotification(ROW, deps);
   const err = failureResponse(ROW, outcome);
@@ -354,9 +377,71 @@ Deno.test("a single-notification failure surfaces as a 502 naming the row", asyn
   assertEquals(err.code, "email_failed");
   assertEquals(err.context?.notification_id, "n-1");
   assertEquals(err.context?.permanent, true);
-  // The client-facing message stays ours; the provider's words are the cause.
-  assertEquals(err.message, "email provider rejected the message");
-  assert(String(err.cause).includes("domain not verified"));
+  // The message and the cause are both ours; the provider's words were logged
+  // where the wiring read them.
+  assertEquals(err.message, "the email was not sent");
+  assertEquals(err.cause, "the email provider answered 422");
+});
+
+Deno.test("the 502 says the email was not sent, whichever failure it was", async () => {
+  // Three failures reach the 502, and "the provider rejected it" is true of one.
+  // An unreadable suppression list is not a rejection; the caller retrying by
+  // hand must not be told it was.
+  const { deps } = makeDeps({ suppressionError: true });
+  let outcome!: Outcome;
+  await captureLines(async () => {
+    outcome = await deliverNotification(ROW, deps);
+  });
+  const err = failureResponse(ROW, outcome);
+  assertEquals(err.message, "the email was not sent");
+  assertEquals(err.cause, "the suppression list could not be read");
+});
+
+// ── the push half of a single request ────────────────────────────────────
+
+Deno.test("a push that throws on a single request is logged, and answers with our sentence", async () => {
+  // The inline catch this replaced put the database's own words into the
+  // response and wrote no log line, so a push that failed on every single
+  // request left no trace anywhere.
+  let outcome!: Outcome;
+  const lines = await captureLines(async () => {
+    outcome = await pushForRequest(
+      ROW,
+      () => Promise.reject(new Error('relation "push_subscriptions" does not exist (host 10.0.0.9)')),
+    );
+  });
+  assertEquals(outcome, { kind: "failed", error: "the push could not be delivered", permanent: false });
+  const parsed = lines.map((l) => JSON.parse(l));
+  assertEquals(parsed.length, 1, `one line, got ${lines.length}: ${lines.join(" | ")}`);
+  assertEquals(parsed[0].message, "push delivery threw");
+  assertEquals(parsed[0].context.notification_id, ROW.id);
+  assertEquals(parsed[0].context.channel, "push");
+  assert(lines[0].includes("push_subscriptions"), "the cause was not logged");
+});
+
+Deno.test("a push's thrown context rides on the line, and the row's id wins", async () => {
+  const lines = await captureLines(async () => {
+    await pushForRequest(
+      ROW,
+      () =>
+        Promise.reject(
+          new HttpError(500, "db_error", "subscription lookup failed", new Error("timeout"), {
+            notification_id: null,
+            operator_id: "op-1",
+          }),
+        ),
+    );
+  });
+  const parsed = JSON.parse(lines[0]);
+  assertEquals(parsed.context.notification_id, ROW.id, "the thrown null must not overwrite the id");
+  assertEquals(parsed.context.operator_id, "op-1");
+});
+
+Deno.test("a push that answers is passed through untouched", async () => {
+  const sent = await pushForRequest(ROW, () => Promise.resolve({ kind: "sent" as const }));
+  assertEquals(sent, { kind: "sent" });
+  const failed: Outcome = { kind: "failed", error: "the push service answered 502", permanent: false };
+  assertEquals(await pushForRequest(ROW, () => Promise.resolve(failed)), failed);
 });
 
 // ── send-once, and the tenant scope (review M1) ────────────────────────────
@@ -439,11 +524,23 @@ Deno.test("an unreadable suppression list fails CLOSED", async () => {
   // the one outcome that cannot be taken back. The row records it and the
   // nightly drain retries — which is exactly what a retryable failure is for.
   const { deps, recorded, sentTo } = makeDeps({ suppressionError: true });
-  const outcome = await deliverNotification(ROW, deps);
+  let outcome!: Outcome;
+  const lines = await captureLines(async () => {
+    outcome = await deliverNotification(ROW, deps);
+  });
   assertEquals(sentTo.length, 0);
   assertEquals(outcome.kind, "failed");
   assert(recorded[0].outcome.kind === "failed");
   assertFalse(recorded[0].outcome.permanent);
+  // A database error is ours to read, not the client's: the row says what
+  // happened, the log says why.
+  assertEquals(recorded[0].outcome.error, "the suppression list could not be read");
+  const logged = lines.find((l) => l.includes("permission denied for table email_suppressions"));
+  assert(logged, "the lookup error was not logged");
+  const line = JSON.parse(logged);
+  assertEquals(line.context?.notification_id, ROW.id);
+  assertEquals(line.context?.operator_id, ROW.operator_id, "the wiring's context was dropped");
+  assertEquals(line.context?.type, ROW.type);
 });
 
 Deno.test("every email carries the one-click unsubscribe pair", async () => {
@@ -614,7 +711,7 @@ Deno.test("recording an outcome RELEASES the claim, on every kind", () => {
   for (const outcome of [
     { kind: "sent" } as const,
     { kind: "skipped", reason: "not a client-facing notification" } as const,
-    { kind: "failed", error: "resend 500", permanent: false } as const,
+    { kind: "failed", error: "the email provider answered 500", permanent: false } as const,
   ]) {
     const patch = recordPatch(outcome, 1);
     assertEquals(
@@ -825,6 +922,39 @@ Deno.test("a terminal skip is fenced too, not only the send path", async () => {
   assertEquals(h.recordedStamps, [STAMP]);
 });
 
+Deno.test("a refusal comes back as its status alone, and the provider's words go to the log", async () => {
+  // The wiring is where the body is read, so it is where the body must stop.
+  // Returning it put it in `notifications.email_last_error`, which
+  // `authenticated` may select: a client read Resend's own words on their own
+  // notices (the independent review of 0056). The status is kept because it is
+  // a number we chose to record; the body goes to one log line.
+  const { makeSendDeps } = await import("../send-notification/deps.ts");
+  const body = '{"name":"validation_error","message":"The sanpo.test domain is not verified (account acct_42)"}';
+  const fetchImpl = (() => Promise.resolve(new Response(body, { status: 422 }))) as unknown as typeof fetch;
+  const deps = makeSendDeps(
+    {
+      db: {} as never,
+      apiKey: "re_test_key",
+      operatorId: null,
+      fromEmail: "Sanpo <n@sanpo.test>",
+      unsubscribeBase: "https://x.test/unsubscribe",
+    },
+    fetchImpl,
+  );
+  let result!: Awaited<ReturnType<typeof deps.sendEmail>>;
+  const lines = await captureLines(async () => {
+    result = await deps.sendEmail({
+      notificationId: "n-9", to: "a@b.test", subject: "s", html: "<p>h</p>", headers: {},
+    });
+  });
+  assertEquals(result, { ok: false, status: 422 });
+  const logged = lines.find((l) => l.includes("domain is not verified"));
+  assert(logged, "the provider's words were not logged");
+  const line = JSON.parse(logged);
+  assertEquals(line.context?.notification_id, "n-9");
+  assertEquals(line.context?.status, 422);
+});
+
 Deno.test("the Resend request carries a deadline below the claim lease", async () => {
   // Codex round 2 on PR #86. The push arm has had `AbortSignal.timeout` since
   // PR #85 and this one had nothing — the sibling asymmetry this repository
@@ -850,7 +980,7 @@ Deno.test("the Resend request carries a deadline below the claim lease", async (
     },
     fetchImpl,
   );
-  await deps.sendEmail({ to: "a@b.test", subject: "s", html: "<p>h</p>", headers: {} });
+  await deps.sendEmail({ notificationId: "n-1", to: "a@b.test", subject: "s", html: "<p>h</p>", headers: {} });
 
   assertEquals(calls.length, 1);
   assert(calls[0]?.signal instanceof AbortSignal, "the Resend request has no deadline");

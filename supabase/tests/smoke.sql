@@ -2354,7 +2354,7 @@ begin
   -- Failed is retryable. Push stays settled from above, so this assertion is
   -- about the EMAIL channel, which is what it claims to be about.
   update notifications set email_status = 'failed', email_attempts = 1,
-         email_last_error = 'resend 500' where id = v_n;
+         email_last_error = 'the email provider answered 500' where id = v_n;
   if not exists (select 1 from fn_notification_backlog() where id = v_n) then
     raise exception 'FAIL: a failed notification is not retryable';
   end if;
@@ -2409,7 +2409,7 @@ begin
                              push_status)
   values ('99999999-0000-4000-a000-000000000001',
           '99999999-0000-4000-c000-00000000000a',
-          'walk_complete', 'Attempt ceiling', 'test', 'failed', 5, 'resend 422',
+          'walk_complete', 'Attempt ceiling', 'test', 'failed', 5, 'the email provider answered 422',
           'skipped')
   returning id into v_n;
 

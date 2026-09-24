@@ -18,6 +18,7 @@
 // deadline among them.
 import { HttpError } from "../_lib/http.ts";
 import { adminClient } from "../_lib/admin.ts";
+import { logHandledError } from "../_lib/observe.ts";
 import {
   claimNotificationSend,
   recordPatch,
@@ -193,7 +194,7 @@ export function makeSendDeps(cfg: SendConfig, fetchImpl: typeof fetch = fetch): 
       );
     },
 
-    async sendEmail({ to, subject, html, headers }) {
+    async sendEmail({ notificationId, to, subject, html, headers }) {
       const res = await fetchImpl("https://api.resend.com/emails", {
         method: "POST",
         // A DEADLINE, which the push arm has had since PR #85 and this one
@@ -214,10 +215,20 @@ export function makeSendDeps(cfg: SendConfig, fetchImpl: typeof fetch = fetch): 
       });
       if (res.ok) return { ok: true };
       // Resend's body says WHY — domain out of verification, rate limited, bad
-      // recipient — and dropping it left "email_failed" as the entire record.
-      // Read defensively: a non-JSON error page must not turn a send failure
-      // into an unhandled 500.
-      return { ok: false, status: res.status, detail: await res.text().catch(() => "") };
+      // recipient — and dropping it would leave nobody able to tell. It goes to
+      // the LOG, here where it is read, and never back to the caller: whatever
+      // this returns is recorded in `notifications.email_last_error`, which
+      // `authenticated` may select, so a client read Resend's own words on
+      // their own notices (the independent review of 0056). The push arm has
+      // worked this way since PR #85. Read defensively: a non-JSON error page
+      // must not turn a send failure into an unhandled 500.
+      logHandledError({
+        fn: "send-notification",
+        message: "the email provider refused a message",
+        cause: (await res.text().catch(() => "")) || "(empty body)",
+        context: { notification_id: notificationId, status: res.status },
+      });
+      return { ok: false, status: res.status };
     },
 
     async record(id, outcome, previousAttempts, stamp) {

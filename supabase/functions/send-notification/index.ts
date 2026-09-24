@@ -12,11 +12,10 @@
 // retryable ('failed') state, and the nightly job counts what is still owed.
 import { isServiceAuth, jsonOk, readJson, requireOperator, serveFunction, HttpError } from "../_lib/http.ts";
 import { makeSendDeps } from "./deps.ts";
-import type { Outcome } from "./handler.ts";
 import { deliverPush, type PushableRow } from "./push.ts";
 import { adminClient } from "../_lib/admin.ts";
 import { makePushDeps, vapidConfig } from "./push_deps.ts";
-import { deliverNotification, drainBacklog, failureResponse } from "./handler.ts";
+import { deliverNotification, drainBacklog, failureResponse, pushForRequest } from "./handler.ts";
 
 interface Body {
   notification_id?: string;
@@ -119,16 +118,13 @@ serveFunction(async (req) => {
   // running. The push row keeps whatever state it had and the nightly drain
   // retries it; the email goes out now, which is the whole point of the two
   // channels not gating each other.
-  let pushOutcome: Outcome;
-  try {
-    pushOutcome = await deliverPush(row as unknown as PushableRow, pushDeps);
-  } catch (e) {
-    pushOutcome = {
-      kind: "failed",
-      error: e instanceof Error ? e.message : String(e),
-      permanent: false,
-    };
-  }
+  //
+  // `pushForRequest` is that catch. It logs the error and answers with our
+  // own sentence, because this response goes back to the caller.
+  const pushOutcome = await pushForRequest(
+    row,
+    (r) => deliverPush(r as unknown as PushableRow, pushDeps),
+  );
 
   const outcome = await deliverNotification(row, deps);
   if (outcome.kind === "failed") throw failureResponse(row, outcome);
