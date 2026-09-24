@@ -1475,10 +1475,11 @@ silently:
   already read that column, so the label discloses nothing. The function
   discloses one boolean besides — not which business's mail was unsubscribed from, not
   when, no reason text, no enumeration — and there is no write path: an
-  operator must never be able to lift a suppression. The address owner cannot
-  lift one either yet, so the notice promises no way to turn email back on
-  (backlog). Why this exposes no operator's list, and the one limit that
-  remains, is in spec 03 (definer catalogue).
+  operator must never be able to lift a suppression. The address owner can,
+  from their own portal and only when it is the address they sign in with
+  (`0054`, below), so for a client with a login the notice says that too. Why
+  this exposes no operator's list, and the one limit that remains, is in spec
+  03 (definer catalogue).
 * `clients.unsubscribe_token` **is rotated whenever the address changes**
   (`0046`). Before that it was not, so a stranger who had received a mistyped
   email held a live one-click link that, when clicked, suppressed whatever
@@ -1513,6 +1514,59 @@ honoured by the big mail clients and the link is what works everywhere else.
 The URL points at the function host, not the app: a one-click POST comes
 straight from the mail client, and a client-side SPA route cannot serve a POST
 at all.
+
+### Turning email back on (0054)
+
+A suppression is permanent to everyone except the person whose address it is.
+Before `0054` it was permanent to them too: a client who unsubscribed from one
+walker's mail and later hired another got no walk reports and no billing
+notices from anyone, and nothing in the product could change that.
+
+The proof that an address is yours is the sign-in. The client portal asks
+`fn_my_email_status()` and, when it answers `ready`, offers **Turn email back
+on**, which calls `fn_lift_my_email_suppression()`. Both read one decision,
+`fn_email_lift_decision`, so the button is never offered for a lift the server
+would refuse. It is `ready` only when all of these hold:
+
+- the client's contact address is suppressed for every type the sender emails
+  (the aggregation `0052`'s operator notice uses, now `fn_email_fully_suppressed`,
+  so the two notices cannot disagree);
+- at least one of the suppressing rows is a one-click row (platform-wide,
+  every type), since that is the only kind a lift removes;
+- the contact address is the account's sign-in address (`auth.users.email`,
+  compared lowercased and trimmed as the claim ladders compare);
+- GoTrue has confirmed that address (`email_confirmed_at`), which is set only by
+  clicking a link GoTrue sent to it. `claim-signup` creates client accounts
+  unconfirmed on purpose, so a client's confirmation is always such a click.
+
+Otherwise it answers why: `no_address`, `not_suppressed`, `not_liftable` (off
+by an operator-scoped or per-type row, which is a narrower preference and not
+this decision), `not_login_address` or `not_confirmed`. An account that is not
+a claimed, unerased client gets no row, and the lift answers `not_client`.
+Refusals are returned rather than raised, and write nothing.
+
+A lift deletes only the one-click rows for the address the decision checked,
+compared exactly as the sender compares (lowercased, not trimmed), and copies
+each into `email_suppression_lifts` in the same statement: the address, the
+account, and when and why the suppression was made. That table is the consent
+record for mailing an address that once asked us to stop, readable by no API
+role, and it goes when the account's client is erased (`fn_forget_purged_email_lifts`).
+The next one-click unsubscribe writes a fresh row, so a lift never weakens the
+next opt-out.
+
+**Stated limit:** the proof is as strong as GoTrue's confirmation setting. With
+confirmations OFF, a public-signup account is confirmed at creation with no
+click in its inbox. An account made that way at someone else's address, once it
+is a client (by claiming an invite, then setting its own contact address, which
+a client may edit), could lift that address's suppression. That is owner action
+16, the same setting that decides what a guessed claim is worth, and closing
+public signup (1b) closes it. An existing client cannot do the same by changing
+their sign-in address: GoTrue confirms a new address only through its inbox for
+any account that is not anonymous (`internal/api/user.go`, read on `master`,
+not measured here). An anonymous account adding an address is confirmed at once
+with confirmations OFF, so anonymous sign-ins, off in `config.toml` and unused
+by the app, must stay off. The address owner can stop the mail again with one
+click, and the lift is on record.
 
 ### The schedule lives in a migration, not a dashboard (0028)
 

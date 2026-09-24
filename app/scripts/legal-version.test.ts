@@ -13,16 +13,29 @@ import { LEGAL_DOCUMENTS, type LegalDocument } from "../src/lib/legal.js";
  * version means anything.
  *
  * When you legitimately change a document: bump `version` in
- * `app/src/lib/legal.ts`, run this test, and paste the printed hash in.
- * Bumping the version is the point — every acceptance recorded against the old
- * version keeps pointing at the old text, which is what a consent record is
- * for.
+ * `app/src/lib/legal.ts`, run this test, and ADD the printed hash under the
+ * new version. Bumping the version is the point — every acceptance recorded
+ * against the old version keeps pointing at the old text, which is what a
+ * consent record is for.
+ *
+ * The pins are keyed by version, not by document, and that is what makes the
+ * bump enforced rather than advised. Keyed by document, as they first were,
+ * the one pin was simply updated to the new hash: a text change with no bump
+ * passed (measured, 6 of 6, while bumping the notice for 0054). Keyed by
+ * version, changing the text without a bump means rewriting a hash already
+ * pinned for a version people accepted, an edit a reviewer can see.
  */
 
-/** version -> sha256 of the document's rendered text. */
-const PINNED: Record<string, string> = {
-  privacy: "fe9fc1ec7c4ef5c09df65601ce7b4fa56b73ea6420729b93eebe0cf093597858",
-  terms: "c3c4bf9a14fc266090630d49a45629d87c009ffebc54962d509e0e6016a63707",
+/** document -> version -> sha256 of that version's rendered text. Append-only. */
+const PINNED: Record<string, Record<string, string>> = {
+  privacy: {
+    "2026-08-29": "fe9fc1ec7c4ef5c09df65601ce7b4fa56b73ea6420729b93eebe0cf093597858",
+    // 0054: turning email back on, and what survives erasure of an unsubscribe.
+    "2026-09-24": "876edc57285b3c28bfc392960b295f40bf4dec823837519f5cb6773aa13ef6ab",
+  },
+  terms: {
+    "2026-08-29": "c3c4bf9a14fc266090630d49a45629d87c009ffebc54962d509e0e6016a63707",
+  },
 };
 
 /**
@@ -47,16 +60,33 @@ describe("legal documents", () => {
   for (const [slug, doc] of Object.entries(LEGAL_DOCUMENTS) as Array<[string, LegalDocument]>) {
     it(`${slug} text matches the hash pinned for version ${doc.version}`, () => {
       const actual = hash(doc);
-      if (actual !== PINNED[slug]) {
+      const pinned = PINNED[slug]?.[doc.version];
+      if (pinned === undefined) {
         throw new Error(
-          `The ${slug} document changed.\n\n` +
-            `If that was intentional: bump its \`version\` in app/src/lib/legal.ts, ` +
-            `then set PINNED.${slug} to:\n  ${actual}\n\n` +
-            `Every consent already recorded against version ${doc.version} points at the ` +
-            `OLD text, which is what makes the record evidence. Changing the words without ` +
-            `changing the version silently rewrites what people agreed to.`,
+          `The ${slug} document is at version ${doc.version}, which has no pinned hash.\n\n` +
+            `If this is a new version, add it: PINNED.${slug}["${doc.version}"] = "${actual}"`,
         );
       }
+      if (actual !== pinned) {
+        throw new Error(
+          `The ${slug} document changed, but its version (${doc.version}) did not.\n\n` +
+            `If that was intentional: bump its \`version\` in app/src/lib/legal.ts and add ` +
+            `the printed hash under the new version. Do not change the hash pinned for ` +
+            `${doc.version}: every consent already recorded against it points at the OLD ` +
+            `text, which is what makes the record evidence. Changing the words without ` +
+            `changing the version silently rewrites what people agreed to.\n\n` +
+            `The current text hashes to:\n  ${actual}`,
+        );
+      }
+    });
+
+    // A document reverted to an older version, or a version pinned and never
+    // shipped, both leave the table and the document disagreeing about which
+    // text is current.
+    it(`${slug} is on the newest version pinned for it`, () => {
+      const versions = Object.keys(PINNED[slug] ?? {}).sort();
+      expect(versions.length).toBeGreaterThan(0);
+      expect(doc.version).toBe(versions[versions.length - 1]);
     });
 
     it(`${slug} has a version, a date and some content`, () => {

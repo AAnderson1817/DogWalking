@@ -39,9 +39,9 @@ export interface LegalDocument {
 }
 
 export const PRIVACY: LegalDocument = {
-  version: "2026-08-29",
+  version: "2026-09-24",
   title: "Privacy notice",
-  updated: "29 August 2026",
+  updated: "24 September 2026",
   intro:
     "Sanpo is the software your walker uses to run their business. This notice describes what the software holds about you, who else it reaches, and how to get a copy or have it erased.",
   sections: [
@@ -84,6 +84,7 @@ export const PRIVACY: LegalDocument = {
       paragraphs: [
         "Route traces are deleted automatically once they pass the window your walker sets — 365 days unless they change it. The visit itself, and its billing record, are kept.",
         "Everything else is kept while you are a client. When your walker erases your record, your address, entry codes, pet notes, route traces and photos are destroyed. Two things survive on purpose: the billing ledger, because it is a financial record your walker is required to keep, and the log of who viewed your entry codes, because a record of who opened your door is not something the person who opened it should be able to delete.",
+        "If you unsubscribed from Sanpo email, that is kept too, as the address and the date alone, so that erasing a record never starts email to that address again. A record that you turned email back on is destroyed with the rest.",
       ],
     },
     {
@@ -92,6 +93,7 @@ export const PRIVACY: LegalDocument = {
         "You can ask your walker for a copy of everything held about you, and they can produce it as a file in a few seconds.",
         "You can ask them to erase it. Erasure is immediate and cannot be undone.",
         "Every email carries an unsubscribe link that works without signing in, including if you received it by mistake and have no account here.",
+        "If you unsubscribe and later want email again, you can turn it back on from your Sanpo account, as long as you sign in with that address and have confirmed it. Sanpo records when you did.",
       ],
     },
   ],

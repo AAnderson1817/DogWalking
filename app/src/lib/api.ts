@@ -690,6 +690,58 @@ export async function clientEmailSuppressed(
   return row ? { email: row.o_email, suppressed: row.o_suppressed === true } : null;
 }
 
+/**
+ * Whether email to the calling client's contact address is off, and whether
+ * they can turn it back on from here (0054). The states are the server's
+ * `fn_email_lift_decision`, in the order it decides them.
+ */
+export const EMAIL_LIFT_STATES = [
+  "no_address",
+  "not_suppressed",
+  "not_liftable",
+  "not_login_address",
+  "not_confirmed",
+  "ready",
+] as const;
+export type EmailLiftState = (typeof EMAIL_LIFT_STATES)[number];
+
+export interface MyEmailStatus {
+  /** The contact address the answer is about, which is not always the one on screen. */
+  email: string | null;
+  state: EmailLiftState;
+}
+
+function asLiftState(s: unknown): EmailLiftState {
+  if ((EMAIL_LIFT_STATES as readonly unknown[]).includes(s)) return s as EmailLiftState;
+  // A state this build does not know is a server newer than the page. Throwing
+  // is the honest answer: guessing "not suppressed" would hide a notice, and
+  // guessing "ready" would offer a button the server may refuse.
+  throw new Error(`Unrecognised email status: ${String(s)}`);
+}
+
+/**
+ * The calling client's email status, or null when this account is not a
+ * claimed client (the server answers no row). Caller-scoped: it takes no
+ * argument, so it can only ever describe the caller's own address.
+ */
+export async function getMyEmailStatus(): Promise<MyEmailStatus | null> {
+  const { data, error } = await supabase.rpc("fn_my_email_status");
+  if (error) throw new Error(error.message);
+  const row = data?.[0];
+  return row ? { email: row.o_email, state: asLiftState(row.o_state) } : null;
+}
+
+/**
+ * Turn email back on for the calling client's contact address (0054). The
+ * server decides again, and answers `lifted` or the reason it did not: a
+ * refusal is an answer, not an error, so this throws only when the call fails.
+ */
+export async function liftMyEmailSuppression(): Promise<"lifted" | "not_client" | EmailLiftState> {
+  const { data, error } = await supabase.rpc("fn_lift_my_email_suppression");
+  if (error) throw new Error(error.message);
+  return data === "lifted" || data === "not_client" ? data : asLiftState(data);
+}
+
 /** The one place the claim URL is built, so Roster and ClientDetail agree. */
 export function inviteUrlFor(token: string): string {
   return `${window.location.origin}/claim/${token}`;

@@ -234,3 +234,29 @@ the gap Codex found in 0048 for `invite_signup_attempts`.
 `push_last_error`, mirroring H17's email quartet exactly. Existing rows are
 backfilled to `skipped`: no push was ever sent because there was no push, and
 the point is that they must not be sent now.
+
+## email_suppressions (0038) and email_suppression_lifts (0054)
+
+Neither is a tenant table (invariant 7 does not apply): both are keyed on an
+email address, which belongs to no operator. Both have RLS enabled and forced,
+no policies, and nothing granted to `anon` or `authenticated`; a client or an
+operator reaches them only through definer functions. The service role holds
+`SELECT, INSERT, DELETE` on the first and `SELECT` on the second.
+
+**email_suppressions** — `email text` (`check (email = lower(email))`: stored
+lowercased and not trimmed, and the sender compares it the same way),
+`operator_id uuid null references operators on delete cascade` (null = every
+operator),
+`notification_type notification_type null` (null = every type), `reason text`,
+`created_at timestamptz`. Unique on `(email, operator_id, notification_type)`
+with `NULLS NOT DISTINCT`. One-click unsubscribe (`fn_unsubscribe_by_token`)
+writes the platform-wide, every-type row; nothing writes the narrower kinds yet.
+It survives a client's erasure on purpose (spec 03).
+
+**email_suppression_lifts** — `email text` (`check (email = lower(email))`),
+`lifted_by uuid` (the account that lifted it; deliberately not a foreign key),
+`lifted_at timestamptz`, and the suppression it replaced: `suppressed_at
+timestamptz`, `suppression_reason text`. Written only by
+`fn_lift_my_email_suppression`, in the statement that deletes the row it
+records, and readable by the service role alone. Deleted, by
+`trg_clients_forget_email_lifts`, when the lifting account's client is erased.
