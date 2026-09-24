@@ -26,3 +26,14 @@ After this change merges, confirm function deployment and probes complete,
 smoke and auth-posture runs execute successfully. Check warnings for missing
 secrets; a workflow's green result alone is not proof of payment or vault readiness.
 
+
+## Follow-up, 2026-09-23
+
+Staging demonstrated the new path: deploy run 105 on `4c45ab1` bundled every
+function with `--use-api`, the boot probe verified each one, and
+`release/staging` advanced to the commit it deployed. The `ops(cli-2.117)`
+change then moved production's function deploy to `--use-api` too, and moved
+the CLI in both workflows from 2.109.1 to 2.117.0. `scripts/verify-workflows.py`
+rule 5 now holds the two workflows to one CLI release and one function-deploy
+invocation, so they cannot drift apart this way again. That change reaches
+staging first, like every merge; production still deploys only by dispatch.

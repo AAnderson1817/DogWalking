@@ -108,20 +108,21 @@ Two reasons, and the second is the real one:
    six-character password floor and MFA off. Hardening the file first is the
    prerequisite, and that is done; the readback above is how we find out what
    the dashboard currently holds.
-2. **I could not verify it.** The Supabase CLI is not installed in the
-   environment this work was done in, so I cannot confirm `config push` exists
-   in the pinned 2.109.1, nor exactly which keys it applies. Adding an
-   unverifiable step to the production **auth** configuration path — on a system
-   holding other people's door codes — is the same shape as the defects this
-   repository has spent a dozen PRs removing: the typecheck that checked zero
-   files, the vault verification that verified nothing, the cron that reported
-   dispatch as success.
+2. **It would overwrite the deployed `site_url`.** When this was first
+   written the CLI could not be inspected from here. It can now: CLI 2.117.0,
+   the release the deploy workflows pin, documents `config push` in its own
+   help text. It writes every property `config.toml` declares and leaves the
+   rest alone, and a non-interactive run (which is what a workflow is)
+   proceeds without asking. This file declares
+   `site_url = "http://127.0.0.1:3000"` for local development, so a push from a
+   deploy would point every magic link, password reset and invite confirmation
+   at localhost. Wiring it first needs the local-only values separated from
+   the deployed ones, and a `config diff` read against staging.
 
-The honest sequence is: read the posture back (now automatic), compare it to the
-table above, change what differs **in the dashboard**, and wire `config push`
-only once someone has watched it work against staging. That is a small, cheap
-task for whoever next has a terminal with the CLI linked — it is not a task for
-a session that cannot run the command.
+So the sequence stays: read the posture back (automatic), compare it to the
+table above, and change what differs **in the dashboard**. `config push`
+belongs in a workflow only after that separation, and after someone has
+watched its diff against staging.
 
 ## The vault's assurance gate (fixed in code)
 

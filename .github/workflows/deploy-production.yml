@@ -73,9 +73,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
 
-      - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0 — keep in lockstep with deploy-staging.yml
+      - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0 — the same commit as deploy-staging.yml (rule 5)
         with:
-          version: 2.109.1  # keep in lockstep with deploy-staging.yml
+          version: 2.117.0  # rule 5 of scripts/verify-workflows.py holds every pin to one release
 
       - name: Link project
         run: supabase link --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
@@ -98,9 +98,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
 
-      - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0 — keep in lockstep with deploy-staging.yml
+      - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0 — the same commit as deploy-staging.yml (rule 5)
         with:
-          version: 2.109.1
+          version: 2.117.0  # rule 5 of scripts/verify-workflows.py holds every pin to one release
 
       # Bounded retry, added after the staging deploy of `db741c8` died with
       # `failed to bundle function: exit 135` on `change-plan` — 135 is 128+7,
@@ -121,8 +121,13 @@ jobs:
       # recurring fault into a slightly slower green.
       - name: Deploy all functions
         run: |
+          # Bundle server-side, exactly as staging does (4c45ab1): GHCR rate
+          # limits blocked the Docker bundler image on two fresh runners, and
+          # production must run the path staging rehearses (rule 5 of
+          # scripts/verify-workflows.py). The function probes below still
+          # verify every deployed function before the frontend release advances.
           for attempt in 1 2 3; do
-            if supabase functions deploy --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"; then
+            if supabase functions deploy --use-api --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"; then
               if [ "$attempt" -gt 1 ]; then
                 echo "::warning title=Function deploy needed $attempt attempts::The function deploy failed $((attempt - 1)) time(s) before succeeding. The bundler has died of a signal before (exit 135 on change-plan, 2026-08-29). If this recurs, stop treating it as noise."
               fi
@@ -352,9 +357,9 @@ jobs:
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
     steps:
-      - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0 — keep in lockstep with deploy-staging.yml
+      - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0 — the same commit as deploy-staging.yml (rule 5)
         with:
-          version: 2.109.1
+          version: 2.117.0  # rule 5 of scripts/verify-workflows.py holds every pin to one release
 
       - name: Push edge-function secrets
         run: |

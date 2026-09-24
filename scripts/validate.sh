@@ -186,6 +186,11 @@ run "10f. enum catalogue proofs" python3 scripts/gen-enum-catalog-proofs.py
 # runs here, and every SKILL.md gate must be run above.
 run "10g. gate lockstep" python3 scripts/check-gate-lockstep.py
 
+# 10h. `functions deploy` ignores an unknown key in [functions.<name>]
+# (measured on CLI 2.109.1 and 2.117.0 alike), so a typo is a setting quietly
+# not applied. The deploy probe cannot see it; this refuses it.
+run "10h. function config" python3 scripts/check-function-config.py
+
 # ── 11. Secret-leak grep ──────────────────────────────────────────────────
 no_secret_literals() {
   local hits

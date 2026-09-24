@@ -6,11 +6,13 @@ Every rule here exists because the repository shipped the thing it forbids.
 The deploy workflows are the least-exercised code in the project — production
 has never run at all, and staging runs once per merge with nobody reading the
 log unless it goes red. So a mistake in their gating is both easy to make and
-slow to find. All four rules below were written after a real failure, and each
-was proven by sabotage against the shipped files in the PR that introduced it.
-Rule 4 is also driven by `app/scripts/verify-workflows.test.ts`, which runs
-this script over fixture workflows, because a rule that reads an expression
-has more ways to be wrong than any file in the tree exercises.
+slow to find. All five rules below were written after a real failure (rule 5
+after a drift that had not failed yet), and each was proven by sabotage against
+the shipped files in the PR that introduced it. Rules 4 and 5 are also driven by
+`app/scripts/verify-workflows.test.ts`, which runs this script over fixture
+workflows. Rule 4 reads an expression, which has more ways to be wrong than any
+file in the tree exercises. Rule 5 compares workflows with one another, and a
+tree that agrees never shows it a disagreement.
 
 Run: python3 scripts/verify-workflows.py
 """
@@ -33,6 +35,10 @@ STATUS_FUNCS = ("success(", "failure(", "cancelled(", "always(")
 failures: list[str] = []
 # Checkouts rule 4 inspected: its eyesight precondition (see main).
 chained_checkouts = 0
+# Rule 5's evidence, gathered across every workflow and judged in main:
+# (workflow, job, setup-cli commit, CLI version) and (workflow, job, flags).
+cli_pins: list[tuple[str, str, str, str]] = []
+function_deploys: list[tuple[str, str, frozenset[str]]] = []
 
 # The value a chained checkout must choose first: the commit the upstream run
 # tested or deployed. And what to write, which every chained checkout uses.
@@ -291,6 +297,19 @@ def check(path: pathlib.Path) -> None:
                 if why:
                     fail(path.name, name, f"{why} — write `ref: {PIN}`")
 
+        # Rule 5's evidence (judged in main, across workflows): every Supabase
+        # CLI this job installs, and every function deploy it runs.
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            uses = str(step.get("uses") or "")
+            if uses.startswith("supabase/setup-cli@"):
+                version = str((step.get("with") or {}).get("version") or "")
+                cli_pins.append((path.name, name, uses.split("@", 1)[1].strip(), version))
+            for m in re.finditer(r"\bsupabase\s+functions\s+deploy\b([^\n;|&]*)", str(step.get("run") or "")):
+                flags = frozenset(re.findall(r"(?<!\S)--[a-z][a-z0-9-]*", m.group(1)))
+                function_deploys.append((path.name, name, flags))
+
 
 def main() -> int:
     files = sorted(WORKFLOWS.glob("*.yml"))
@@ -308,14 +327,50 @@ def main() -> int:
     if chained_checkouts == 0:
         failures.append("rule 4 inspected no checkout in any workflow_run-triggered workflow — it checked nothing")
 
+    # ── Rule 5: one Supabase CLI, and one way to deploy functions ────────
+    # Staging is the only place a CLI version or a deploy path is exercised
+    # before production runs it — no workflow a pull request triggers uses the
+    # CLI — so production must run exactly what staging ran. Every setup-cli
+    # step carried "keep in lockstep with deploy-staging.yml", a rule written
+    # down and connected to nothing, and it had already drifted: the owner's
+    # 4c45ab1 moved staging's function deploy to `--use-api` and production's
+    # stayed on the Docker bundler. So: one setup-cli commit, one exact CLI
+    # release, and the same flags on every `supabase functions deploy`. Each
+    # half refuses if it saw nothing, since agreement among zero pins is not
+    # agreement.
+    if not cli_pins:
+        failures.append("rule 5 inspected no supabase/setup-cli step in any workflow — it checked nothing")
+    if not function_deploys:
+        failures.append("rule 5 inspected no `supabase functions deploy` in any workflow — it checked nothing")
+    for workflow, job, ref, version in cli_pins:
+        if not re.fullmatch(r"[0-9a-f]{40}", ref):
+            fail(workflow, job, f"supabase/setup-cli is pinned to `{ref}`, not a commit SHA")
+        if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+            fail(workflow, job, f"the Supabase CLI version is `{version or '(unset)'}`, not an exact release — pin X.Y.Z")
+    for what, values in (
+        ("supabase/setup-cli commit", {(w, j, r) for w, j, r, _ in cli_pins}),
+        ("Supabase CLI version", {(w, j, v) for w, j, _, v in cli_pins}),
+    ):
+        distinct = {v for _, _, v in values}
+        if len(distinct) > 1:
+            listed = "; ".join(f"{w} :: {j} = {v}" for w, j, v in sorted(values))
+            failures.append(f"rule 5: the {what} differs between jobs, so production would run what staging never did: {listed}")
+    if len({flags for _, _, flags in function_deploys}) > 1:
+        listed = "; ".join(
+            f"{w} :: {j} = {' '.join(sorted(f)) or '(no flags)'}" for w, j, f in sorted(function_deploys, key=lambda t: (t[0], t[1]))
+        )
+        failures.append(f"rule 5: `supabase functions deploy` runs with different flags, so staging does not rehearse production's path: {listed}")
+
     if failures:
         for line in failures:
             print(f"::error::{line}")
         print(f"\nFAIL: {len(failures)} workflow gating problem(s)")
         return 1
+    version = cli_pins[0][3]
     print(
         f"PASS: {len(files)} workflows — no self-referential conditions, no dropped `needs` gate, "
-        f"no shallow push, no unpinned checkout after a workflow_run ({chained_checkouts} checked)"
+        f"no shallow push, no unpinned checkout after a workflow_run ({chained_checkouts} checked), "
+        f"one Supabase CLI ({version}, {len(cli_pins)} pins) and one function-deploy path ({len(function_deploys)} deploys)"
     )
     return 0
 
