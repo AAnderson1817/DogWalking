@@ -403,11 +403,14 @@ function namesFactory(id: ts.Identifier, checker: ts.TypeChecker): boolean {
  * The name is read as a value here — not declared, not a member's name (the
  * access is judged instead), not the source of a rename (judged as the
  * rename), not in a type, and not the target of a destructuring assignment.
+ * A shorthand's DEFAULT (`({ x = createElement } = obj)`) is evaluated, not
+ * assigned to, so it is read like any other expression (the verify-deployment
+ * scan's finding on #97, and its sibling here).
  */
 function isValueReference(id: ts.Identifier, checker: ts.TypeChecker): boolean {
   const p = id.parent;
   if (!p) return false;
-  if (ts.isShorthandPropertyAssignment(p)) return p.name === id && !isAssignmentTarget(p.parent);
+  if (ts.isShorthandPropertyAssignment(p) && p.name === id) return !isAssignmentTarget(p.parent);
   if (ts.isPropertyAccessExpression(p) && p.name === id) return false;
   if ((ts.isImportSpecifier(p) || ts.isExportSpecifier(p) || ts.isBindingElement(p)) && p.propertyName === id) return false;
   if (ts.isExportSpecifier(p)) return false;
@@ -1068,6 +1071,12 @@ describe("what the scan refuses and admits", () => {
     expect(notes(`const { [key]: h } = React;`)[0]).toMatch(/key the scan cannot read/);
     expect(rules(`let createElement; ({ createElement } = React);`)).toEqual(both);
     expect(notes(`let createElement; ({ createElement } = React);`)[0]).toMatch(/declared elsewhere/);
+    // A default is evaluated, not assigned to: the factory handed into `x`
+    // as a destructuring default is taken as a value, however it is written.
+    expect(rules(`let x; ({ x = createElement } = obj);`)).toEqual(both);
+    expect(notes(`let x; ({ x = createElement } = obj);`)[0]).toMatch(/taken as a value/);
+    expect(rules(`let x; ({ a: x = createElement } = obj);`)).toEqual(both);
+    expect(rules(`const { a: x = createElement } = obj;`)).toEqual(both);
     // Under its own name it is still read where it is called.
     expect(rules(`import { createElement } from "react"; createElement("span", { role: "status" });`)).toEqual([]);
     expect(rules(`const { createElement } = React; createElement("span", { role: r });`)).toEqual(["role"]);
