@@ -13,8 +13,9 @@ After a reset to the migrations, every function in `public` that the
 migrations create must be in the model with the same argument types, the same
 SECURITY DEFINER flag, and the same API roles holding EXECUTE (PUBLIC, anon,
 authenticated); and the model may name nothing the database lacks. That also
-covers what the generator cannot see — a GRANT or REVOKE made by dynamic SQL
-inside a body, which the shared SQL reader blanks — and what it misreads: a
+covers what the generator cannot see — a GRANT or REVOKE assembled inside a
+body past the shared SQL reader's refusal of routine statements there — and
+what it misreads: a
 statement it takes for a no-op, or a type it spells differently from
 `format_type`. The database has applied what the migrations said, the model
 has applied what it read, and the two then disagree here, by name.
@@ -120,7 +121,7 @@ def main() -> int:
             show = lambda rs: ", ".join(gen.SHOWN.get(r, r) for r in rs) or "none"  # noqa: E731
             problems.append(f"{gen.fmt(key)}: the model says EXECUTE is held by {show(w_roles)},"
                             f" the database by {show(h_roles)} — a grant or revoke the generator"
-                            " cannot see (dynamic SQL in a body) or misread (a statement it took for a"
+                            " cannot see (SQL assembled in a body) or misread (a statement it took for a"
                             " no-op, a type it spells differently)")
     if problems:
         for p in problems:

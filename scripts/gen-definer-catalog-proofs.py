@@ -516,25 +516,25 @@ for label, sql, needle in (
               f"exit {code}, stderr {err.strip()[:160]!r}")
 
 
+# ── … and not the same statements without the part that decides it ──────
+with probe("a drop without CASCADE, and a type that is no range"):
+    model = collect_with(
+        "drop type if exists probe_t;\ndrop table if exists probe_tbl restrict;\n"
+        "create type probe_e as enum ('as range');\ncreate type probe_c as (a int);\n"
+    )
+    check("a DROP without CASCADE, an enum and a composite type are read without refusal",
+          gen.render(model) == gen.render(collect_with(None)))
+
 # ── Routine DDL inside a body is refused, not blanked (Codex, on #97) ─────
-# The reader blanks every DO and routine body, so a function created and
-# granted by dynamic SQL inside one was invisible here: the migration
-# installed a publicly executable definer function while this catalogue and
-# its invariant-5 check stayed green. A body may not create, alter or drop a
-# routine, nor grant or revoke on one; a table grant in a body (0004's loop)
-# is none of these, and is read. Each alternative of the rule has a probe
-# only it refuses, so dropping one goes red here by name.
-def collect_code(sql: str) -> tuple[int | None, str]:
-    err = io.StringIO()
-    code = None
-    with contextlib.redirect_stderr(err):
-        try:
-            collect_with(sql)
-        except SystemExit as e:
-            code = e.code
-    return code, err.getvalue()
-
-
+# Carried over from #97's twenty-seventh round, whose fix lives in the reader
+# this model shares. The reader blanks every DO and function body, so a
+# function created and granted by dynamic SQL inside one was invisible to any
+# reading of the migrations, and gate 8e saw a DO block's effect only once it
+# had run — never a function body that does the same when it is called. The
+# reader now refuses a body that creates, alters or drops a routine, or grants
+# or revokes on one, by name; a table grant in a body (0004's loop) is none of
+# these, and is read. Each alternative of the rule has a probe only it
+# refuses, so dropping one goes red here by name.
 for label, sql, *needle in (
     ("a DO block that creates and grants a definer function (Codex's case)",
      "do $$ begin\n"
@@ -568,33 +568,26 @@ for label, sql, *needle in (
      "do $$ begin execute 'grant execute on /*x*/ function public.fn_book_walk(uuid) to anon'; end $$;\n",
      "EXECUTE'd command"),
 ):
-    code, err = collect_code(sql)
-    check(f"{label} is refused by name",
-          code == 1 and f"{NEXT:04d}_probe.sql" in err and "refused" in err
-          and (needle[0] if needle else "in a body") in err,
-          f"exit {code}, stderr {err.strip()[:160]!r}")
-for label, sql in (
-    ("a dynamic table grant in a body is read, not refused",
-     "do $$ begin execute format('grant select on table %I to service_role', 'clients'); end $$;\n"),
-    # A word that merely CONTAINS one of the rule's words is not that word,
-    # even in the same statement: `can_revoke` fails the boundary before
-    # `revoke`, `revoked` the one after it, `salon` the one before `on`, and
-    # `functionality` the one after `function`.
-    ("a body whose words merely contain grant, revoke, on or function is read, not refused",
-     "do $$ begin raise notice 'can_revoke on function calls, revoked on function calls, "
-     "grant access to the salon functions, and grant access on functionality'; end $$;\n"),
-):
-    code, err = collect_code(sql)
-    check(label, code is None, f"exit {code}, stderr {err.strip()[:160]!r}")
-
-# ── … and not the same statements without the part that decides it ──────
-with probe("a drop without CASCADE, and a type that is no range"):
-    model = collect_with(
-        "drop type if exists probe_t;\ndrop table if exists probe_tbl restrict;\n"
-        "create type probe_e as enum ('as range');\ncreate type probe_c as (a int);\n"
-    )
-    check("a DROP without CASCADE, an enum and a composite type are read without refusal",
-          gen.render(model) == gen.render(collect_with(None)))
+    with probe(f"refuses {label}"):
+        code, err = refused(sql)
+        check(f"refuses {label}, naming the file",
+              code == 1 and f"{NEXT:04d}_probe.sql" in err and "refused" in err
+              and (needle[0] if needle else "in a body") in err,
+              f"exit {code}, stderr {err.strip()[:160]!r}")
+with probe("a body that only touches a table, or words that merely contain the rule's"):
+    baseline = gen.render(collect_with(None))
+    for label, sql in (
+        ("a dynamic table grant in a body is read, not refused",
+         "do $$ begin execute format('grant select on table %I to service_role', 'clients'); end $$;\n"),
+        # A word that merely CONTAINS one of the rule's words is not that word,
+        # even in the same statement: `can_revoke` fails the boundary before
+        # `revoke`, `revoked` the one after it, `salon` the one before `on`, and
+        # `functionality` the one after `function`.
+        ("a body whose words merely contain grant, revoke, on or function is read, not refused",
+         "do $$ begin raise notice 'can_revoke on function calls, revoked on function calls, "
+         "grant access to the salon functions, and grant access on functionality'; end $$;\n"),
+    ):
+        check(f"{label}, and changes nothing", gen.render(collect_with(sql)) == baseline)
 
 total = passed + len(failures)
 for f in failures:

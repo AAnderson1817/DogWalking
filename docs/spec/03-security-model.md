@@ -604,10 +604,13 @@ depend on, a range type (whose constructors no statement names), and a
 exists with another — a no-op, or a type it spells differently from
 PostgreSQL, and it cannot tell which.
 
-So the table below is the model's reading, not the database's word. What no
-reading of the migrations can see is a grant made by dynamic SQL inside a
-body, and what a reading can get wrong is a type or a statement it misreads;
-gate 8e (`scripts/check-definer-catalog-live.py`) is the backstop for both. It
+So the table below is the model's reading, not the database's word. The
+reader it shares with the enum catalogue blanks every DO and function body, so
+it refuses a body that creates, alters or drops a routine, or grants or
+revokes on one, by name; what no reading of the migrations can see is SQL
+assembled inside a body past that refusal, and what a reading can get wrong is
+a type or a statement it misreads. Gate 8e
+(`scripts/check-definer-catalog-live.py`) is the backstop for both. It
 holds the whole model — every function the migrations create, its argument
 types, its `SECURITY DEFINER` flag and the API roles holding EXECUTE — to a
 reset database, and fails by name where they disagree.
