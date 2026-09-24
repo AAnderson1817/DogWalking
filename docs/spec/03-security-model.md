@@ -144,8 +144,16 @@ deadline the walker answers in Stripe, so an erasure neither deletes it nor
 stops the next one. Rows written before 0057 got a subject where they recorded one (a
 `client_id` or a walk), and those about a client already erased were deleted,
 as the purge now would; a walker notice that named its client only in text
-could not be linked without guessing from a name, and stays. Production has
-never run, so none exists outside staging's fixtures. `invite_signup_attempts` (0048) is
+could not be linked without guessing from a name, and stays. So does one the
+previous Stripe webhook writes during the deploy that applies 0057: both
+workflows migrate before they deploy functions, and for those minutes (longer
+if the function deploy fails) the webhook still in place writes its walker
+notices with no subject (Codex on PR #105). The database cannot tell whom such
+a row is about, so it could only drop or refuse it, and either loses the
+refund or dispute alert above: `fn_reverse_payment` commits before the alert,
+and Stripe's retry takes its no-op branch and never writes it. Production has
+never run, and its first deploy applies 0057 to a database with no clients, so
+neither kind exists outside staging's fixtures. `invite_signup_attempts` (0048) is
 destroyed too, and not by `fn_purge_client` naming it: the purge rotates
 `invite_token`, and `trg_clients_reset_invite_signup_budget` clears the
 client's rows whenever that column changes. Those rows carry an `ip`, so
