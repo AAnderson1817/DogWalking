@@ -39,6 +39,10 @@ chained_checkouts = 0
 # (workflow, job, setup-cli commit, CLI version) and (workflow, job, flags).
 cli_pins: list[tuple[str, str, str, str]] = []
 function_deploys: list[tuple[str, str, frozenset[str]]] = []
+# The two workflows rule 5 exists to hold together. Each must show it its own
+# evidence (see main): counted across all workflows, staging's pin and deploy
+# alone satisfied the rule, so production could vouch for nothing and pass.
+DEPLOY_WORKFLOWS = ("deploy-staging.yml", "deploy-production.yml")
 
 # The value a chained checkout must choose first: the commit the upstream run
 # tested or deployed. And what to write, which every chained checkout uses.
@@ -335,13 +339,28 @@ def main() -> int:
     # down and connected to nothing, and it had already drifted: the owner's
     # 4c45ab1 moved staging's function deploy to `--use-api` and production's
     # stayed on the Docker bundler. So: one setup-cli commit, one exact CLI
-    # release, and the same flags on every `supabase functions deploy`. Each
-    # half refuses if it saw nothing, since agreement among zero pins is not
-    # agreement.
-    if not cli_pins:
-        failures.append("rule 5 inspected no supabase/setup-cli step in any workflow — it checked nothing")
-    if not function_deploys:
-        failures.append("rule 5 inspected no `supabase functions deploy` in any workflow — it checked nothing")
+    # release, and the same flags on every `supabase functions deploy`.
+    #
+    # And each deploy workflow must show the rule its OWN pin and its own
+    # function deploy. This used to be a global "saw nothing" check, which
+    # staging's evidence alone satisfied: with production's deploy removed, or
+    # wrapped past the scanner as `${SB:-supabase} functions deploy`, the
+    # comparisons ran over staging alone and passed (Codex, on #100; both
+    # reproduced). Agreement with nothing is not agreement.
+    present = {p.name for p in files}
+    for workflow in DEPLOY_WORKFLOWS:
+        if workflow not in present:
+            failures.append(f"rule 5: there is no {workflow}, so it cannot hold staging and production to one CLI and one deploy path")
+            continue
+        if not any(w == workflow for w, _, _, _ in cli_pins):
+            failures.append(
+                f"rule 5 read no supabase/setup-cli step in {workflow}, so it cannot tell which CLI that workflow deploys with"
+            )
+        if not any(w == workflow for w, _, _ in function_deploys):
+            failures.append(
+                f"rule 5 read no `supabase functions deploy` in {workflow}, so it cannot tell which path that workflow "
+                "deploys by — a deploy the scanner cannot read would let the other workflow vouch for it"
+            )
     for workflow, job, ref, version in cli_pins:
         if not re.fullmatch(r"[0-9a-f]{40}", ref):
             fail(workflow, job, f"supabase/setup-cli is pinned to `{ref}`, not a commit SHA")

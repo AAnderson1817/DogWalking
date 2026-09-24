@@ -247,8 +247,10 @@ one commit SHA and one exact `X.Y.Z` CLI release, and every
 `supabase functions deploy` runs with the same flags, because staging is the
 only place a CLI version or a deploy path is exercised before production runs
 it. The owner's `4c45ab1` had already moved staging's function deploy to
-`--use-api` while production stayed on the Docker bundler. Each half fails if
-it saw nothing.
+`--use-api` while production stayed on the Docker bundler. Each of the two
+deploy workflows must show rule 5 its own pin and its own function deploy, so
+neither can vouch for the other: counted across all workflows, staging's alone
+once satisfied it (Codex, on #100).
 
 ## 10d. CLAUDE.md's counts match the tree
 ```
