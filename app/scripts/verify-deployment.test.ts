@@ -578,14 +578,22 @@ const aliasSource = (id: ts.Identifier): boolean =>
  * element of a literal that is (a property's value, a shorthand's name, a
  * spread, an array element), or the variable of a `for … of`/`for … in`. A
  * shorthand's DEFAULT is evaluated, not assigned to, so only its name counts.
- * A caller passes the outermost wrapper (`(serveFunction as any) = …`); a
- * wrapped pattern is not a valid target at all. The channel and FormError
- * scans carry their own copy of this rule.
+ * It climbs every wrapper, as `destructuredKeys` already did for the same
+ * left side (Codex, on #97: `(({ serveFunction: serve } as any) = http)` was
+ * no destructuring here and one there). This comment used to say a wrapped
+ * pattern "is not a valid target at all". TypeScript refuses one (TS2364),
+ * and so do Vite's rolldown, esbuild and Deno, at parse time (measured), but
+ * what this scan sees should not depend on a parser it does not run. A comma
+ * is not climbed, since `(0, { a }) = x` is not JavaScript; the `=` check
+ * below comes first, and a comma is a binary expression, so that order is
+ * what keeps it out. The channel and FormError scans carry their own copy
+ * of this rule.
  */
 function isAssignmentTarget(node: ts.Node): boolean {
   const parent = node.parent;
   if (!parent) return false;
   if (ts.isBinaryExpression(parent)) return parent.operatorToken.kind === ts.SyntaxKind.EqualsToken && parent.left === node;
+  if (isWrapper(parent)) return isAssignmentTarget(parent);
   if ((ts.isPropertyAssignment(parent) && parent.initializer === node)
     || (ts.isShorthandPropertyAssignment(parent) && parent.name === node)
     || ts.isSpreadAssignment(parent) || ts.isSpreadElement(parent)) return isAssignmentTarget(parent.parent);
@@ -1237,6 +1245,18 @@ describe("verify-deployment's read-only argument is derived", () => {
     fn("assigned-default", SERVES + "let serve;\n({ serveFunction: serve = fallback } = http);\nserve(g);");
     fn("assigned-for-of", SERVES + "let serve;\nfor ({ serveFunction: serve } of mods) serve(g);");
     fn("assigned-nested", SERVES + "let serve;\n[{ serveFunction: serve }] = pairs;\nserve(g);");
+    // A destructuring target read through every wrapper, not just the
+    // parentheses the channel and FormError scans climbed (Codex, on #97).
+    // TypeScript refuses each (TS2364), and so do Vite's rolldown, esbuild
+    // and Deno, at parse time (measured); the scan reads through them anyway,
+    // as it does at every other site — `destructuredKeys` already unwrapped
+    // the left side, so this scan disagreed with itself.
+    fn("assigned-as-pattern", SERVES + 'let serve;\n(({ serveFunction: serve } as any) = http);\nserve(g, { methods: ["GET"] });');
+    fn("assigned-satisfies-pattern", SERVES + "let serve;\n(({ serveFunction: serve } satisfies object) = http);\nserve(g);");
+    fn("assigned-angle-pattern", SERVES + "let serve;\n((<any>{ serveFunction: serve }) = http);\nserve(g);");
+    fn("assigned-nonnull-pattern", SERVES + "let serve;\n(({ serveFunction: serve })! = http);\nserve(g);");
+    fn("assigned-wrapped-nested", SERVES + "let serve;\n({ inner: ({ serveFunction: serve } as any) } = http);\nserve(g);");
+    fn("assigned-wrapped-unreadable", SERVES + "let serve;\n(({ [key]: serve } as any) = http);\nserve(g);");
     fn("indexed-unreadable", SERVES + 'http[name](g, { methods: ["GET"] });');
     // A default is evaluated, not assigned to: serveFunction as a shorthand's
     // default is read, and handed to `serve`.
@@ -1272,6 +1292,11 @@ describe("verify-deployment's read-only argument is derived", () => {
     fn("assigned-keeps-default", SERVES + "function adopt(http) {\n  let serveFunction;\n  ({ serveFunction: serveFunction = fallback } = http);\n}");
     fn("unreadable-keeps-name", SERVES + "function adopt(mod) {\n  const { [key]: serveFunction } = mod;\n}");
     fn("built-object-key", IMPORT_HELPER + "const routes = { serveFunction: handler };\nserveFunction(h);");
+    fn("built-wrapped-key", IMPORT_HELPER + "const routes = ({ serveFunction: handler } as const);\nserveFunction(h);");
+    // A comma is no assignment target: `(0, { a }) = x` is not JavaScript
+    // (V8, rolldown, esbuild and Deno each refuse it, measured), so the
+    // literal it holds takes nothing out.
+    fn("comma-pattern", IMPORT_HELPER + "let serve;\n((0, { serveFunction: serve }) = http);\nserveFunction(h);");
     fn("indexed-uncalled", SERVES + "const message = OUTCOME_MESSAGES[outcome];");
     // Deno is a member of the global object too (Codex, on #97): each name the
     // global object goes by in Deno 2 reaches it (measured: globalThis, self
@@ -1337,6 +1362,12 @@ describe("verify-deployment's read-only argument is derived", () => {
       "assigned-default": "serveFunction destructured under another name, so the scan cannot see its calls",
       "assigned-for-of": "serveFunction destructured under another name, so the scan cannot see its calls",
       "assigned-nested": "serveFunction destructured under another name, so the scan cannot see its calls",
+      "assigned-as-pattern": "serveFunction destructured under another name, so the scan cannot see its calls",
+      "assigned-satisfies-pattern": "serveFunction destructured under another name, so the scan cannot see its calls",
+      "assigned-angle-pattern": "serveFunction destructured under another name, so the scan cannot see its calls",
+      "assigned-nonnull-pattern": "serveFunction destructured under another name, so the scan cannot see its calls",
+      "assigned-wrapped-nested": "serveFunction destructured under another name, so the scan cannot see its calls",
+      "assigned-wrapped-unreadable": "a key the scan cannot read, destructured under another name, could be serveFunction, so the scan cannot see its calls",
       "indexed-unreadable": "a call through a member the scan cannot read could be serveFunction, so the scan cannot see its options",
       "assigned-default-read": "serveFunction referenced without being called, so the scan cannot see its options",
       "comma-indexed": "a call through a member the scan cannot read could be serveFunction, so the scan cannot see its options",

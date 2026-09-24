@@ -174,13 +174,19 @@ function memberOf(e: ts.PropertyAccessExpression | ts.ElementAccessExpression): 
 /**
  * An object literal written where a value is ASSIGNED TO rather than built:
  * the left of `=`, nested in another such literal (or an array one), or the
- * variable of a `for … of`/`for … in`.
+ * variable of a `for … of`/`for … in`. It climbs every wrapper the scan reads
+ * through elsewhere, not just parentheses (Codex, on #97). TypeScript refuses
+ * a wrapped pattern as a target (TS2364), and so do Vite's rolldown, esbuild
+ * and Deno, at parse time (measured) — but what this scan sees should not
+ * depend on a parser it does not run. A comma is not climbed, since `(0,
+ * { a }) = x` is not JavaScript; the `=` check below comes first, and a
+ * comma is a binary expression, so that order is what keeps it out.
  */
 function isAssignmentTarget(node: ts.Node): boolean {
   const parent = node.parent;
   if (!parent) return false;
   if (ts.isBinaryExpression(parent)) return parent.operatorToken.kind === ts.SyntaxKind.EqualsToken && parent.left === node;
-  if (ts.isParenthesizedExpression(parent)) return isAssignmentTarget(parent);
+  if (isWrapper(parent)) return isAssignmentTarget(parent);
   if ((ts.isPropertyAssignment(parent) && parent.initializer === node) || ts.isSpreadAssignment(parent)
     || ts.isSpreadElement(parent)) return isAssignmentTarget(parent.parent);
   if (ts.isArrayLiteralExpression(parent)) return isAssignmentTarget(parent);
@@ -531,6 +537,31 @@ describe("what the channel scan refuses and admits", () => {
     expect(one("const claim = { notification_id: id, channel };")).toBe("");
     expect(one("const out = { channel: \"email\" };")).toBe("");
     expect(one('const { data, error } = await supabase.from("walks").select("id");')).toBe("");
+  });
+
+  it("reads a destructuring target through every wrapper, not just parentheses (Codex, on #97)", () => {
+    const one = (code: string) => client({ [THE_CHANNEL_FILE]: `${PRIVATE}\n${code}` }).join("\n");
+    // TypeScript refuses each of these (TS2364), and so do Vite's rolldown,
+    // esbuild and Deno, at parse time (measured). The scan still reads through
+    // the wrapper, as it does at every other site, so what it sees does not
+    // depend on a parser it does not run.
+    const wrapped = one("let open;\n(({ channel: open } as any) = supabase);\nopen.call(supabase, t);");
+    expect(wrapped).toMatch(/:3 is not private: `\.channel` taken by destructuring/);
+    expect(wrapped).toMatch(/exactly one channel call, found 2/);
+    expect(one("let open;\n(({ channel: open } satisfies object) = supabase);")).toMatch(/taken by destructuring/);
+    expect(one("let open;\n((<any>{ channel: open }) = supabase);")).toMatch(/taken by destructuring/);
+    expect(one("let open;\n(({ channel: open })! = supabase);")).toMatch(/taken by destructuring/);
+    expect(one("let open;\n({ realtime: ({ channel: open } as any) } = supabase);")).toMatch(/taken by destructuring/);
+    expect(one("let open;\nfor (({ channel: open } as any) of clients) open(t);")).toMatch(/taken by destructuring/);
+    expect(one("let open;\n(({ [key]: open } as any) = supabase);")).toMatch(/under a key the scan cannot read/);
+    // A wrapped literal that is not assigned to is still data.
+    expect(one('const out = ({ channel: "email" } as const);')).toBe("");
+    expect(one('send(<Payload>{ channel: "push" });')).toBe("");
+    // And a comma is no assignment target: `(0, { channel }) = x` is not
+    // JavaScript (V8, rolldown, esbuild and Deno each refuse it, measured),
+    // so the literal a comma holds is data, whichever side of `=` it is on.
+    expect(one("const pair = (0, { channel: open });")).toBe("");
+    expect(one("let open;\n((0, { channel: open }) = supabase);")).toBe("");
   });
 
   it("refuses a member taken under a key it cannot read, which could be `channel` (Codex, on #97)", () => {

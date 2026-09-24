@@ -461,13 +461,19 @@ function isValueReference(id: ts.Identifier, checker: ts.TypeChecker): boolean {
 /**
  * `node` is being assigned to: the left of `=`, or inside a literal that is —
  * so `({ createElement } = React)` takes the member out without a binding
- * pattern the scan would read as one.
+ * pattern the scan would read as one. It climbs every wrapper the scan reads
+ * through elsewhere, not just parentheses (Codex, on #97). TypeScript refuses
+ * a wrapped pattern as a target (TS2364), and so do Vite's rolldown, esbuild
+ * and Deno, at parse time (measured) — but what this scan sees should not
+ * depend on a parser it does not run. A comma is not climbed, since `(0,
+ * { a }) = x` is not JavaScript; the `=` check below comes first, and a
+ * comma is a binary expression, so that order is what keeps it out.
  */
 function isAssignmentTarget(node: ts.Node): boolean {
   const parent = node.parent;
   if (!parent) return false;
   if (ts.isBinaryExpression(parent)) return parent.operatorToken.kind === ts.SyntaxKind.EqualsToken && parent.left === node;
-  if (ts.isParenthesizedExpression(parent)) return isAssignmentTarget(parent);
+  if (passesThrough(parent)) return isAssignmentTarget(parent);
   if ((ts.isPropertyAssignment(parent) && parent.initializer === node) || ts.isSpreadAssignment(parent)
     || ts.isSpreadElement(parent)) return isAssignmentTarget(parent.parent);
   if (ts.isArrayLiteralExpression(parent)) return isAssignmentTarget(parent);
@@ -1377,6 +1383,30 @@ describe("what the scan refuses and admits", () => {
     expect(rules(`type F = typeof React.createElement; let g: typeof createElement;`)).toEqual([]);
     // …and a wrapper of the real one is caught where it applies the props.
     expect(rules(`function make(tag, props) { return React.createElement(tag, props); }`)).toEqual(both);
+  });
+
+  it("reads a destructuring target through every wrapper, not just parentheses (Codex, on #97)", () => {
+    const both = ["role", "aria-live"];
+    const notes = (text: string, file?: string) => scanSource(file ?? "screens/Probe.tsx", text).map((f) => f.note);
+    // TypeScript refuses each of these (TS2364), and so do Vite's rolldown,
+    // esbuild and Deno, at parse time (measured). The scan still reads through
+    // the wrapper, as it does at every other site, so what it sees does not
+    // depend on a parser it does not run.
+    const codex = `let make; (({ createElement: make } as any) = React); make("span", { role: getRole() });`;
+    expect(rules(codex)).toEqual(both);
+    expect(notes(codex)[0]).toMatch(/declared elsewhere/);
+    expect(rules(`let make; (({ createElement: make } satisfies object) = React);`)).toEqual(both);
+    expect(rules(`let make; (({ createElement: make })! = React);`)).toEqual(both);
+    expect(rules(`let make; ((<any>{ createElement: make }) = React);`, "screens/probe.ts")).toEqual(both);
+    expect(rules(`let createElement; (({ createElement } as any) = React);`)).toEqual(both);
+    expect(rules(`let make; ({ ui: ({ createElement: make } as any) } = React);`)).toEqual(both);
+    expect(rules(`let make; (({ [key]: make } as any) = React);`)).toEqual(both);
+    // A wrapped literal that is not assigned to is still data.
+    expect(rules(`const x = ({ createElement: "div" } as const);`)).toEqual([]);
+    expect(rules(`send(<Payload>{ createElement: "div" });`, "screens/probe.ts")).toEqual([]);
+    // A comma is no assignment target: `(0, { a }) = x` is not JavaScript
+    // (V8, rolldown, esbuild and Deno each refuse it, measured).
+    expect(rules(`let make; ((0, { createElement: make }) = React);`)).toEqual([]);
   });
 
   it("gives a component's exemption only to the component, never to a string (Codex, on #97)", () => {
