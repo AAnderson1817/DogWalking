@@ -510,6 +510,7 @@ cat <<'EOF'
   * owner of schema public
   * member of anon, authenticated, service_role
   * member of the role owning storage.objects   (supabase_storage_admin)
+                                   -- and 0058's erasure reads it at run time
   * member of the role owning realtime.messages (supabase_realtime_admin)
   * REFERENCES and SELECT on auth.users -- SELECT is read at run time
   * USAGE on auth, storage, realtime, cron

@@ -111,6 +111,21 @@ after the purge commits.
 
 ## Done
 
+- **An erasure removes every photo, and says when it has finished** —
+  migration `0058`. No erasure of a client whose pet had a photo ever
+  finished: the browser guessed each path's bucket from its shape and sent
+  every pet photo to walk-photos. The adversarial review of the first fix then
+  found three more defects on the same path, all older than it. A pet's
+  replaced photos, and any walk photo whose row never got written, survived
+  every erasure. After a reload an unfinished erasure read as done, with its
+  retry hidden and the pets' medical notes still in the database. And
+  Storage's answers could not prove an object gone. The purge now reads the
+  client's walk and pet folders from `storage.objects`. It redacts the pets in
+  its first phase, refuses its second while any photo remains, and has a
+  read-only status call that the screen uses to offer "Finish erasing".
+  Removals go in batches of at most 1000. See the `privacy(0058)` status-log
+  entry.
+
 - **An erasure removes the walker's notices about the client** — migration
   `0057`. `notifications.client_id` says who a row is for, so a row the walker
   reads carried NULL there and named its client only in its title; the purge,

@@ -3776,10 +3776,25 @@ declare
   v_ledger_before int;
   v_ledger_after  int;
   v_paths int;
+  v_named text[];
   v_export jsonb;
+  v_status jsonb;
+  v_msg text;
+  v_other_walk uuid;
+  v_other_pet uuid;
+  v_other_client uuid;
+  v_live  uuid := '99999999-0000-4000-c000-0000000058c1';
+  v_began timestamptz;
 begin
   reset session authorization;
   select id into v_svc from service_types where operator_id = v_op limit 1;
+  select w.id, w.client_id into v_other_walk, v_other_client
+    from walks w where w.operator_id = v_op order by w.id limit 1;
+  select id into v_other_pet from pets
+   where operator_id = v_op and client_id = v_other_client order by id limit 1;
+  if v_other_walk is null or v_other_pet is null then
+    raise exception 'FAIL: precondition — the walker has no other client with a walk and a pet';
+  end if;
 
   insert into clients (id, operator_id, full_name, email, phone, notes, status, auth_user_id)
   values (v_cl, v_op, 'Purge Me', 'purge@sanpo.test', '+1 555 0100',
@@ -3788,9 +3803,13 @@ begin
                           access_notes_public, lat, lng)
   values (v_prop, v_op, v_cl, 'Home', '14 Elm Street', 'Chicago', '60601',
           'side gate, latch is stiff', 41.88, -87.63);
+  -- In the layout uploadPetPhoto writes, {operator}/{pet}/{file}, which the
+  -- pet-photos policies read (0031). This fixture used {operator}/pet/{file}
+  -- until 0058: the shape the browser's bucket guess assumed, and one no pet
+  -- photo has ever had, so the fixture agreed with the defect.
   insert into pets (id, operator_id, client_id, name, medical_notes, medication_notes, photo_path)
   values (v_pet, v_op, v_cl, 'Rex', 'epileptic', 'phenobarbital 2x daily',
-          v_op || '/pet/rex.jpg');
+          v_op || '/' || v_pet || '/rex.jpg');
   insert into walks (id, operator_id, client_id, property_id, service_type_id,
                      scheduled_date, window_start, window_end, status, notes, origin_date)
   values (v_walk, v_op, v_cl, v_prop, v_svc, current_date - 400,
@@ -3801,6 +3820,31 @@ begin
   values (v_walk, v_op, 41.88, -87.63, now() - interval '400 days');
   insert into walk_photos (walk_id, operator_id, storage_path)
   values (v_walk, v_op, v_op || '/' || v_walk || '/1.jpg');
+  -- A row naming an object in another walker's folder. This walker can
+  -- neither see nor delete it (storage_operator_select/_delete read the
+  -- first segment), so it is not theirs to ask storage about; the second
+  -- phase still drops the row.
+  insert into walk_photos (walk_id, operator_id, storage_path)
+  values (v_walk, v_op, '99999999-0000-4000-a000-000000000002/' || v_walk || '/stray.jpg');
+  -- A live client with a pet and no photos: the one thing standing between
+  -- the second phase and their pet is that they have not been erased.
+  insert into clients (id, operator_id, full_name, status)
+  values (v_live, v_op, 'Still Here', 'active');
+  insert into pets (operator_id, client_id, name) values (v_op, v_live, 'Biscuit');
+  -- The objects, as Storage holds them (0058). Two more of the client's than
+  -- the rows name: the pet's previous photo, which replacing it left behind,
+  -- and a walk photo whose row was never written. The last four are not the
+  -- client's: another walker's folder, another client's walk and pet, and a
+  -- file in this walker's folder named after the walk rather than inside it.
+  insert into storage.objects (bucket_id, name) values
+    ('walk-photos', v_op || '/' || v_walk || '/1.jpg'),
+    ('walk-photos', v_op || '/' || v_walk || '/orphan.jpg'),
+    ('pet-photos',  v_op || '/' || v_pet || '/rex.jpg'),
+    ('pet-photos',  v_op || '/' || v_pet || '/previous.jpg'),
+    ('walk-photos', '99999999-0000-4000-a000-000000000002/' || v_walk || '/stray.jpg'),
+    ('walk-photos', v_op || '/' || v_other_walk || '/theirs.jpg'),
+    ('pet-photos',  v_op || '/' || v_other_pet || '/theirs.jpg'),
+    ('walk-photos', v_op || '/' || v_walk);
   -- With its audit row, the way fn_write_credential creates one. Without this
   -- the fixture is a credential no product path could have produced, and the
   -- purge's hardest constraint — credential_access_log is immutable and
@@ -3861,6 +3905,15 @@ begin
       raise exception 'FAIL: foreign purge refused for the wrong reason: %', sqlerrm;
     end if;
   end;
+  begin
+    perform fn_purge_client_status(v_cl);
+    raise exception 'FAIL: a foreign operator read another tenant''s erasure';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%no such client%' then
+      raise exception 'FAIL: foreign erasure status refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
   reset session authorization;
 
   -- ── purge ─────────────────────────────────────────────────────────────
@@ -3868,12 +3921,117 @@ begin
     format('{"sub":"%s","role":"authenticated"}', v_op), true);
   set local session authorization authenticated;
 
-  select count(*) into v_paths from fn_purge_client(v_cl);
-  if v_paths <> 2 then
-    raise exception 'FAIL: expected 2 storage paths to delete, got %', v_paths;
+  -- The first phase hands over every object in the client's folders, each
+  -- starting with the bucket that holds it (0058): both kinds are
+  -- {operator}/{uuid}/{file}, so only the folder can say which.
+  select array_agg(storage_path order by storage_path) into v_named
+    from fn_purge_client(v_cl);
+  if v_named is distinct from array[
+       'pet-photos/' || v_op || '/' || v_pet || '/previous.jpg',
+       'pet-photos/' || v_op || '/' || v_pet || '/rex.jpg',
+       'walk-photos/' || v_op || '/' || v_walk || '/1.jpg',
+       'walk-photos/' || v_op || '/' || v_walk || '/orphan.jpg'] then
+    raise exception 'FAIL: the purge named its objects as %, not every object in the client''s folders with its bucket', v_named;
+  end if;
+
+  -- Nothing but the photos waits for the second phase (0058).
+  if exists (select 1 from pets where client_id = v_cl
+              and (name <> 'Removed' or medical_notes is not null
+                   or medication_notes is not null or vet_name is not null
+                   or photo_path is not null)) then
+    raise exception 'FAIL: the pet''s details wait for the second phase';
+  end if;
+  if exists (select 1 from walk_photos where walk_id = v_walk) then
+    raise exception 'FAIL: the photo rows wait for the second phase';
+  end if;
+
+  -- Unfinished, and the database says so.
+  v_status := fn_purge_client_status(v_cl);
+  if v_status is distinct from '{"erased": true, "finished": false, "photos_left": 4}'::jsonb then
+    raise exception 'FAIL: an erasure with four photos still stored reads as %', v_status;
+  end if;
+
+  -- The second phase refuses while any of them is there: the pet's row is
+  -- its folder's only name.
+  begin
+    perform fn_purge_client_photos(v_cl);
+    raise exception 'FAIL: the second phase dropped the rows over photos still in storage';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    if v_msg like 'FAIL:%' then raise; end if;
+    if v_msg not like '%4 photo(s) are still in storage%' then
+      raise exception 'FAIL: the second phase refused for the wrong reason: %', v_msg;
+    end if;
+  end;
+  if not exists (select 1 from pets where client_id = v_cl) then
+    raise exception 'FAIL: the second phase refused and dropped the pet rows anyway';
+  end if;
+  reset session authorization;
+
+  -- The browser deletes them; Storage's API deletes the object's row.
+  delete from storage.objects where bucket_id || '/' || name = any (v_named);
+  get diagnostics v_paths = row_count;
+  if v_paths <> 4 then
+    raise exception 'FAIL: precondition — % of the four objects were deleted', v_paths;
+  end if;
+
+  -- Another walker cannot run it, even with nothing left in storage to stop
+  -- them.
+  perform set_config('request.jwt.claims',
+    '{"sub":"99999999-0000-4000-a000-000000000002","role":"authenticated"}', true);
+  set local session authorization authenticated;
+  begin
+    perform fn_purge_client_photos(v_cl);
+    raise exception 'FAIL: a foreign operator ran another tenant''s second phase';
+  exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+    if sqlerrm not like '%no such client%' then
+      raise exception 'FAIL: foreign second phase refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  reset session authorization;
+
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  set local session authorization authenticated;
+  v_status := fn_purge_client_status(v_cl);
+  if v_status is distinct from '{"erased": true, "finished": false, "photos_left": 0}'::jsonb then
+    raise exception 'FAIL: an erasure whose second phase has not run reads as %', v_status;
   end if;
   perform fn_purge_client_photos(v_cl);
+  v_status := fn_purge_client_status(v_cl);
+  if v_status is distinct from '{"erased": true, "finished": true, "photos_left": 0}'::jsonb then
+    raise exception 'FAIL: a finished erasure reads as %', v_status;
+  end if;
+
+  -- The second phase belongs to an erasure: on a live client it would
+  -- delete their pets.
+  begin
+    perform fn_purge_client_photos(v_live);
+    raise exception 'FAIL: the second phase ran on a client that has not been erased';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    if v_msg like 'FAIL:%' then raise; end if;
+    if v_msg not like '%has not been erased%' then
+      raise exception 'FAIL: the second phase refused a live client for the wrong reason: %', v_msg;
+    end if;
+  end;
+  if (fn_purge_client_status(v_live) ->> 'erased')::boolean then
+    raise exception 'FAIL: a live client reads as erased';
+  end if;
+  if not exists (select 1 from pets where client_id = v_live) then
+    raise exception 'FAIL: the second phase refused a live client and deleted their pet anyway';
+  end if;
   reset session authorization;
+
+  -- Objects that are not the client's are untouched by all of it.
+  if (select count(*) from storage.objects
+       where name in ('99999999-0000-4000-a000-000000000002/' || v_walk || '/stray.jpg',
+                      v_op || '/' || v_other_walk || '/theirs.jpg',
+                      v_op || '/' || v_other_pet || '/theirs.jpg',
+                      v_op || '/' || v_walk)) <> 4 then
+    raise exception 'FAIL: precondition — the objects that are not the client''s are missing';
+  end if;
 
   -- ── the sensitive things are gone ─────────────────────────────────────
   if exists (select 1 from walk_gps_points where walk_id = v_walk) then
@@ -3931,6 +4089,10 @@ begin
   end if;
 
   -- ── idempotent: running it again is a no-op, not an error ─────────────
+  -- Backdated first, because `now()` is fixed for the whole suite: a retry
+  -- that rewrote the date would otherwise write the same value back (0058).
+  update clients set purged_at = purged_at - interval '1 day' where id = v_cl
+  returning purged_at into v_began;
   perform set_config('request.jwt.claims',
     format('{"sub":"%s","role":"authenticated"}', v_op), true);
   set local session authorization authenticated;
@@ -3939,6 +4101,9 @@ begin
     raise exception 'FAIL: a second purge found % paths to delete', v_paths;
   end if;
   reset session authorization;
+  if (select purged_at from clients where id = v_cl) is distinct from v_began then
+    raise exception 'FAIL: a retry moved the date the erasure began';
+  end if;
 
   raise notice 'client export, purge and ledger survival (0040): OK';
 end $$;

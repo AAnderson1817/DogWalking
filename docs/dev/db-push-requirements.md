@@ -90,7 +90,7 @@ from pg_roles where rolname = current_user;
 | not a superuser | Nothing — but if it *is* one, this checklist proves nothing, because a superuser satisfies every row above for free. |
 | **BYPASSRLS** | Everything. See below. |
 | membership in the API roles | `grant ... to authenticated` in 0004 and after. |
-| membership in the owner of `storage.objects` | `create policy` on it in 0004, 0008, 0012, 0031, 0033. Fails as `must be owner of table objects` — the failure the runbook has described for a year without anyone being able to confirm it. |
+| membership in the owner of `storage.objects` | `create policy` on it in 0004, 0008, 0012, 0031, 0033. Fails as `must be owner of table objects` — the failure the runbook has described for a year without anyone being able to confirm it. Since 0058 the erasure also READS the table at run time, as its owner, to find every photo in a client's folders; 0058 refuses to deploy unless that role can read it past row security. |
 | membership in the owner of `realtime.messages` | `create policy` on it in 0020. Same error, and never mentioned anywhere before. |
 | CREATE on `public` | Every table. |
 | REFERENCES on `auth.users` | The `auth_user_id` foreign keys in 0002. |

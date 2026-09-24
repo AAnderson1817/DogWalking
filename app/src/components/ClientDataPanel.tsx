@@ -6,12 +6,12 @@
 //
 // Export comes first, deliberately: an operator asked to delete a client should
 // be able to hand them their record on the way out.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "./Button";
 import { FormError, Input } from "./fields";
 import { Sheet } from "./Sheet";
-import { exportClientData, purgeClient,
-  type ClientRecord,
+import { exportClientData, getErasureStatus, purgeClient,
+  type ClientRecord, type ErasureStatus,
 } from "@/lib/api";
 
 /** Typed to confirm. Not a yes/no — this destroys a person's record. */
@@ -29,8 +29,31 @@ export function ClientDataPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // What the database says about an erasure that has begun (0058). The first
+  // phase marks the client erased before any photo is deleted, so `purged_at`
+  // alone cannot say the erasure finished — this screen used to read it that
+  // way, hide the button, and leave the rest waiting for a retry nobody could
+  // start.
+  const [status, setStatus] = useState<ErasureStatus | "unknown" | null>(null);
 
   const purged = client.purged_at !== null;
+
+  useEffect(() => {
+    if (!purged) {
+      setStatus(null);
+      return;
+    }
+    let live = true;
+    getErasureStatus(client.id).then(
+      (s) => { if (live) setStatus(s); },
+      () => { if (live) setStatus("unknown"); },
+    );
+    return () => {
+      live = false;
+    };
+  }, [client.id, purged]);
+
+  const unfinished = purged && status !== null && (status === "unknown" || !status.finished);
 
   async function download() {
     setError(null);
@@ -53,24 +76,20 @@ export function ClientDataPanel({
   async function erase() {
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
       const result = await purgeClient(client.id);
-      if (result.failedPaths.length > 0) {
-        // Reporting success over a photo that is still in the bucket is the
-        // one outcome that would make this worse than doing nothing.
-        setError(
-          `${result.failedPaths.length} photo(s) could not be deleted, so the erasure is incomplete. Everything else is gone. Try again — it picks up where it stopped.`,
-        );
-        return;
-      }
-      setNotice("This client's personal data has been erased.");
+      setStatus({ erased: true, finished: result.finished, photosLeft: result.photosLeft });
+      if (result.finished) setNotice("This client's personal data has been erased.");
       setOpen(false);
       setTyped("");
-      onPurged();
     } catch (err) {
+      // The first phase may have committed before the failure, so the record
+      // is reloaded either way and the panel shows what the database says.
       setError(err instanceof Error ? err.message : "Erasure failed.");
     } finally {
       setBusy(false);
+      onPurged();
     }
   }
 
@@ -78,7 +97,17 @@ export function ClientDataPanel({
     <section className="client-data-panel" aria-labelledby="client-data-heading">
       <h2 id="client-data-heading" className="section-label">Their data</h2>
 
-      {purged ? (
+      {purged && status === null ? (
+        <p className="client-data-panel__detail">Checking whether erasing this client's data finished…</p>
+      ) : unfinished ? (
+        <p className="client-data-panel__detail">
+          {status === "unknown"
+            ? "This client's record was erased, but whether every photo is gone could not be checked."
+            : status.photosLeft > 0
+              ? `Erasing this client's data has not finished: ${status.photosLeft} photo(s) are still stored. Everything else is erased.`
+              : "Erasing this client's data has not finished: its last step did not run. Everything else is erased."}
+        </p>
+      ) : purged ? (
         <p className="client-data-panel__detail">
           This client's personal data was erased. The billing record remains,
           because it is a financial record.
@@ -103,6 +132,11 @@ export function ClientDataPanel({
         {!purged && (
           <Button variant="ghost" onClick={() => setOpen(true)}>
             Erase their data
+          </Button>
+        )}
+        {unfinished && (
+          <Button variant="ghost" disabled={busy} onClick={() => void erase()}>
+            {busy ? "Erasing…" : "Finish erasing"}
           </Button>
         )}
       </div>
