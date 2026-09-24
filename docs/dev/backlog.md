@@ -25,24 +25,7 @@ before you hit them.
 
 ## Open
 
-### 1. An erasure leaves the client's name in the walker's notifications
-`notifications.client_id` says who a row is FOR (RLS reads it), not who it is
-ABOUT: a row the walker reads carries NULL, and names the client only in its
-words. `fn_notify_low_credit` writes one ("Jane Doe is low on credits"), the
-walk trigger two, the overage path one and the Stripe webhook eight more.
-`fn_purge_client` deletes notifications by `client_id`, so it removes the
-client's own inbox and none of these. Measured on the local database: after
-the purge the client row read "Deleted client" and the walker's notice still
-read "Jane Erasure is low on credits". Spec 03 says what survives an erasure
-carries no personal data beyond an unsubscribed address, which is false.
-Fix: a `subject_client_id` on each row, filled by a trigger from `client_id`
-or the walk where the row records one and set explicitly by the writers that
-do not (`fn_notify_low_credit`, the webhook's operator rows), checked against
-the operator, and deleted by the purge. Existing rows are backfilled only from
-what they record; a notice that named its client only in text stays unlinked
-rather than matched on a name.
-
-### 2. The client export leaves out much of what Sanpo holds about a client
+### 1. The client export leaves out much of what Sanpo holds about a client
 `fn_export_client_data` (`0040`), the export the operator runs, returns six
 named fields of the client row (name, email, phone, status, credit balance,
 created), the properties' address fields and public access notes, pets, walks
@@ -67,7 +50,7 @@ one the operator can read. A written argument before code, and growing the
 export lets the notice's promise grow with it (`legal-version.test.ts` keeps
 "everything" out until then).
 
-### 3. `notifications.email_last_error` keeps the email provider's own words
+### 2. `notifications.email_last_error` keeps the email provider's own words
 `send-notification` records a failed send as `resend <status>: <up to 300
 characters of Resend's response body>`, and `notifications` carries a
 table-level SELECT for `authenticated`, so a client reads that text on their
@@ -77,7 +60,7 @@ to the server log). The email arm should do the same. What a provider body can
 contain has not been measured here, so this is the same shape rather than a
 known leak. Found by the independent review of 0056.
 
-### 4. A failed read of the entry-code trail shows as no activity
+### 3. A failed read of the entry-code trail shows as no activity
 Both readers swallow the error: `VaultFlows.tsx`'s audit sheet and
 `PortalHome.tsx` call `listCredentialLog(...)` / `listMyCredentialLog(20)`
 with `.catch(() => [])`, so a failed read renders as an empty trail. On the
@@ -86,7 +69,7 @@ not load" must not look the same (the M39 shape). PortalHome's comment is
 right that a failure must not cost the client the whole portal; the section
 should say it could not load, and offer a retry.
 
-### 5. Revoke TEMP from PUBLIC
+### 4. Revoke TEMP from PUBLIC
 `PUBLIC` holds TEMP on the database (PostgreSQL's default). `0055` closed the
 path by which that let a temp table shadow a table inside a definer function:
 every function that pins a `search_path` now pins `public, pg_temp`, which
@@ -106,6 +89,15 @@ configure. Not reachable through the product either way: `anon` and
 role can execute runs dynamic SQL.
 
 ## Done
+
+- **An erasure removes the walker's notices about the client** — migration
+  `0057`. `notifications.client_id` says who a row is for, so a row the walker
+  reads carried NULL there and named its client only in its title; the purge,
+  deleting by `client_id`, left "<name> is low on credits" in the walker's
+  inbox after the client's record was erased. Each row now records
+  `subject_client_id` (filled from `client_id` or the walk by a trigger, set by
+  the writers whose rows record neither) and the purge deletes by it. Found
+  while designing the export. See the `privacy(0057)` status-log entry.
 
 - **The claim replay deletes its fixtures.** Every staging smoke run left an
   operator, a claimed client and two auth users behind, with four warnings

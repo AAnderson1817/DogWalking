@@ -19,6 +19,7 @@
 //   4. Card errors mark the claim failed (re-chargeable); infra errors leave
 //      the claim pending and rethrow — the caller 500s and retries.
 
+import type { NotificationRow } from "./notification_row.ts";
 import { formatMoney } from "./money.ts";
 
 export interface OverageWalk {
@@ -80,14 +81,7 @@ export interface OverageDeps {
     row: OveragePayment & { operator_id: string; client_id: string },
   ): Promise<OveragePayment>;
   updatePayment(id: string, fields: Record<string, unknown>): Promise<OveragePayment>;
-  insertNotification(row: {
-    operator_id: string;
-    client_id: string | null;
-    type: string;
-    title: string;
-    body: string;
-    walk_id: string | null;
-  }): Promise<void>;
+  insertNotification(row: NotificationRow): Promise<void>;
   /** True for card/payment failures (decline etc.) vs infra/DB errors. */
   isCardError(err: unknown): boolean;
   /** True for a failure that RETRYING CANNOT FIX — a malformed request, a
@@ -233,6 +227,7 @@ export async function chargeOverageForWalk(
       await deps.insertNotification({
         operator_id: walk.operator_id,
         client_id: walk.client_id,
+        subject_client_id: walk.client_id,
         type: "payment_failed",
         title: "Walk payment failed",
         body: `We couldn't charge for your walk (${reason}). Please update your payment method.`,
@@ -242,6 +237,7 @@ export async function chargeOverageForWalk(
     await deps.insertNotification({
       operator_id: walk.operator_id,
       client_id: null,
+      subject_client_id: walk.client_id,
       type: "payment_failed",
       title: fault === "card"
         ? `Overage charge failed for ${billing.full_name}`
@@ -364,6 +360,7 @@ export async function chargeOverageForWalk(
         await deps.insertNotification({
           operator_id: walk.operator_id,
           client_id: walk.client_id,
+          subject_client_id: walk.client_id,
           type: "payment_taken",
           title: `${money} charged for your walk`,
           body: explanation + (pi.receipt_url ? ` Receipt: ${pi.receipt_url}` : ""),

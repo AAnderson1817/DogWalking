@@ -1,5 +1,7 @@
 // credential-vault handler: rate limit, re-auth gate, purpose requirement,
 // soft revoke; plus overage idempotency (mocked deps).
+import { checkSubject } from "./notification_subject.ts";
+import type { NotificationRow } from "../_lib/notification_row.ts";
 import { assert, assertEquals, assertFalse, assertRejects } from "./asserts.ts";
 import {
   type CredentialMeta,
@@ -247,7 +249,7 @@ interface OverageOpts {
 function makeODeps(opts: OverageOpts = {}) {
   const calls: string[] = [];
   const updates: Array<Record<string, unknown>> = [];
-  const notes: Array<Record<string, unknown>> = [];
+  const notes: NotificationRow[] = [];
   const piArgs: Array<{ amountPence: number; pricing: string }> = [];
   let attemptKey = "";
   const NOW = 1_700_000_000_000;
@@ -330,8 +332,8 @@ function makeODeps(opts: OverageOpts = {}) {
       // The ROW is kept, not just the fact of it: H12 is about what the
       // message says — the amount and that money moved — so a test that only
       // counted notifications would pass against a blank one.
-      notes.push(row as Record<string, unknown>);
-      return Promise.resolve();
+      notes.push(row);
+      return checkSubject(row, "client-1");
     },
     isCardError: (err) => (err as { type?: string })?.type === "StripeCardError",
     isPermanentError: (err) => {
@@ -907,7 +909,7 @@ Deno.test("a malformed request is refused before it costs a slot", async () => {
 // nothing, so the only message the client got was `walk_complete` — "Your walk
 // report card is ready" — with no amount and no mention that money had moved.
 
-function clientNote(notes: Array<Record<string, unknown>>, type: string) {
+function clientNote(notes: NotificationRow[], type: string) {
   return notes.find((n) => n.type === type && n.client_id !== null);
 }
 

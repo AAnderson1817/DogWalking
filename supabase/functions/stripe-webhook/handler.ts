@@ -14,6 +14,7 @@
 // dependency-injected. Constants and pure helpers, not dependencies —
 // and sharing the metadata keys with their writer is the point (review L23),
 // as is sharing the invoice shape with platform-webhook.
+import type { NotificationRow } from "../_lib/notification_row.ts";
 import { MAX_TOPUP_CREDITS, STRIPE_META } from "../_lib/stripe_metadata.ts";
 import { formatMoney } from "../_lib/money.ts";
 import { invoiceSubscriptionId } from "../_lib/stripe_shapes.ts";
@@ -110,7 +111,7 @@ export interface WebhookDeps {
     amountPence: number;
   }): Promise<boolean>;
   insertPayment(row: Record<string, unknown>): Promise<void>;
-  insertNotification(row: Record<string, unknown>): Promise<void>;
+  insertNotification(row: NotificationRow): Promise<void>;
 
   /** Locate the payments row a Stripe reversal refers to. Tried in the order
    * the identifiers are trustworthy: the payment intent (what overage rows
@@ -242,6 +243,7 @@ async function applyTopupFromSession(
     await deps.insertNotification({
       operator_id: operatorId,
       client_id: client.id,
+      subject_client_id: client.id,
       type: "payment_taken",
       title: `Top-up received — ${topup.credits} ${plural} added`,
       body: `Your ${money} top-up went through and ${topup.credits} ${plural} ` +
@@ -251,6 +253,7 @@ async function applyTopupFromSession(
     await deps.insertNotification({
       operator_id: operatorId,
       client_id: null,
+      subject_client_id: client.id,
       type: "payment_taken",
       title: `${client.full_name} topped up ${topup.credits} ${plural}`,
       body: `${money} was collected. The credits are already on their balance.`,
@@ -333,6 +336,7 @@ async function applyEvent(
         await deps.insertNotification({
           operator_id: operatorId,
           client_id: null,
+          subject_client_id: client.id,
           type: "card_saved",
           title: `${client.full_name} saved a card`,
           body: "Their card is on file now, so completed walks beyond their credits " +
@@ -382,6 +386,7 @@ async function applyEvent(
       await deps.insertNotification({
         operator_id: operatorId,
         client_id: client.id,
+        subject_client_id: client.id,
         type: "payment_failed",
         title: "Your top-up didn't go through",
         body: "The bank payment for your credit top-up failed, so no credits were " +
@@ -391,6 +396,7 @@ async function applyEvent(
       await deps.insertNotification({
         operator_id: operatorId,
         client_id: null,
+        subject_client_id: client.id,
         type: "payment_failed",
         title: `${client.full_name}'s top-up payment failed`,
         body: "Their bank payment bounced after checkout, so no credits were granted " +
@@ -455,6 +461,7 @@ async function applyEvent(
         await deps.insertNotification({
           operator_id: client.operator_id,
           client_id: null,
+          subject_client_id: client.id,
           type: "plan_changed_externally",
           title: `${client.full_name}'s plan was corrected from their invoice`,
           body: "Stripe billed them for a different plan than Sanpo had on file, so their "
@@ -504,6 +511,7 @@ async function applyEvent(
       await deps.insertNotification({
         operator_id: client.operator_id,
         client_id: client.id,
+        subject_client_id: client.id,
         type: "payment_failed",
         title: "Payment failed",
         body: "Your subscription payment failed. Please update your payment method — we'll retry automatically.",
@@ -512,6 +520,7 @@ async function applyEvent(
       await deps.insertNotification({
         operator_id: client.operator_id,
         client_id: null,
+        subject_client_id: client.id,
         type: "payment_failed",
         title: `Payment failed for ${client.full_name}`,
         body: "Stripe will retry automatically; the account is past due until it succeeds.",
@@ -526,6 +535,7 @@ async function applyEvent(
       await deps.insertNotification({
         operator_id: client.operator_id,
         client_id: client.id,
+        subject_client_id: client.id,
         type: "renewal_upcoming",
         title: "Your plan renews soon",
         body: "Your next cycle's credits will be granted when the renewal payment completes.",
@@ -604,6 +614,7 @@ async function applyEvent(
         await deps.insertNotification({
           operator_id: client.operator_id,
           client_id: null,
+          subject_client_id: client.id,
           type: "plan_changed_externally",
           title: `${client.full_name}'s plan changed outside Sanpo`,
           body: "The subscription's price was changed in Stripe, so their plan here has been "
@@ -619,6 +630,7 @@ async function applyEvent(
         await deps.insertNotification({
           operator_id: client.operator_id,
           client_id: null,
+          subject_client_id: client.id,
           type: "plan_changed_externally",
           title: `${client.full_name} is on a price Sanpo does not know`,
           body: "Their Stripe subscription uses a price that matches no plan here, so Sanpo "
@@ -660,6 +672,7 @@ async function applyEvent(
       await deps.insertNotification({
         operator_id: client.operator_id,
         client_id: null,
+        subject_client_id: client.id,
         type: "subscription_cancelled",
         title: `${client.full_name} cancelled their subscription`,
         body: "No further walks will be scheduled or bookable for them, and no more credits will be granted. Walks already on the calendar are untouched.",
@@ -767,6 +780,7 @@ async function reverse(
   await deps.insertNotification({
     operator_id: payment.operator_id,
     client_id: null,
+    subject_client_id: payment.client_id,
     type: kind === "dispute" ? "payment_disputed" : "payment_refunded",
     title: kind === "dispute" ? "Payment disputed" : "Payment refunded",
     body: reversalBody(kind, result),

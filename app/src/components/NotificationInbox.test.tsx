@@ -8,6 +8,7 @@ const ITEMS: Notifications[] = [
     id: "notification-1",
     operator_id: "operator-1",
     client_id: "client-1",
+    subject_client_id: "client-1",
     type: "walk_complete",
     title: "Walk report ready",
     body: "Biscuit's route and notes are ready.",

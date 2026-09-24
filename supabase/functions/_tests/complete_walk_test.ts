@@ -1,4 +1,5 @@
 // complete-walk: happy path, idempotent replay, overage path (mocked deps).
+import { checkSubject } from "./notification_subject.ts";
 import { assert, assertEquals, assertFalse, assertRejects } from "./asserts.ts";
 import {
   completeWalk,
@@ -69,7 +70,7 @@ function makeDeps(
     },
     insertNotification: (row) => {
       calls.push(`notify:${row.type}`);
-      return Promise.resolve();
+      return checkSubject(row, "client-1");
     },
     hasCompleteNotification: () => {
       calls.push("hasCompleteNotification");

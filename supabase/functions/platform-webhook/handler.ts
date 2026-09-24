@@ -51,6 +51,7 @@
 // No payments rows are written here, deliberately: payments is tenant-scoped
 // (client_id NOT NULL) and records money moving TO operators. Sanpo's own
 // revenue has Stripe's platform account as its book of record.
+import type { NotificationRow } from "../_lib/notification_row.ts";
 import { invoiceSubscriptionId } from "../_lib/stripe_shapes.ts";
 
 export interface PlatformEventLike {
@@ -145,7 +146,7 @@ export interface PlatformWebhookDeps {
     fields: Record<string, unknown>,
     guard?: OperatorWriteGuard,
   ): Promise<number>;
-  insertNotification(row: Record<string, unknown>): Promise<void>;
+  insertNotification(row: NotificationRow): Promise<void>;
 }
 
 export class InFlightError extends Error {}
@@ -242,6 +243,8 @@ async function applyEvent(
         deps.insertNotification({
           operator_id: op.id,
           client_id: null,
+          subject_client_id: null,
+          walk_id: null,
           type: "payment_taken",
           title: "A second Sanpo subscription was created",
           body:
@@ -331,7 +334,10 @@ async function applyEvent(
           { bindableTo: subscriptionId, unlessStatusIn: ["past_due"] },
         );
         if (changed > 0) {
-          await deps.insertNotification({ operator_id: op.id, client_id: null, ...PAST_DUE_BELL });
+          await deps.insertNotification({
+            operator_id: op.id, client_id: null, subject_client_id: null, walk_id: null,
+            ...PAST_DUE_BELL,
+          });
         }
         return { status: "processed" };
       }
@@ -350,6 +356,8 @@ async function applyEvent(
           await deps.insertNotification({
             operator_id: op.id,
             client_id: null,
+            subject_client_id: null,
+            walk_id: null,
             type: "subscription_cancelled",
             title: "Your Sanpo subscription has ended",
             body:
@@ -386,6 +394,8 @@ async function applyEvent(
         await deps.insertNotification({
           operator_id: op.id,
           client_id: null,
+          subject_client_id: null,
+          walk_id: null,
           type: "subscription_cancelled",
           title: "Your Sanpo subscription has ended",
           body: "Your Sanpo subscription is cancelled. Subscribe again from Settings to keep using Sanpo.",
@@ -415,7 +425,10 @@ async function applyEvent(
         { whileBoundTo: subscriptionId, unlessStatusIn: ["past_due", "cancelled"] },
       );
       if (changed > 0) {
-        await deps.insertNotification({ operator_id: op.id, client_id: null, ...PAST_DUE_BELL });
+        await deps.insertNotification({
+          operator_id: op.id, client_id: null, subject_client_id: null, walk_id: null,
+          ...PAST_DUE_BELL,
+        });
       }
       return { status: "processed" };
     }
