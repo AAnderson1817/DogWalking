@@ -1127,6 +1127,47 @@ counting it would march terminal rows toward the give-up ceiling for no reason.
 uniform success forever while sending zero email. Since H14 that 500 also writes
 a log line naming what is missing.
 
+### What a failure records is ours, never the provider's words
+
+`notifications.email_last_error` is selectable by `authenticated` (0004's
+table-level grant), so a client reads it on their own notices. It used to carry
+`resend <status>: ` and up to 300 characters of Resend's response body, the
+runtime's own error text when Resend could not be reached, and the database's
+error when the suppression list could not be read. What a provider body can
+contain was never measured, so this was the push arm's defect (PR #85) in the
+email arm rather than a known leak.
+
+A failed send now records one of three sentences, each ours:
+
+| What happened | `email_last_error` |
+| --- | --- |
+| Resend answered a non-2xx | `the email provider answered <status>` |
+| The request did not complete | `the request to the email provider did not complete` |
+| The suppression list could not be read | `the suppression list could not be read` |
+
+All three are `failed`, so the drain retries each within the bounds below. A
+4xx other than 429 is marked permanent, which rides on the 502's context only.
+
+The status is kept because it is the diagnostic and a number we chose. Resend's
+body, the runtime error and the database error each go to one log line at the
+point they are read, with the notification id (`logHandledError`, H14's field
+names). `sendEmail` returns only `{ ok: false, status }`, so the body cannot
+reach the row: the wiring is where it is read, and a test drives the real
+wiring with a telling body and checks that it comes back as the status alone
+and appears only in the log.
+
+The 502 a single request returns says only "the email was not sent", with the
+recorded sentence as its cause. Three different failures reach it, and "the
+provider rejected the message", which it used to say, is true of one.
+
+The push half of a single request follows the same rule. A push that throws
+there is a failure in the optional channel's own bookkeeping, a database blip
+in `getSubscriptions` or `recordPush`. `pushForRequest` logs it with the
+notification id and answers "the push could not be delivered". The inline catch
+it replaced put the database's own words into the response and wrote no log
+line, so a push failing on every single request left no trace. The drain has
+logged the same failure since PR #92.
+
 ### Bounds, and giving up on purpose
 
 `fn_notification_backlog(window, max_attempts)` returns what is retryable:

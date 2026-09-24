@@ -89,8 +89,17 @@ export interface SendDeps {
   /** Whether this address has opted out — see 0038 and review M29. */
   isSuppressed(email: string, operatorId: string, type: string): Promise<boolean>;
   getOperator(id: string): Promise<{ business_name: string | null } | null>;
-  /** Resolves on a 2xx; rejects or returns the provider's own words otherwise. */
+  /**
+   * Resolves `{ ok: true }` on a 2xx. A refusal resolves with the provider's
+   * status and nothing else: its body goes to the server log where it is read,
+   * because every outcome lands in `notifications.email_last_error`, which
+   * `authenticated` may select, so a client reads it on their own notices.
+   * The push arm has kept its service's words off the row since PR #85.
+   * Rejects when the provider could not be reached.
+   */
   sendEmail(msg: {
+    /** For the log line a refusal writes; not sent. */
+    notificationId: string;
     to: string;
     subject: string;
     html: string;
@@ -100,7 +109,7 @@ export interface SendDeps {
      * aggregated — Sanpo is the bulk sender even when no operator is.
      */
     headers: Record<string, string>;
-  }): Promise<{ ok: true } | { ok: false; status: number; detail: string }>;
+  }): Promise<{ ok: true } | { ok: false; status: number }>;
   /**
    * Throw if this deployment cannot send email at all.
    *
@@ -345,10 +354,19 @@ async function sendClaimed(
     // not know whether this person asked us to stop, and sending anyway is the
     // one outcome here that cannot be taken back. Recorded as a failure so the
     // nightly drain comes back to it — which is what makes failing closed
-    // affordable rather than a silent drop.
+    // affordable rather than a silent drop. The row says what happened in our
+    // words; the database's error goes to the log (the client reads the row).
+    logHandledError({
+      fn: "send-notification",
+      message: "suppression lookup failed",
+      cause: e,
+      // The wiring's context (the operator and the type, what a person can
+      // search by) first, the row's id last, as in the drain.
+      context: { ...(e instanceof HttpError ? e.context : {}), notification_id: row.id },
+    });
     const outcome: Outcome = {
       kind: "failed",
-      error: `suppression lookup failed: ${e instanceof Error ? e.message : "unknown"}`,
+      error: "the suppression list could not be read",
       permanent: false,
     };
     await deps.record(row.id, outcome, row.email_attempts, stamp);
@@ -371,6 +389,7 @@ async function sendClaimed(
   let result: Awaited<ReturnType<SendDeps["sendEmail"]>>;
   try {
     result = await deps.sendEmail({
+      notificationId: row.id,
       to: client.email,
       subject: `${row.title} — ${business}`,
       html: deps.renderEmail(business, row.title, row.body ?? "", unsubscribeUrl),
@@ -385,10 +404,17 @@ async function sendClaimed(
   } catch (e) {
     // Resend unreachable. Retryable — and the row now says so. Before this it
     // threw out of the handler and the webhook, which does not retry, simply
-    // forgot the email had ever been owed.
+    // forgot the email had ever been owed. The runtime's error names hosts and
+    // addresses, so it goes to the log, not onto a row the client reads.
+    logHandledError({
+      fn: "send-notification",
+      message: "the email provider could not be reached",
+      cause: e,
+      context: { notification_id: row.id },
+    });
     const outcome: Outcome = {
       kind: "failed",
-      error: `resend unreachable: ${e instanceof Error ? e.message : "unknown"}`,
+      error: "the request to the email provider did not complete",
       permanent: false,
     };
     await deps.record(row.id, outcome, row.email_attempts, stamp);
@@ -398,7 +424,7 @@ async function sendClaimed(
   if (!result.ok) {
     const outcome: Outcome = {
       kind: "failed",
-      error: `resend ${result.status}: ${result.detail.slice(0, 300)}`,
+      error: `the email provider answered ${result.status}`,
       permanent: isPermanentSendFailure(result.status),
     };
     await deps.record(row.id, outcome, row.email_attempts, stamp);
@@ -505,11 +531,45 @@ export async function drainBacklog(
 }
 
 /**
+ * Push for a SINGLE notification request, never throwing.
+ *
+ * `deliverPush` handles a failed endpoint itself; what reaches this catch is a
+ * failure in the optional channel's own bookkeeping, a database blip in
+ * `getSubscriptions` or `recordPush`. It must not cost the email (Codex review
+ * on PR #85), so it becomes an outcome. What the outcome says is ours: it goes
+ * into the response, and a database error's text is the server's, not the
+ * caller's (review H14). The error itself goes to the log with the id, which
+ * the inline catch this replaced never wrote, so a push failing every time on
+ * the single-request path left no trace at all.
+ */
+export async function pushForRequest(
+  row: NotificationRow,
+  pushDelivery: PushDelivery,
+): Promise<Outcome> {
+  try {
+    return await pushDelivery(row);
+  } catch (e) {
+    logHandledError({
+      fn: "send-notification",
+      message: "push delivery threw",
+      cause: e,
+      // The row's facts win over the thrown context, as in the drain.
+      context: { ...(e instanceof HttpError ? e.context : {}), notification_id: row.id, channel: "push" },
+    });
+    return { kind: "failed", error: "the push could not be delivered", permanent: false };
+  }
+}
+
+/**
  * Turn a delivery failure into the response for a SINGLE notification request.
  *
  * A 502 is what makes the failure visible to the caller — the DB webhook, or an
- * operator retrying by hand. The row has already recorded the detail; this is
- * the part a person or a log sees.
+ * operator retrying by hand. The row has already recorded what happened, in
+ * our words, and the provider's or the runtime's own words are already in the
+ * log beside the notification id; this is the part the caller sees. Its message
+ * says only that the email was not sent, because three different failures reach
+ * it (a refusal, a request that did not complete, a suppression list that could
+ * not be read) and "rejected" is true of one.
  */
 export function failureResponse(row: NotificationRow, outcome: Outcome): HttpError {
   if (outcome.kind !== "failed") {
@@ -518,7 +578,7 @@ export function failureResponse(row: NotificationRow, outcome: Outcome): HttpErr
   return new HttpError(
     502,
     "email_failed",
-    "email provider rejected the message",
+    "the email was not sent",
     outcome.error,
     {
       notification_id: row.id,

@@ -50,17 +50,7 @@ one the operator can read. A written argument before code, and growing the
 export lets the notice's promise grow with it (`legal-version.test.ts` keeps
 "everything" out until then).
 
-### 2. `notifications.email_last_error` keeps the email provider's own words
-`send-notification` records a failed send as `resend <status>: <up to 300
-characters of Resend's response body>`, and `notifications` carries a
-table-level SELECT for `authenticated`, so a client reads that text on their
-own rows through the API. The push arm stopped doing this for the equally
-readable `push_last_error` in PR #85 (the status is recorded and the body goes
-to the server log). The email arm should do the same. What a provider body can
-contain has not been measured here, so this is the same shape rather than a
-known leak. Found by the independent review of 0056.
-
-### 3. A failed read of the entry-code trail shows as no activity
+### 2. A failed read of the entry-code trail shows as no activity
 Both readers swallow the error: `VaultFlows.tsx`'s audit sheet and
 `PortalHome.tsx` call `listCredentialLog(...)` / `listMyCredentialLog(20)`
 with `.catch(() => [])`, so a failed read renders as an empty trail. On the
@@ -69,7 +59,7 @@ not load" must not look the same (the M39 shape). PortalHome's comment is
 right that a failure must not cost the client the whole portal; the section
 should say it could not load, and offer a retry.
 
-### 4. Revoke TEMP from PUBLIC
+### 3. Revoke TEMP from PUBLIC
 `PUBLIC` holds TEMP on the database (PostgreSQL's default). `0055` closed the
 path by which that let a temp table shadow a table inside a definer function:
 every function that pins a `search_path` now pins `public, pg_temp`, which
@@ -88,7 +78,7 @@ configure. Not reachable through the product either way: `anon` and
 `authenticated` are NOLOGIN, PostgREST issues no DDL, and no function an API
 role can execute runs dynamic SQL.
 
-### 5. An erasure leaves the Stripe event payloads and the client's sign-in account
+### 4. An erasure leaves the Stripe event payloads and the client's sign-in account
 Found by the independent review of 0057; both predate it, and spec 03 now
 names them rather than claiming otherwise.
 
@@ -109,7 +99,7 @@ admin API (the migrations cannot assume the deploy role may delete from
 `auth.users`), so it is an edge-function step in the erasure flow, ordered
 after the purge commits.
 
-### 6. A stale tab can write personal data back into an erased client's rows
+### 5. A stale tab can write personal data back into an erased client's rows
 An erasure redacts the client, property and credential rows in place and
 keeps them, because retained walks reference them. The UI withholds every
 edit surface from an erased client (spec 03), but a tab opened before the
@@ -128,7 +118,7 @@ Stripe webhook's subscription status, the ledger's balance), so its rule is
 about the personal columns only. The credential row takes its writes through
 `fn_write_credential`, which can refuse an erased client's property itself.
 
-### 7. A walk deleted through the API leaves its photos with no name
+### 6. A walk deleted through the API leaves its photos with no name
 `0058` made the rows the index of the photo folders: an erasure finds a
 client's photos through the folders of their walks and pets. A pet row can no
 longer be deleted (`trg_pets_erased`, Codex's third round on PR #106), and
@@ -142,6 +132,19 @@ walk. The fix is the pet rule's shape: refuse deleting a walk whose folder
 could hold photos, or revoke the grant, which nothing uses.
 
 ## Done
+
+- **A failed email records our sentence, never the provider's words.**
+  `notifications.email_last_error` is selectable by `authenticated`, and a
+  failed send recorded `resend <status>: ` plus up to 300 characters of
+  Resend's response body; a request that did not complete recorded the
+  runtime's error text, and an unreadable suppression list the database's.
+  Each now records one of three sentences of ours, and the provider's body,
+  the runtime error and the database error go to one log line each with the
+  notification id, as the push arm has done since PR #85. The single-request
+  push catch in `index.ts`, which returned the database's own words to its
+  caller and logged nothing, is `pushForRequest` in `handler.ts` now. Found
+  by the independent review of 0056. See the `privacy(email-errors)`
+  status-log entry.
 
 - **An erasure removes every photo, and says when it has finished** —
   migration `0058`. No erasure of a client whose pet had a photo ever
