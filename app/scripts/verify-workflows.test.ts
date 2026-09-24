@@ -33,7 +33,10 @@ import { describe, expect, it } from "vitest";
  * workflows with one another, and the real tree agrees, so only fixtures can
  * show it a disagreement: the owner's 4c45ab1 moved staging's deploy to
  * `--use-api` and left production on the Docker bundler, which is the drift
- * the fixtures below reproduce.
+ * the fixtures below reproduce. And every CLI command must run after a
+ * setup-cli step in its own job, because each job starts on a fresh runner:
+ * matched by workflow alone, a pin in `migrate` vouched for a
+ * `deploy-functions` job that had none (Codex, on #100, round 5).
  */
 
 const REPO = resolve(__dirname, "..", "..");
@@ -87,6 +90,22 @@ function deploying(job: string, opts: Deploying = {}): string {
   // A block scalar, as the real workflows write it: a plain scalar starting
   // with `#` would be a YAML comment, and the step would have no run at all.
   lines.push("      - run: |", ...run.split("\n").map((line) => `          ${line}`));
+  return `${lines.join("\n")}\n`;
+}
+
+/** A step in `workflow()` that installs the pinned CLI; any other step is a `run:` command. */
+const SETUP = "setup-cli";
+
+/** A push-triggered workflow of several jobs, each a list of steps in order. */
+function workflow(jobs: Record<string, string[]>): string {
+  const lines = ["on:", "  push:", "    branches: [main]", "jobs:"];
+  for (const [job, steps] of Object.entries(jobs)) {
+    lines.push(`  ${job}:`, "    runs-on: ubuntu-latest", "    steps:");
+    for (const step of steps) {
+      if (step === SETUP) lines.push(`      - uses: supabase/setup-cli@${SETUP_CLI}`, "        with:", "          version: 2.117.0");
+      else lines.push("      - run: |", ...step.split("\n").map((line) => `          ${line}`));
+    }
+  }
   return `${lines.join("\n")}\n`;
 }
 
@@ -371,12 +390,53 @@ describe("verify-workflows rule 5: production runs the CLI and the deploy path s
     expect(run.status).toBe(1);
   });
 
-  it("refuses either deploy workflow showing no CLI pin or no function deploy of its own", () => {
+  it("refuses either deploy workflow showing no function deploy of its own, or deploying with no CLI pin", () => {
     const noCli = verify(CHAINED, two({}, { cli: false }));
-    expect(noCli.out).toContain("rule 5 read no supabase/setup-cli step in deploy-production.yml");
+    expect(noCli.failed).toEqual(["deploy-production"]);
+    expect(noCli.out).toContain("deploy-production.yml :: functions :: runs `supabase functions deploy` before any supabase/setup-cli step");
     expect(noCli.status).toBe(1);
     const noDeploy = verify(CHAINED, two({ deploy: false }, {}));
     expect(noDeploy.out).toContain("rule 5 read no `supabase functions deploy` in deploy-staging.yml");
     expect(noDeploy.status).toBe(1);
+  });
+
+  it("refuses a CLI command with no pin earlier in its own job, whatever the workflow's other jobs install (Codex, on #100)", () => {
+    const deploy = "supabase functions deploy --use-api --project-ref x";
+    const shapes = {
+      // Codex's case: `migrate` pins, `deploy-functions` does not, and the
+      // two jobs run on different runners.
+      "pin in another job": {
+        job: "deploy-functions",
+        command: "supabase functions deploy",
+        jobs: { migrate: [SETUP, "supabase db push"], "deploy-functions": [deploy] },
+      },
+      // The pin installs the CLI only for the steps after it.
+      "pin after the command": { job: "functions", command: "supabase functions deploy", jobs: { functions: [deploy, SETUP] } },
+      // Every CLI command, not only the deploy: `link` and `db push` run on
+      // the job's CLI too, and a flag is not part of the command named.
+      "unpinned link": {
+        job: "migrate",
+        command: "supabase link",
+        jobs: { migrate: ["supabase link --project-ref x\nsupabase db push"], "deploy-functions": [SETUP, deploy] },
+      },
+    };
+    for (const [shape, { job, command, jobs }] of Object.entries(shapes)) {
+      const result = verify(CHAINED, { "deploy-staging": deploying("functions"), "deploy-production": workflow(jobs) });
+      expect(result.failed, shape).toEqual(["deploy-production"]);
+      expect(result.out, shape).toContain(`deploy-production.yml :: ${job} :: runs \`${command}\` before any supabase/setup-cli step in this job`);
+      expect(result.status, shape).toBe(1);
+    }
+  });
+
+  it("passes every CLI command after a pin in its own job, and needs no pin in a job that runs none", () => {
+    const production = workflow({
+      gate: ["echo gate"],
+      migrate: [SETUP, "supabase link --project-ref x", "supabase db push"],
+      "deploy-functions": ["echo checkout", SETUP, "supabase functions deploy --use-api --project-ref x"],
+      frontend: ["echo release the frontend"],
+    });
+    const result = verify(CHAINED, { "deploy-staging": deploying("functions"), "deploy-production": production });
+    expect(result.out).toMatch(/^PASS: .*one Supabase CLI \(2\.117\.0, 3 pins\).*every CLI command after a pin in its own job \(4 checked\)/m);
+    expect(result.status).toBe(0);
   });
 });

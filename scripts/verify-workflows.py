@@ -39,9 +39,12 @@ chained_checkouts = 0
 # (workflow, job, setup-cli commit, CLI version) and (workflow, job, flags).
 cli_pins: list[tuple[str, str, str, str]] = []
 function_deploys: list[tuple[str, str, frozenset[str]]] = []
+# CLI commands rule 5 found a pin for, earlier in their own job (see check).
+cli_commands_checked = 0
 # The two workflows rule 5 exists to hold together. Each must show it its own
-# evidence (see main): counted across all workflows, staging's pin and deploy
-# alone satisfied the rule, so production could vouch for nothing and pass.
+# function deploy (see main), and every CLI command a pin in its own job (see
+# check): counted across all workflows, staging's pin and deploy alone
+# satisfied the rule, so production could vouch for nothing and pass.
 DEPLOY_WORKFLOWS = ("deploy-staging.yml", "deploy-production.yml")
 
 # The value a chained checkout must choose first: the commit the upstream run
@@ -206,16 +209,29 @@ def matching_paren(script: str, i: int) -> int:
 COMMAND_PREFIX = {"if", "then", "else", "elif", "do", "while", "until", "!", "{", "time"}
 
 
-def deploy_invocations(script: str) -> list[tuple[frozenset[str], list[str]]]:
-    """Every `supabase functions deploy` a run: script runs: its flags, and
-    the arguments whose flags cannot be read.
+def cli_commands(script: str) -> list[list[str]]:
+    """Every Supabase CLI command a run: script runs, as its words.
 
     Only in command position: a simple command (split at newlines and
     `; & | ( )`) whose command word, after any prefix word or `NAME=value`
-    assignment, is `supabase` followed by `functions deploy`. So
-    `echo supabase functions deploy ...` is an echo, not a deploy (Codex on
-    #100, round 3). `x=$(supabase functions deploy ...)` is a deploy: the
-    substitution runs.
+    assignment, is `supabase`. So `echo supabase functions deploy ...` is an
+    echo, not a deploy (Codex on #100, round 3). `x=$(supabase functions
+    deploy ...)` is a deploy: the substitution runs.
+    """
+    found: list[list[str]] = []
+    for segment in re.split(r"[\n;&|()]", shell_code(script)):
+        words = segment.split()
+        while words and (words[0] in COMMAND_PREFIX or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", words[0])):
+            words.pop(0)
+        if words and words[0] == "supabase":
+            found.append(words)
+    return found
+
+
+def deploy_invocations(script: str) -> list[tuple[frozenset[str], list[str]]]:
+    """Every `supabase functions deploy` a run: script runs: its flags, and
+    the arguments whose flags cannot be read. Read by `cli_commands`, so a
+    deploy is exactly a CLI command whose subcommand is `functions deploy`.
 
     An argument holding a `$` expansion is expanded when the step runs, so
     the flags it supplies are invisible here: `"${flags[@]}"` in both
@@ -225,11 +241,8 @@ def deploy_invocations(script: str) -> list[tuple[frozenset[str], list[str]]]:
     secret and which is an argument, not a flag.
     """
     found: list[tuple[frozenset[str], list[str]]] = []
-    for segment in re.split(r"[\n;&|()]", shell_code(script)):
-        words = segment.split()
-        while words and (words[0] in COMMAND_PREFIX or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", words[0])):
-            words.pop(0)
-        if words[:3] == ["supabase", "functions", "deploy"]:
+    for words in cli_commands(script):
+        if words[1:3] == ["functions", "deploy"]:
             args = words[3:]
             flags = frozenset(m.group(0) for w in args if (m := re.match(r"--[a-z][a-z0-9-]*", w)))
             unreadable = [
@@ -390,7 +403,7 @@ def fail(workflow: str, job: str, message: str) -> None:
 
 
 def check(path: pathlib.Path) -> None:
-    global chained_checkouts
+    global chained_checkouts, cli_commands_checked
     doc = yaml.safe_load(path.read_text())
     if not isinstance(doc, dict):
         return
@@ -494,6 +507,24 @@ def check(path: pathlib.Path) -> None:
 
         # Rule 5's evidence (judged in main, across workflows): every Supabase
         # CLI this job installs, and every function deploy it runs.
+        #
+        # And, judged here, that every CLI command runs after a setup-cli step
+        # in its OWN job. Each job starts on a fresh runner, so a pin in
+        # `migrate` installs nothing in `deploy-functions`. Matched by workflow
+        # alone, a deploy job with no pin of its own passed on the strength of
+        # another job's (Codex, on #100, round 5; reproduced, and so were a
+        # pin after the deploy and an unpinned `link`): production's
+        # first deploy would have migrated the database and then found no
+        # `supabase` to deploy with, or whatever CLI the runner happened to
+        # carry. A CLI installed where this cannot read its pin, inside a
+        # composite action or in the job's container image, is refused, since
+        # the version comparison could not read it either. Stated boundaries:
+        # this reads which steps a job lists, not which of them run, so a pin
+        # behind a step-level `if:` still counts; and a command `cli_commands`
+        # misses (behind a wrapper such as `timeout`, or a variable) is not
+        # checked here either, the boundary `shell_code` states.
+        pinned = False
+        unpinned: list[str] | None = None
         for step in steps:
             if not isinstance(step, dict):
                 continue
@@ -501,7 +532,14 @@ def check(path: pathlib.Path) -> None:
             if uses.startswith("supabase/setup-cli@"):
                 version = str((step.get("with") or {}).get("version") or "")
                 cli_pins.append((path.name, name, uses.split("@", 1)[1].strip(), version))
-            for flags, unreadable in deploy_invocations(str(step.get("run") or "")):
+                pinned = True
+            script = str(step.get("run") or "")
+            for words in cli_commands(script):
+                if pinned:
+                    cli_commands_checked += 1
+                elif unpinned is None:
+                    unpinned = words
+            for flags, unreadable in deploy_invocations(script):
                 function_deploys.append((path.name, name, flags))
                 for word in unreadable:
                     fail(
@@ -510,6 +548,15 @@ def check(path: pathlib.Path) -> None:
                         f"rule 5 cannot read the flags of `supabase functions deploy`: `{word}` is expanded when the step "
                         "runs, so the flags it supplies are invisible to the comparison — write the flags out",
                     )
+        if unpinned is not None:
+            command = " ".join(["supabase", *[w for w in unpinned[1:3] if not w.startswith("-") and "$" not in w]])
+            fail(
+                path.name,
+                name,
+                f"runs `{command}` before any supabase/setup-cli step in this job — every job starts on a fresh "
+                "runner, so only a pin earlier in the same job installs the CLI it runs, and rule 5 cannot say which "
+                "CLI that is; put the setup-cli step in this job, before its first CLI command",
+            )
 
 
 def main() -> int:
@@ -538,21 +585,21 @@ def main() -> int:
     # stayed on the Docker bundler. So: one setup-cli commit, one exact CLI
     # release, and the same flags on every `supabase functions deploy`.
     #
-    # And each deploy workflow must show the rule its OWN pin and its own
-    # function deploy. This used to be a global "saw nothing" check, which
-    # staging's evidence alone satisfied: with production's deploy removed, or
-    # wrapped past the scanner as `${SB:-supabase} functions deploy`, the
-    # comparisons ran over staging alone and passed (Codex, on #100; both
-    # reproduced). Agreement with nothing is not agreement.
+    # And each deploy workflow must show the rule its OWN function deploy,
+    # and every CLI command a pin in its own job (in check). This used to be a
+    # global "saw nothing" check, which staging's evidence alone satisfied:
+    # with production's deploy removed, or wrapped past the scanner as
+    # `${SB:-supabase} functions deploy`, the comparisons ran over staging
+    # alone and passed (Codex, on #100; both reproduced). Agreement with
+    # nothing is not agreement. There is no separate "read no pin in this
+    # workflow" check any more: a workflow with a deploy has a pin in the
+    # deploy's own job or fails in check, and one without a deploy fails
+    # below, so that message could only ever repeat a more precise one.
     present = {p.name for p in files}
     for workflow in DEPLOY_WORKFLOWS:
         if workflow not in present:
             failures.append(f"rule 5: there is no {workflow}, so it cannot hold staging and production to one CLI and one deploy path")
             continue
-        if not any(w == workflow for w, _, _, _ in cli_pins):
-            failures.append(
-                f"rule 5 read no supabase/setup-cli step in {workflow}, so it cannot tell which CLI that workflow deploys with"
-            )
         if not any(w == workflow for w, _, _ in function_deploys):
             failures.append(
                 f"rule 5 read no `supabase functions deploy` in {workflow}, so it cannot tell which path that workflow "
@@ -586,7 +633,8 @@ def main() -> int:
     print(
         f"PASS: {len(files)} workflows — no self-referential conditions, no dropped `needs` gate, "
         f"no shallow push, no unpinned checkout after a workflow_run ({chained_checkouts} checked), "
-        f"one Supabase CLI ({version}, {len(cli_pins)} pins) and one function-deploy path ({len(function_deploys)} deploys)"
+        f"one Supabase CLI ({version}, {len(cli_pins)} pins) and one function-deploy path ({len(function_deploys)} deploys), "
+        f"every CLI command after a pin in its own job ({cli_commands_checked} checked)"
     )
     return 0
 
