@@ -1,6 +1,6 @@
 // PortalHome (phase 07): next walk, credit meter, latest report cards,
 // unread notifications with mark-read.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Card } from "@/components/Card";
 import { CreditMeter } from "@/components/CreditMeter";
@@ -33,6 +33,17 @@ import type { Notifications, Plans } from "@/lib/types";
 import { useDocumentTitle } from "@/lib/use-document-title";
 import { useAuth } from "@/lib/auth-context";
 
+/** The newest entries of the trail the portal shows. */
+const TRAIL_LIMIT = 20;
+
+/**
+ * The trail as the section shows it. "failed" is not an empty list: an empty
+ * list hides the section, exactly as a client with no entry code on file sees
+ * it, so a failed read that became one said "nothing happened" on the one
+ * screen that answers "who opened my door".
+ */
+type TrailState = CredentialLogRow[] | "failed" | "retrying";
+
 export default function PortalHome() {
   useDocumentTitle("Your walks");
   const auth = useAuth();
@@ -43,7 +54,23 @@ export default function PortalHome() {
   const [upcomingWalks, setUpcoming] = useState<WalkDetailed[]>([]);
   const [reports, setReports] = useState<WalkDetailed[]>([]);
   const [notifications, setNotifications] = useState<Notifications[]>([]);
-  const [accessTrail, setAccessTrail] = useState<CredentialLogRow[]>([]);
+  const [accessTrail, setAccessTrail] = useState<TrailState>([]);
+  // Which read is the answer. A Retry and a full reload can both be reading;
+  // an older one settling afterwards is not the answer to what is on screen.
+  const trailRead = useRef(0);
+
+  /** Read the trail; null when a newer read has started since. */
+  const readTrail = useCallback(async (): Promise<CredentialLogRow[] | "failed" | null> => {
+    const read = ++trailRead.current;
+    const answer = await listMyCredentialLog(TRAIL_LIMIT).catch(() => "failed" as const);
+    return read === trailRead.current ? answer : null;
+  }, []);
+
+  const retryTrail = useCallback(async () => {
+    setAccessTrail("retrying");
+    const answer = await readTrail();
+    if (answer !== null) setAccessTrail(answer);
+  }, [readTrail]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -62,10 +89,10 @@ export default function PortalHome() {
       listWalksDetailed({ status: "completed", newestFirst: true, limit: 3 }),
       listNotifications(true),
       me.plan_id ? getPlan(me.plan_id) : Promise.resolve(null),
-      // Advisory. A client with no credential on file has an empty trail, and
-      // a failure to read it must not cost them their whole portal — the
-      // walks and the credit balance are what they came for.
-      listMyCredentialLog(20).catch(() => []),
+      // Advisory. A failure to read it must not cost the client their whole
+      // portal — the walks and the credit balance are what they came for — so
+      // it is caught here, and the section says it could not load.
+      readTrail(),
     ]);
     setClient(me);
     setOperator(op);
@@ -73,8 +100,8 @@ export default function PortalHome() {
     setReports(recentReports);
     setNotifications(ns);
     setPlan(p);
-    setAccessTrail(trail);
-  }, [auth.session?.user.id]);
+    if (trail !== null) setAccessTrail(trail);
+  }, [auth.session?.user.id, readTrail]);
 
   useEffect(() => {
     setError(null);
@@ -190,18 +217,38 @@ export default function PortalHome() {
         </section>
       )}
 
-      {accessTrail.length > 0 && (
+      {accessTrail === "failed" || accessTrail === "retrying" ? (
         <section style={{ marginTop: "var(--s-6)" }}>
           <span className="section-label">Entry code activity</span>
-          <p style={{ color: "var(--text-2)", fontSize: "var(--fs-12)", marginTop: "var(--s-1)" }}>
-            Every time your walker views or changes an entry code for your home,
-            it is recorded here. You cannot see the codes themselves — nor can
-            anyone without a fresh password check.
-          </p>
-          <Card style={{ marginTop: "var(--s-2)" }}>
-            <AccessTrail rows={accessTrail} />
-          </Card>
+          <div style={{ marginTop: "var(--s-2)" }}>
+            {accessTrail === "retrying" ? (
+              <LoadingState label="Loading your entry code activity" compact />
+            ) : (
+              // Our sentence, not the error's: the portal is a client's screen,
+              // and everything else on it did load.
+              <LoadError
+                compact
+                title="Couldn't load your entry code activity"
+                message="The rest of your portal is up to date. Try again in a moment."
+                onRetry={retryTrail}
+              />
+            )}
+          </div>
         </section>
+      ) : (
+        accessTrail.length > 0 && (
+          <section style={{ marginTop: "var(--s-6)" }}>
+            <span className="section-label">Entry code activity</span>
+            <p style={{ color: "var(--text-2)", fontSize: "var(--fs-12)", marginTop: "var(--s-1)" }}>
+              Every time your walker views or changes an entry code for your home,
+              it is recorded here. You cannot see the codes themselves — nor can
+              anyone without a fresh password check.
+            </p>
+            <Card style={{ marginTop: "var(--s-2)" }}>
+              <AccessTrail rows={accessTrail} />
+            </Card>
+          </section>
+        )
       )}
 
       {reports.length > 0 && (

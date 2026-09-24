@@ -4,11 +4,13 @@
 // auto-cleared. Put: new secret or rotation. Every reveal writes exactly
 // one audit row server-side (fn_read_credential).
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { AccessTrail } from "./AccessTrail";
 import { Button } from "./Button";
 import { FormError, Input, Select } from "./fields";
+import { LoadError, loadErrorMessage } from "./LoadError";
 import { Sheet } from "./Sheet";
 import { Spinner } from "./Spinner";
-import { LoadingState, StateField } from "./StateField";
+import { LoadingState } from "./StateField";
 import {
   listCredentialLog,
   vaultDelete,
@@ -19,7 +21,7 @@ import {
 } from "@/lib/api";
 import { browserClipboard, makeSecretClipboard } from "@/lib/clipboard";
 import { useAuth } from "@/lib/auth-context";
-import { dateLocal, timeLocal } from "@/lib/format";
+import { dateLocal } from "@/lib/format";
 import {
   canExtend,
   extendReveal,
@@ -50,6 +52,11 @@ export function entryMethodLabel(method: string): string {
   return METHOD_LABELS[method] ?? method;
 }
 
+type AuditState =
+  | { kind: "loading" }
+  | { kind: "failed"; message: string }
+  | { kind: "loaded"; rows: CredentialLogRow[] };
+
 /** One credential row with reveal / rotate / revoke / audit actions. */
 export function CredentialRow({
   credential,
@@ -71,7 +78,11 @@ export function CredentialRow({
   // operator filled from somewhere else entirely.
   const clipboard = useRef(makeSecretClipboard(browserClipboard)).current;
   const [auditOpen, setAuditOpen] = useState(false);
-  const [audit, setAudit] = useState<CredentialLogRow[] | null>(null);
+  const [audit, setAudit] = useState<AuditState>({ kind: "loading" });
+  // Which read is the answer to the sheet on screen. Opening again, or
+  // pressing Retry, starts a new read; an older one settling afterwards is not
+  // the answer, and letting it land put an earlier failure over newer rows.
+  const auditRead = useRef(0);
   const clearTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Auto-clear (spec 03). The rule lives in `lib/vault-reveal` so the
@@ -138,9 +149,24 @@ export function CredentialRow({
     }
   }
 
-  async function openAudit() {
+  // Each opening reads afresh, and a failure says so. It used to be caught
+  // into an empty list, which this sheet rendered as "This credential has not
+  // been opened yet": on the screen that answers who opened this door,
+  // "nothing happened" and "could not find out" must not look the same.
+  async function loadAudit() {
+    const read = ++auditRead.current;
+    setAudit({ kind: "loading" });
+    try {
+      const rows = await listCredentialLog(credential.id);
+      if (read === auditRead.current) setAudit({ kind: "loaded", rows });
+    } catch (err) {
+      if (read === auditRead.current) setAudit({ kind: "failed", message: loadErrorMessage(err) });
+    }
+  }
+
+  function openAudit() {
     setAuditOpen(true);
-    setAudit(await listCredentialLog(credential.id).catch(() => []));
+    void loadAudit();
   }
 
   return (
@@ -210,7 +236,7 @@ export function CredentialRow({
 
       <div style={{ display: "flex", gap: "var(--s-3)" }}>
         <LinkButton onClick={() => setRotateOpen(true)}>Rotate</LinkButton>
-        <LinkButton onClick={() => void openAudit()}>Audit trail</LinkButton>
+        <LinkButton onClick={openAudit}>Audit trail</LinkButton>
         <LinkButton onClick={() => void revoke()} danger>
           Revoke
         </LinkButton>
@@ -245,21 +271,16 @@ export function CredentialRow({
       />
 
       <Sheet open={auditOpen} onClose={() => setAuditOpen(false)} title="Audit trail">
-        {audit === null ? (
+        {audit.kind === "loading" ? (
           <LoadingState label="Loading audit trail" compact />
-        ) : audit.length === 0 ? (
-          <StateField compact title="No reveals recorded" detail="This credential has not been opened yet." />
+        ) : audit.kind === "failed" ? (
+          <LoadError compact title="Couldn't load the audit trail" message={audit.message} onRetry={loadAudit} />
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-2)" }}>
-            {audit.map((row) => (
-              <div key={row.id} className="vault-audit-row">
-                <div style={{ fontWeight: 600, fontSize: "var(--fs-14)" }}>{row.purpose}</div>
-                <div style={{ color: "var(--text-2)", fontSize: "var(--fs-12)" }}>
-                  {dateLocal(row.accessed_at)} · {timeLocal(row.accessed_at)}
-                </div>
-              </div>
-            ))}
-          </div>
+          <AccessTrail
+            rows={audit.rows}
+            emptyTitle="Nothing recorded yet"
+            emptyHint="When this entry code is viewed, changed or removed, it appears here."
+          />
         )}
       </Sheet>
     </div>

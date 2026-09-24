@@ -50,16 +50,7 @@ one the operator can read. A written argument before code, and growing the
 export lets the notice's promise grow with it (`legal-version.test.ts` keeps
 "everything" out until then).
 
-### 2. A failed read of the entry-code trail shows as no activity
-Both readers swallow the error: `VaultFlows.tsx`'s audit sheet and
-`PortalHome.tsx` call `listCredentialLog(...)` / `listMyCredentialLog(20)`
-with `.catch(() => [])`, so a failed read renders as an empty trail. On the
-one screen whose job is to answer "who opened my door", "nothing" and "could
-not load" must not look the same (the M39 shape). PortalHome's comment is
-right that a failure must not cost the client the whole portal; the section
-should say it could not load, and offer a retry.
-
-### 3. Revoke TEMP from PUBLIC
+### 2. Revoke TEMP from PUBLIC
 `PUBLIC` holds TEMP on the database (PostgreSQL's default). `0055` closed the
 path by which that let a temp table shadow a table inside a definer function:
 every function that pins a `search_path` now pins `public, pg_temp`, which
@@ -78,7 +69,7 @@ configure. Not reachable through the product either way: `anon` and
 `authenticated` are NOLOGIN, PostgREST issues no DDL, and no function an API
 role can execute runs dynamic SQL.
 
-### 4. An erasure leaves the Stripe event payloads and the client's sign-in account
+### 3. An erasure leaves the Stripe event payloads and the client's sign-in account
 Found by the independent review of 0057; both predate it, and spec 03 now
 names them rather than claiming otherwise.
 
@@ -99,7 +90,7 @@ admin API (the migrations cannot assume the deploy role may delete from
 `auth.users`), so it is an edge-function step in the erasure flow, ordered
 after the purge commits.
 
-### 5. A stale tab can write personal data back into an erased client's rows
+### 4. A stale tab can write personal data back into an erased client's rows
 An erasure redacts the client, property and credential rows in place and
 keeps them, because retained walks reference them. The UI withholds every
 edit surface from an erased client (spec 03), but a tab opened before the
@@ -118,7 +109,7 @@ Stripe webhook's subscription status, the ledger's balance), so its rule is
 about the personal columns only. The credential row takes its writes through
 `fn_write_credential`, which can refuse an erased client's property itself.
 
-### 6. A walk deleted through the API leaves its photos with no name
+### 5. A walk deleted through the API leaves its photos with no name
 `0058` made the rows the index of the photo folders: an erasure finds a
 client's photos through the folders of their walks and pets. A pet row can no
 longer be deleted (`trg_pets_erased`, Codex's third round on PR #106), and
@@ -132,6 +123,16 @@ walk. The fix is the pet rule's shape: refuse deleting a walk whose folder
 could hold photos, or revoke the grant, which nothing uses.
 
 ## Done
+
+- **A failed read of the entry-code trail says so, with a retry.** The
+  portal and the operator's audit sheet caught the error into an empty list:
+  the portal then hid the section, as it does for a client with no entry
+  code on file, and the sheet said the code had never been opened. Both show
+  a compact `LoadError` with a retry now, and a read that settles after a
+  newer one is dropped. The operator's sheet printed only the purpose, which
+  only a reveal carries; it names each action now, as the portal does. Found
+  by the independent review of 0056. See the `fix(trail-read)` status-log
+  entry.
 
 - **A failed email records our sentence, never the provider's words.**
   `notifications.email_last_error` is selectable by `authenticated`, and a

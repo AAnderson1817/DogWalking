@@ -15,37 +15,44 @@ export function loadErrorMessage(err: unknown): string {
   return msg || "Something went wrong.";
 }
 
+/**
+ * `compact` is for one section of a screen that otherwise loaded: the card
+ * stands where the section would, without the page wrapper, so one advisory
+ * read failing does not replace everything else the person came for.
+ */
 export function LoadError({
   title = "Couldn't load",
   message,
   onRetry,
+  compact = false,
 }: {
   title?: string;
   message: string;
   onRetry: () => void | Promise<void>;
+  compact?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   const offline = /offline|connection/i.test(message);
-  return (
-    <div className="page">
-      <StateField
-        tone={offline ? "information" : "attention"}
-        label={offline ? "Offline" : "Needs attention"}
-        title={title}
-        detail={message}
-        role="alert"
-        action={
-          <Button
-            onClick={() => {
-              setBusy(true);
-              void Promise.resolve(onRetry()).finally(() => setBusy(false));
-            }}
-            disabled={busy}
-          >
-            {busy ? <Spinner label="Retrying" /> : "Retry"}
-          </Button>
-        }
-      />
-    </div>
+  const field = (
+    <StateField
+      tone={offline ? "information" : "attention"}
+      label={offline ? "Offline" : "Needs attention"}
+      title={title}
+      detail={message}
+      role="alert"
+      compact={compact}
+      action={
+        <Button
+          onClick={() => {
+            setBusy(true);
+            void Promise.resolve(onRetry()).finally(() => setBusy(false));
+          }}
+          disabled={busy}
+        >
+          {busy ? <Spinner label="Retrying" /> : "Retry"}
+        </Button>
+      }
+    />
   );
+  return compact ? field : <div className="page">{field}</div>;
 }
