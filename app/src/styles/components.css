@@ -485,7 +485,6 @@ a.btn { text-decoration: none; }
   padding: var(--s-3) 0;
   border-bottom: var(--bw-xs) solid var(--sanpo-color-border-subtle);
 }
-.vault-audit-row { border-bottom: var(--bw-xs) solid var(--sanpo-color-border-subtle); padding-bottom: var(--s-2); }
 
 /* ── Fields ────────────────────────────────────────────────────────────── */
 .field { display: flex; flex-direction: column; gap: var(--s-1); }

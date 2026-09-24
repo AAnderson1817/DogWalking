@@ -1328,6 +1328,17 @@ columns in one query and nothing more: 0004's table-level SELECT covered both,
 so a client session could ask for them and get them. The grant is a column list
 now, and no API role can select either.
 
+A failed read of the trail says so, with a retry, on both readers: the
+portal's section and the operator's audit sheet for one entry code. Both used
+to catch the error into an empty list, which the sheet rendered as "This
+credential has not been opened yet" and the portal as no section at all, the
+same as a client with no entry code on file. On the screen that answers who
+opened the door, "nothing happened" and "could not find out" must not look the
+same. The newest read is the answer: a read that settles after a newer one is
+dropped. The operator's sheet names each action as the portal does, since the
+log records creations, rotations, revocations and failed password checks as
+well as reveals, and only a reveal carries a purpose.
+
 ## billing-portal — POST, client JWT (phase 07)
 Body: none. Returns `{ url }` — a Stripe customer-portal session for
 payment-method, pause and cancel self-service.

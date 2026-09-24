@@ -16,14 +16,23 @@ import type { CredentialLogRow } from "@/lib/api";
 import { accessActionLabel, accessActionTone } from "./access-trail-treatment";
 import { EmptyState } from "./EmptyState";
 
-export function AccessTrail({ rows }: { rows: CredentialLogRow[] }) {
+/**
+ * Also the operator's audit sheet for one entry code (VaultFlows), which used
+ * to print only `purpose`. Only a reveal carries one, so every creation,
+ * rotation, revocation and failed password check read as a bare date there.
+ * The empty text is the caller's, since the two readers are different people.
+ */
+export function AccessTrail({
+  rows,
+  emptyTitle = "No access yet",
+  emptyHint = "When your walker views or changes an entry code, it appears here.",
+}: {
+  rows: CredentialLogRow[];
+  emptyTitle?: string;
+  emptyHint?: string;
+}) {
   if (rows.length === 0) {
-    return (
-      <EmptyState
-        title="No access yet"
-        hint="When your walker views or changes an entry code, it appears here."
-      />
-    );
+    return <EmptyState title={emptyTitle} hint={emptyHint} />;
   }
   return (
     <ul className="access-trail" aria-label="Entry code activity">
