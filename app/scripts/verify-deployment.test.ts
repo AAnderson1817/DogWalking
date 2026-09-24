@@ -431,6 +431,61 @@ const aliasSource = (id: ts.Identifier): boolean =>
   (ts.isImportSpecifier(id.parent) || ts.isExportSpecifier(id.parent) || ts.isBindingElement(id.parent))
   && id.parent.propertyName === id;
 
+/**
+ * Whether `node` is being ASSIGNED TO rather than read: the left of `=`, an
+ * element of a literal that is (a property's value, a shorthand's name, a
+ * spread, an array element), or the variable of a `for … of`/`for … in`. A
+ * shorthand's DEFAULT is evaluated, not assigned to, so only its name counts.
+ * A caller passes the outermost wrapper (`(serveFunction as any) = …`); a
+ * wrapped pattern is not a valid target at all. The channel and FormError
+ * scans carry their own copy of this rule.
+ */
+function isAssignmentTarget(node: ts.Node): boolean {
+  const parent = node.parent;
+  if (!parent) return false;
+  if (ts.isBinaryExpression(parent)) return parent.operatorToken.kind === ts.SyntaxKind.EqualsToken && parent.left === node;
+  if ((ts.isPropertyAssignment(parent) && parent.initializer === node)
+    || (ts.isShorthandPropertyAssignment(parent) && parent.name === node)
+    || ts.isSpreadAssignment(parent) || ts.isSpreadElement(parent)) return isAssignmentTarget(parent.parent);
+  if (ts.isArrayLiteralExpression(parent)) return isAssignmentTarget(parent);
+  if (ts.isForOfStatement(parent) || ts.isForInStatement(parent)) return parent.initializer === node;
+  return false;
+}
+
+/**
+ * The key a destructuring element takes and the local side it lands in, or
+ * undefined if `node` is none: an element of an object binding pattern
+ * (`const { a: b } = …`) or a property of an object literal being assigned to
+ * (`({ a: b } = …)`). A rest element takes no one member, and an array
+ * pattern takes by position, so neither names one.
+ */
+function destructured(node: ts.Node): { key: string | typeof UNREADABLE; local: ts.Node } | undefined {
+  if (ts.isBindingElement(node) && ts.isObjectBindingPattern(node.parent) && !node.dotDotDotToken) {
+    const key = node.propertyName ? keyOf(node.propertyName) : ts.isIdentifier(node.name) ? node.name.text : UNREADABLE;
+    return { key, local: node.name };
+  }
+  if ((ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node)) && isAssignmentTarget(node.parent)) {
+    return { key: keyOf(node.name), local: ts.isPropertyAssignment(node) ? node.initializer : node.name };
+  }
+  return undefined;
+}
+
+/** Whether a destructuring's local side is serveFunction itself, default or not — a rename of nothing. */
+function keepsName(local: ts.Node): boolean {
+  let e = local;
+  if (ts.isExpression(e)) {
+    e = unwrap(e);
+    if (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.EqualsToken) e = unwrap(e.left);
+  }
+  return ts.isIdentifier(e) && e.text === "serveFunction";
+}
+
+/** Whether an access is the callee of a call, through any wrappers. */
+function isCalled(access: Access): boolean {
+  const held = outermost(access);
+  return ts.isCallExpression(held.parent) && held.parent.expression === held;
+}
+
 /** Whether `node` sits in a type (`typeof serveFunction`), which nothing runs. */
 function inType(node: ts.Node): boolean {
   for (let n = node.parent; n && !ts.isStatement(n) && !ts.isSourceFile(n); n = n.parent) {
@@ -491,13 +546,16 @@ function widening(call: ts.CallExpression): string | null {
  * never reaches that fallback: `Deno.serve` however it is spelled is a door,
  * called or not; `serveFunction` must be called where it is named, or its
  * options are out of sight (a bare alias, or a rename away from it on an
- * import, an export or a destructuring, its source spelled however it can
- * be — the local side of a rename, and any name being declared, is judged
- * where it is called instead); and a member of `Deno` the scan cannot read
- * could be `serve`. What stays outside: a second
- * serve reached through a name the scan never sees at all (`const { serve } =
- * Deno`, an alias of `Deno` itself) beside a first one it does — one serve
- * per function is the shape the runtime runs, and the fallback covers it.
+ * import, an export or a destructuring, declared or assigned, its source
+ * spelled however it can be — the local side of a rename, and any name being
+ * declared or assigned to, is judged where it is called instead); a key the
+ * scan cannot read, destructured under another name, and a call through a
+ * member it cannot read could each be serveFunction; and a member of `Deno`
+ * the scan cannot read could be `serve`. What stays outside: a second serve
+ * reached through a name the scan never sees at all (`const { serve } =
+ * Deno`, an alias of `Deno` itself, a member the scan cannot read taken by
+ * indexing and called later) beside a first one it does — one serve per
+ * function is the shape the runtime runs, and the fallback covers it.
  */
 function getReachable(root: string): Map<string, string> {
   const found = new Map<string, string>();
@@ -518,29 +576,47 @@ function getReachable(root: string): Map<string, string> {
         if (runs && receiver && ts.isIdentifier(receiver) && receiver.text === "Deno") {
           if (member === "serve") door("its own Deno.serve");
           else if (member === UNREADABLE) door("a member of Deno the scan cannot read");
+        } else if (runs && access && member === UNREADABLE && isCalled(access)) {
+          // `http[name](…)` is the unreadable destructured key below without
+          // the destructuring (Codex, on #97). Indexing that is not called is
+          // ordinary code — `OUTCOME_MESSAGES[outcome]`, three such reads in
+          // the functions today — so only a call counts, and there is none.
+          door("a call through a member the scan cannot read could be serveFunction, so the scan cannot see its options");
         }
         // An alias hides serveFunction's calls when it renames serveFunction
         // AWAY: its source side names serveFunction and its local side does
         // not — `import { serveFunction as serve }`, `export { serveFunction
         // as serve }` (the source an identifier or a string), and `const {
-        // serveFunction: serve } = …` (the key spelled however a key can be).
-        // The other side of an alias, serveFunction as the new name for
-        // something else, renames nothing of its away (Codex, on #97); an
-        // alias that keeps the name is no rename; and a type-only specifier
-        // is erased. Judged here, at the alias, so neither side is read again
-        // below as a bare reference.
+        // serveFunction: serve } = …` or `({ serveFunction: serve } = …)`
+        // (the key spelled however a key can be; Codex, on #97, for the
+        // assignment). The other side of an alias, serveFunction as the new
+        // name for something else, renames nothing of its away (Codex, on
+        // #97); an alias that keeps the name is no rename; and a type-only
+        // specifier is erased. Judged here, at the alias, so neither side is
+        // read again below as a bare reference.
         if (runs && (ts.isImportSpecifier(node) || ts.isExportSpecifier(node)) && node.propertyName
           && node.propertyName.text === "serveFunction" && node.name.text !== "serveFunction"
           && !typeOnlySpecifier(node)) {
           door(`serveFunction ${ts.isImportSpecifier(node) ? "imported" : "exported"} under another name, so the scan cannot see its calls`);
         }
-        if (runs && ts.isBindingElement(node) && node.propertyName && keyOf(node.propertyName) === "serveFunction"
-          && !(ts.isIdentifier(node.name) && node.name.text === "serveFunction")) {
-          door("serveFunction destructured under another name, so the scan cannot see its calls");
+        // A destructured key the scan cannot read could be serveFunction
+        // (Codex, on #97): that costs nothing today, since the functions
+        // destructure with no computed key and assign by destructuring
+        // nowhere (measured: 198 object binding elements in 16 functions).
+        const taken = runs ? destructured(node) : undefined;
+        if (taken && (taken.key === "serveFunction" || taken.key === UNREADABLE) && !keepsName(taken.local)) {
+          door(taken.key === UNREADABLE
+            ? "a key the scan cannot read, destructured under another name, could be serveFunction, so the scan cannot see its calls"
+            : "serveFunction destructured under another name, so the scan cannot see its calls");
         }
+        // A name being written — declared, or assigned to — is judged where it
+        // is called: `let serveFunction; ({ serveFunction } = http)`,
+        // `serveFunction = make()` and `http.serveFunction = make()` pass
+        // nothing on, and a call of it is read.
         const namesServeFunction = runs
           && ((ts.isIdentifier(node) && node.text === "serveFunction" && !declaresName(node) && !aliasSource(node))
-            || member === "serveFunction");
+            || member === "serveFunction")
+          && !isAssignmentTarget(outermost(node as ts.Expression));
         if (namesServeFunction) {
           const held = outermost(node as ts.Expression);
           const parent = held.parent;
@@ -759,6 +835,41 @@ describe("verify-deployment's read-only argument is derived", () => {
       + 'serve(g, { methods: ["GET"] });');
     fn("destructured", 'serveFunction(h);\nconst { serveFunction: serve } = http;\nserve(g, { methods: ["GET"] });');
     fn("destructured-key", 'serveFunction(h);\nconst { ["serveFunction"]: serve } = http;\nserve(g);');
+    // Destructuring takes a member with no access expression at all, and an
+    // assignment destructures as well as a declaration does (Codex, on #97):
+    // `({ serveFunction: serve } = http)`, in a `for … of`, nested in an array
+    // pattern, or with a default. A key the scan cannot read could be
+    // serveFunction (Codex again), and so could a member a call is made
+    // through: `http[name](…)` is the same unreadable key without the
+    // destructuring. Each sits beside a plain serveFunction(h), so none is the
+    // fallback.
+    fn("destructured-unreadable", 'serveFunction(h);\nconst key = "serveFunction";\n'
+      + 'const { [key]: serve } = http;\nserve(g, { methods: ["GET"] });');
+    fn("assigned", 'serveFunction(h);\nlet serve;\n({ serveFunction: serve } = http);\nserve(g, { methods: ["GET"] });');
+    fn("assigned-unreadable", "serveFunction(h);\nlet serve;\n({ [key]: serve } = http);\nserve(g);");
+    fn("assigned-default", "serveFunction(h);\nlet serve;\n({ serveFunction: serve = fallback } = http);\nserve(g);");
+    fn("assigned-for-of", "serveFunction(h);\nlet serve;\nfor ({ serveFunction: serve } of mods) serve(g);");
+    fn("assigned-nested", "serveFunction(h);\nlet serve;\n[{ serveFunction: serve }] = pairs;\nserve(g);");
+    fn("indexed-unreadable", 'serveFunction(h);\nhttp[name](g, { methods: ["GET"] });');
+    // A default is evaluated, not assigned to: serveFunction as a shorthand's
+    // default is read, and handed to `serve`.
+    fn("assigned-default-read", 'serveFunction(h);\nlet serve;\n({ serve = serveFunction } = mod);\nserve(g, { methods: ["GET"] });');
+    // Not doors. A destructuring assignment that keeps the name, or assigns
+    // something else TO serveFunction, is the declaration forms' twin: the
+    // local serveFunction is written, and judged where it is called — as is a
+    // plain assignment to it. An unreadable key whose local side keeps the
+    // name renames nothing; an object BUILT with a serveFunction key is data;
+    // and indexing that is not called is ordinary code (three such reads in
+    // the functions today, `OUTCOME_MESSAGES[outcome]` among them).
+    fn("assigned-shorthand", "let serveFunction;\n({ serveFunction } = http);\nserveFunction(h);");
+    fn("assigned-reverse", "let serveFunction;\n({ serve: serveFunction } = mod);\nserveFunction(h);");
+    fn("assigned-plain", "let serveFunction;\nserveFunction = make();\nserveFunction(h);");
+    fn("assigned-wrapped", "let serveFunction;\n(serveFunction as any) = make();\nserveFunction(h);");
+    fn("member-assigned", "http.serveFunction = make();\nhttp.serveFunction(h);");
+    fn("assigned-keeps-default", "let serveFunction;\n({ serveFunction: serveFunction = fallback } = http);\nserveFunction(h);");
+    fn("unreadable-keeps-name", "const { [key]: serveFunction } = mod;\nserveFunction(h);");
+    fn("built-object-key", "const routes = { serveFunction: handler };\nserveFunction(h);");
+    fn("indexed-uncalled", "serveFunction(h);\nconst message = OUTCOME_MESSAGES[outcome];");
     expect(Object.fromEntries(getReachable(root))).toEqual({
       "element-paren": "serveFunction widened with methods",
       "deno-paren": "its own Deno.serve",
@@ -776,6 +887,14 @@ describe("verify-deployment's read-only argument is derived", () => {
       "deno-template": "its own Deno.serve",
       "deno-unreadable": "a member of Deno the scan cannot read",
       "deno-alias": "its own Deno.serve",
+      "destructured-unreadable": "a key the scan cannot read, destructured under another name, could be serveFunction, so the scan cannot see its calls",
+      assigned: "serveFunction destructured under another name, so the scan cannot see its calls",
+      "assigned-unreadable": "a key the scan cannot read, destructured under another name, could be serveFunction, so the scan cannot see its calls",
+      "assigned-default": "serveFunction destructured under another name, so the scan cannot see its calls",
+      "assigned-for-of": "serveFunction destructured under another name, so the scan cannot see its calls",
+      "assigned-nested": "serveFunction destructured under another name, so the scan cannot see its calls",
+      "indexed-unreadable": "a call through a member the scan cannot read could be serveFunction, so the scan cannot see its options",
+      "assigned-default-read": "serveFunction referenced without being called, so the scan cannot see its options",
     });
   });
 });
