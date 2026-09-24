@@ -175,6 +175,28 @@ const passesThrough = (n: ts.Node): n is
   ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isSatisfiesExpression(n)
   || ts.isNonNullExpression(n) || ts.isTypeAssertionExpression(n);
 
+const isComma = (n: ts.Node): n is ts.BinaryExpression =>
+  ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.CommaToken;
+
+/**
+ * What `n` hands on unchanged, if it hands something on: the expression
+ * inside a pass-through, or a comma's right operand. A comma evaluates its
+ * operands in order and yields the last, so `(0, "alert")` is "alert". The
+ * callee already read one (`(0, React.createElement)(…)`) and no other read
+ * did: the deploy scan's finding on #97, one scan over.
+ */
+function through(n: ts.Node): ts.Expression | undefined {
+  if (passesThrough(n)) return n.expression;
+  if (isComma(n)) return n.right;
+  return undefined;
+}
+
+/** An expression with everything that hands its value on read through. */
+function unwrapValue(e: ts.Expression): ts.Expression {
+  for (let inner = through(e); inner; inner = through(e)) e = inner;
+  return e;
+}
+
 function resolverFor(checker: ts.TypeChecker): Resolve {
   return (id) => {
     const parent = id.parent;
@@ -199,7 +221,8 @@ function resolverFor(checker: ts.TypeChecker): Resolve {
  */
 function valuesOf(node: ts.Node, resolve: Resolve, seen = new Set<ts.Node>()): Value[] {
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return [node.text];
-  if (passesThrough(node)) return valuesOf(node.expression, resolve, seen);
+  const inner = through(node);
+  if (inner) return valuesOf(inner, resolve, seen);
   if (ts.isConditionalExpression(node)) {
     return [...valuesOf(node.whenTrue, resolve, seen), ...valuesOf(node.whenFalse, resolve, seen)];
   }
@@ -234,7 +257,8 @@ function valuesOf(node: ts.Node, resolve: Resolve, seen = new Set<ts.Node>()): V
  */
 function objectsOf(node: ts.Expression, resolve: Resolve, seen = new Set<ts.Node>()): ts.ObjectLiteralExpression[] | undefined {
   if (ts.isObjectLiteralExpression(node)) return [node];
-  if (passesThrough(node)) return objectsOf(node.expression, resolve, seen);
+  const inner = through(node);
+  if (inner) return objectsOf(inner, resolve, seen);
   const both = (a: ts.Expression, b: ts.Expression) => {
     const left = objectsOf(a, resolve, seen);
     const right = objectsOf(b, resolve, seen);
@@ -284,8 +308,7 @@ function isComponentProps(param: ts.ParameterDeclaration): boolean {
  * JSX tag; a helper that spreads its parameter is not one.
  */
 function forwardsProps(expr: ts.Expression, checker: ts.TypeChecker): boolean {
-  let e = expr;
-  while (passesThrough(e)) e = e.expression;
+  const e = unwrapValue(expr);
   if (!ts.isIdentifier(e)) return false;
   const symbol = checker.getSymbolAtLocation(e);
   const decl = symbol?.valueDeclaration ?? symbol?.declarations?.[0];
@@ -336,24 +359,16 @@ function forwardsProps(expr: ts.Expression, checker: ts.TypeChecker): boolean {
 const ELEMENT_FACTORIES = new Set(["createElement", "cloneElement", "jsx", "jsxs", "jsxDEV"]);
 const isFactoryName = (n: string | typeof UNREADABLE): boolean => typeof n === "string" && ELEMENT_FACTORIES.has(n);
 
-const isComma = (n: ts.Node): n is ts.BinaryExpression =>
-  ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.CommaToken;
-
 /** What a call calls: through the pass-throughs and a comma's right side. */
 function calleeOf(call: ts.CallExpression): ts.Expression {
-  let e: ts.Expression = call.expression;
-  for (;;) {
-    if (passesThrough(e)) e = e.expression;
-    else if (isComma(e)) e = e.right;
-    else return e;
-  }
+  return unwrapValue(call.expression);
 }
 
 /** The call `node` is what calls, climbing the same nodes `calleeOf` descends. */
 function callOf(node: ts.Node): ts.CallExpression | undefined {
   let e = node;
   for (let p = e.parent; p; e = p, p = e.parent) {
-    if (!((passesThrough(p) && p.expression === e) || (isComma(p) && p.right === e))) {
+    if (through(p) !== e) {
       return ts.isCallExpression(p) && p.expression === e ? p : undefined;
     }
   }
@@ -373,7 +388,8 @@ function memberNames(access: ts.PropertyAccessExpression | ts.ElementAccessExpre
 
 /** A member access names a factory, could (its key is unreadable), or does not. */
 function memberFactory(access: ts.PropertyAccessExpression | ts.ElementAccessExpression, resolve: Resolve): "factory" | "maybe" | undefined {
-  if (ts.isIdentifier(access.expression) && access.expression.text === "document") return undefined;
+  const receiver = unwrapValue(access.expression);
+  if (ts.isIdentifier(receiver) && receiver.text === "document") return undefined;
   const names = memberNames(access, resolve);
   if (names.some(isFactoryName)) return "factory";
   return names.includes(UNREADABLE) ? "maybe" : undefined;
@@ -493,7 +509,8 @@ function foldOf(node: ts.Node, resolve: Resolve, path: Set<ts.Node> = new Set())
       combiners: [...a.combiners, ...b.combiners],
     };
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return piece(node.text);
-  if (passesThrough(node)) return foldOf(node.expression, resolve, path);
+  const inner = through(node);
+  if (inner) return foldOf(inner, resolve, path);
   if (ts.isConditionalExpression(node)) {
     const a = foldOf(node.whenTrue, resolve, path);
     const b = foldOf(node.whenFalse, resolve, path);
@@ -911,6 +928,23 @@ describe("what the scan refuses and admits", () => {
     expect(ts(`const props = { role: <const>"alert" };`)).toEqual(["role"]);
     expect(ts(`createElement("span", <Props>{ role: "alert" });`)).toEqual(["role", "role"]);
     expect(ts(`export function Field(props: P) { return createElement("span", <P>props); }`)).toEqual([]);
+  });
+
+  it("reads a comma as the value it yields, its right operand, wherever it reads a value", () => {
+    // The callee already read through a comma: `(0, React.createElement)(…)`.
+    // Every other place the scan reads a value did not, the deploy scan's
+    // finding on #97 one scan over. The silent ones: a folded class, and a
+    // role in a plain object literal, where only a literal counts.
+    expect(rules(`const cls = "signin__" + (0, "error");`)).toEqual(["error-class"]);
+    expect(rules(`const props = { role: (0, "alert") };`)).toEqual(["role"]);
+    // The loud ones, refused as something the scan could not see: an applied
+    // props object, a component forwarding its own props, and a role value.
+    expect(rules(`createElement("span", (0, { role: "alert" }));`)).toEqual(["role", "role"]);
+    expect(rules(`export function Field(props: P) { return createElement("span", (0, props)); }`)).toEqual([]);
+    expect(rules(`export const X = () => <span role={(0, "status")}>x</span>;`)).toEqual([]);
+    // The DOM's createElement takes no props, however its receiver is held.
+    expect(rules(`(0, document).createElement("div", options);`)).toEqual([]);
+    expect(rules(`(document as Document).createElement("div", options);`)).toEqual([]);
   });
 
   it("admits a layout class on FormError itself", () => {
