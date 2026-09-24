@@ -268,6 +268,17 @@ DDL_INSIDE = sql_re(IDENT_START + r"(?:create|alter|drop)\s+type" + IDENT_END, r
 # seventeen): a body that turns it off changes how every later literal in
 # the same session is lexed, and this generator reads literals the standard
 # way only.
+# ROUTINE DDL and ROUTINE PRIVILEGES join them for the definer catalogue,
+# which shares this reader (Codex, on #97): the reader blanks every body, so
+# `do $$ begin execute 'create function … security definer …'; execute
+# 'grant execute on function … to public'; end $$` installed a publicly
+# executable definer function while `gen-definer-catalog.py` — and its
+# invariant-5 refusal — saw no statement at all. A body may not create,
+# alter or drop a function, procedure or routine, nor grant or revoke on
+# one; a table grant in a body (0004's loop) is none of these. ALTER DEFAULT
+# PRIVILEGES needs no word of its own: on functions it always carries
+# `grant|revoke … on functions|routines`, and on anything else the
+# catalogue has nothing to say.
 BODY_UNREADABLE = sql_re(
     "|".join(
         IDENT_START + word + IDENT_END
@@ -279,6 +290,10 @@ BODY_UNREADABLE = sql_re(
             r"session\s+authorization",
             r"session_authorization",
             r"(?:create|alter|drop)\s+schema",
+            r"create\s+(?:or\s+replace\s+)?(?:function|procedure)",
+            r"(?:alter|drop)\s+(?:function|procedure|routine)",
+            r"(?:grant|revoke)" + IDENT_END + r"[^;]*?" + IDENT_START
+            + r"on\s+(?:all\s+)?(?:function|procedure|routine)s?",
         )
     ),
     re.I,
@@ -332,10 +347,12 @@ AS_LAST = sql_re(IDENT_START + r"as$", re.I)
 # EXECUTE in a body must be a plain literal or a `format()` whose template is
 # one — the only two forms this repository's migrations use — and anything
 # else (a variable, `||`, `concat()`, a function) is refused as unreadable.
-# Matched on the body's SKELETON, so `grant execute on`, a trigger's
-# `execute function`, and the word inside a string are not EXECUTE statements.
+# Matched on the body's SKELETON, so a trigger's `execute function` and the
+# word inside a string are not EXECUTE statements. `grant execute on` used to
+# be excluded here too; every routine grant in a body is now refused by
+# BODY_UNREADABLE first, so no body that reaches this carries one.
 EXECUTE_STMT = sql_re(
-    IDENT_START + r"execute\s+(?!(?:on|function|procedure)" + IDENT_END + r")(.*?)"
+    IDENT_START + r"execute\s+(?!(?:function|procedure)" + IDENT_END + r")(.*?)"
     r"(?=;|" + IDENT_START + r"(?:into|using)" + IDENT_END + r"|$)",
     re.I | re.S,
 )
@@ -343,8 +360,8 @@ READABLE_COMMAND = sql_re(r"^\s*(?:'x*'|format\s*\(\s*'x*'\s*(?:,.*)?\))\s*$", r
 
 
 class HiddenDDL(Exception):
-    """Enum DDL, or a search_path change, inside a body or value this
-    generator does not read."""
+    """Enum DDL, routine DDL or a routine privilege, or a guarded session
+    change, inside a body or value this generator does not read."""
 
 
 class UnreadableIdentifier(HiddenDDL):
@@ -367,8 +384,8 @@ def check_command(command: str, where: str) -> None:
     held to the body rules."""
     clean, _ = strip_sql(command)
     if BODY_UNREADABLE.search(clean) or body_set_config_unreadable(clean):
-        raise HiddenDDL("an EXECUTE'd command carrying enum DDL or a guarded session change: "
-                        + " ".join(where.split())[:100])
+        raise HiddenDDL("an EXECUTE'd command carrying enum or routine DDL, a routine privilege, "
+                        "or a guarded session change: " + " ".join(where.split())[:100])
 
 
 def strip_sql(sql: str, *, inside_dollar: bool = False, in_body: bool = False) -> tuple[str, str]:
@@ -441,8 +458,11 @@ def strip_sql(sql: str, *, inside_dollar: bool = False, in_body: bool = False) -
     def check_body(body: str, where: str) -> None:
         """`body` is the raw text of a DO or function body, either quoting."""
         clean, body_skel = strip_sql(body, in_body=True)
-        if BODY_UNREADABLE.search(clean):
-            raise HiddenDDL(" ".join(where.split())[:120])
+        hit = BODY_UNREADABLE.search(clean)
+        if hit:
+            # The phrase that matched, so a refusal names what it saw.
+            raise HiddenDDL(f"`{' '.join(hit.group(0).split())[:60]}` in a body: "
+                            + " ".join(where.split())[:120])
         if body_set_config_unreadable(clean):
             raise HiddenDDL("set_config of a guarded (or unreadable) setting in a body: "
                             + " ".join(where.split())[:100])
@@ -1117,9 +1137,9 @@ def collect() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
         except HiddenDDL as e:
             print(
                 f"FAIL: {path.name}: enum DDL (or a change of search_path, standard_conforming_strings, "
-                f"role or session authorization, or schema DDL) inside a DO body, a "
-                f"function body or a dollar-quoted value, which this generator does not read — "
-                f"`{e}`; lift it to a top-level statement or teach gen-enum-catalog.py the form",
+                f"role or session authorization; schema DDL; or routine DDL or a routine grant) inside "
+                f"a DO body, a function body or a dollar-quoted value, which this generator does not "
+                f"read — `{e}`; lift it to a top-level statement or teach gen-enum-catalog.py the form",
                 file=sys.stderr,
             )
             sys.exit(1)

@@ -610,7 +610,10 @@ check("format() with a literal template allowed (0004 pattern)", lambda: unchang
 check("plain literal EXECUTE allowed (0028 pattern)", lambda: unchanged(scratch("f6", "do $$ begin execute 'create extension if not exists pg_cron'; exception when others then null; end $$;\n")))
 check("EXECUTE … INTO with a literal allowed", lambda: unchanged(scratch("f7", "do $$ declare n int; begin execute 'select 1' into n; end $$;\n")))
 check("EXECUTE … USING with a literal allowed", lambda: unchanged(scratch("f8", "do $$ declare n int; begin execute 'select $1' into n using 1; end $$;\n")))
-check("grant execute on inside a DO is not an EXECUTE", lambda: unchanged(scratch("f9", "do $$ begin grant execute on function fn_job_health() to service_role; end $$;\n")))
+# A routine grant in a body is refused by the body rule now (Codex, on #97,
+# for the definer catalogue that shares this reader): the needle is the phrase
+# that rule saw, which the EXECUTE rule never reports.
+check("grant execute on inside a DO is refused as a routine grant, not read as an EXECUTE", lambda: refuses(scratch("f9", "do $$ begin grant execute on function fn_job_health() to service_role; end $$;\n"), "`grant execute on function` in a body"))
 check("create trigger … execute function inside a DO is not an EXECUTE", lambda: unchanged(scratch("f10", "do $$ begin create trigger probe_t after insert on job_runs for each row execute function fn_touch_updated_at(); end $$;\n")))
 check("the word execute inside a string is not an EXECUTE", lambda: unchanged(scratch("f11", "do $$ begin raise notice 'grant execute fn_unsubscribe_by_token'; end $$;\n")))
 check("format() with a computed template refused", lambda: refuses(scratch("f12", "do $$ declare t text := 'select 1'; begin execute format(t); end $$;\n"), "cannot read"))

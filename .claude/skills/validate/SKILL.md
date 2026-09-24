@@ -343,6 +343,9 @@ use anywhere.
 locally. Gate 10g fails when a step has no row, a row names no step, or a gate
 id names no heading — so the list is complete by construction, where the one
 it replaced was a hand-kept selection that told its reader not to trust it.
+One row serves one name, so two steps may share a name only if they are the
+same step in the same job setting after the same steps, as the two `Install`s
+are; a pair that differs in any of the three is refused too.
 
 - **a gate id**: `validate.sh` runs the same check under that number;
 - **CI only**: a check with no local gate. Each is cheap to run by hand when

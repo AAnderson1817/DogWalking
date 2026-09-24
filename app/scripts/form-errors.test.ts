@@ -584,6 +584,135 @@ function keysOf(name: ts.PropertyName, resolve: Resolve): (string | typeof UNREA
   return [];
 }
 
+/** The attributes the scan refuses when they can be an error region. */
+const GUARDED: readonly string[] = ["role", "aria-live"];
+type Settled = ReadonlySet<string>;
+const NONE: Settled = new Set();
+
+/**
+ * The one key a property is DEFINITELY written under: a name written plainly,
+ * or a computed key every reading of which is the same string. A key that
+ * could be two names, or one the scan cannot read, may not be that key at
+ * all, so it overrides nothing for certain.
+ */
+function definiteKey(name: ts.PropertyName, resolve: Resolve): string | undefined {
+  if (!ts.isComputedPropertyName(name)) {
+    const [only, ...more] = keysOf(name, resolve);
+    return typeof only === "string" && more.length === 0 ? only : undefined;
+  }
+  const values = new Set(valuesOf(name.expression, resolve));
+  const [only] = values;
+  return values.size === 1 && typeof only === "string" ? only : undefined;
+}
+
+/**
+ * The guarded keys a list of props DEFINITELY defines, so that every earlier
+ * definition of the same key is overridden before React receives the props:
+ * the last definition wins, in an attribute list and an object literal alike
+ * (Codex, on #97: `<span {...{ ...p, role: "status", "aria-live": "polite"
+ * }} />` refused `p` although the two later properties decide both values).
+ * A method or a setter defines its key too — a function, or undefined when
+ * spread — so it overrides as surely as a value. A spread defines a key only
+ * if every object it could apply defines it: one the scan cannot see, or one
+ * that could apply nothing (`c && {…}`, `null`), defines nothing for certain.
+ * `ancestors` is the chain of constants being followed, so a cycle ends.
+ */
+function definiteKeys(entries: readonly ts.Node[], resolve: Resolve, ancestors: ReadonlySet<ts.Node> = new Set()): Set<string> {
+  const keys = new Set<string>();
+  for (const entry of entries) {
+    let key: string | undefined;
+    if (ts.isJsxAttribute(entry)) key = attrName(entry.name);
+    else if (ts.isPropertyAssignment(entry) || ts.isShorthandPropertyAssignment(entry)
+      || ts.isGetAccessorDeclaration(entry) || ts.isSetAccessorDeclaration(entry) || ts.isMethodDeclaration(entry)) {
+      key = definiteKey(entry.name, resolve);
+    } else if (ts.isSpreadAssignment(entry) || ts.isJsxSpreadAttribute(entry)) {
+      for (const k of spreadDefines(entry.expression, resolve, ancestors)) keys.add(k);
+    }
+    if (key !== undefined && GUARDED.includes(key)) keys.add(key);
+  }
+  return keys;
+}
+
+/** The guarded keys a spread of `node` defines for certain: see `definiteKeys`. */
+function spreadDefines(node: ts.Expression, resolve: Resolve, ancestors: ReadonlySet<ts.Node>): Set<string> {
+  if (ts.isObjectLiteralExpression(node)) return definiteKeys(node.properties, resolve, ancestors);
+  const inner = through(node);
+  if (inner) return spreadDefines(inner, resolve, ancestors);
+  const both = (a: ts.Expression, b: ts.Expression) => {
+    const right = spreadDefines(b, resolve, ancestors);
+    return new Set([...spreadDefines(a, resolve, ancestors)].filter((k) => right.has(k)));
+  };
+  if (ts.isConditionalExpression(node)) return both(node.whenTrue, node.whenFalse);
+  if (ts.isBinaryExpression(node)) {
+    const op = node.operatorToken.kind;
+    if (op === ts.SyntaxKind.BarBarToken || op === ts.SyntaxKind.QuestionQuestionToken) return both(node.left, node.right);
+  }
+  if (ts.isIdentifier(node)) {
+    const init = resolve(node);
+    if (init && !ancestors.has(init)) return spreadDefines(init, resolve, new Set([...ancestors, init]));
+  }
+  return new Set();
+}
+
+/**
+ * For each entry of a props list, the guarded keys some LATER entry defines
+ * for certain, plus those already settled after the whole list: a definition
+ * of one of those keys can never be the value React receives, so it is not
+ * judged for that key.
+ */
+function settledAfter(entries: readonly ts.Node[], resolve: Resolve, after: Settled): Settled[] {
+  const out: Settled[] = [];
+  let acc = new Set(after);
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    out[i] = acc;
+    acc = new Set([...acc, ...definiteKeys([entries[i]], resolve)]);
+  }
+  return out;
+}
+
+/**
+ * The spread that applies an object literal written in it, through what hands
+ * a value on — parentheses and assertions, a comma's right operand, a
+ * ternary's arm, either side of `||`/`??`, the right of `&&` — or undefined:
+ * a literal anywhere else can reach props the scan does not see.
+ */
+function spreadHolding(literal: ts.ObjectLiteralExpression): ts.SpreadAssignment | ts.JsxSpreadAttribute | undefined {
+  let n: ts.Node = literal;
+  for (let p = n.parent; p; n = p, p = p.parent) {
+    if (ts.isSpreadAssignment(p) || ts.isJsxSpreadAttribute(p)) return p;
+    if (through(p) === n) continue;
+    if (ts.isConditionalExpression(p) && p.condition !== n) continue;
+    if (ts.isBinaryExpression(p)) {
+      const op = p.operatorToken.kind;
+      if (op === ts.SyntaxKind.BarBarToken || op === ts.SyntaxKind.QuestionQuestionToken) continue;
+      if (op === ts.SyntaxKind.AmpersandAmpersandToken && p.right === n) continue;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * The guarded keys settled after a property of an object literal, wherever
+ * that literal's value can go: later in the literal itself, which fixes its
+ * value for every use, and — when the literal is written in a spread and so
+ * can be applied nowhere else — later in each list that spread feeds, up the
+ * chain.
+ */
+function settledAt(entry: ts.ObjectLiteralElementLike, resolve: Resolve): Settled {
+  const literal = entry.parent;
+  if (!ts.isObjectLiteralExpression(literal)) return NONE;
+  const i = literal.properties.indexOf(entry);
+  const keys = definiteKeys(literal.properties.slice(i + 1), resolve);
+  const spread = spreadHolding(literal);
+  if (spread && ts.isSpreadAssignment(spread)) for (const k of settledAt(spread, resolve)) keys.add(k);
+  else if (spread) {
+    const attrs = spread.parent.properties;
+    for (const k of definiteKeys(attrs.slice(attrs.indexOf(spread) + 1), resolve)) keys.add(k);
+  }
+  return keys;
+}
+
 const COMPILER_OPTIONS: ts.CompilerOptions = {
   noLib: true,
   noResolve: true,
@@ -701,13 +830,17 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
   // `__error` class may be written outside fields.tsx.
   const formErrorClass = new Set<ts.Node>();
 
+  // `done`: the guarded keys a later definition settles, so this one never
+  // reaches React for them (`settledAfter`).
   const visitProps = (
     owner: string | null,
     name: string | undefined,
     value: ts.Node | undefined,
     site: ts.Node,
+    done: Settled = NONE,
   ) => {
     const jsx = owner !== null;
+    if (name !== undefined && done.has(name)) return;
     if (name === "role" && mayBe(value, "alert", jsx, resolve)) {
       alertRoles += 1;
       if (owner !== "StateField") at(site, "role");
@@ -727,10 +860,10 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
   // `role` and `aria-live`, since it could be either; in a plain object
   // literal it is no evidence of anything, by the same rule that makes only a
   // literal "alert" count there.
-  const visitMember = (owner: string | null, name: ts.PropertyName, value: ts.Node, site: ts.Node) => {
+  const visitMember = (owner: string | null, name: ts.PropertyName, value: ts.Node, site: ts.Node, done: Settled = NONE) => {
     for (const key of keysOf(name, resolve)) {
-      if (key !== UNREADABLE) visitProps(owner, key, value, site);
-      else if (owner !== null) for (const each of ["role", "aria-live"]) visitProps(owner, each, value, site);
+      if (key !== UNREADABLE) visitProps(owner, key, value, site, done);
+      else if (owner !== null) for (const each of GUARDED) visitProps(owner, each, value, site, done);
     }
   };
 
@@ -741,7 +874,9 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
   // object is spread, and the scan cannot read what it returns, so it is
   // unreadable; a method or a setter supplies no string at all. A spread
   // whose objects the scan cannot see could carry either attribute, so it is
-  // judged as both — unless it forwards the component's own props.
+  // judged as both — unless it forwards the component's own props. Only a
+  // definition that can still win is judged for a key: one a later definition
+  // settles for certain never reaches React (`settledAfter`; Codex, on #97).
   //
   // A literal WRITTEN where an approved component is applied —
   // `createElement(StateField, { role: "alert" })`, `<StateField {...{ role:
@@ -752,10 +887,12 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
   // name is judged where it is written too, since another use of the name may
   // apply it elsewhere; so is one written inside such a literal.
   const judgedWithOwner = new Set<ts.Node>();
-  const visitSpread = (owner: string, expr: ts.Expression, site: ts.Node, seen = new Set<ts.Node>(), written = true) => {
+  const visitSpread = (
+    owner: string, expr: ts.Expression, site: ts.Node, seen = new Set<ts.Node>(), written = true, done: Settled = NONE,
+  ) => {
     const objects = objectsOf(expr, resolve);
     if (objects === undefined) {
-      if (!forwardsProps(expr, checker)) for (const each of ["role", "aria-live"]) visitProps(owner, each, expr, site);
+      if (!forwardsProps(expr, checker)) for (const each of GUARDED) visitProps(owner, each, expr, site, done);
       return;
     }
     const inPlace = new Set<ts.Node>(written ? inlineObjects(expr) : []);
@@ -764,12 +901,13 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
       seen.add(obj);
       const here = inPlace.has(obj);
       if (here && Object.hasOwn(APPROVED, owner)) judgedWithOwner.add(obj);
-      for (const prop of obj.properties) {
-        if (ts.isPropertyAssignment(prop)) visitMember(owner, prop.name, prop.initializer, site);
-        else if (ts.isShorthandPropertyAssignment(prop)) visitProps(owner, prop.name.text, prop.name, site);
-        else if (ts.isGetAccessorDeclaration(prop)) visitMember(owner, prop.name, prop, site);
-        else if (ts.isSpreadAssignment(prop)) visitSpread(owner, prop.expression, site, seen, here);
-      }
+      const after = settledAfter(obj.properties, resolve, done);
+      obj.properties.forEach((prop, i) => {
+        if (ts.isPropertyAssignment(prop)) visitMember(owner, prop.name, prop.initializer, site, after[i]);
+        else if (ts.isShorthandPropertyAssignment(prop)) visitProps(owner, prop.name.text, prop.name, site, after[i]);
+        else if (ts.isGetAccessorDeclaration(prop)) visitMember(owner, prop.name, prop, site, after[i]);
+        else if (ts.isSpreadAssignment(prop)) visitSpread(owner, prop.expression, site, seen, here, after[i]);
+      });
     }
   };
 
@@ -778,10 +916,12 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
       // An approved component is the owner by its binding; any other element
       // is its tag in brackets, which no exemption names.
       const owner = approvedAs(node.tagName, file, checker) ?? `<${tagName(node)}>`;
-      for (const attr of node.attributes.properties) {
-        if (ts.isJsxAttribute(attr)) visitProps(owner, attrName(attr.name), valueOf(attr.initializer), attr);
-        else if (ts.isJsxSpreadAttribute(attr)) visitSpread(owner, attr.expression, attr);
-      }
+      const attrs = node.attributes.properties;
+      const after = settledAfter(attrs, resolve, NONE);
+      attrs.forEach((attr, i) => {
+        if (ts.isJsxAttribute(attr)) visitProps(owner, attrName(attr.name), valueOf(attr.initializer), attr, after[i]);
+        else if (ts.isJsxSpreadAttribute(attr)) visitSpread(owner, attr.expression, attr, undefined, undefined, after[i]);
+      });
     } else if (ts.isCallExpression(node) && factoryCall(node)) {
       // The element type is the owner when it is an approved component by
       // its binding (`StateField` may carry the role, `FormError` its
@@ -793,7 +933,7 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
       const [type, props] = node.arguments;
       const owner = (type && factoryOwner(node, type)) ?? "<element>";
       if (node.arguments.some(ts.isSpreadElement)) {
-        for (const each of ["role", "aria-live"]) visitProps("<element>", each, node, node);
+        for (const each of GUARDED) visitProps("<element>", each, node, node);
       } else if (props) {
         visitSpread(owner, props, node);
       }
@@ -801,10 +941,10 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
         for (const f of findings.slice(before)) f.note = "a call through a member the scan cannot read, judged as the element factory it could be";
       }
     } else if (ts.isPropertyAssignment(node) && !judgedWithOwner.has(node.parent)) {
-      visitMember(null, node.name, node.initializer, node);
+      visitMember(null, node.name, node.initializer, node, settledAt(node, resolve));
     } else if (ts.isShorthandPropertyAssignment(node) && !judgedWithOwner.has(node.parent)) {
       // `{ role }`: the value is the binding of the same name.
-      visitProps(null, node.name.text, node.name, node);
+      visitProps(null, node.name.text, node.name, node, settledAt(node, resolve));
     }
 
     // A factory referenced without being called, however it is spelled.
@@ -1094,6 +1234,46 @@ describe("what the scan refuses and admits", () => {
     expect(rules(`const a = { role: "status" }; export const X = ({ on }) => <span {...(on && a)}>x</span>;`)).toEqual([]);
     expect(rules(`export const X = () => <span {...null}>x</span>;`)).toEqual([]);
     expect(rules(`const a = { role: r }; export const X = ({ big }) => <span {...(big ? a : {})}>x</span>;`))
+      .toEqual(["role"]);
+  });
+
+  it("judges only a definition that can win, since the last definition of a key is the one React receives (Codex, on #97)", () => {
+    const at = (el: string) => rules(`export const X = ({ c }) => ${el};`);
+    // Codex's case: the later properties decide both values, whatever p holds.
+    expect(at(`<span {...{ ...getProps(), role: "status", "aria-live": "polite" }}>x</span>`)).toEqual([]);
+    // A later attribute overrides an earlier spread just the same.
+    expect(at(`<span {...getProps()} role="status" aria-live="polite">x</span>`)).toEqual([]);
+    expect(at(`<span {...getProps()} {...{ role: "status", "aria-live": "polite" }}>x</span>`)).toEqual([]);
+    expect(at(`<span {...{ ...{ ...getProps() }, role: "status", "aria-live": "polite" }}>x</span>`)).toEqual([]);
+    expect(rules(`createElement("span", { ...getProps(), role: "status", "aria-live": "polite" });`)).toEqual([]);
+    expect(rules(`const safe = { role: "status", "aria-live": "polite" };
+      export const X = () => <span {...getProps()} {...safe}>x</span>;`)).toEqual([]);
+    // A method supplies a function, never a string, and still overrides.
+    expect(at(`<span {...{ ...getProps(), role() { return "x"; }, "aria-live": "polite" }}>x</span>`)).toEqual([]);
+    // Only what is overridden is let off: p can still set the other key, or both.
+    expect(at(`<span {...getProps()} role="status">x</span>`)).toEqual(["aria-live"]);
+    // And a spread the scan cannot see overrides nothing for certain: it may
+    // leave the earlier value in place.
+    expect(rules(`const x = { role: "alert", ...getProps() };`)).toEqual(["role"]);
+    expect(at(`<span role="status" aria-live="polite" {...getProps()}>x</span>`)).toEqual(["role", "aria-live"]);
+    // A spread overrides for certain only if every object it could apply
+    // does: `c && …` may apply nothing, and here one arm lacks aria-live.
+    expect(at(`<span {...getProps()} {...(c && { role: "status", "aria-live": "polite" })}>x</span>`))
+      .toEqual(["role", "aria-live"]);
+    expect(at(`<span {...getProps()} {...(c ? { role: "status", "aria-live": "off" } : { role: "note" })}>x</span>`))
+      .toEqual(["aria-live"]);
+    // A key that could be two names may not be `role` at all.
+    expect(at(`<span {...{ ...getProps(), [c ? "role" : "title"]: "status", "aria-live": "polite" }}>x</span>`))
+      .toEqual(["role"]);
+    // The pass over every object literal honours it too: later in the same
+    // literal, which fixes its value for every use, and later in the list a
+    // literal written in a spread feeds, since it can be applied nowhere else…
+    expect(rules(`const x = { role: "alert", ...{ role: "status" } };`)).toEqual([]);
+    expect(rules(`const x = { ...{ role: "status" }, role: "alert" };`)).toEqual(["role"]);
+    expect(at(`<span {...{ ...{ role: "alert" }, role: "status" }}>x</span>`)).toEqual([]);
+    expect(at(`<span {...(c ? { role: "alert" } : {})} role="status">x</span>`)).toEqual([]);
+    // …but not a literal bound to a name, which another use may apply as it is.
+    expect(rules(`const inner = { role: "alert" }; export const X = () => <span {...{ ...inner, role: "status" }}>x</span>;`))
       .toEqual(["role"]);
   });
 
