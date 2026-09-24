@@ -250,7 +250,9 @@ export default function ClientDetail() {
       {/* Review H5: export and erasure. Sits below the tabs rather than inside
           one, because it is about the whole record rather than a section of
           it — and it must not be somewhere an operator lands by accident. */}
-      <ClientDataPanel client={client} onPurged={() => void reload()} />
+      {/* Keyed by client: the panel holds a typed confirmation, a notice and
+          an erasure status, none of which belongs to the next client. */}
+      <ClientDataPanel key={client.id} client={client} onPurged={() => void reload()} />
 
       {/* Review M16. This control had no `aria-label` at all, so a screen
           reader announced "tab, 5 of 5, selected" for the operator's main

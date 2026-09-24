@@ -825,9 +825,8 @@ export interface PurgeResult {
   photosDeleted: number;
   /**
    * Objects still in the client's folders when this call finished, as the
-   * database counts them. Non-zero means the erasure has NOT finished: the
-   * pet rows that name those folders are kept, and a later call picks up the
-   * rest.
+   * database counts them. Non-zero means the erasure has NOT finished, and a
+   * later call picks up the rest.
    */
   photosLeft: number;
   /** Every photo is gone and the second phase has run. */
@@ -876,10 +875,10 @@ const REMOVE_BATCH = 1000;
  * — an expired token, say — with the same 400 as "not found", so neither can
  * prove an object absent. `fn_purge_client_status` counts what
  * `storage.objects` still holds in those folders; only when that is zero does
- * this call `fn_purge_client_photos`, which drops the pet rows and itself
- * refuses while any object remains. Reporting "deleted" over a file that is
- * still there is the one outcome that would make this worse than doing
- * nothing.
+ * this call `fn_purge_client_photos`, which drops any photo row written since
+ * the first phase and itself refuses while any object remains. Reporting
+ * "deleted" over a file that is still there is the one outcome that would
+ * make this worse than doing nothing.
  *
  * Running it again is how an unfinished erasure finishes: the first phase is
  * idempotent and keeps the date the erasure began.

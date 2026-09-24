@@ -33,20 +33,21 @@ export function ClientDataPanel({
   // phase marks the client erased before any photo is deleted, so `purged_at`
   // alone cannot say the erasure finished — this screen used to read it that
   // way, hide the button, and leave the rest waiting for a retry nobody could
-  // start.
-  const [status, setStatus] = useState<ErasureStatus | "unknown" | null>(null);
+  // start. The answer is kept with the client it is about: this panel can be
+  // handed another client while a request for the last one is in flight, and
+  // one client's "finished" must never stand for another's.
+  const [answer, setAnswer] = useState<{ client: string; value: ErasureStatus | "unknown" } | null>(null);
+  const status = answer?.client === client.id ? answer.value : null;
 
   const purged = client.purged_at !== null;
 
   useEffect(() => {
-    if (!purged) {
-      setStatus(null);
-      return;
-    }
+    if (!purged) return;
     let live = true;
-    getErasureStatus(client.id).then(
-      (s) => { if (live) setStatus(s); },
-      () => { if (live) setStatus("unknown"); },
+    const about = client.id;
+    getErasureStatus(about).then(
+      (s) => { if (live) setAnswer({ client: about, value: s }); },
+      () => { if (live) setAnswer({ client: about, value: "unknown" }); },
     );
     return () => {
       live = false;
@@ -78,8 +79,9 @@ export function ClientDataPanel({
     setError(null);
     setNotice(null);
     try {
-      const result = await purgeClient(client.id);
-      setStatus({ erased: true, finished: result.finished, photosLeft: result.photosLeft });
+      const about = client.id;
+      const result = await purgeClient(about);
+      setAnswer({ client: about, value: { erased: true, finished: result.finished, photosLeft: result.photosLeft } });
       if (result.finished) setNotice("This client's personal data has been erased.");
       setOpen(false);
       setTyped("");
