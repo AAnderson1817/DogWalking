@@ -234,6 +234,32 @@ with probe("a quoted role"):
     check("a quoted role is read as its name", held(model, "fn_probe_quoted") == ["authenticated"],
           f"held by {held(model, 'fn_probe_quoted')}")
 
+# ── A role is read as PostgreSQL resolves it (Codex, on #97) ──────────────
+# Carried over from #97, whose grant reader stored `TO PUBLIC` as `PUBLIC`
+# and missed it. This reader folds already; these pin it. An unquoted name
+# folds to lower case, so `TO PUBLIC` and `TO Anon` grant exactly `public`
+# and `anon` (measured). A quoted name is exact, doubled quotes read as one,
+# and a comma inside one separates nothing: `"PUBLIC"` is not the PUBLIC
+# pseudo-role (PostgreSQL refuses it as a role that does not exist).
+with probe("roles read as PostgreSQL resolves them"):
+    model = collect_with(
+        fn("fn_probe_upper") + "grant execute on function fn_probe_upper() to PUBLIC;\n"
+        + fn("fn_probe_mixed") + "grant execute on function fn_probe_mixed() to Anon;\n"
+        + fn("fn_probe_qpublic") + 'grant execute on function fn_probe_qpublic() to "public";\n'
+        + fn("fn_probe_exact") + 'grant execute on function fn_probe_exact() to "PUBLIC", "we""ird", "a,b";\n'
+    )
+    for name, want in (("fn_probe_upper", ["public"]), ("fn_probe_mixed", ["anon"]), ("fn_probe_qpublic", ["public"])):
+        check(f"{name} is held by {want}", held(model, name) == want, f"held by {held(model, name)}")
+    acl = sorted(model.funcs.get(("fn_probe_exact", ()), {}).get("acl", {"<absent>"}))
+    check("a quoted name is exact, doubled quotes read as one, and a comma inside one separates nothing",
+          {"PUBLIC", 'we"ird', "a,b"} <= set(acl) and held(model, "fn_probe_exact") == [], f"acl {acl}")
+    exposed = {f for f, _ in gen.open_to_anon(model)}
+    check("invariant 5 names what TO PUBLIC and TO Anon expose, and not a role named PUBLIC",
+          {"fn_probe_upper()", "fn_probe_mixed()", "fn_probe_qpublic()"} <= exposed and "fn_probe_exact()" not in exposed,
+          f"named {sorted(exposed)}")
+    check("... and the catalogue shows PUBLIC for TO PUBLIC, not none",
+          "| `fn_probe_upper` | `PUBLIC` |" in gen.render(model))
+
 # ── A migration the shared reader refuses is a named FAIL, not a traceback ─
 with probe("a refused migration"):
     code, err = refused('do $$ begin perform 1 from U&"clients"; end $$;\n')
@@ -462,6 +488,8 @@ for label, sql, needle in (
      "shape"),
     ("WITH GRANT OPTION", fn("fn_probe_wgo") + "grant execute on function fn_probe_wgo() to anon with grant option;\n",
      "GRANT OPTION"),
+    ("a GROUP grantee", fn("fn_probe_grp") + "grant execute on function fn_probe_grp() to group anon;\n",
+     "role it cannot read"),
     ("ALTER FUNCTION", fn("fn_probe_alter") + "alter function fn_probe_alter() owner to postgres;\n", "ALTER FUNCTION"),
     ("a procedure", "create procedure public.pr_probe() language sql as $$ select 1 $$;\n", "procedure"),
     ("a %TYPE reference", fn("fn_probe_ref", "p_x walks.id%type", "uuid"), "cannot read"),
