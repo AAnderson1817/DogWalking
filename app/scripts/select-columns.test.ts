@@ -30,7 +30,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { firstSelectArg, resolveConst } from "./column-grants.test.ts";
+import { fromSelects, resolveConst } from "./select-scan.ts";
 
 const ROOT = join(import.meta.dirname, "..", "..");
 const MIGRATIONS = join(ROOT, "supabase", "migrations");
@@ -172,13 +172,8 @@ function selects(): Sel[] {
   for (const dir of SCAN_DIRS) {
     for (const file of sourceFiles(dir)) {
       const src = readFileSync(file, "utf8");
-      const from = /\.from\(\s*"([a-z_]+)"\s*\)/g;
-      let m: RegExpExecArray | null;
-      while ((m = from.exec(src))) {
-        const nextFrom = src.indexOf('.from("', m.index + 1);
-        const region = src.slice(m.index, nextFrom === -1 ? undefined : nextFrom);
-        let sel = firstSelectArg(region);
-        if (sel === null) continue;
+      for (const { table, arg } of fromSelects(src)) {
+        let sel = arg;
         // A bare identifier: try to resolve it, and SKIP if we cannot. An
         // unresolvable expression is unknown, not wrong — treating it as a
         // column list is how `payments.cols` got reported as a missing column.
@@ -189,7 +184,7 @@ function selects(): Sel[] {
         } else if (!/^["'`]/.test(sel)) {
           continue;
         }
-        found.push({ file, table: m[1], arg: sel });
+        found.push({ file, table, arg: sel });
       }
     }
   }

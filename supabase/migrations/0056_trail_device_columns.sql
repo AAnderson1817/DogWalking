@@ -58,9 +58,14 @@ begin
     raise exception '0056: authenticated still holds a table-level SELECT on credential_access_log, which covers ip and user_agent';
   end if;
   if has_column_privilege('authenticated', 'public.credential_access_log', 'ip', 'SELECT')
-     or has_column_privilege('authenticated', 'public.credential_access_log', 'user_agent', 'SELECT')
-     or has_any_column_privilege('anon', 'public.credential_access_log', 'SELECT') then
-    raise exception '0056: an API role can still read the walker''s IP address or device';
+     or has_column_privilege('authenticated', 'public.credential_access_log', 'user_agent', 'SELECT') then
+    raise exception '0056: authenticated can still read the walker''s IP address or device';
+  end if;
+  -- anon has no policy on this table, so a grant would return no rows; it is
+  -- refused anyway, because nothing signed out has any business with the
+  -- trail, and a grant here would be one policy away from a leak.
+  if has_any_column_privilege('anon', 'public.credential_access_log', 'SELECT') then
+    raise exception '0056: anon holds SELECT on a column of credential_access_log';
   end if;
   if not has_column_privilege('authenticated', 'public.credential_access_log', 'purpose', 'SELECT') then
     raise exception '0056: the trail itself is no longer readable by the people it is for';

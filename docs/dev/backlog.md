@@ -25,24 +25,22 @@ before you hit them.
 
 ## Open
 
-### 1. Revoke TEMP from PUBLIC
-`PUBLIC` holds TEMP on the database (PostgreSQL's default). `0055` closed the
-path by which that let a temp table shadow a table inside a definer function:
-every function that pins a `search_path` now pins `public, pg_temp`, which
-searches temp tables last, and smoke refuses anything else. The same TEMP
-privilege is what let an API role attach a definer TRIGGER function to a temp
-table of its own, which `0053` closed for the four that were open and smoke now
-refuses for all.
-
-What is left is the privilege itself: `revoke temporary on database … from
-public`. It would close the same door again, independently of `0055`, and it
-cannot be judged from here. It needs measuring on a real project first, to
-show that nothing the
-platform runs as an API role needs a temporary table: PostgREST, Realtime,
-Storage and the auth hooks all connect under roles this repository does not
-configure. Not reachable through the product either way: `anon` and
-`authenticated` are NOLOGIN, PostgREST issues no DDL, and no function an API
-role can execute runs dynamic SQL.
+### 1. An erasure leaves the client's name in the walker's notifications
+`notifications.client_id` says who a row is FOR (RLS reads it), not who it is
+ABOUT: a row the walker reads carries NULL, and names the client only in its
+words. `fn_notify_low_credit` writes one ("Jane Doe is low on credits"), the
+walk trigger two, the overage path one and the Stripe webhook eight more.
+`fn_purge_client` deletes notifications by `client_id`, so it removes the
+client's own inbox and none of these. Measured on the local database: after
+the purge the client row read "Deleted client" and the walker's notice still
+read "Jane Erasure is low on credits". Spec 03 says what survives an erasure
+carries no personal data beyond an unsubscribed address, which is false.
+Fix: a `subject_client_id` on each row, filled by a trigger from `client_id`
+or the walk where the row records one and set explicitly by the writers that
+do not (`fn_notify_low_credit`, the webhook's operator rows), checked against
+the operator, and deleted by the purge. Existing rows are backfilled only from
+what they record; a notice that named its client only in text stays unlinked
+rather than matched on a name.
 
 ### 2. The client export leaves out much of what Sanpo holds about a client
 `fn_export_client_data` (`0040`), the export the operator runs, returns six
@@ -68,6 +66,44 @@ almost nothing about, so it belongs in a copy the client receives rather than
 one the operator can read. A written argument before code, and growing the
 export lets the notice's promise grow with it (`legal-version.test.ts` keeps
 "everything" out until then).
+
+### 3. `notifications.email_last_error` keeps the email provider's own words
+`send-notification` records a failed send as `resend <status>: <up to 300
+characters of Resend's response body>`, and `notifications` carries a
+table-level SELECT for `authenticated`, so a client reads that text on their
+own rows through the API. The push arm stopped doing this for the equally
+readable `push_last_error` in PR #85 (the status is recorded and the body goes
+to the server log). The email arm should do the same. What a provider body can
+contain has not been measured here, so this is the same shape rather than a
+known leak. Found by the independent review of 0056.
+
+### 4. A failed read of the entry-code trail shows as no activity
+Both readers swallow the error: `VaultFlows.tsx`'s audit sheet and
+`PortalHome.tsx` call `listCredentialLog(...)` / `listMyCredentialLog(20)`
+with `.catch(() => [])`, so a failed read renders as an empty trail. On the
+one screen whose job is to answer "who opened my door", "nothing" and "could
+not load" must not look the same (the M39 shape). PortalHome's comment is
+right that a failure must not cost the client the whole portal; the section
+should say it could not load, and offer a retry.
+
+### 5. Revoke TEMP from PUBLIC
+`PUBLIC` holds TEMP on the database (PostgreSQL's default). `0055` closed the
+path by which that let a temp table shadow a table inside a definer function:
+every function that pins a `search_path` now pins `public, pg_temp`, which
+searches temp tables last, and smoke refuses anything else. The same TEMP
+privilege is what let an API role attach a definer TRIGGER function to a temp
+table of its own, which `0053` closed for the four that were open and smoke now
+refuses for all.
+
+What is left is the privilege itself: `revoke temporary on database … from
+public`. It would close the same door again, independently of `0055`, and it
+cannot be judged from here. It needs measuring on a real project first, to
+show that nothing the
+platform runs as an API role needs a temporary table: PostgREST, Realtime,
+Storage and the auth hooks all connect under roles this repository does not
+configure. Not reachable through the product either way: `anon` and
+`authenticated` are NOLOGIN, PostgREST issues no DDL, and no function an API
+role can execute runs dynamic SQL.
 
 ## Done
 
