@@ -1344,6 +1344,12 @@ export type Database = {
         Args: Record<string, never>;
         Returns: Database["public"]["Enums"]["notification_type"][];
       };
+      fn_client_photo_objects: {
+        Args: {
+          p_client: string;
+        };
+        Returns: Array<{ bucket: string; name: string }>;
+      };
       fn_credential_log_block_mutation: {
         Args: Record<string, never>;
         Returns: unknown;
@@ -1570,6 +1576,12 @@ export type Database = {
           p_client: string;
         };
         Returns: number;
+      };
+      fn_purge_client_status: {
+        Args: {
+          p_client: string;
+        };
+        Returns: Json;
       };
       fn_read_credential: {
         Args: {

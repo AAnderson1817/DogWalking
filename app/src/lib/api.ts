@@ -821,11 +821,39 @@ export async function exportClientData(clientId: string): Promise<unknown> {
 }
 
 export interface PurgeResult {
-  /** Objects the browser removed from storage. */
+  /** Objects this call removed from storage. */
   photosDeleted: number;
-  /** Objects storage refused to delete. Non-empty means the purge is INCOMPLETE. */
-  failedPaths: string[];
+  /**
+   * Objects still in the client's folders when this call finished, as the
+   * database counts them. Non-zero means the erasure has NOT finished: the
+   * pet rows that name those folders are kept, and a later call picks up the
+   * rest.
+   */
+  photosLeft: number;
+  /** Every photo is gone and the second phase has run. */
+  finished: boolean;
 }
+
+export interface ErasureStatus {
+  erased: boolean;
+  finished: boolean;
+  photosLeft: number;
+}
+
+/** Whether a client's erasure has finished (0058). Read-only. */
+export async function getErasureStatus(clientId: string): Promise<ErasureStatus> {
+  const { data, error } = await supabase.rpc("fn_purge_client_status", { p_client: clientId });
+  if (error) throw new Error(error.message);
+  const s = (data ?? {}) as { erased?: unknown; finished?: unknown; photos_left?: unknown };
+  if (typeof s.erased !== "boolean" || typeof s.finished !== "boolean"
+      || typeof s.photos_left !== "number") {
+    throw new Error("The erasure status came back in a shape this app does not know.");
+  }
+  return { erased: s.erased, finished: s.finished, photosLeft: s.photos_left };
+}
+
+/** Storage deletes at most this many objects per request. */
+const REMOVE_BATCH = 1000;
 
 /**
  * Erase a client's personal data.
@@ -835,20 +863,26 @@ export interface PurgeResult {
  * metadata and leaves the file — so a SQL-only purge would destroy the POINTER
  * to a photo of somebody's house and leave the photo.
  *
- * So `fn_purge_client` destroys everything it can and RETURNS the storage
- * paths, keeping the rows that name them. This function deletes the objects
- * (the operator already holds a storage delete policy scoped to their own
- * folder, 0004), and only then calls `fn_purge_client_photos` to drop the rows.
+ * So `fn_purge_client` destroys everything it can and RETURNS every object in
+ * the client's folders — the folders of their walks and their pets, the
+ * layout every uploader writes and the storage policies read (0058). That
+ * includes a pet's earlier photos, which replacing it never deleted, and a
+ * walk photo whose row was never written. This function deletes them (the
+ * operator already holds a storage delete policy scoped to their own folder,
+ * 0004), then asks the database what is left.
  *
- * The rows are the work queue — the pattern the vault rewrap settled on. If
- * this dies between the phases, re-running returns the same paths. A file left
- * in the bucket with nothing in the database naming it is structurally
- * impossible, because the row outlives the object by construction.
+ * The database is the judge of "gone", not Storage's answers. `remove`
+ * reports only what it deleted just now, and Storage answers a HEAD it refuses
+ * — an expired token, say — with the same 400 as "not found", so neither can
+ * prove an object absent. `fn_purge_client_status` counts what
+ * `storage.objects` still holds in those folders; only when that is zero does
+ * this call `fn_purge_client_photos`, which drops the pet rows and itself
+ * refuses while any object remains. Reporting "deleted" over a file that is
+ * still there is the one outcome that would make this worse than doing
+ * nothing.
  *
- * A path that storage refuses is REPORTED rather than swallowed, and the rows
- * are still dropped only for what actually went. Reporting "deleted" over a
- * file that is still there is the one outcome that would make this worse than
- * doing nothing.
+ * Running it again is how an unfinished erasure finishes: the first phase is
+ * idempotent and keeps the date the erasure began.
  */
 export async function purgeClient(clientId: string): Promise<PurgeResult> {
   const { data, error } = await supabase.rpc("fn_purge_client", { p_client: clientId });
@@ -857,48 +891,49 @@ export async function purgeClient(clientId: string): Promise<PurgeResult> {
     .map((r) => r.storage_path)
     .filter((p): p is string => typeof p === "string" && p.length > 0);
 
-  const failedPaths: string[] = [];
+  // Group by the bucket each path names; `remove` is per bucket. A path
+  // naming no bucket this app knows is left alone, never sent to a bucket
+  // chosen by its shape — and the count below still sees its object.
+  const byBucket = new Map<PhotoBucket, string[]>();
+  for (const path of paths) {
+    const at = splitBucket(path);
+    if (at) byBucket.set(at.bucket, [...(byBucket.get(at.bucket) ?? []), at.name]);
+  }
+
   let photosDeleted = 0;
-
-  // Split by bucket: walk photos and pet photos live in different ones, and
-  // `remove` is per-bucket.
-  for (const bucket of ["walk-photos", "pet-photos"] as const) {
-    const mine = paths.filter((p) => bucketOf(p) === bucket);
-    if (mine.length === 0) continue;
-    const { data: removed, error: rmError } = await supabase.storage
-      .from(bucket)
-      .remove(mine.map(stripBucket));
-    if (rmError) {
-      failedPaths.push(...mine);
-      continue;
+  for (const [bucket, names] of byBucket) {
+    for (let i = 0; i < names.length; i += REMOVE_BATCH) {
+      const { data: removed, error: rmError } = await supabase.storage
+        .from(bucket)
+        .remove(names.slice(i, i + REMOVE_BATCH));
+      // A refused batch deletes nothing; the count below will say so.
+      if (!rmError) photosDeleted += (removed ?? []).length;
     }
-    photosDeleted += removed?.length ?? 0;
-    const removedSet = new Set((removed ?? []).map((o) => o.name));
-    failedPaths.push(...mine.filter((p) => !removedSet.has(stripBucket(p))));
   }
 
-  if (failedPaths.length === 0) {
-    await supabase.rpc("fn_purge_client_photos", { p_client: clientId });
+  const status = await getErasureStatus(clientId);
+  if (status.photosLeft > 0) {
+    return { photosDeleted, photosLeft: status.photosLeft, finished: false };
   }
-  return { photosDeleted, failedPaths };
+  const { error: rowsError } = await supabase.rpc("fn_purge_client_photos", {
+    p_client: clientId,
+  });
+  if (rowsError) throw new Error(rowsError.message);
+  return { photosDeleted, photosLeft: 0, finished: true };
 }
 
-/**
- * Stored paths may or may not carry the bucket as a first segment depending on
- * where they were written. Both shapes are handled rather than assumed, because
- * guessing wrong here means silently failing to delete a photo while reporting
- * success.
- */
-function bucketOf(path: string): "walk-photos" | "pet-photos" {
-  if (path.startsWith("pet-photos/")) return "pet-photos";
-  if (path.startsWith("walk-photos/")) return "walk-photos";
-  // Pet photos are written as `{operator}/pet/...`; walk photos as
-  // `{operator}/{walk}/...`.
-  return path.split("/")[1] === "pet" ? "pet-photos" : "walk-photos";
-}
+const PHOTO_BUCKETS = ["walk-photos", "pet-photos"] as const;
+type PhotoBucket = (typeof PHOTO_BUCKETS)[number];
 
-function stripBucket(path: string): string {
-  return path.replace(/^(walk-photos|pet-photos)\//, "");
+/** `fn_purge_client` names each object's bucket as its first segment (0058). */
+function splitBucket(path: string): { bucket: PhotoBucket; name: string } | null {
+  for (const bucket of PHOTO_BUCKETS) {
+    const prefix = `${bucket}/`;
+    if (path.startsWith(prefix) && path.length > prefix.length) {
+      return { bucket, name: path.slice(prefix.length) };
+    }
+  }
+  return null;
 }
 
 /**
