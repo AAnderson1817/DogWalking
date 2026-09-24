@@ -317,6 +317,47 @@ describe("verify-workflows rule 5: production runs the CLI and the deploy path s
     expect(result.status).toBe(0);
   });
 
+  it("reads a continued deploy's flags, so a drift written across lines is still a drift (Codex, on #100)", () => {
+    const staging = "supabase functions deploy \\\n  --use-api --project-ref x";
+    const production = "supabase functions deploy \\\n  --project-ref x";
+    const run = verify(CHAINED, two({ run: staging }, { run: production }));
+    expect(run.out).toContain("`supabase functions deploy` runs with different flags");
+    expect(run.out).toContain("deploy-production.yml :: functions = --project-ref;");
+    expect(run.out).toContain("deploy-staging.yml :: functions = --project-ref --use-api");
+    expect(run.status).toBe(1);
+  });
+
+  it("counts a deploy only as a command: an echo of one, or one in a heredoc body, is data (Codex, on #100)", () => {
+    const shapes = {
+      echo: "echo supabase functions deploy --use-api --project-ref x",
+      // Quoted text stays one word: its `;` does not start a second command.
+      "separator in a quoted string": 'echo "done; supabase functions deploy --use-api --project-ref x"',
+      heredoc: "cat <<EOF > notes.txt\nsupabase functions deploy --use-api --project-ref x\nEOF",
+      "tab-stripped heredoc": "cat <<-'END'\n\tsupabase functions deploy --use-api --project-ref x\n\tEND",
+    };
+    for (const [shape, run] of Object.entries(shapes)) {
+      const result = verify(CHAINED, two({}, { run }));
+      expect(result.out, shape).toContain("rule 5 read no `supabase functions deploy` in deploy-production.yml");
+      expect(result.status, shape).toBe(1);
+    }
+  });
+
+  it("counts every deploy bash would run: after an assignment, in a substitution or a group, with a quoted flag, continued", () => {
+    const run = [
+      "A=1 supabase functions deploy --use-api --project-ref x",
+      "out=$(supabase functions deploy --use-api --project-ref x)",
+      '{ supabase functions deploy "--use-api" --project-ref x; }',
+      "supabase functions deploy \\",
+      "  --use-api --project-ref x",
+      "cat <<EOF",
+      "not a deploy: supabase functions deploy --other-flag",
+      "EOF",
+    ].join("\n");
+    const result = verify(CHAINED, two({ run }, { run }));
+    expect(result.out).toMatch(/^PASS: .*one function-deploy path \(8 deploys\)/m);
+    expect(result.status).toBe(0);
+  });
+
   it("refuses either deploy workflow showing no CLI pin or no function deploy of its own", () => {
     const noCli = verify(CHAINED, two({}, { cli: false }));
     expect(noCli.out).toContain("rule 5 read no supabase/setup-cli step in deploy-production.yml");
