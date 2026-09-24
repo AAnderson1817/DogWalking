@@ -58,8 +58,11 @@ behind, and it is how a service-role-only function becomes callable by every
 signed-in user (PR B review).
 
 What it cannot read it REFUSES by name rather than modelling (the enum
-generator's rule): a routine grant in any other shape, ALTER FUNCTION,
-ALTER DEFAULT PRIVILEGES, procedures, a quoted or non-public name, a parameter
+generator's rule): a routine grant in any other shape, ALTER FUNCTION (all
+but one shape: a single `SET search_path` to a list of plain names, on a
+signature it knows, which changes nothing it models — 0055 moved every
+pinned path to `public, pg_temp` that way), ALTER DEFAULT PRIVILEGES,
+procedures, a quoted or non-public name, a parameter
 mode, a `%type` or quoted argument, `with grant option`, `granted by`, a role
 only known at run time — and the statements that change functions without
 naming them: a DROP … CASCADE on a type, table, schema or anything else a
@@ -125,6 +128,19 @@ CREATE_PROC = sql_re(r"\s*create\s+(?:or\s+replace\s+)?procedure" + IE, re.I)
 DROP_FN = sql_re(r"\s*drop\s+function(\s+if\s+exists)?" + IE, re.I)
 DROP_ROUTINE = sql_re(r"\s*drop\s+(?:routine|procedure)" + IE, re.I)
 ALTER_ROUTINE = sql_re(r"\s*alter\s+(?:function|routine|procedure)" + IE, re.I)
+ALTER_FN = sql_re(r"\s*alter\s+function" + IE, re.I)
+# The one ALTER FUNCTION this model reads: a single `SET search_path` whose
+# value is a list of plain schema names (0055 moved every function that pins a
+# path to `public, pg_temp`). It changes a function's configuration and nothing
+# this model holds — the name, the definer flag, the ACL — so it is checked
+# against the model and passed. Any other action, or a second action after the
+# value, is still refused: OWNER TO, RENAME, SECURITY, SET SCHEMA all change
+# what the catalogue shows.
+SET_SEARCH_PATH = sql_re(
+    r"\s*set\s+search_path\s*(?:=|to" + IE + r")\s*"
+    r"[A-Za-z_][A-Za-z0-9_$]*" + IE + r"(?:\s*,\s*[A-Za-z_][A-Za-z0-9_$]*" + IE + r")*\s*",
+    re.I,
+)
 DEFAULT_PRIVILEGES = sql_re(r"\s*alter\s+default\s+privileges" + IE, re.I)
 GRANT_OR_REVOKE = sql_re(r"\s*(?:grant|revoke)" + IE, re.I)
 ON_ROUTINES = sql_re(
@@ -479,6 +495,19 @@ def apply(model: Model, clean: str, skel: str, a: int, b: int) -> None:
         for key in signatures(clean, skel, a + m.end(), end):
             model.drop(key, if_exists=bool(m.group(1)))
         return
+    if m := ALTER_FN.match(stmt):
+        try:
+            name, sig, j = signature(clean, skel, a + m.end())
+        except Unreadable:
+            # Not the shape below; the refusal that follows names it.
+            name, sig, j = None, (), b
+        if name is not None and SET_SEARCH_PATH.fullmatch(skel, j, b):
+            if (name, sig) not in model.funcs:
+                raise Unreadable(
+                    f"an ALTER FUNCTION of {fmt((name, sig))}, which no earlier migration creates"
+                    " — or an argument type spelt in a way this model does not know"
+                )
+            return
     for refuse, what in (
         (DROP_CASCADE, "a DROP … CASCADE on an object functions can depend on, which drops them without naming them"),
         (CREATE_RANGE, "a range type, which creates constructor functions no statement names"),

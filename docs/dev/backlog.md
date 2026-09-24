@@ -25,28 +25,24 @@ before you hit them.
 
 ## Open
 
-### 1. TEMP, and the `search_path` that lets a temp table shadow `public`
-`PUBLIC` holds TEMP on the database (PostgreSQL's default), and a definer
-function whose `search_path` is `public` alone searches `pg_temp` FIRST for
-relations. So a SQL session holding a role with EXECUTE on a definer function
-can create a temp table named like one the function reads and have the
-function read that instead, as its owner (measured on `my_client_id()` with a
-temp `clients`, PR B review). The same TEMP privilege is what let an API role
-attach a definer TRIGGER function to a temp table of its own, which `0053`
-closed for the four that were open and smoke now refuses for all.
+### 1. Revoke TEMP from PUBLIC
+`PUBLIC` holds TEMP on the database (PostgreSQL's default). `0055` closed the
+path by which that let a temp table shadow a table inside a definer function:
+every function that pins a `search_path` now pins `public, pg_temp`, which
+searches temp tables last, and smoke refuses anything else. The same TEMP
+privilege is what let an API role attach a definer TRIGGER function to a temp
+table of its own, which `0053` closed for the four that were open and smoke now
+refuses for all.
 
-Not reachable through the product: `anon` and `authenticated` are NOLOGIN,
-PostgREST issues no DDL, and no function an API role can execute runs dynamic
-SQL. Two independent hardenings, each a migration on every definer function,
-so each wants the money-path argument:
-
-- move every definer function to `set search_path = public, pg_temp`, the form
-  PostgreSQL's documentation recommends. It puts temp tables last whatever
-  TEMP is granted, so it does not depend on the platform; smoke already
-  accepts it, and a single-quoted `'public, pg_temp'` (one schema of that
-  name) still fails;
-- `revoke temporary on database … from public`, once it is measured on a real
-  project that nothing the platform runs as an API role needs a temp table.
+What is left is the privilege itself: `revoke temporary on database … from
+public`. It would close the same door again, independently of `0055`, and it
+cannot be judged from here. It needs measuring on a real project first, to
+show that nothing the
+platform runs as an API role needs a temporary table: PostgREST, Realtime,
+Storage and the auth hooks all connect under roles this repository does not
+configure. Not reachable through the product either way: `anon` and
+`authenticated` are NOLOGIN, PostgREST issues no DDL, and no function an API
+role can execute runs dynamic SQL.
 
 ### 2. The claim replay's fixtures cannot be deleted, and its warning says they can
 Every staging smoke run creates an operator, a client and two auth users for
@@ -108,6 +104,16 @@ export lets the notice's promise grow with it (`legal-version.test.ts` keeps
 "everything" out until then).
 
 ## Done
+
+- **Every function that pins a `search_path` pins `public, pg_temp`** —
+  migration `0055`. With `pg_temp` unlisted, PostgreSQL searches temp tables
+  FIRST, so a definer function pinned to `public` alone read a caller's temp
+  table of the same name as a table it uses, as its owner. 73 definer functions
+  and four invoker functions moved with one `ALTER FUNCTION … SET search_path`
+  each, which changes nothing else: bodies, owners, ACLs, security and
+  volatility compared equal before and after. Smoke now refuses `public` alone
+  for a definer, and any other pinned path for any function. The TEMP privilege
+  itself is item 1. See the `security(0055)` status-log entry.
 
 - **The address owner can turn email back on** — migration `0054`. A client
   whose contact address unsubscribed can lift the suppression from the portal,

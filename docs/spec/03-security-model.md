@@ -542,7 +542,7 @@ signature, and whoever adds it decides what the check should become. pgcrypto's
 handler `.rpc()`s them.
 
 ## Definer function catalog + grant pattern
-Every definer fn: `SECURITY DEFINER SET search_path = public`, then
+Every definer fn: `SECURITY DEFINER SET search_path = public, pg_temp`, then
 ```
 REVOKE ALL ON FUNCTION fn_x(…) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION fn_x(…) TO <role list>;
@@ -575,14 +575,30 @@ four from every API role, which cannot break them — EXECUTE on a trigger
 function is checked when a trigger is created, not when it fires (smoke.sql
 pins that for the three an API role can reach) — and smoke now refuses a
 definer trigger function that ANY API role can execute, `authenticated`
-included. TEMP itself, and the `search_path` that lets a temp table shadow
-`public` inside a definer body, are left to their own item in
-`docs/dev/backlog.md`.
+included. The `search_path` that let a temp table shadow `public` inside a
+definer body is closed by `0055` (below); TEMP itself is left to its own item
+in `docs/dev/backlog.md`.
 
-Smoke asserts both halves of invariant 5 against the live catalogue, for every
-definer function: `search_path` pinned to `public` (or to `public, pg_temp`,
-the form PostgreSQL's documentation recommends, which puts temp tables last),
-and no EXECUTE for `PUBLIC` or `anon`.
+**`search_path` is `public, pg_temp` (0055).** PostgreSQL searches the
+session's temporary schema FIRST for tables and types unless `pg_temp` is
+listed, and `PUBLIC` holds TEMP, so a definer function pinned to `public` alone
+reads a caller's temp table of the same name as a table it uses, as its owner
+(measured on `my_client_id()`, PR B review). Listing `pg_temp` last, the form
+PostgreSQL's documentation recommends, puts temp tables after everything else
+whatever TEMP is granted; functions are never looked up there. `0055` moved all
+73 definer functions still on `public`, and the four invoker functions that pin
+a path of their own (a definer that calls one runs it as its owner, with that
+path), with one `ALTER FUNCTION … SET search_path` each. That rewrites
+`proconfig` and nothing else: before and after, across all 88 functions, the
+bodies, signatures, owners, ACLs, security and volatility were compared equal.
+An invoker function that pins no path inherits its caller's, which inside a
+definer is now this one.
+
+Smoke asserts both halves of invariant 5 against the live catalogue: every
+definer function pins exactly `public, pg_temp` (`public` alone, `pg_temp`
+first, and a quoted `'public, pg_temp'`, which is one schema of that name, all
+fail); no function pins any other path; and no definer function is executable
+by `PUBLIC` or `anon`.
 This catalogue used to be hand-written and listed **11** functions when there
 were **48** (the generated block below carries the live count). It was presented as the complete grant-audit checklist, so an engineer
 adding a definer function and checking their grants against it had no idea 37
