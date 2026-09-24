@@ -248,9 +248,12 @@ one commit SHA and one exact `X.Y.Z` CLI release, and every
 only place a CLI version or a deploy path is exercised before production runs
 it. The owner's `4c45ab1` had already moved staging's function deploy to
 `--use-api` while production stayed on the Docker bundler. Each of the two
-deploy workflows must show rule 5 its own pin and its own function deploy, so
-neither can vouch for the other: counted across all workflows, staging's alone
-once satisfied it (Codex, on #100). A `run:` block is read as bash would run
+deploy workflows must show rule 5 its own function deploy, and every CLI
+command must run after a `setup-cli` step in its own job, since each job starts
+on a fresh runner. So neither workflow, and no job, can vouch for another:
+counted across all workflows, staging's evidence alone once satisfied the rule,
+and matched by workflow, a pin in `migrate` once vouched for a
+`deploy-functions` job with none (Codex, on #100). A `run:` block is read as bash would run
 it: comments dropped, continued lines joined, quote marks removed, heredoc
 bodies skipped. A deploy counts only as a command, so an `echo` of one, a
 commented-out one, one in a heredoc body and one in an array literal are
