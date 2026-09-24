@@ -213,6 +213,7 @@ export type Database = {
         Row: {
           id: string;
           email: string;
+          client_id: string;
           lifted_by: string;
           lifted_at: string;
           suppressed_at: string;
@@ -221,6 +222,7 @@ export type Database = {
         Insert: {
           id?: string;
           email: string;
+          client_id: string;
           lifted_by: string;
           lifted_at?: string;
           suppressed_at: string;
@@ -229,6 +231,7 @@ export type Database = {
         Update: {
           id?: string;
           email?: string;
+          client_id?: string;
           lifted_by?: string;
           lifted_at?: string;
           suppressed_at?: string;
@@ -1231,6 +1234,13 @@ export type Database = {
         };
         Returns: number;
       };
+      fn_amr_has_email_link_since: {
+        Args: {
+          p_amr: Json;
+          p_since: string;
+        };
+        Returns: boolean;
+      };
       fn_apply_invoice_paid: {
         Args: {
           p_client: string;
@@ -1356,8 +1366,9 @@ export type Database = {
       fn_email_lift_decision: {
         Args: {
           p_user: string;
+          p_amr: Json;
         };
-        Returns: Array<{ o_state: string; o_email: string }>;
+        Returns: Array<{ o_state: string; o_email: string; o_client: string }>;
       };
       fn_email_suppressed: {
         Args: {
@@ -1467,7 +1478,7 @@ export type Database = {
       };
       fn_lift_my_email_suppression: {
         Args: Record<string, never>;
-        Returns: string;
+        Returns: Array<{ o_result: string; o_email: string }>;
       };
       fn_log_credential_action: {
         Args: {

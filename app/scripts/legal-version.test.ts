@@ -18,20 +18,25 @@ import { LEGAL_DOCUMENTS, type LegalDocument } from "../src/lib/legal.js";
  * against the old version keeps pointing at the old text, which is what a
  * consent record is for.
  *
- * The pins are keyed by version, not by document, and that is what makes the
- * bump enforced rather than advised. Keyed by document, as they first were,
- * the one pin was simply updated to the new hash: a text change with no bump
- * passed (measured, 6 of 6, while bumping the notice for 0054). Keyed by
- * version, changing the text without a bump means rewriting a hash already
- * pinned for a version people accepted, an edit a reviewer can see.
+ * The pins are keyed by version, not by document. Keyed by document, as they
+ * first were, the one pin was simply updated to the new hash: a text change
+ * with no bump passed (measured, 6 of 6, while bumping the notice for 0054),
+ * and this test's own message told whoever changed the text to do exactly
+ * that. Keyed by version, the failure names the bump as the fix, and the only
+ * way to pass without one is to rewrite a hash already pinned for a version
+ * people accepted. This test cannot see that edit: it has no history. What it
+ * does is make the edit a visible change to a published pin, which review
+ * refuses. A version that has never merged has been accepted by nobody, so
+ * its pin may still be rewritten while the change that introduces it is open.
  */
 
 /** document -> version -> sha256 of that version's rendered text. Append-only. */
 const PINNED: Record<string, Record<string, string>> = {
   privacy: {
     "2026-08-29": "fe9fc1ec7c4ef5c09df65601ce7b4fa56b73ea6420729b93eebe0cf093597858",
-    // 0054: turning email back on, and what survives erasure of an unsubscribe.
-    "2026-09-24": "876edc57285b3c28bfc392960b295f40bf4dec823837519f5cb6773aa13ef6ab",
+    // 0054: turning email back on, what survives erasure of an unsubscribe,
+    // and what the export file holds.
+    "2026-09-24": "dd6b0cdf77eaeb9539fc634d05e8daa2520556f8bd8bfc17a7c5c222e8eaa48e",
   },
   terms: {
     "2026-08-29": "c3c4bf9a14fc266090630d49a45629d87c009ffebc54962d509e0e6016a63707",
@@ -117,7 +122,25 @@ describe("legal documents", () => {
   it("the privacy notice describes the paths that exist", () => {
     const text = renderedText(LEGAL_DOCUMENTS.privacy).toLowerCase();
     expect(text).toContain("erase");
-    expect(text).toContain("copy of everything");
+    expect(text).toContain("as a file");
     expect(text).toContain("unsubscribe");
+  });
+
+  /**
+   * The export (`fn_export_client_data`, 0040) holds the client row's contact
+   * fields, properties, pets, walks, entry-credential labels, the ledger and
+   * payments. It does not hold route traces, photos or the credential access
+   * log, among other things, so a notice promising "everything" is false, and
+   * this notice said so until 0054's review caught the new version repeating
+   * it. Growing the export would let the claim come back; until then it stays
+   * out, and the notice names what the file leaves out.
+   */
+  it("the privacy notice does not promise an export of everything", () => {
+    const text = renderedText(LEGAL_DOCUMENTS.privacy).toLowerCase();
+    expect(text).not.toMatch(/copy of everything|everything held about you/);
+    for (const omitted of ["route traces", "photos", "who viewed your entry codes"]) {
+      expect(text).toContain(`${omitted}`);
+    }
+    expect(text).toContain("left out");
   });
 });

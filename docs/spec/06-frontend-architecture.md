@@ -916,25 +916,43 @@ When it is off, the server's `fn_my_email_status` decides what the section
 offers, and the page only says what each answer means and whose move it is:
 the **Turn email back on** button appears for `ready` alone, because a button
 the server would refuse looks like it works and then does nothing. The other
-off states each name their remedy: `not_confirmed` says to sign in with a link
-sent to the address (opening one confirms it), `not_login_address` says to ask
-the walker to change the address to the one the client signs in with, and
-`not_liftable` says plainly that this page cannot change it. Spec 04 has the
-rules behind each state.
+off states each name their remedy. `needs_link_sign_in` says to sign out, sign
+in with a magic link sent to the address, and come back: the proof of the
+address is a session that began with such a link, opened since the
+unsubscribe.
+`not_confirmed` says to use "Forgot your password?" instead, because GoTrue
+sends an unconfirmed account's magic-link request through signup, which a
+project with signup closed refuses, while a reset link is not gated on signup
+and confirms the address. `not_login_address` says to ask the walker to change
+the address to the one the client signs in with, and `not_liftable` says
+plainly that this page cannot change it. Spec 04 has the rules behind each
+state.
 
 - **A failed status read renders nothing**, as the operator's notice does
   (0052): the section is advisory, and an error in its place would make a
-  working portal look broken.
-- **The lift's answer is the new state.** `lifted` and `not_suppressed` (another
-  tab got there first) both confirm, with no second read that could fail and
-  put an error beside the confirmation. Any other answer means the server
-  decided differently from the offer, so the section says the lift did not
-  happen and re-reads the status to show the new reason.
+  working portal look broken. An answer this build does not know is a failed
+  read too, so the section stays silent rather than guess.
+- **The lift's answer is the new state, and names its address.** `lifted` and
+  `not_suppressed` (another tab got there first) both confirm, naming the
+  address the server decided on rather than the one read earlier, since the
+  contact address can change between the offer and the press. Any other answer
+  is a refusal carrying the server's new reading, so the section says the lift
+  did not happen and shows that reading at once. No second read is made on
+  either path, so none can fail and leave an error beside a confirmation, or a
+  button the server has just refused.
+- **Focus moves to the section's heading** when an answer arrives, since the
+  button it was on goes away; the button is disabled while the call is in
+  flight.
 - **The confirmation's live region is mounted before its text**, the FormError
   rule: it is a `.form-note` that collapses out of flow while empty.
-- **An unknown state throws** in `api.ts` rather than being guessed. Read as
-  email-on it would hide the notice, and read as `ready` it would offer a
-  button the server refuses.
+- **An unknown answer throws** in `api.ts` (`UnrecognisedEmailStatusError`)
+  rather than being guessed, and the section says it cannot tell whether email
+  is back on and to reload, instead of showing the raw string. A network failure
+  says the page appears to be offline. `scripts/email-lift-states.test.ts` reads
+  the decision's CASE and the lift's answers out of the migration and holds
+  `EMAIL_LIFT_STATES` to them, in order.
+- **Keyed on the client** in PortalHome, so the section can never keep one
+  client's address and answer after the screen reloads for another.
 
 The operator's notice in ClientDetail gains one sentence for a client with a
 login: if it is the address they sign in with, they can turn email back on

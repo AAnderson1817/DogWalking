@@ -1,6 +1,13 @@
 // Typed data-access layer (spec 06). ALL reads/writes and edge invocations
 // flow through here; screens never call supabase.from directly. Wrappers for
 // later-phase surfaces exist as typed stubs so screens can bind early.
+import {
+  asLiftResult,
+  asLiftState,
+  UnrecognisedEmailStatusError,
+  type EmailLiftResult,
+  type EmailLiftState,
+} from "./email-lift-states";
 import { businessWallClockToMs } from "./format";
 import { LOW_CREDIT_SUBSCRIPTION_STATUSES } from "./selectors";
 import { photoSha256 } from "./photo-digest";
@@ -690,20 +697,18 @@ export async function clientEmailSuppressed(
   return row ? { email: row.o_email, suppressed: row.o_suppressed === true } : null;
 }
 
-/**
- * Whether email to the calling client's contact address is off, and whether
- * they can turn it back on from here (0054). The states are the server's
- * `fn_email_lift_decision`, in the order it decides them.
- */
-export const EMAIL_LIFT_STATES = [
-  "no_address",
-  "not_suppressed",
-  "not_liftable",
-  "not_login_address",
-  "not_confirmed",
-  "ready",
-] as const;
-export type EmailLiftState = (typeof EMAIL_LIFT_STATES)[number];
+// The states and answers of 0054 live in a leaf module the parity test reads.
+// An answer this build does not know throws UnrecognisedEmailStatusError
+// rather than being guessed at. On the lift that keeps an unknown answer from
+// being read as success; on the status read the portal says nothing, as it
+// does for any failed read, rather than offer a button the server may refuse.
+export {
+  EMAIL_LIFT_STATES,
+  EMAIL_LIFT_RESULTS,
+  UnrecognisedEmailStatusError,
+  type EmailLiftState,
+  type EmailLiftResult,
+} from "./email-lift-states";
 
 export interface MyEmailStatus {
   /** The contact address the answer is about, which is not always the one on screen. */
@@ -711,18 +716,11 @@ export interface MyEmailStatus {
   state: EmailLiftState;
 }
 
-function asLiftState(s: unknown): EmailLiftState {
-  if ((EMAIL_LIFT_STATES as readonly unknown[]).includes(s)) return s as EmailLiftState;
-  // A state this build does not know is a server newer than the page. Throwing
-  // is the honest answer: guessing "not suppressed" would hide a notice, and
-  // guessing "ready" would offer a button the server may refuse.
-  throw new Error(`Unrecognised email status: ${String(s)}`);
-}
-
 /**
  * The calling client's email status, or null when this account is not a
  * claimed client (the server answers no row). Caller-scoped: it takes no
- * argument, so it can only ever describe the caller's own address.
+ * argument, so it can only ever describe the caller's own address, and the
+ * session it is asked on is part of the answer (`needs_link_sign_in`).
  */
 export async function getMyEmailStatus(): Promise<MyEmailStatus | null> {
   const { data, error } = await supabase.rpc("fn_my_email_status");
@@ -731,15 +729,28 @@ export async function getMyEmailStatus(): Promise<MyEmailStatus | null> {
   return row ? { email: row.o_email, state: asLiftState(row.o_state) } : null;
 }
 
+export interface EmailLiftAnswer {
+  result: EmailLiftResult;
+  /**
+   * The contact address the server decided about, at the moment it decided:
+   * name this one, not the address the page read earlier. Null only when the
+   * account is not a claimed client.
+   */
+  email: string | null;
+}
+
 /**
  * Turn email back on for the calling client's contact address (0054). The
- * server decides again, and answers `lifted` or the reason it did not: a
- * refusal is an answer, not an error, so this throws only when the call fails.
+ * server decides again, and answers `lifted` or the reason it did not, with
+ * the address: a refusal is an answer, not an error, so this throws only when
+ * the call fails or the answer is one this build does not know.
  */
-export async function liftMyEmailSuppression(): Promise<"lifted" | "not_client" | EmailLiftState> {
+export async function liftMyEmailSuppression(): Promise<EmailLiftAnswer> {
   const { data, error } = await supabase.rpc("fn_lift_my_email_suppression");
   if (error) throw new Error(error.message);
-  return data === "lifted" || data === "not_client" ? data : asLiftState(data);
+  const row = data?.[0];
+  if (!row) throw new UnrecognisedEmailStatusError("(no answer)");
+  return { result: asLiftResult(row.o_result), email: row.o_email };
 }
 
 /** The one place the claim URL is built, so Roster and ClientDetail agree. */

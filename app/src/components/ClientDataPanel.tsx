@@ -85,9 +85,11 @@ export function ClientDataPanel({
         </p>
       ) : (
         <p className="client-data-panel__detail">
-          Give this client a copy of everything held about them, or erase it.
-          Erasure removes their address, entry codes, pet notes, route traces
-          and photos. The billing ledger is kept — it is a financial record.
+          Give this client a copy of their records, or erase them. The copy
+          holds their details, address, pets, visits and billing, and leaves
+          out route traces, photos and the entry-code log. Erasure removes
+          their address, entry codes, pet notes, route traces and photos. The
+          billing ledger is kept — it is a financial record.
         </p>
       )}
 

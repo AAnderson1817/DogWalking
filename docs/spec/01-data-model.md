@@ -240,8 +240,12 @@ the point is that they must not be sent now.
 Neither is a tenant table (invariant 7 does not apply): both are keyed on an
 email address, which belongs to no operator. Both have RLS enabled and forced,
 no policies, and nothing granted to `anon` or `authenticated`; a client or an
-operator reaches them only through definer functions. The service role holds
-`SELECT, INSERT, DELETE` on the first and `SELECT` on the second.
+operator reaches them only through definer functions. On the first, `0038`
+grants the service role `SELECT, INSERT, DELETE`, and on a live project the
+platform's default privileges give it the rest as well (nothing but definer
+functions uses the table, so nothing needs them). On the second it holds
+`SELECT` and nothing else: `0054` revokes the default too, so no service-role
+path can rewrite the consent record.
 
 **email_suppressions** — `email text` (`check (email = lower(email))`: stored
 lowercased and not trimmed, and the sender compares it the same way),
@@ -254,9 +258,12 @@ writes the platform-wide, every-type row; nothing writes the narrower kinds yet.
 It survives a client's erasure on purpose (spec 03).
 
 **email_suppression_lifts** — `email text` (`check (email = lower(email))`),
-`lifted_by uuid` (the account that lifted it; deliberately not a foreign key),
-`lifted_at timestamptz`, and the suppression it replaced: `suppressed_at
+`client_id uuid references clients on delete cascade` (the client it was lifted
+for), `lifted_by uuid` (the account that lifted it; deliberately not a foreign
+key), `lifted_at timestamptz`, and the suppression it replaced: `suppressed_at
 timestamptz`, `suppression_reason text`. Written only by
 `fn_lift_my_email_suppression`, in the statement that deletes the row it
 records, and readable by the service role alone. Deleted, by
-`trg_clients_forget_email_lifts`, when the lifting account's client is erased.
+`trg_clients_forget_email_lifts`, when that client is erased: keyed on the
+client, not the account, because an account can be released from one client and
+bound to another (spec 03).

@@ -6,11 +6,13 @@
 //
 // The server decides everything (`fn_email_lift_decision`). This file only
 // says what each answer means for the person reading it, and whose move it is.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FormError } from "@/components/fields";
+import { loadErrorMessage } from "@/components/LoadError";
 import {
   getMyEmailStatus,
   liftMyEmailSuppression,
+  UnrecognisedEmailStatusError,
   type EmailLiftState,
   type MyEmailStatus,
 } from "@/lib/api";
@@ -18,6 +20,7 @@ import {
 /** The states in which email to the contact address is off. */
 const OFF: ReadonlySet<EmailLiftState> = new Set<EmailLiftState>([
   "ready",
+  "needs_link_sign_in",
   "not_confirmed",
   "not_login_address",
   "not_liftable",
@@ -34,14 +37,27 @@ function emailOffExplanation(
     + "notices by email; they still appear here.";
   switch (state) {
     case "ready":
-      return `${why} It's the address you sign in with, so you can turn email back on.`;
+      return `${why} You signed in with a link sent to that address, so you can turn email back on.`;
+    case "needs_link_sign_in":
+      // The proof is the session (0054): it has to have begun with a link
+      // sent to this address and opened after the unsubscribe. A password
+      // sign-in, or a link opened before it, shows nothing about who reads
+      // the inbox now.
+      return (
+        `${why} To turn it back on, show that the address is still yours: sign `
+        + `out, choose "Use a magic link instead" on the sign-in screen, and `
+        + `open the link we send to ${email}. Then come back here.`
+      );
     case "not_confirmed":
-      // GoTrue sets `email_confirmed_at` when a link it sent is opened; a
-      // sign-in link does it as well as a confirmation link does.
+      // A reset link, not a magic link. GoTrue sends an unconfirmed account's
+      // magic-link request through signup, which a project with signup
+      // closed refuses, while a reset link is not gated on signup and opening
+      // it confirms the address (recoverVerify).
       return (
         `${why} To turn it back on here, your sign-in address has to be `
-        + `confirmed first: sign out, then sign in with a link sent to ${email}. `
-        + "Opening that link confirms it."
+        + `confirmed first: sign out, choose "Forgot your password?" on the `
+        + `sign-in screen, and open the reset link we send to ${email}. `
+        + "Opening it confirms the address."
       );
     case "not_login_address":
       return (
@@ -62,12 +78,6 @@ export function EmailSection({ walkerName }: { walkerName: string | null }) {
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const headingRef = useRef<HTMLHeadingElement | null>(null);
-
-  const refresh = useCallback(async (): Promise<MyEmailStatus | null> => {
-    const next = await getMyEmailStatus();
-    setStatus(next);
-    return next;
-  }, []);
 
   useEffect(() => {
     let live = true;
@@ -90,32 +100,38 @@ export function EmailSection({ walkerName }: { walkerName: string | null }) {
     setError(null);
     try {
       const answer = await liftMyEmailSuppression();
-      const email = status?.email ?? "your address";
-      if (answer === "lifted" || answer === "not_suppressed") {
+      // The address the server decided about, not the one read earlier: the
+      // contact address can change between the offer and the press.
+      const email = answer.email ?? status?.email ?? "your address";
+      if (answer.result === "lifted" || answer.result === "not_suppressed") {
         // The answer IS the new state, so no second read is needed, and none
         // can fail after the lift succeeded and leave an error beside the
         // confirmation. `not_suppressed` means another tab, or a second
         // press, got there first.
         setDone(
-          answer === "lifted"
+          answer.result === "lifted"
             ? `Email is back on. Walk updates and billing notices will go to ${email}.`
             : `Email is already on for ${email}.`,
         );
-        setStatus((s) => (s ? { ...s, state: "not_suppressed" } : s));
+        setStatus({ email: answer.email, state: "not_suppressed" });
       } else {
-        // The server decided differently from the answer the button was
-        // offered on: the address or the account changed in between. Its
-        // new reading is what the section should now say.
+        // Refused: the server decided differently from the answer the button
+        // was offered on, because the address, the account or the session
+        // changed in between. The refusal carries its new reading, so the
+        // section shows that, and never keeps offering a button the server
+        // has just refused.
         setError("Email wasn't turned back on.");
-        try {
-          await refresh();
-        } catch {
-          // The error above already says the lift did not happen.
-        }
+        setStatus(
+          answer.result === "not_client" ? null : { email: answer.email, state: answer.result },
+        );
       }
       headingRef.current?.focus();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not turn email back on.");
+      setError(
+        e instanceof UnrecognisedEmailStatusError
+          ? "This page is older than the server's answer, so we can't tell whether email is back on. Reload the page to check."
+          : loadErrorMessage(e),
+      );
     } finally {
       setBusy(false);
     }

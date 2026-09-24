@@ -9,64 +9,141 @@
 --
 -- ── What proves an address is yours ──────────────────────────────────────
 --
--- The one proof available without Sanpo emailing a suppressed address is the
--- sign-in: a claimed client whose login email, CONFIRMED by GoTrue, is the
--- suppressed address. `email_confirmed_at` is set when someone clicks a link
--- that GoTrue sent to that inbox — a signup confirmation, a magic link, a
--- recovery link — so it says that whoever controls the inbox took part.
--- `claim-signup` creates every client account with `email_confirm: false`,
--- so a client's confirmation is always such a click and never the account's
--- own creation.
+-- Control of the inbox NOW, shown by the session the request arrives on. The
+-- lift is offered only to a claimed client whose sign-in address is the
+-- suppressed address and whose current session began with a link GoTrue sent
+-- to that address, opened AFTER the suppression was made. Sanpo never emails
+-- a suppressed address itself: GoTrue's sign-in mail does not go through the
+-- sender, so the link still arrives.
 --
--- The proof is exactly as strong as the deployed project makes it, and that
--- is stated rather than implied. With email confirmations OFF, GoTrue confirms
--- a public `/signup` account at creation, with no link. An account created
--- that way at a stranger's address that then becomes a client (by claiming an
--- invite, then setting its own contact address, which a client may edit)
--- could lift the stranger's suppression. That is the same setting owner action
--- 16 already names for the claim flow, where the same guess is a takeover of
--- the client portal, and this is a smaller consequence of it added to that
--- entry. Changing an existing account's address is not a way round it: GoTrue
--- confirms a new address through its inbox for every account that is not
--- anonymous (`internal/api/user.go`, read on `master`), and anonymous sign-ins
--- are off. With confirmations ON, a login at an address is usable only after
--- that inbox's link is clicked; a magic or recovery link confirms it too
--- (`recoverVerify` in `internal/api/verify.go`).
+-- GoTrue records how a session began in the access token's `amr` claim, one
+-- entry per method with the time it was used (auth-js `AMREntry`: `method`,
+-- `timestamp` in epoch seconds). Opening an emailed link, or typing an
+-- emailed code, records `otp` in the implicit flow this app uses
+-- (`internal/api/verify.go`, both `verifyGet` and `verifyPost`) and
+-- `magiclink`, `recovery`, `email/signup`, `invite` or `email_change` in the
+-- PKCE flow (`ParseAuthenticationMethod` of the link's type). Refreshing a
+-- token rebuilds the claim from the session's stored entries without
+-- restamping them (`internal/tokens/service.go`: the refresh grant calls
+-- `GenerateAccessToken`, which reads `CalculateAALAndAMR`; only a new session
+-- or an MFA step adds an entry). So an entry of one of those methods dated
+-- after the suppression says the holder of this session opened a link from
+-- that inbox after somebody asked us to stop. All read on GoTrue `master`.
 --
--- A shared login proves what a login proves: whoever holds it holds the inbox
--- it was confirmed at, so lifting as that login is the inbox's decision.
+-- The first version of this file proved ownership with `email_confirmed_at`,
+-- and a review showed why that is not enough. A confirmation is history: it
+-- says someone opened the inbox once, possibly years before the unsubscribe.
+-- A mailbox that changed hands keeps its confirmation, so the account that
+-- confirmed it long ago could lift the new holder's unsubscribe, and lift it
+-- again after every unsubscribe that followed. It also rested on a dashboard
+-- setting: with email confirmations off, GoTrue confirms a public `/signup`
+-- account at creation with no click, and a magic-link request confirms any
+-- unconfirmed account the same way (`magic_link.go` routes one through
+-- `Signup`). The session proof rests on neither. An account confirmed without
+-- a click still has to open a link sent to that inbox before it can lift,
+-- and a password, a TOTP code or an anonymous sign-in is not such a link.
+--
+-- What it still assumes, stated rather than implied:
+--   - `otp` also records an SMS code (`verifyPost`, `smsVerification`), so an
+--     account that could add and verify a phone number would get a fresh
+--     `otp` entry without opening the inbox. No SMS provider is enabled in
+--     `config.toml`; the deployed projects' setting is not measured from here.
+--   - A GoTrue admin email change (the dashboard, or the service role) moves
+--     the sign-in address without a link and without touching an existing
+--     session, whose entry then describes a different inbox. Nothing in this
+--     repository changes a sign-in address that way; the session timebox
+--     bounds how long such a session lives.
+--   - A shared login proves what the session proves: whoever opened that
+--     link could read that inbox, and lifting is that inbox's decision.
+--   - The entry is dated when the link was OPENED, not when it was read.
+--     Someone who read a link in that inbox before the unsubscribe and opens
+--     it after would pass. The link's lifetime bounds that window
+--     (`otp_expiry`, one hour in `config.toml`; the deployed setting is not
+--     measured from here).
+--
+-- `email_confirmed_at` is still read. A link session implies it, so it only
+-- matters when it is missing, and then the remedy differs: an unconfirmed
+-- account's magic-link request goes through `Signup`, which a closed signup
+-- refuses, while a password reset link is not gated on signup and confirms
+-- the address (`recoverVerify`). So `not_confirmed` is its own answer.
 --
 -- ── What a lift removes, and what it leaves ─────────────────────────────
 --
--- Only the rows one-click unsubscribe writes: platform-wide
--- (`operator_id is null`) and every-type (`notification_type is null`), for
--- the one address. An operator-scoped row ("stop from this business") or a
--- typed row ("no walk_complete") is a narrower preference, and turning email
--- back on in general is not the same decision; nothing writes either kind
--- today, and the status below reports such a suppression as one this cannot
--- lift rather than pretending otherwise. A later one-click unsubscribe inserts
--- a fresh row, so a lift never weakens the next opt-out.
+-- Only the row one-click unsubscribe writes: platform-wide (`operator_id is
+-- null`), every type (`notification_type is null`), with the reason
+-- `fn_unsubscribe_by_token` gives it (`'one-click unsubscribe'`, 0038). The
+-- reason is part of the match. A platform-wide, every-type row written for
+-- any other reason, such as a bounce, a complaint or a manual block, none of
+-- which exists yet, is not a lift's to remove. Because the unique index
+-- treats NULLs as equal, there is at most one such row per address.
+--
+-- And only when that row is ALL that keeps this client's email off. A row
+-- that also applies, either the client's own operator's stop or a typed row
+-- for a type the sender emails, is a narrower preference that turning email
+-- back on in general does not decide. The answer then is `not_liftable`,
+-- not a `lifted` that leaves some email off. That keeps the portal's
+-- confirmation true: after a lift, nothing the sender consults suppresses
+-- this address for this client's operator. The "also applies" test restates
+-- the sender's own match (`fn_email_suppressed`, 0038): same operator scope,
+-- same type scope. Smoke ties the two by asking the sender after every lift.
+--
+-- A later one-click unsubscribe inserts a fresh row, so a lift never weakens
+-- the next opt-out, and lifting that one needs a fresh link again.
 --
 -- ── Whether a lift is logged ─────────────────────────────────────────────
 --
 -- Yes. A lift is consent to receive mail at an address that once asked us to
 -- stop, and if it is ever disputed, "which account turned it back on, and
 -- when" must have an answer. Each removed row is copied into
--- `email_suppression_lifts` in the same statement that deletes it, with when
--- the suppression was made and why. The table holds the address and the
--- account id and nothing else. No operator reads it: it belongs to the address,
--- not to a tenant. `lifted_by` is deliberately not a foreign key: an account
--- deleted later must not be blocked by the record of what it once did — the
--- claim replay's undeletable fixtures are what a RESTRICT into auth.users costs.
+-- `email_suppression_lifts` in the same statement that deletes it. The row
+-- holds the address, the client it was lifted for, the account that lifted
+-- it, when, and when and why the removed suppression was made. No operator
+-- reads it: it belongs to the address, not to a tenant. `lifted_by` is
+-- deliberately not a foreign key: an account deleted later must not be
+-- blocked by the record of what it once did, and the claim replay's
+-- undeletable fixtures are what a RESTRICT into auth.users costs. The service
+-- role may read it and nothing else: the platform's default privileges would
+-- otherwise let any service-role path rewrite the consent record.
 --
 -- ── What erasure does to it ──────────────────────────────────────────────
 --
 -- An erased client's lift records are deleted with the rest of the record
--- (section 6). `fn_purge_client` already destroys the consent record kept on
--- the client row (`notice_accepted_at`, 0041), and the privacy notice lists
--- what survives an erasure; this is not on it. The suppression list itself is
--- NOT touched, as it never was: it is the address owner's instruction to stop,
--- and erasing a record must never start email to an address again.
+-- (section 6), keyed on the CLIENT, as 0049's devices are. The first version
+-- keyed them on the account, which missed a lift made before the operator
+-- released the account (`fn_unbind_invite` nulls `auth_user_id`, so the
+-- erasure found nobody), and deleted another client's record when the same
+-- account had since been bound elsewhere. `fn_purge_client` already destroys
+-- the consent record kept on the client row (`notice_accepted_at`, 0041). The
+-- suppression list itself is NOT touched, as it never was: it is the address
+-- owner's instruction to stop, and erasing a record must never start email
+-- to an address again.
+--
+-- ── A lift and an erasure do not interleave ──────────────────────────────
+--
+-- The lift takes the client row `for no key update` before it decides, as
+-- 0049's registration does. The first version took no lock, and a review
+-- measured a lift and an erasure of the same client failing to serialize in
+-- either order: a lift committing after the erasure's trigger had run left
+-- its record behind, and a lift reading the row while the erasure was in
+-- flight lifted for a client being erased. With the lock, whichever comes
+-- second waits: a lift after an erasure finds no account on the row and
+-- answers `not_client`, and an erasure after a lift deletes the lift's
+-- record. (This version's foreign key to the client already makes an
+-- erasure wait behind a lift, through the key-share check the record's
+-- insert takes; a lift behind an erasure needs the lock. `concurrency.sh`
+-- case 11 shows both.)
+-- Lock order: this function takes clients, then email_suppressions, then
+-- email_suppression_lifts. The purge takes walks, then clients, then the lift
+-- rows through its trigger, and never touches email_suppressions. Both take
+-- clients before the lift rows, so there is no cycle (0037).
+--
+-- ── What a client can learn ──────────────────────────────────────────────
+--
+-- The status names the client's own contact address, and a client may edit
+-- that field (`clients_self_update`). So, like the operator with 0052's
+-- notice, a client can learn whether any address it saves there is
+-- suppressed. What bounds that is how little comes back: one state, with no
+-- business, no date and no reason, the argument 0052 makes for the operator.
 --
 -- ── One decision, two readers ────────────────────────────────────────────
 --
@@ -74,9 +151,8 @@
 -- `fn_lift_my_email_suppression()` performs it. Both read one decision,
 -- `fn_email_lift_decision`, so the button cannot be offered for a lift that
 -- would be refused, or refused for one it offered. The lift deletes the
--- address the decision validated, not a second read of the row, because the
--- contact address can change between two statements and only the validated
--- one was proven.
+-- address the decision validated, not a second read of the row, and answers
+-- with that address, so the portal names the address the lift was about.
 --
 -- ── One aggregation, both notices ────────────────────────────────────────
 --
@@ -141,6 +217,11 @@ create table email_suppression_lifts (
   id uuid primary key default gen_random_uuid(),
   -- The address, in the canonical form email_suppressions stores it.
   email text not null check (email = lower(email) and position('@' in email) > 1),
+  -- The client it was lifted for: what the erasure trigger (section 6) keys
+  -- on. A lift needs a claimed client, and a claimed client can never be
+  -- deleted (0039's attempt rows restrict it), so the cascade only states the
+  -- relationship.
+  client_id uuid not null references clients (id) on delete cascade,
   -- The account that lifted it. Not a foreign key: see the header.
   lifted_by uuid not null,
   lifted_at timestamptz not null default now(),
@@ -150,38 +231,67 @@ create table email_suppression_lifts (
 );
 
 create index idx_email_suppression_lifts_email on email_suppression_lifts (email);
--- The erasure trigger (section 6) deletes by account.
-create index idx_email_suppression_lifts_lifted_by on email_suppression_lifts (lifted_by);
+create index idx_email_suppression_lifts_client on email_suppression_lifts (client_id);
 
 alter table email_suppression_lifts enable row level security;
 alter table email_suppression_lifts force row level security;
 -- No policies and no API grants, like email_suppressions. The lift function
--- writes it as its owner; the service role may read it to answer a dispute.
--- Not a tenant table (invariant 7 does not apply): the address belongs to no
--- operator.
-revoke all on email_suppression_lifts from public, anon, authenticated;
+-- writes it as its owner and the erasure trigger deletes from it as its
+-- owner. The service role may only read it, to answer a dispute: the
+-- platform's default privileges grant it everything on a new table, so the
+-- revoke names it too. Not a tenant table (invariant 7 does not apply): the
+-- address belongs to no operator, the 0048 precedent for a client-keyed log.
+revoke all on email_suppression_lifts from public, anon, authenticated, service_role;
 grant select on email_suppression_lifts to service_role;
 
 comment on table email_suppression_lifts is
-  'Suppressions an address owner removed by turning email back on: the address, the account that did it, and the suppression it replaced. The consent record for mailing an address that once asked us to stop; deleted when that account''s client is erased (0054).';
+  'Suppressions an address owner removed by turning email back on: the address, the client it was for, the account that did it, and the suppression it replaced. The consent record for mailing an address that once asked us to stop; deleted when that client is erased (0054).';
 
 -- ── 3. The decision ──────────────────────────────────────────────────────
+-- Whether a session's `amr` shows an emailed link or code opened after
+-- `p_since` (the header says which methods and why). Anything unreadable is
+-- no evidence: a missing claim, a claim that is not an array, an entry that
+-- is not an object or whose timestamp is not a number.
+create function fn_amr_has_email_link_since(p_amr jsonb, p_since timestamptz)
+returns boolean
+language sql
+immutable
+set search_path = public, pg_temp
+as $$
+  select coalesce((
+    select bool_or(to_timestamp((e ->> 'timestamp')::double precision) > p_since)
+      from jsonb_array_elements(
+             case when jsonb_typeof(p_amr) = 'array' then p_amr else '[]'::jsonb end
+           ) as e
+     where jsonb_typeof(e) = 'object'
+       and e ->> 'method' in ('otp', 'magiclink', 'recovery', 'email/signup', 'invite', 'email_change')
+       and jsonb_typeof(e -> 'timestamp') = 'number'
+  ), false);
+$$;
+
+revoke all on function fn_amr_has_email_link_since(jsonb, timestamptz) from public, anon, authenticated;
+
+comment on function fn_amr_has_email_link_since(jsonb, timestamptz) is
+  'Whether an access token''s amr claim records an emailed link or code opened after the given time. The proof of current inbox control fn_email_lift_decision asks for (0054).';
+
 -- One row for the account's client, or none when the account is not a
 -- claimed, unerased client. `o_email` is the contact address the decision is
 -- about. States, in the order they are decided:
---   no_address        the client has no email address
---   not_suppressed    email to it is not fully off, so there is nothing to lift
---   not_liftable      it is off, but not by a row a lift removes
---   not_login_address it is not the address this account signs in with
---   not_confirmed     it is, but GoTrue has not confirmed it
---   ready             the lift will remove it
+--   no_address          the client has no email address
+--   not_suppressed      email to it is not fully off, so there is nothing to lift
+--   not_liftable        it is off, but not by the one-click row alone
+--   not_login_address   it is not the address this account signs in with
+--   not_confirmed       it is, but GoTrue has not confirmed it
+--   needs_link_sign_in  this session did not begin with a link sent to it
+--                       and opened after the unsubscribe
+--   ready               the lift will remove it
 --
 -- The suppression checks compare the address exactly as the sender does:
 -- lowercased, not trimmed (`fn_email_suppressed`, 0038), which is also how
 -- one-click stores it. The sign-in comparison trims as well, as the claim
 -- ladders do, because whitespace around an address is not part of it.
-create function fn_email_lift_decision(p_user uuid)
-returns table (o_state text, o_email text)
+create function fn_email_lift_decision(p_user uuid, p_amr jsonb)
+returns table (o_state text, o_email text, o_client uuid)
 language sql
 stable
 set search_path = public, pg_temp
@@ -189,30 +299,46 @@ as $$
   select case
            when c.email is null then 'no_address'
            when not fn_email_fully_suppressed(c.email, c.operator_id) then 'not_suppressed'
-           when not exists (
+           -- No row that one-click wrote: nothing here is a lift's to remove.
+           when g.created_at is null then 'not_liftable'
+           -- Another row that also applies to this client's email: the
+           -- sender's own match, without the one-click row.
+           when exists (
              select 1 from email_suppressions s
               where s.email = lower(c.email)
-                and s.operator_id is null
-                and s.notification_type is null
+                and (s.operator_id is null or s.operator_id = c.operator_id)
+                and (s.notification_type is null
+                     or s.notification_type = any (fn_client_facing_notification_types()))
+                and not (s.operator_id is null and s.notification_type is null)
            ) then 'not_liftable'
            when u.email is null
              or lower(trim(u.email)) <> lower(trim(c.email)) then 'not_login_address'
            when u.email_confirmed_at is null then 'not_confirmed'
+           when not fn_amr_has_email_link_since(p_amr, g.created_at) then 'needs_link_sign_in'
            else 'ready'
          end,
-         c.email
+         c.email,
+         c.id
     from clients c
     left join auth.users u on u.id = c.auth_user_id
+    left join lateral (
+      select s.created_at
+        from email_suppressions s
+       where s.email = lower(c.email)
+         and s.operator_id is null
+         and s.notification_type is null
+         and s.reason = 'one-click unsubscribe'
+    ) g on true
    where c.auth_user_id = p_user
      -- The purge nulls auth_user_id, so no login reaches an erased row today.
      -- Stated here too, so the rule does not rest on that.
      and c.purged_at is null;
 $$;
 
-revoke all on function fn_email_lift_decision(uuid) from public, anon, authenticated;
+revoke all on function fn_email_lift_decision(uuid, jsonb) from public, anon, authenticated;
 
-comment on function fn_email_lift_decision(uuid) is
-  'Whether this account''s client may turn email back on for its contact address, and if not why. Read by both fn_my_email_status and fn_lift_my_email_suppression, so the offer and the lift cannot disagree (0054).';
+comment on function fn_email_lift_decision(uuid, jsonb) is
+  'Whether this account''s client may turn email back on for its contact address, given the session''s amr claim, and if not why. Read by both fn_my_email_status and fn_lift_my_email_suppression, so the offer and the lift cannot disagree (0054).';
 
 -- ── 4. What the portal asks ──────────────────────────────────────────────
 create function fn_my_email_status()
@@ -223,21 +349,24 @@ security definer
 set search_path = public, pg_temp
 as $$
   -- The caller is the scope: auth.uid() picks the one client row this account
-  -- is bound to (clients.auth_user_id is unique), and nothing else is asked.
-  select d.o_email, d.o_state from fn_email_lift_decision((select auth.uid())) d;
+  -- is bound to (clients.auth_user_id is unique), and the session's own token
+  -- supplies the amr. Nothing is taken from the caller as an argument.
+  select d.o_email, d.o_state
+    from fn_email_lift_decision((select auth.uid()), (select auth.jwt()) -> 'amr') d;
 $$;
 
 revoke all on function fn_my_email_status() from public, anon, authenticated;
 grant execute on function fn_my_email_status() to authenticated;
 
 comment on function fn_my_email_status() is
-  'For the calling client: its contact address, and whether email to it is off and can be turned back on from this account (a state from fn_email_lift_decision). No row for an account that is not a claimed client (0054).';
+  'For the calling client: its contact address, and whether email to it is off and can be turned back on from this session (a state from fn_email_lift_decision). No row for an account that is not a claimed client (0054).';
 
 -- ── 5. The lift ──────────────────────────────────────────────────────────
 -- Refusals are returned, not raised: they are answers the portal shows, and
--- nothing here is written on the way to one.
+-- nothing here is written on the way to one. Every answer carries the
+-- address it is about, or null when there is no client.
 create function fn_lift_my_email_suppression()
-returns text
+returns table (o_result text, o_email text)
 language plpgsql
 volatile
 security definer
@@ -245,42 +374,66 @@ set search_path = public, pg_temp
 as $$
 declare
   v_user uuid := (select auth.uid());
+  v_client uuid;
   v_state text;
   v_email text;
   v_lifted int;
 begin
-  select d.o_state, d.o_email into v_state, v_email
-    from fn_email_lift_decision(v_user) d;
+  -- Held until the lift commits, so an erasure of this client waits for it,
+  -- or it waits for the erasure and finds no row: the purge nulls
+  -- auth_user_id, and the re-check after the wait reads the new row (the
+  -- header's section on interleaving). The erased-row rule itself is the
+  -- decision's, which states it rather than resting on that.
+  select c.id into v_client
+    from clients c
+   where c.auth_user_id = v_user
+     for no key update;
   if not found then
-    return 'not_client';
+    return query select 'not_client'::text, null::text;
+    return;
+  end if;
+
+  select d.o_state, d.o_email into v_state, v_email
+    from fn_email_lift_decision(v_user, (select auth.jwt()) -> 'amr') d
+   where d.o_client = v_client;
+  if not found then
+    return query select 'not_client'::text, null::text;
+    return;
   end if;
   if v_state <> 'ready' then
-    return v_state;
+    return query select v_state, v_email;
+    return;
   end if;
 
   -- The address the decision validated, not a second read of the row, and
-  -- compared as the sender compares it.
+  -- compared as the sender compares it; and the row one-click wrote, by
+  -- shape and by reason, as the decision matched it.
   with lifted as (
     delete from email_suppressions s
      where s.email = lower(v_email)
        and s.operator_id is null
        and s.notification_type is null
+       and s.reason = 'one-click unsubscribe'
     returning s.email, s.created_at, s.reason
   )
-  insert into email_suppression_lifts (email, lifted_by, suppressed_at, suppression_reason)
-  select l.email, v_user, l.created_at, l.reason from lifted l;
+  insert into email_suppression_lifts
+    (email, client_id, lifted_by, suppressed_at, suppression_reason)
+  select l.email, v_client, v_user, l.created_at, l.reason from lifted l;
   get diagnostics v_lifted = row_count;
 
-  -- Zero here means another request lifted it between the decision and the
-  -- delete: the address is no longer suppressed by a row this removes.
-  return case when v_lifted > 0 then 'lifted' else 'not_suppressed' end;
+  -- Zero here means the row went between the decision and the delete. The
+  -- client row is held, so not by another lift for this client; by something
+  -- that does not take that lock. The address is not suppressed by a row this
+  -- removes, which is what the answer says.
+  return query
+    select case when v_lifted > 0 then 'lifted' else 'not_suppressed' end, v_email;
 end $$;
 
 revoke all on function fn_lift_my_email_suppression() from public, anon, authenticated;
 grant execute on function fn_lift_my_email_suppression() to authenticated;
 
 comment on function fn_lift_my_email_suppression() is
-  'Turns email back on for the calling client''s contact address when it is the address the account signs in with and GoTrue has confirmed it: removes the platform-wide one-click suppression and records the lift in email_suppression_lifts. Returns lifted, or the reason it did not (0054).';
+  'Turns email back on for the calling client''s contact address when it is the address the account signs in with and this session began with a link sent to it and opened after the unsubscribe: removes the one-click suppression and records the lift in email_suppression_lifts. Answers lifted, or the reason it did not, with the address it was about (0054).';
 
 -- ── 6. An erased client's lifts go with them ─────────────────────────────
 -- A trigger, as 0049's `fn_forget_purged_push_subscriptions` is, rather than
@@ -288,8 +441,7 @@ comment on function fn_lift_my_email_suppression() is
 -- gets this without knowing the rule exists, and the purge is not rebuilt from
 -- a body that could drop what a later migration added to it (the 0040 lesson).
 --
--- Keyed on the account that lifted. The purge nulls `auth_user_id` in the same
--- UPDATE that sets `purged_at`, so OLD still names the account. AFTER, with the
+-- Keyed on the client (the header says why not the account). AFTER, with the
 -- WHEN clause reading the final row image, for 0049's reasons: a BEFORE
 -- trigger sees the image only as it stands when it runs, and `update of
 -- purged_at` is evaluated against the columns the statement names.
@@ -299,9 +451,7 @@ security definer
 set search_path = public, pg_temp
 as $$
 begin
-  if old.auth_user_id is not null then
-    delete from email_suppression_lifts where lifted_by = old.auth_user_id;
-  end if;
+  delete from email_suppression_lifts where client_id = new.id;
   return null;
 end $$;
 

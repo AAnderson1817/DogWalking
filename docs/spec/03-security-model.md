@@ -137,16 +137,20 @@ FK cascade never fires, and `trg_clients_forget_push_subscriptions` deletes
 the device rows when `purged_at` is set — an endpoint identifies a browser, and
 one surviving an erasure request would keep putting that person's
 notifications on a lock screen (spec 01). `email_suppression_lifts` (0054)
-goes by the same trigger shape: `trg_clients_forget_email_lifts` deletes the
-lift records of the account the purge unbinds, reading it from OLD because the
-purge nulls `auth_user_id` in the statement that sets `purged_at`.
+goes by the same trigger shape and the same key: `trg_clients_forget_email_lifts`
+deletes the erased client's lift records by `client_id`. The first version
+keyed them on the account the purge unbinds, which missed a lift made before
+the operator released the account (`fn_unbind_invite` nulls `auth_user_id`, so
+the erasure found nobody) and deleted another client's record when the same
+account had since been bound elsewhere.
 `email_suppressions` is the one thing about an address this leaves, on
 purpose: it is keyed on the address rather than the client, it is the address
 owner's instruction to stop, and deleting it would make an erasure start email
 to that address again. Redaction here is not a weaker
 deletion; it is the only form the graph allows without dismantling the tax
-record or the audit trail, and what remains carries no personal data and no
-readable secret.
+record or the audit trail. What remains carries no readable secret, and no
+personal data beyond an unsubscribed address, kept so that it stays
+unsubscribed.
 
 **Nothing in the database stops a purged record being re-personalised.** The
 `0004` UPDATE grant still covers `full_name`, `email` and `phone` after
@@ -762,33 +766,63 @@ has the product half.
 `email_suppressions` besides one-click itself, and the trust argument is what
 decides who may use it. A suppression is somebody asking us to stop, so an
 operator can never lift one; the address owner can, and the proof of ownership
-is the sign-in: the caller must be the claimed client whose contact address is
-their own login email, and GoTrue must have confirmed that email, which it does
-only when a link it sent to that inbox is clicked. It takes no argument, so the
-caller cannot name an address or a client — `auth.uid()` picks the one client
-row bound to the account. `fn_my_email_status` answers the same caller-scoped
-question, so a client learns only about their own contact address.
+is control of the inbox NOW, shown by the session the request arrives on. The
+caller must be the claimed client whose contact address is their own sign-in
+address, and the access token's `amr` claim must record an emailed link or code
+opened after the suppression was made: `otp` in the implicit flow this app uses,
+or the PKCE names `magiclink`, `recovery`, `email/signup`, `invite` and
+`email_change` (GoTrue `internal/api/verify.go`, read on `master`). Refreshing a
+token rebuilds the claim from the session's stored entries without restamping
+them (`internal/tokens/service.go`), so the entry dates the link, not the last
+refresh. Sanpo never emails a suppressed address itself; GoTrue's sign-in mail
+does not pass through the sender, so the link arrives. The functions take no
+argument, so the caller cannot name an address, a client or a session:
+`auth.uid()` picks the one client row bound to the account, and `auth.jwt()`
+supplies the claim.
 
-What the lift removes is narrow on purpose: the platform-wide, every-type rows
-one-click writes, for that one address. An operator-scoped or per-type row is a
-narrower preference and is left alone (the status reports it as `not_liftable`
-rather than hiding it), and the next one-click unsubscribe writes a fresh row.
-Each lift is recorded in `email_suppression_lifts` (address, account, and the
-suppression it replaced), a table no API role can read or write, and an erased
-client's records go with the rest of the record (`fn_forget_purged_email_lifts`,
-the 0049 trigger shape). The suppression list itself survives erasure, as it
+The first version proved ownership with `email_confirmed_at`, and a review
+showed why that is history rather than control: a mailbox that changed hands
+keeps its confirmation, so whoever confirmed it long ago could lift the new
+holder's unsubscribe, and lift each one after it. It also rested on a dashboard
+setting: with email confirmations off, GoTrue confirms a public-signup account
+at creation, and a magic-link request confirms any unconfirmed account the same
+way. The session proof rests on neither, since an account confirmed without a
+click still has to open a link sent to that inbox. `email_confirmed_at` is still
+read, because an unconfirmed account's remedy is a reset link rather than a
+magic link (spec 04), and a link session implies it anyway.
+
+What the lift removes is narrow on purpose: the platform-wide, every-type row
+one-click writes, matched by its reason as well as its shape, and only when it
+is all that keeps this client's email off. A row that also applies (the client's
+own operator's stop, or a stop for a type the sender emails) is a narrower
+preference, so the answer is `not_liftable`, and a `lifted` answer is never
+given while some email stays off. Each lift is recorded in
+`email_suppression_lifts` (address, client, account, and the suppression it
+replaced), a table no API role can read or write and the service role may only
+read. An erased client's records go with the rest of the record, keyed on the
+client (above). The lift takes the client row `for no key update` before it
+decides, so a lift and an erasure of the same client serialize in either order
+(`concurrency.sh` case 11). The suppression list itself survives erasure, as it
 always has: erasing a record must never start email to an address again.
 
-The limit, stated: the proof is exactly as strong as the deployed project's
-email-confirmation setting. With confirmations OFF, GoTrue confirms a
-public-signup account at creation, so an account made at someone else's
-address that then becomes a client could lift that address's suppression —
-owner action 16, where the same setting already decides what a guessed claim
-is worth. Changing an existing account's address does not open the same door:
-GoTrue confirms the new address through its inbox for every account that is not
-anonymous (`internal/api/user.go`, read on `master`), so anonymous sign-ins must
-stay off, as they are. The address owner can stop the mail again with one
-click.
+What a client can learn: `fn_my_email_status` answers about the client's own
+contact address, and a client may edit that field (`clients_self_update`), so,
+like the operator with `fn_client_email_suppressed`, a client can learn whether
+any address it saves there is suppressed. What bounds that is how little comes
+back: one state, with no business, no date and no reason.
+
+The limits, stated: `otp` also records an SMS code, so an account that could add
+and verify a phone number would get a fresh entry without opening the inbox (no
+SMS provider is enabled in `config.toml`; the deployed projects' setting is not
+measured from here); and a GoTrue admin email change (the dashboard, or the
+service role) moves the sign-in address without a link and without touching an
+existing session, whose entry then describes a different inbox. Nothing in this
+repository changes a sign-in address that way, and the session timebox bounds
+how long such a session lives. And the entry is dated when a link was opened,
+not when it was read: someone who read a link in that inbox before the
+unsubscribe and opens it after would pass, within the link's lifetime
+(`otp_expiry`, one hour in `config.toml`; the deployed setting is not measured
+from here).
 
 Body-level tenancy check is mandatory in every definer fn (RLS does not apply inside definer context): assert the target row's `operator_id`/`client_id` matches the caller or that the caller is service role.
 
