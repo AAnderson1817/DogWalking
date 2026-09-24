@@ -244,9 +244,11 @@ SHA is empty and the fallback is what gets checked out. Rule 4 fails if it
 inspected no such checkout, since a trigger parse that read nothing would
 report every checkout pinned. And rule 5: every `supabase/setup-cli` step pins
 one commit SHA and one exact `X.Y.Z` CLI release, and every
-`supabase functions deploy` runs with the same flags, because staging is the
-only place a CLI version or a deploy path is exercised before production runs
-it. The owner's `4c45ab1` had already moved staging's function deploy to
+`supabase functions deploy` runs with the same arguments, word for word apart
+from the project ref's value, because staging is the only place a CLI version
+or a deploy path is exercised before production runs it. Flag names alone let a
+positional function name (which deploys that one function) or a flag's value
+drift unseen (Codex, on #100). The owner's `4c45ab1` had already moved staging's function deploy to
 `--use-api` while production stayed on the Docker bundler. Each of the two
 deploy workflows must show rule 5 its own function deploy, and every CLI
 command must run after a `setup-cli` step in its own job, since each job starts
@@ -257,7 +259,7 @@ and matched by workflow, a pin in `migrate` once vouched for a
 it: comments dropped, continued lines joined, quote marks removed, heredoc
 bodies skipped. A deploy counts only as a command, so an `echo` of one, a
 commented-out one, one in a heredoc body and one in an array literal are
-data, and a flag on a continued line is still a flag. A deploy whose flags
+data, and a flag on a continued line is still a flag. A deploy whose arguments
 come from a variable (`"${flags[@]}"`) is refused, since the comparison
 cannot see them.
 

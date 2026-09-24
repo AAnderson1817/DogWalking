@@ -36,9 +36,9 @@ failures: list[str] = []
 # Checkouts rule 4 inspected: its eyesight precondition (see main).
 chained_checkouts = 0
 # Rule 5's evidence, gathered across every workflow and judged in main:
-# (workflow, job, setup-cli commit, CLI version) and (workflow, job, flags).
+# (workflow, job, setup-cli commit, CLI version) and (workflow, job, arguments).
 cli_pins: list[tuple[str, str, str, str]] = []
-function_deploys: list[tuple[str, str, frozenset[str]]] = []
+function_deploys: list[tuple[str, str, tuple[str, ...]]] = []
 # CLI commands rule 5 found a pin for, earlier in their own job (see check).
 cli_commands_checked = 0
 # The two workflows rule 5 exists to hold together. Each must show it its own
@@ -228,29 +228,50 @@ def cli_commands(script: str) -> list[list[str]]:
     return found
 
 
-def deploy_invocations(script: str) -> list[tuple[frozenset[str], list[str]]]:
-    """Every `supabase functions deploy` a run: script runs: its flags, and
-    the arguments whose flags cannot be read. Read by `cli_commands`, so a
-    deploy is exactly a CLI command whose subcommand is `functions deploy`.
+# The one argument whose value may differ between the two deploys: each
+# workflow deploys to its own project. Its value is not compared.
+PROJECT_REF = "--project-ref"
+REF_VALUE = "<project-ref>"
+
+
+def deploy_invocations(script: str) -> list[tuple[tuple[str, ...], list[str]]]:
+    """Every `supabase functions deploy` a run: script runs: its arguments,
+    and those whose value cannot be read. Read by `cli_commands`, so a deploy
+    is exactly a CLI command whose subcommand is `functions deploy`.
+
+    The arguments are compared word for word and in order. Comparing flag
+    names alone let production run `supabase functions deploy stripe-webhook
+    ...`, which deploys that one function, beside staging's deploy of all of
+    them, and let a flag's value (`--import-map a.json` against `b.json`)
+    drift unseen (Codex on #100, round 6). Only the project ref's value is
+    left out, in either spelling, since each workflow deploys to its own
+    project. Two orderings of the same arguments read as a difference: the
+    loud direction, and the remedy is to write the two alike.
 
     An argument holding a `$` expansion is expanded when the step runs, so
-    the flags it supplies are invisible here: `"${flags[@]}"` in both
-    workflows compared equal whatever the arrays held. Those arguments are
-    returned as unreadable, and the caller refuses them. The one exemption
-    is the value of `--project-ref`, which the real workflows take from a
-    secret and which is an argument, not a flag.
+    what it supplies is invisible here: `"${flags[@]}"` in both workflows
+    compared equal whatever the arrays held. Those arguments are returned as
+    unreadable, and the caller refuses them. The one exemption is the project
+    ref's value, which the real workflows take from a secret.
     """
-    found: list[tuple[frozenset[str], list[str]]] = []
+    found: list[tuple[tuple[str, ...], list[str]]] = []
     for words in cli_commands(script):
-        if words[1:3] == ["functions", "deploy"]:
-            args = words[3:]
-            flags = frozenset(m.group(0) for w in args if (m := re.match(r"--[a-z][a-z0-9-]*", w)))
-            unreadable = [
-                w
-                for k, w in enumerate(args)
-                if "$" in w and not w.startswith("--project-ref=") and not (k > 0 and args[k - 1] == "--project-ref")
-            ]
-            found.append((flags, unreadable))
+        if words[1:3] != ["functions", "deploy"]:
+            continue
+        args: list[str] = []
+        unreadable: list[str] = []
+        previous = ""
+        for word in words[3:]:
+            if previous == PROJECT_REF:
+                args.append(REF_VALUE)
+            elif word.startswith(PROJECT_REF + "="):
+                args.append(f"{PROJECT_REF}={REF_VALUE}")
+            else:
+                args.append(word)
+                if "$" in word:
+                    unreadable.append(word)
+            previous = word
+        found.append((tuple(args), unreadable))
     return found
 
 
@@ -539,14 +560,14 @@ def check(path: pathlib.Path) -> None:
                     cli_commands_checked += 1
                 elif unpinned is None:
                     unpinned = words
-            for flags, unreadable in deploy_invocations(script):
-                function_deploys.append((path.name, name, flags))
+            for args, unreadable in deploy_invocations(script):
+                function_deploys.append((path.name, name, args))
                 for word in unreadable:
                     fail(
                         path.name,
                         name,
-                        f"rule 5 cannot read the flags of `supabase functions deploy`: `{word}` is expanded when the step "
-                        "runs, so the flags it supplies are invisible to the comparison — write the flags out",
+                        f"rule 5 cannot read the arguments of `supabase functions deploy`: `{word}` is expanded when the "
+                        "step runs, so what it supplies is invisible to the comparison — write the arguments out",
                     )
         if unpinned is not None:
             command = " ".join(["supabase", *[w for w in unpinned[1:3] if not w.startswith("-") and "$" not in w]])
@@ -583,7 +604,14 @@ def main() -> int:
     # down and connected to nothing, and it had already drifted: the owner's
     # 4c45ab1 moved staging's function deploy to `--use-api` and production's
     # stayed on the Docker bundler. So: one setup-cli commit, one exact CLI
-    # release, and the same flags on every `supabase functions deploy`.
+    # release, and the same arguments on every `supabase functions deploy`,
+    # word for word apart from the project ref's value (deploy_invocations).
+    # Only the function deploy is compared. `link`, `db push` and `secrets
+    # set` are held to the one CLI and to a pin in their own job, not to
+    # matching arguments: a production-only safety step (a `db push
+    # --dry-run` preview, say) is a legitimate difference, and staging's
+    # `link` already differs in its shell plumbing, capturing the CLI's
+    # output for the expired-token annotation.
     #
     # And each deploy workflow must show the rule its OWN function deploy,
     # and every CLI command a pin in its own job (in check). This used to be a
@@ -618,11 +646,13 @@ def main() -> int:
         if len(distinct) > 1:
             listed = "; ".join(f"{w} :: {j} = {v}" for w, j, v in sorted(values))
             failures.append(f"rule 5: the {what} differs between jobs, so production would run what staging never did: {listed}")
-    if len({flags for _, _, flags in function_deploys}) > 1:
+    if len({args for _, _, args in function_deploys}) > 1:
         listed = "; ".join(
-            f"{w} :: {j} = {' '.join(sorted(f)) or '(no flags)'}" for w, j, f in sorted(function_deploys, key=lambda t: (t[0], t[1]))
+            f"{w} :: {j} = {' '.join(a) or '(no arguments)'}" for w, j, a in sorted(function_deploys, key=lambda t: (t[0], t[1]))
         )
-        failures.append(f"rule 5: `supabase functions deploy` runs with different flags, so staging does not rehearse production's path: {listed}")
+        failures.append(
+            f"rule 5: `supabase functions deploy` runs with different arguments, so staging does not rehearse production's path: {listed}"
+        )
 
     if failures:
         for line in failures:
