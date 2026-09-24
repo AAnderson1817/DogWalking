@@ -68,6 +68,8 @@ interface Deploying {
   cli?: boolean;
   /** `false` replaces the function deploy with a step that deploys nothing. */
   deploy?: boolean;
+  /** Replaces the deploy step's command outright. */
+  run?: string;
 }
 
 /**
@@ -75,13 +77,13 @@ interface Deploying {
  * deploys every function: the evidence rule 5 reads.
  */
 function deploying(job: string, opts: Deploying = {}): string {
-  const { commit = SETUP_CLI, version = "2.117.0", flags = "--use-api", cli = true, deploy = true } = opts;
+  const { commit = SETUP_CLI, version = "2.117.0", flags = "--use-api", cli = true, deploy = true, run: command } = opts;
   const lines = ["on:", "  push:", "    branches: [main]", "jobs:", `  ${job}:`, "    runs-on: ubuntu-latest", "    steps:"];
   if (cli) {
     lines.push(`      - uses: supabase/setup-cli@${commit}`);
     if (version !== null) lines.push("        with:", `          version: ${version}`);
   }
-  const run = deploy ? `supabase functions deploy ${flags} --project-ref x`.replace(/ {2,}/g, " ") : "echo nothing to deploy";
+  const run = command ?? (deploy ? `supabase functions deploy ${flags} --project-ref x`.replace(/ {2,}/g, " ") : "echo nothing to deploy");
   lines.push(`      - run: ${run}`);
   return `${lines.join("\n")}\n`;
 }
@@ -89,12 +91,12 @@ function deploying(job: string, opts: Deploying = {}): string {
 /**
  * Runs the script over a scratch tree of fixtures; returns its exit status and
  * the fixtures it failed. `raw` adds whole workflow files. By default it adds
- * one that installs the CLI and deploys functions, since without one rule 5
- * refuses the tree for having shown it nothing.
+ * the two deploy workflows rule 5 holds together, each installing the same CLI
+ * and deploying the same way, since without them rule 5 refuses the tree.
  */
 function verify(
   fixtures: Record<string, string | null>,
-  raw: Record<string, string> = { deploy: deploying("deploy") },
+  raw: Record<string, string> = { "deploy-staging": deploying("functions"), "deploy-production": deploying("functions") },
 ): { status: number | null; failed: string[]; out: string } {
   const root = mkdtempSync(join(tmpdir(), "workflows-"));
   mkdirSync(join(root, ".github", "workflows"), { recursive: true });
@@ -260,8 +262,9 @@ describe("verify-workflows rule 5: production runs the CLI and the deploy path s
 
   it("refuses a setup-cli tag, and a CLI version that is not one exact release", () => {
     const run = verify(
-      {},
+      CHAINED,
       {
+        ...two({}, {}),
         tag: deploying("functions", { commit: "v3" }),
         latest: deploying("functions", { version: "latest" }),
         range: deploying("functions", { version: "2.x" }),
@@ -274,12 +277,24 @@ describe("verify-workflows rule 5: production runs the CLI and the deploy path s
     expect(run.out).toContain("the Supabase CLI version is `(unset)`, not an exact release");
   });
 
-  it("refuses a tree it could read no CLI or no function deploy in, rather than reporting agreement", () => {
-    const noCli = verify(CHAINED, { deploy: deploying("functions", { cli: false }) });
-    expect(noCli.out).toContain("rule 5 inspected no supabase/setup-cli step in any workflow — it checked nothing");
+  it("refuses a missing production workflow, rather than letting staging vouch for it (Codex, on #100)", () => {
+    const run = verify(CHAINED, { "deploy-staging": deploying("functions") });
+    expect(run.out).toContain("rule 5: there is no deploy-production.yml");
+    expect(run.status).toBe(1);
+  });
+
+  it("refuses a production deploy the scanner cannot read, rather than comparing staging with itself (Codex, on #100)", () => {
+    const run = verify(CHAINED, two({}, { run: "${SB:-supabase} functions deploy --use-api --project-ref x" }));
+    expect(run.out).toContain("rule 5 read no `supabase functions deploy` in deploy-production.yml");
+    expect(run.status).toBe(1);
+  });
+
+  it("refuses either deploy workflow showing no CLI pin or no function deploy of its own", () => {
+    const noCli = verify(CHAINED, two({}, { cli: false }));
+    expect(noCli.out).toContain("rule 5 read no supabase/setup-cli step in deploy-production.yml");
     expect(noCli.status).toBe(1);
-    const noDeploy = verify(CHAINED, { deploy: deploying("functions", { deploy: false }) });
-    expect(noDeploy.out).toContain("rule 5 inspected no `supabase functions deploy` in any workflow — it checked nothing");
+    const noDeploy = verify(CHAINED, two({ deploy: false }, {}));
+    expect(noDeploy.out).toContain("rule 5 read no `supabase functions deploy` in deploy-staging.yml");
     expect(noDeploy.status).toBe(1);
   });
 });
