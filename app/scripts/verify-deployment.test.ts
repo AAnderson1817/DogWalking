@@ -563,6 +563,31 @@ function widening(call: ts.CallExpression): string | null {
 }
 
 /**
+ * The names the global object goes by in the edge runtime, which is Deno 2
+ * (`deno_version = 2` in supabase/config.toml). Measured in Deno 2.9.1, the
+ * CI pin: `globalThis`, `self` and `global` are each the global object, and
+ * each reaches `Deno`; `window` is undefined.
+ */
+const GLOBAL_OBJECT = new Set(["globalThis", "self", "global"]);
+
+/**
+ * Whether an expression is the Deno namespace: the global `Deno`, or the
+ * global object's member of that name, spelled however a member can be
+ * (Codex, on #97: `(globalThis as any).Deno.serve(g)` beside a plain
+ * `serveFunction(h)` opened no door). "maybe" is a member of the global
+ * object the scan cannot read, which could be Deno.
+ */
+function denoOf(value: ts.Expression): "deno" | "maybe" | undefined {
+  const e = unwrap(value);
+  if (ts.isIdentifier(e)) return e.text === "Deno" ? "deno" : undefined;
+  if (!ts.isPropertyAccessExpression(e) && !ts.isElementAccessExpression(e)) return undefined;
+  const base = unwrap(e.expression);
+  if (!ts.isIdentifier(base) || !GLOBAL_OBJECT.has(base.text)) return undefined;
+  const member = memberOf(e);
+  return member === "Deno" ? "deno" : member === UNREADABLE ? "maybe" : undefined;
+}
+
+/**
  * name -> how a GET can reach its code, for every function where it can.
  * A function with neither a `Deno.serve` nor a `serveFunction` call is
  * reported too: the scan cannot see how it serves, which is not "safe".
@@ -577,11 +602,15 @@ function widening(call: ts.CallExpression): string | null {
  * declared or assigned to, is judged where it is called instead); a key the
  * scan cannot read, destructured under another name, and a call through a
  * member it cannot read could each be serveFunction; and a member of `Deno`
- * the scan cannot read could be `serve`. What stays outside: a second serve
- * reached through a name the scan never sees at all (`const { serve } =
- * Deno`, an alias of `Deno` itself, a member the scan cannot read taken by
- * indexing and called later) beside a first one it does — one serve per
- * function is the shape the runtime runs, and the fallback covers it.
+ * the scan cannot read could be `serve`, with `Deno` read as the global or
+ * as the global object's member under each name the global object goes by,
+ * where a member the scan cannot read could be Deno. What stays outside: a
+ * second serve reached through a name the scan never sees at all (`const {
+ * serve } = Deno`, an alias of `Deno` itself however it was obtained, the
+ * global object reached through one of its own members, `globalThis.self`,
+ * a member the scan cannot read taken by indexing and called later) beside
+ * a first one it does — one serve per function is the shape the runtime
+ * runs, and the fallback covers it.
  */
 function getReachable(root: string): Map<string, string> {
   const found = new Map<string, string>();
@@ -598,10 +627,12 @@ function getReachable(root: string): Map<string, string> {
         const runs = !inType(node);
         const access = ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node) ? node : undefined;
         const member = access && memberOf(access);
-        const receiver = access && unwrap(access.expression);
-        if (runs && receiver && ts.isIdentifier(receiver) && receiver.text === "Deno") {
+        const receiver = access && denoOf(access.expression);
+        if (runs && receiver === "deno") {
           if (member === "serve") door("its own Deno.serve");
           else if (member === UNREADABLE) door("a member of Deno the scan cannot read");
+        } else if (runs && receiver === "maybe" && (member === "serve" || member === UNREADABLE)) {
+          door("a member of the global object the scan cannot read could be Deno");
         } else if (runs && access && member === UNREADABLE && isCalled(access)) {
           // `http[name](…)` is the unreadable destructured key below without
           // the destructuring (Codex, on #97). Indexing that is not called is
@@ -932,6 +963,25 @@ describe("verify-deployment's read-only argument is derived", () => {
     fn("unreadable-keeps-name", "const { [key]: serveFunction } = mod;\nserveFunction(h);");
     fn("built-object-key", "const routes = { serveFunction: handler };\nserveFunction(h);");
     fn("indexed-uncalled", "serveFunction(h);\nconst message = OUTCOME_MESSAGES[outcome];");
+    // Deno is a member of the global object too (Codex, on #97): each name the
+    // global object goes by in Deno 2 reaches it (measured: globalThis, self
+    // and global; window is undefined), however the member is spelled, and a
+    // member of the global object the scan cannot read could be Deno.
+    fn("global-deno", "serveFunction(h);\n(globalThis as any).Deno.serve(g);");
+    fn("global-deno-element", 'serveFunction(h);\nglobalThis["Deno"].serve(g);');
+    fn("self-deno", "serveFunction(h);\nself.Deno.serve(g);");
+    fn("global-node-deno", "serveFunction(h);\nglobal.Deno.serve(g);");
+    fn("global-deno-unreadable", "serveFunction(h);\nglobalThis.Deno[k](g);");
+    fn("global-unreadable-serve", "serveFunction(h);\nglobalThis[k].serve(g);");
+    fn("global-comma-deno", "serveFunction(h);\n(0, globalThis).Deno.serve(g);");
+    // Not doors: the global object's other members, Deno's other members read
+    // through it, a member of the global object nothing serves from, and a
+    // name the runtime does not define.
+    fn("global-other-serve", "serveFunction(h);\nglobalThis.other.serve(g);");
+    fn("global-deno-env", 'serveFunction(h);\nconst url = globalThis.Deno.env.get("SUPABASE_URL");');
+    fn("global-indexed", "serveFunction(h);\nconst value = globalThis[name];");
+    fn("global-indexed-env", "serveFunction(h);\nconst env = globalThis[name].env;");
+    fn("window-deno", "serveFunction(h);\nwindow.Deno.serve(g);");
     expect(Object.fromEntries(getReachable(root))).toEqual({
       "element-paren": "serveFunction widened with methods",
       "deno-paren": "its own Deno.serve",
@@ -963,6 +1013,13 @@ describe("verify-deployment's read-only argument is derived", () => {
       "comma-callee-get": "serveFunction widened with methods",
       "comma-options-get": "serveFunction widened with methods",
       "comma-left": "serveFunction referenced without being called, so the scan cannot see its options",
+      "global-deno": "its own Deno.serve",
+      "global-deno-element": "its own Deno.serve",
+      "self-deno": "its own Deno.serve",
+      "global-node-deno": "its own Deno.serve",
+      "global-deno-unreadable": "a member of Deno the scan cannot read",
+      "global-unreadable-serve": "a member of the global object the scan cannot read could be Deno",
+      "global-comma-deno": "its own Deno.serve",
     });
   });
 });

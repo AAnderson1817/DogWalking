@@ -658,11 +658,12 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
     return undefined;
   };
 
-  // The approved component an ELEMENT renders: a JSX element of one, read
-  // through what hands a value on and a `const`. Anything else is none the
-  // scan can name.
-  const elementOwner = (expr: ts.Expression): string | null => {
-    const seen = new Set<ts.Node>();
+  // The approved component an ELEMENT renders: a JSX element of one, or an
+  // element a factory call made (Codex, on #97: `cloneElement(createElement(
+  // StateField, …), …)`), read through what hands a value on and a `const`.
+  // Anything else is none the scan can name. `seen` is shared with
+  // factoryOwner, so a const that clones itself ends.
+  const elementOwner = (expr: ts.Expression, seen = new Set<ts.Node>()): string | null => {
     let e = unwrapValue(expr);
     while (ts.isIdentifier(e) && !seen.has(e)) {
       seen.add(e);
@@ -672,6 +673,10 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
     }
     if (ts.isJsxElement(e)) return approvedAs(e.openingElement.tagName, file, checker);
     if (ts.isJsxSelfClosingElement(e)) return approvedAs(e.tagName, file, checker);
+    // A call through a member the scan cannot read is read both ways by
+    // factoryOwner, as an element and as a type, and nothing is both, so it
+    // names no owner.
+    if (ts.isCallExpression(e) && factoryCall(e) && e.arguments[0]) return factoryOwner(e, e.arguments[0], seen);
     return null;
   };
 
@@ -681,12 +686,12 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
   // <StateField … />, …)` was judged as a generic element). A call that could
   // be either — a ternary member, or one the scan cannot read — takes an owner
   // only when both readings name the same one.
-  const factoryOwner = (call: ts.CallExpression, first: ts.Expression): string | null => {
+  const factoryOwner = (call: ts.CallExpression, first: ts.Expression, seen = new Set<ts.Node>()): string | null => {
     const callee = calleeOf(call);
     const names = ts.isIdentifier(callee) ? [callee.text]
       : ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee) ? memberNames(callee, resolve) : [];
     const readings: (string | null)[] = [];
-    if (names.some((n) => n === "cloneElement" || n === UNREADABLE)) readings.push(elementOwner(first));
+    if (names.some((n) => n === "cloneElement" || n === UNREADABLE)) readings.push(elementOwner(first, seen));
     if (names.some((n) => n !== "cloneElement")) readings.push(approvedAs(first, file, checker));
     const [one] = readings;
     return one !== undefined && one !== null && readings.every((r) => r === one) ? one : null;
@@ -1263,6 +1268,20 @@ describe("what the scan refuses and admits", () => {
     expect(rules(APPROVED_IMPORTS + `React[c ? "cloneElement" : "createElement"](StateField, { role: "alert" });`)).toEqual(["role", "role"]);
     expect(rules(APPROVED_IMPORTS + `React[c ? "cloneElement" : "createElement"](<StateField />, { role: "alert" });`)).toEqual(["role", "role"]);
     expect(rules(APPROVED_IMPORTS + `React[k](StateField, { role: "alert" });`)).toEqual(["role", "role"]);
+  });
+
+  it("reads the owner of an element a factory made, as well as one written in JSX (Codex, on #97)", () => {
+    // An element is an element however it was created, so a clone of one a
+    // factory made keeps that factory's owner — through a const, and through
+    // a clone of a clone.
+    expect(rules(APPROVED_IMPORTS + `cloneElement(createElement(StateField, { title: "x" }), { role: "alert" });`)).toEqual([]);
+    expect(rules(APPROVED_IMPORTS + `cloneElement(jsx(StateField, { title: "x" }), { role: "alert" });`)).toEqual([]);
+    expect(rules(APPROVED_IMPORTS + `const made = createElement(StateField, { title: "x" }); cloneElement(made, { role: "alert" });`)).toEqual([]);
+    expect(rules(APPROVED_IMPORTS + `cloneElement(cloneElement(<StateField title="x" />, {}), { role: "alert" });`)).toEqual([]);
+    // A host element a factory made is that host, and a const that clones
+    // itself names no owner, and ends.
+    expect(rules(`cloneElement(createElement("span"), { role: "alert" });`)).toEqual(["role", "role"]);
+    expect(rules(APPROVED_IMPORTS + `const looped = cloneElement(looped, { title: "x" }); cloneElement(looped, { role: "alert" });`)).toEqual(["role", "role"]);
   });
 
   it("gives the exemptions to the approved components by binding, not by spelling (Codex, on #97)", () => {
