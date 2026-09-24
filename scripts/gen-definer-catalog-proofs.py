@@ -525,6 +525,46 @@ with probe("a drop without CASCADE, and a type that is no range"):
     check("a DROP without CASCADE, an enum and a composite type are read without refusal",
           gen.render(model) == gen.render(collect_with(None)))
 
+# ── The one ALTER FUNCTION it reads: SET search_path (0055) ───────────────
+# 0055 moved every function that pins a path to `public, pg_temp`, one ALTER
+# each. That changes configuration and nothing the catalogue shows, so the
+# model checks the signature exists and changes nothing. Any other action, a
+# second action after the value, or a value it cannot read is still refused:
+# those change what the catalogue shows, or might.
+with probe("ALTER FUNCTION … SET search_path is read and changes nothing"):
+    base = fn("fn_probe_sp", "p_a uuid, p_at timestamptz", "uuid, timestamptz")
+    before = collect_with(base)
+    after = collect_with(
+        base
+        + "alter function fn_probe_sp(uuid, timestamptz) set search_path = public, pg_temp;\n"
+        + "alter function public.fn_probe_sp(uuid, timestamp with time zone) set search_path to public, pg_temp;\n"
+    )
+    check("a SET search_path ALTER, in either spelling, leaves the catalogue as it was",
+          gen.render(after) == gen.render(before)
+          and held(after, "fn_probe_sp", "uuid", "timestamp with time zone") == [],
+          f"held by {held(after, 'fn_probe_sp', 'uuid', 'timestamp with time zone')}")
+
+for label, sql, needle in (
+    ("a SET search_path ALTER of a signature nobody created",
+     fn("fn_probe_spnone") + "alter function fn_probe_spnone(uuid) set search_path = public, pg_temp;\n",
+     "no earlier migration creates"),
+    ("a SET search_path ALTER with a second action after the value",
+     fn("fn_probe_sp2") + "alter function fn_probe_sp2() set search_path = public, pg_temp security invoker;\n",
+     "ALTER FUNCTION"),
+    ("an ALTER that sets another setting",
+     fn("fn_probe_spwm") + "alter function fn_probe_spwm() set work_mem = '64MB';\n", "ALTER FUNCTION"),
+    ("a SET search_path ALTER whose value is quoted",
+     fn("fn_probe_spq") + "alter function fn_probe_spq() set search_path = 'public, pg_temp';\n", "ALTER FUNCTION"),
+    ("a RESET search_path ALTER", fn("fn_probe_spr") + "alter function fn_probe_spr() reset search_path;\n",
+     "ALTER FUNCTION"),
+    ("an ALTER ROUTINE that sets search_path",
+     fn("fn_probe_sprt") + "alter routine fn_probe_sprt() set search_path = public, pg_temp;\n", "ALTER FUNCTION"),
+):
+    with probe(f"refuses {label}"):
+        code, err = refused(sql)
+        check(f"refuses {label}, naming the file", code == 1 and f"{NEXT:04d}_probe.sql" in err and needle in err,
+              f"exit {code}, stderr {err.strip()[:160]!r}")
+
 # ── Routine DDL inside a body is refused, not blanked (Codex, on #97) ─────
 # Carried over from #97's twenty-seventh round, whose fix lives in the reader
 # this model shares. The reader blanks every DO and function body, so a

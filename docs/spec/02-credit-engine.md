@@ -26,7 +26,7 @@ out of `pg_get_functiondef` for every function that takes both and fails on
 any that inverts it, and `concurrency.sh` case 5 reproduces the deadlock itself
 against two real backends.
 
-## Functions (all `SECURITY DEFINER`, `SET search_path = public`; grants per spec 03)
+## Functions (all `SECURITY DEFINER`, `SET search_path = public, pg_temp`; grants per spec 03)
 
 **fn_grant_credits(p_client uuid, p_amount int, p_note text) → int** — inserts `grant` (+p_amount), updates balance, returns new balance. Called by stripe-webhook on `invoice.paid`.
 

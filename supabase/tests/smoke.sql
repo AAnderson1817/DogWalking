@@ -2179,7 +2179,7 @@ begin
   -- Break the sweep for the duration of this transaction. The outer rollback
   -- puts the real one back.
   create or replace function fn_expire_credits() returns int
-  language plpgsql security definer set search_path = public as $broken$
+  language plpgsql security definer set search_path = public, pg_temp as $broken$
   begin
     raise exception 'simulated expiry failure';
   end;
@@ -2731,7 +2731,7 @@ begin
 
   create or replace function fn_sweep_abandoned_walks(p_hours int default 6)
   returns int
-  language plpgsql security definer set search_path = public as $broken$
+  language plpgsql security definer set search_path = public, pg_temp as $broken$
   begin
     raise exception 'simulated stale-walk failure';
   end;
@@ -5993,11 +5993,11 @@ begin
     raise exception 'FAIL: the emailed-type list is empty or includes the bell-only card_saved (precondition) (0052)';
   end if;
 
-  -- Invariant 5: definer, pinned search_path.
+  -- Invariant 5: definer, pinned search_path (public, pg_temp since 0055).
   select p.prosecdef, p.proconfig into v_def, v_cfg
     from pg_proc p where p.oid = 'fn_client_email_suppressed(uuid)'::regprocedure;
-  if not v_def or not ('search_path=public' = any(coalesce(v_cfg, '{}'))) then
-    raise exception 'FAIL: fn_client_email_suppressed is not SECURITY DEFINER with search_path=public (invariant 5)';
+  if not v_def or not ('search_path=public, pg_temp' = any(coalesce(v_cfg, '{}'))) then
+    raise exception 'FAIL: fn_client_email_suppressed is not SECURITY DEFINER with search_path=public, pg_temp (invariant 5)';
   end if;
 
   -- One row of each kind the sender distinguishes. Addresses unique to this
@@ -6429,9 +6429,9 @@ begin
   raise notice 'invariant 1: every statement that can write credit_balance is fn_ledger_apply''s, and only clients has the column: OK';
 end $$;
 
--- ── Invariant 5 · every SECURITY DEFINER function pins search_path = public
---    and is not executable by PUBLIC or anon; no API role executes a definer
---    trigger function ─────────────────────────────────────────────────────
+-- ── Invariant 5 · every SECURITY DEFINER function pins search_path =
+--    public, pg_temp and is not executable by PUBLIC or anon; no function
+--    pins another path; no API role executes a definer trigger function ────
 -- CLAUDE.md invariant 5, both halves, against what Postgres installed. Until
 -- the spec-drift audit neither half was asserted anywhere but per function,
 -- and four trigger functions had kept EXECUTE for PUBLIC and anon since 0012
@@ -6446,13 +6446,15 @@ end $$;
 -- OR through PUBLIC, and it reads a NULL `proacl` as the default it stands
 -- for — EXECUTE to PUBLIC — which a hand-read `aclexplode(proacl)` would miss.
 --
--- `public, pg_temp` is accepted beside `public`. It is the form PostgreSQL's
+-- The path is exactly `public, pg_temp` (0055), the form PostgreSQL's
 -- documentation recommends for a definer function: with pg_temp unlisted it
 -- is searched FIRST for relations, so a session holding TEMP (PUBLIC does, by
 -- default) can shadow `clients` inside a definer function with a temp table
--- of its own (measured on `my_client_id()`, PR B review). No API role has a
--- SQL session, so that is not reachable through PostgREST, and moving the
--- definer functions over is backlog work; this check must not forbid it.
+-- of its own (measured on `my_client_id()`, PR B review). `public` alone,
+-- which every definer function used until 0055, now fails. So does any
+-- function, definer or not, that pins a different path: an invoker function
+-- a definer calls runs as the definer's owner with its own pinned path. An
+-- invoker function that pins no path inherits its caller's and is allowed.
 -- A single-quoted `'public, pg_temp'` is one schema of that literal name and
 -- still fails.
 --
@@ -6474,7 +6476,11 @@ begin
     $f$ select has_function_privilege('anon', p, 'EXECUTE') $f$;
   create function pg_temp.inv5_unpinned(p oid) returns boolean language sql stable as
     $f$ select not (coalesce((select proconfig from pg_proc where oid = p), '{}')
-                    && array['search_path=public', 'search_path=public, pg_temp']) $f$;
+                    @> array['search_path=public, pg_temp']) $f$;
+  -- Any function, definer or not: a pinned path that is not exactly this one.
+  create function pg_temp.inv5_other_path(p oid) returns boolean language sql stable as
+    $f$ select exists (select 1 from unnest(coalesce((select proconfig from pg_proc where oid = p), '{}')) c
+                        where c like 'search\_path=%' and c <> 'search_path=public, pg_temp') $f$;
   create function pg_temp.inv5_trigger_open(p oid) returns boolean language sql stable as
     $f$ select (select prorettype from pg_proc where oid = p) = 'trigger'::regtype
                and (has_function_privilege('anon', p, 'EXECUTE')
@@ -6498,7 +6504,15 @@ begin
     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
    where n.nspname = 'public' and p.prosecdef and pg_temp.inv5_unpinned(p.oid);
   if v_bad is not null then
-    raise exception 'FAIL: invariant 5 — SECURITY DEFINER functions that do not set search_path = public: %', v_bad;
+    raise exception 'FAIL: invariant 5 — SECURITY DEFINER functions that do not set search_path = public, pg_temp: %', v_bad;
+  end if;
+
+  select string_agg(p.oid::regprocedure::text, ', ' order by 1) into v_bad
+    from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+   where n.nspname = 'public' and pg_temp.inv5_other_path(p.oid)
+     and not exists (select 1 from pg_depend d where d.objid = p.oid and d.deptype = 'e');
+  if v_bad is not null then
+    raise exception 'FAIL: invariant 5 — functions that pin a search_path other than public, pg_temp: %', v_bad;
   end if;
 
   select string_agg(p.oid::regprocedure::text, ', ' order by 1) into v_bad
@@ -6519,12 +6533,13 @@ begin
       ('revoked, then granted to anon',        'revoke all on function public.fn_inv5_probe() from public, anon; grant execute on function public.fn_inv5_probe() to anon;', true, false),
       ('no set search_path',                   'revoke all on function public.fn_inv5_probe() from public, anon; alter function public.fn_inv5_probe() reset search_path;', false, true),
       ('search_path = public, pg_temp',        'revoke all on function public.fn_inv5_probe() from public, anon; alter function public.fn_inv5_probe() set search_path = public, pg_temp;', false, false),
+      ('search_path = public (temp tables first)', 'revoke all on function public.fn_inv5_probe() from public, anon; alter function public.fn_inv5_probe() set search_path = public;', false, true),
       ('search_path = pg_temp, public',        'revoke all on function public.fn_inv5_probe() from public, anon; alter function public.fn_inv5_probe() set search_path = pg_temp, public;', false, true),
       ('search_path = ''public, pg_temp'' (one quoted schema)', 'revoke all on function public.fn_inv5_probe() from public, anon; alter function public.fn_inv5_probe() set search_path = ''public, pg_temp'';', false, true),
       ('search_path = public, extensions',     'revoke all on function public.fn_inv5_probe() from public, anon; alter function public.fn_inv5_probe() set search_path = public, extensions;', false, true)
     ) as t(label, after, open, unpinned)
   loop
-    execute 'create function public.fn_inv5_probe() returns void language sql security definer set search_path = public as $b$ select 1 $b$';
+    execute 'create function public.fn_inv5_probe() returns void language sql security definer set search_path = public, pg_temp as $b$ select 1 $b$';
     if r.after <> '' then execute r.after; end if;
     -- Looked up, not cast: a `'…'::regprocedure` constant is folded into the
     -- statement's cached plan, so the second iteration would ask about the
@@ -6554,12 +6569,31 @@ begin
       ('not a trigger, open to authenticated',     'returns void language sql',        '$b$ select $b$', 'revoke all on function public.fn_inv5_probe() from public, anon;',               false)
     ) as t(label, shape, body, after, open)
   loop
-    execute format('create function public.fn_inv5_probe() %s security definer set search_path = public as %s', r.shape, r.body);
+    execute format('create function public.fn_inv5_probe() %s security definer set search_path = public, pg_temp as %s', r.shape, r.body);
     if r.after <> '' then execute r.after; end if;
     select p.oid into v_probe from pg_proc p
      where p.proname = 'fn_inv5_probe' and p.pronamespace = 'public'::regnamespace;
     if pg_temp.inv5_trigger_open(v_probe) is distinct from r.open then
       raise exception 'FAIL: the invariant-5 trigger predicate % the % form', case when r.open then 'misses' else 'wrongly flags' end, r.label;
+    end if;
+    drop function public.fn_inv5_probe();
+  end loop;
+
+  -- The other-path predicate, on INVOKER probes: a pinned `public` alone and
+  -- any other path are flagged; `public, pg_temp` and no pinned path are not.
+  for r in
+    select * from (values
+      ('an invoker pinning public alone',       'set search_path = public',           true),
+      ('an invoker pinning public, pg_temp',    'set search_path = public, pg_temp',  false),
+      ('an invoker pinning no path',            '',                                   false),
+      ('an invoker pinning public, extensions', 'set search_path = public, extensions', true)
+    ) as t(label, clause, other)
+  loop
+    execute format('create function public.fn_inv5_probe() returns void language sql %s as $b$ select 1 $b$', r.clause);
+    select p.oid into v_probe from pg_proc p
+     where p.proname = 'fn_inv5_probe' and p.pronamespace = 'public'::regnamespace;
+    if pg_temp.inv5_other_path(v_probe) is distinct from r.other then
+      raise exception 'FAIL: the invariant-5 pinned-path predicate % %', case when r.other then 'misses' else 'wrongly flags' end, r.label;
     end if;
     drop function public.fn_inv5_probe();
   end loop;
@@ -6570,7 +6604,7 @@ begin
   -- grants". Reached by removing this role's default privileges for the one
   -- CREATE, inside the suite's transaction.
   alter default privileges in schema public revoke all on functions from anon, authenticated, service_role;
-  execute 'create function public.fn_inv5_probe() returns void language sql security definer set search_path = public as $b$ select 1 $b$';
+  execute 'create function public.fn_inv5_probe() returns void language sql security definer set search_path = public, pg_temp as $b$ select 1 $b$';
   alter default privileges in schema public grant all on functions to anon, authenticated, service_role;
   select p.oid into v_probe from pg_proc p
    where p.proname = 'fn_inv5_probe' and p.pronamespace = 'public'::regnamespace;
@@ -6582,7 +6616,7 @@ begin
   end if;
   drop function public.fn_inv5_probe();
 
-  raise notice 'invariant 5: all % SECURITY DEFINER functions pin search_path, none is executable by PUBLIC or anon, and no API role executes a definer trigger function: OK', v_n;
+  raise notice 'invariant 5: all % SECURITY DEFINER functions pin search_path = public, pg_temp, no function pins another path, none is executable by PUBLIC or anon, and no API role executes a definer trigger function: OK', v_n;
 end $$;
 
 -- ── 0053 · a trigger fires whatever EXECUTE says ──────────────────────────
