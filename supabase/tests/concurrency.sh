@@ -107,6 +107,11 @@ db_cleanup() {
     drop function if exists fn_register_push_subscription_barrier(text, text, text, text);
     delete from invite_signup_attempts where client_id in
       (select id from clients where operator_id::text like '${NS}%');
+    -- Case 11 commits a lift record and its suppressions; replica mode above
+    -- means deleting the client would orphan the record rather than cascade.
+    delete from email_suppression_lifts where client_id in
+      (select id from clients where operator_id::text like '${NS}%');
+    delete from email_suppressions where email like 'cc-lift%@sanpo.test';
     delete from pets where operator_id::text like '${NS}%';
     delete from properties where operator_id::text like '${NS}%';
     delete from clients where operator_id::text like '${NS}%';
@@ -1076,6 +1081,103 @@ expect_eq "the other nine were refused, not errored" \
   "$(cat "$WORK"/claim*.out | grep -c '^f$')" "9"
 
 psql "$DB" -q -c "delete from notifications where operator_id = '${NS}-000000000001';" >/dev/null
+
+echo
+echo "== case 11a: an erasure waits for a lift in flight, then takes its record =="
+
+# Review of 0054, P2-3. A client can turn email back on
+# (fn_lift_my_email_suppression) while their walker erases them
+# (fn_purge_client), and an erasure has to take the lift record with the rest
+# of the client. The first version of the lift took no lock on the client row,
+# so the two did not serialize, and a record could outlive the erasure. The
+# lift now takes the row "for no key update" before it decides.
+#
+# Two orders, because they fail differently. Here the lift is in flight when
+# the erasure starts. The erasure must wait for it and then delete the record
+# the lift wrote. Stated rather than hidden: this order is also serialized by
+# the lift record's foreign key, whose key-share check holds the same client
+# row that the purge updates key columns of, so this case stays green with the
+# lock removed. Case 11b is the one only the lock passes.
+psql "$DB" -v ON_ERROR_STOP=1 -q -c "
+  insert into auth.users (id, email, email_confirmed_at) values
+    ('${NS}-000000001101', 'cc-lift@sanpo.test', now()),
+    ('${NS}-000000001102', 'cc-lift2@sanpo.test', now());
+  insert into clients (id, operator_id, auth_user_id, full_name, email, status) values
+    ('${NS}-000000000111', '${NS}-000000000001', '${NS}-000000001101', 'CC Lifter', 'cc-lift@sanpo.test', 'active'),
+    ('${NS}-000000000112', '${NS}-000000000001', '${NS}-000000001102', 'CC Lifter 2', 'cc-lift2@sanpo.test', 'active');
+  insert into email_suppressions (email, operator_id, notification_type, reason, created_at) values
+    ('cc-lift@sanpo.test', null, null, 'one-click unsubscribe', now() - interval '1 hour'),
+    ('cc-lift2@sanpo.test', null, null, 'one-click unsubscribe', now() - interval '1 hour');"
+
+# A session opened by an emailed link now, after the unsubscribe an hour ago:
+# the decision's proof of the inbox (the amr claim).
+LINK_NOW="$(date +%s)"
+
+cat >&3 <<SQL
+begin;
+set local request.jwt.claims = '{"sub":"${NS}-000000001101","role":"authenticated","amr":[{"method":"otp","timestamp":${LINK_NOW}}]}';
+select o_result from fn_lift_my_email_suppression();
+SQL
+expect_eq "PRECONDITION: the lift has run and holds its transaction open" \
+  "$(wait_until_idle_in_txn fn_lift_my_email_suppression)" "holding"
+
+psql "$DB" -q -v ON_ERROR_STOP=1 -c "
+  set local request.jwt.claims = '{\"sub\":\"${NS}-000000000001\",\"role\":\"authenticated\"}';
+  select count(*) from fn_purge_client('${NS}-000000000111');" >"$WORK/c11a.out" 2>&1 &
+C11A_PID=$!
+expect_eq "PRECONDITION: the erasure is waiting on the client row the lift holds" \
+  "$(wait_until_blocked fn_purge_client)" "blocked"
+
+cat >&3 <<SQL
+commit;
+SQL
+C11A_RC=0
+wait $C11A_PID || C11A_RC=$?
+expect_eq "the erasure completed after the lift committed" "$C11A_RC" "0"
+expect_eq "the erasure took the record of the lift it waited for" \
+  "$(q "select count(*) from email_suppression_lifts where client_id = '${NS}-000000000111'")" "0"
+
+echo
+echo "== case 11b: a lift waits for an erasure in flight, then refuses =="
+
+# The other order, and the one the lock exists for. The erasure has run and
+# holds its transaction open. Without the lock, the lift read the client row
+# as it stood before the erasure (the erasure had not committed), decided
+# "ready", removed the suppression and wrote a record the erasure's trigger had
+# already run past: a lift for a client being erased, recorded after the
+# erasure. The review measured it: suppression gone, one record surviving.
+# With the lock, the lift waits for the erasure, then re-reads the row, finds
+# no account on it, and answers not_client.
+#
+# The "waiting" precondition holds with the lock removed too: the record's
+# foreign key check waits on the same row. It is a precondition that the
+# interleave happened, and the three outcomes after it are the detector.
+cat >&3 <<SQL
+begin;
+set local request.jwt.claims = '{"sub":"${NS}-000000000001","role":"authenticated"}';
+select count(*) from fn_purge_client('${NS}-000000000112');
+SQL
+expect_eq "PRECONDITION: the erasure has run and holds its transaction open" \
+  "$(wait_until_idle_in_txn fn_purge_client)" "holding"
+
+psql "$DB" -q -At -v ON_ERROR_STOP=1 -c "
+  set local request.jwt.claims = '{\"sub\":\"${NS}-000000001102\",\"role\":\"authenticated\",\"amr\":[{\"method\":\"otp\",\"timestamp\":${LINK_NOW}}]}';
+  select o_result from fn_lift_my_email_suppression();" >"$WORK/b11b.out" 2>&1 &
+B11B_PID=$!
+expect_eq "PRECONDITION: the lift is waiting on the client row the erasure holds" \
+  "$(wait_until_blocked fn_lift_my_email_suppression)" "blocked"
+
+cat >&3 <<SQL
+commit;
+SQL
+wait $B11B_PID || true
+
+expect_eq "the lift answered not_client for a client erased while it waited" \
+  "$(tail -1 "$WORK/b11b.out")" "not_client"
+expect_eq "the suppression was not lifted for an erased client" \
+  "$(q "select count(*) from email_suppressions where email = 'cc-lift2@sanpo.test'")" "1"
+expect_eq "no lift record outlived the erasure" \
+  "$(q "select count(*) from email_suppression_lifts where client_id = '${NS}-000000000112'")" "0"
 
 exec 3>&-
 wait $A_PID 2>/dev/null || true

@@ -1522,51 +1522,70 @@ Before `0054` it was permanent to them too: a client who unsubscribed from one
 walker's mail and later hired another got no walk reports and no billing
 notices from anyone, and nothing in the product could change that.
 
-The proof that an address is yours is the sign-in. The client portal asks
-`fn_my_email_status()` and, when it answers `ready`, offers **Turn email back
-on**, which calls `fn_lift_my_email_suppression()`. Both read one decision,
+The proof that an address is yours is the session: control of the inbox now,
+not once. The client portal asks `fn_my_email_status()` and, when it answers
+`ready`, offers **Turn email back on**, which calls
+`fn_lift_my_email_suppression()`. Both read one decision,
 `fn_email_lift_decision`, so the button is never offered for a lift the server
 would refuse. It is `ready` only when all of these hold:
 
 - the client's contact address is suppressed for every type the sender emails
   (the aggregation `0052`'s operator notice uses, now `fn_email_fully_suppressed`,
   so the two notices cannot disagree);
-- at least one of the suppressing rows is a one-click row (platform-wide,
-  every type), since that is the only kind a lift removes;
+- one of the suppressing rows is the one-click row (platform-wide, every type,
+  reason `'one-click unsubscribe'`), since that is the only kind a lift removes;
+- no other row applies to this client's email: not its own operator's stop, and
+  not a stop for a type the sender emails. Either would leave some email off
+  after a lift, and the portal's confirmation says email is back on;
 - the contact address is the account's sign-in address (`auth.users.email`,
   compared lowercased and trimmed as the claim ladders compare);
-- GoTrue has confirmed that address (`email_confirmed_at`), which is set only by
-  clicking a link GoTrue sent to it. `claim-signup` creates client accounts
-  unconfirmed on purpose, so a client's confirmation is always such a click.
+- GoTrue has confirmed that address (`email_confirmed_at`);
+- the session began with a link or code GoTrue emailed to it, opened after the
+  one-click row was made: the access token's `amr` claim records `otp` (the
+  implicit flow this app uses) or one of `magiclink`, `recovery`,
+  `email/signup`, `invite`, `email_change` (PKCE), dated after the row. A
+  refreshed token keeps the original date. A password, a TOTP code or an
+  anonymous sign-in is not such a link.
 
-Otherwise it answers why: `no_address`, `not_suppressed`, `not_liftable` (off
-by an operator-scoped or per-type row, which is a narrower preference and not
-this decision), `not_login_address` or `not_confirmed`. An account that is not
-a claimed, unerased client gets no row, and the lift answers `not_client`.
-Refusals are returned rather than raised, and write nothing.
+Otherwise it answers why, in this order: `no_address`, `not_suppressed`,
+`not_liftable` (no one-click row, or another row that applies),
+`not_login_address`, `not_confirmed`, `needs_link_sign_in`. The order is the
+order of the remedies: a stop the lift cannot remove, or another address,
+cannot be fixed by signing in again, and an unconfirmed account needs a reset
+link rather than a magic link (spec 06). An account that is not a claimed,
+unerased client gets no row, and the lift answers `not_client`. Refusals are
+returned rather than raised, write nothing, and carry the address they are
+about.
 
-A lift deletes only the one-click rows for the address the decision checked,
-compared exactly as the sender compares (lowercased, not trimmed), and copies
-each into `email_suppression_lifts` in the same statement: the address, the
-account, and when and why the suppression was made. That table is the consent
-record for mailing an address that once asked us to stop, readable by no API
-role, and it goes when the account's client is erased (`fn_forget_purged_email_lifts`).
-The next one-click unsubscribe writes a fresh row, so a lift never weakens the
-next opt-out.
+A lift takes the client row `for no key update`, then deletes only the one-click
+row for the address the decision checked, compared exactly as the sender
+compares (lowercased, not trimmed), and copies it into `email_suppression_lifts`
+in the same statement: the address, the client, the account, and when and why
+the suppression was made. That table is the consent record for mailing an
+address that once asked us to stop, which no API role can read and the service
+role can only read, and it goes when that client is erased
+(`fn_forget_purged_email_lifts`, keyed on the client). The row lock makes a lift
+and an erasure of the same client wait for each other (`concurrency.sh` case 11).
+The lift answers with the address it decided on, and the portal names that
+address, since the contact address can change between the offer and the press.
+The next one-click unsubscribe writes a fresh row, and lifting it needs a fresh
+link again: a lift never undoes a later opt-out.
 
-**Stated limit:** the proof is as strong as GoTrue's confirmation setting. With
-confirmations OFF, a public-signup account is confirmed at creation with no
-click in its inbox. An account made that way at someone else's address, once it
-is a client (by claiming an invite, then setting its own contact address, which
-a client may edit), could lift that address's suppression. That is owner action
-16, the same setting that decides what a guessed claim is worth, and closing
-public signup (1b) closes it. An existing client cannot do the same by changing
-their sign-in address: GoTrue confirms a new address only through its inbox for
-any account that is not anonymous (`internal/api/user.go`, read on `master`,
-not measured here). An anonymous account adding an address is confirmed at once
-with confirmations OFF, so anonymous sign-ins, off in `config.toml` and unused
-by the app, must stay off. The address owner can stop the mail again with one
-click, and the lift is on record.
+**Stated limits.** The session proof does not rest on GoTrue's confirmation
+setting or on anonymous sign-ins being off: an account confirmed without a
+click, or made anonymous and given an address, still has to open a link sent to
+that inbox. What it does assume: `otp` also records an SMS code, so an account
+that could add and verify a phone number would get a fresh entry without the
+inbox (no SMS provider is enabled in `config.toml`, and the deployed projects'
+setting is not measured from here); and a GoTrue admin email change moves the
+sign-in address without a link and leaves an existing session's entry
+describing the old inbox (nothing here changes a sign-in address that way, and
+the session timebox bounds such a session); and the entry is dated when a link
+was opened, not read, so a link read in that inbox before the unsubscribe and
+opened after it passes, within the link's lifetime (`otp_expiry`, one hour in
+`config.toml`). A client can also learn whether any
+address it saves as its own contact address is suppressed, the same one bit
+`0052` gives an operator (spec 03).
 
 ### The schedule lives in a migration, not a dashboard (0028)
 

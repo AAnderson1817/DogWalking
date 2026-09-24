@@ -82,37 +82,42 @@ staging's auth users under a 50-page bound, so each run's two permanent users
 add a page every fifty runs, and a lookup that reaches the bound exits 9
 rather than reporting a user absent.
 
-### 3. The client export is narrower than the privacy notice says
-The notice tells a client that their walker can give them "a copy of
-everything held about you". `fn_export_client_data` (`0040`), the export the
-operator runs, returns the client row, properties, pets, walks, credential
-labels, the ledger and payments. It leaves out route traces
-(`walk_gps_points`), photos (`walk_photos`, `pets.photo_path`), notifications,
-the credential access log, the consent record (`notice_accepted_at`,
-`notice_version`), invite claim attempts, and anything about the client's
-address on the suppression list. Found while deciding what erasure does to a
-lift record (`0054`); not introduced by it.
+### 3. The client export leaves out much of what Sanpo holds about a client
+`fn_export_client_data` (`0040`), the export the operator runs, returns six
+named fields of the client row (name, email, phone, status, credit balance,
+created), the properties' address fields and public access notes, pets, walks
+(date, status, times, distance, notes), credential labels, the ledger and
+payments. It leaves out route traces (`walk_gps_points`), photos
+(`walk_photos`, `pets.photo_path`), `clients.notes`, `properties.lat`/`lng`,
+`pets.is_reactive`/`is_escape_risk`, `recurring_schedules`, the walks' care
+flags, notifications, `push_subscriptions`, the credential access log, the
+consent record (`notice_accepted_at`, `notice_version`), invite claim
+attempts, the address's suppression and `email_suppression_lifts` (`0054`).
 
-Either the export grows or the sentence shrinks, and they are different
-decisions. Growing it is not free: route traces and the access log are the
-operator's evidence as well as the client's data, and suppression history is
-the one thing `0052` deliberately tells an operator almost nothing about, so
-it belongs in a copy the client receives and not one the operator can read.
-Shrinking the sentence is a notice version bump. Either is a written argument
-before code.
+Until `0054` the privacy notice promised "a copy of everything held about
+you". Its review caught the new notice version repeating that sentence while
+this item recorded it as false, so version `2026-09-24` says instead what the
+file holds and names route traces, photos and the entry-code log as left out
+(the client can see all three in their own account). The notice is now true.
+What remains is whether the export grows, and that is not free: route traces
+and the access log are the operator's evidence as well as the client's data,
+and suppression history is the one thing `0052` deliberately tells an operator
+almost nothing about, so it belongs in a copy the client receives rather than
+one the operator can read. A written argument before code, and growing the
+export lets the notice's promise grow with it (`legal-version.test.ts` keeps
+"everything" out until then).
 
 ## Done
 
 - **The address owner can turn email back on** — migration `0054`. A client
   whose contact address unsubscribed can lift the suppression from the portal,
-  and only when that address is the one they sign in with and GoTrue has
-  confirmed it: the trust argument the item asked for is in the migration's
-  header and spec 03. Only the one-click row goes, each lift is recorded in
-  `email_suppression_lifts`, and an erased client's records go with the rest
-  of the record. The proof is as strong as the deployed confirmation setting,
-  which owner action 16 now says. See the `feat(email-owner-lift)` status-log
-  entry.
-
+  only when that address is the one they sign in with and their session began
+  with a link sent to it and opened after the unsubscribe: the trust argument
+  the item asked for is in the migration's header and spec 03, and it depends
+  on no dashboard setting. Only the one-click row goes, and only when it is
+  all that keeps email off; each lift is recorded in `email_suppression_lifts`,
+  and an erased client's records go with the rest of the record. See the
+  `feat(email-owner-lift)` status-log entry.
 
 - **The Supabase CLI, 2.109.1 → 2.117.0, and production's function deploy
   onto `--use-api`.** Read against the 420 commits in the range, and both

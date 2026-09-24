@@ -224,7 +224,12 @@ export default function PortalHome() {
           </div>
         </section>
       )}
-      <EmailSection walkerName={operator?.business_name ?? null} />
+      {/* Keyed on the client. Another tab signing in as someone else reloads
+          this screen, and today the loading state unmounts the section while
+          it does, so it asks again for the new client. The key keeps that
+          true if the reload ever stops unmounting it: the section must not
+          keep the previous client's address and answer. */}
+      <EmailSection key={client.id} walkerName={operator?.business_name ?? null} />
       <PushSection heading="Notifications on this device" />
       <YourDataPanel
         businessName={operator?.business_name ?? null}

@@ -6683,7 +6683,8 @@ end $$;
 
 -- ── 0054 · the address owner can turn email back on ──────────────────────
 -- A suppression can be lifted only by the client whose sign-in address it is,
--- once GoTrue has confirmed that address, and only the row one-click wrote.
+-- on a session that began with a link sent to that address and opened after
+-- the unsubscribe, and only when the one-click row is all that keeps email off.
 -- Every refusal is an answer that writes nothing, and a lift is recorded.
 do $$
 declare
@@ -6693,6 +6694,14 @@ declare
   v_a    uuid := '99999999-0000-4000-c000-00000000000a';  -- op1, claimed by v_user
   v_owner text := 'smoke-0054-owner@example.test';
   v_emailed notification_type[] := fn_client_facing_notification_types();
+  -- Sessions, as the access token's amr claim describes them (auth-js
+  -- AMREntry: a method and epoch seconds). now() is this transaction's start,
+  -- and every suppression below made without a created_at is dated then: a
+  -- link a minute later was opened after it, one two days earlier before it.
+  v_later  bigint := extract(epoch from now() + interval '1 minute')::bigint;
+  v_before bigint := extract(epoch from now() - interval '2 days')::bigint;
+  v_link     jsonb := jsonb_build_array(jsonb_build_object('method', 'otp', 'timestamp', v_later));
+  v_password jsonb := jsonb_build_array(jsonb_build_object('method', 'password', 'timestamp', v_later));
   r record;
   v_state text;
   v_email text;
@@ -6721,46 +6730,95 @@ begin
   -- ── The decision, one state at a time ──────────────────────────────────
   for r in
     select * from (values
-      -- contact address, confirmed?, rows (email, operator, type), want, what it proves
-      (v_owner::text, true,
-       array['G'], 'ready',
-       'the sign-in address, confirmed, off by a one-click row'),
-      ('Smoke-0054-Owner@Example.TEST', true,
-       array['G'], 'ready',
+      -- contact address, confirmed?, rows, the session's amr, want, what it proves
+      (v_owner::text, true, array['G'], v_link, 'ready',
+       'the sign-in address, confirmed, off by the one-click row, on a session opened by a link since'),
+      ('Smoke-0054-Owner@Example.TEST', true, array['G'], v_link, 'ready',
        'the same address typed in another case (the sender lowercases)'),
       -- The sender lowercases and does NOT trim (fn_email_suppressed, 0038),
       -- and one-click stores the contact address the same way, so a trailing
       -- space is a different address to the suppression list. The decision
       -- follows the sender there, and trims only where the claim ladders do:
       -- comparing the contact address with the sign-in address.
-      ('smoke-0054-owner@example.test ', true,
-       array['G-spaced'], 'ready',
+      ('smoke-0054-owner@example.test ', true, array['G-spaced'], v_link, 'ready',
        'a trailing space, off by the one-click row written from that same address'),
-      ('smoke-0054-owner@example.test ', true,
-       array['G'], 'not_suppressed',
+      ('smoke-0054-owner@example.test ', true, array['G'], v_link, 'not_suppressed',
        'a trailing space, where the only row is for the trimmed address the sender never asks about'),
-      (v_owner, false,
-       array['G'], 'not_confirmed',
+      (v_owner, false, array['G'], v_link, 'not_confirmed',
        'the sign-in address, but GoTrue has not confirmed it'),
-      ('smoke-0054-other@example.test', true,
-       array['G-other'], 'not_login_address',
+      ('smoke-0054-other@example.test', true, array['G-other'], v_link, 'not_login_address',
        'a suppressed contact address that is not the one this account signs in with'),
-      (v_owner, true,
-       array['OP1'], 'not_liftable',
-       'off by this operator''s own row, which a lift does not remove'),
-      (v_owner, true,
-       array['EVERY-TYPE'], 'not_liftable',
+      (v_owner, true, array['OP1'], v_link, 'not_liftable',
+       'off by this operator''s own row alone, which a lift does not remove'),
+      (v_owner, true, array['EVERY-TYPE'], v_link, 'not_liftable',
        'off by per-type rows covering every emailed type, which a lift does not remove'),
-      (v_owner, true,
-       array['TYPED'], 'not_suppressed',
+      -- The one-click row is there, but it is not all that keeps email off:
+      -- lifting it would answer "lifted" with some email still off.
+      (v_owner, true, array['G', 'OP1'], v_link, 'not_liftable',
+       'the one-click row and this operator''s own stop'),
+      (v_owner, true, array['G', 'TYPED'], v_link, 'not_liftable',
+       'the one-click row and a stop for one type the sender emails'),
+      ('Smoke-0054-Owner@Example.TEST', true, array['G', 'OP1'], v_link, 'not_liftable',
+       'the one-click row and this operator''s own stop, the contact address typed in another case'),
+      (v_owner, true, array['G', 'BELL-ONLY'], v_link, 'ready',
+       'the one-click row and a stop for a type the sender never emails, which holds no email off'),
+      (v_owner, true, array['G', 'OP2'], v_link, 'ready',
+       'the one-click row and another operator''s stop, which does not apply to this client'),
+      (v_owner, true, array['G-bounce'], v_link, 'not_liftable',
+       'a platform-wide, every-type row written for another reason: not one-click''s to lift'),
+      (v_owner, true, array['TYPED'], v_link, 'not_suppressed',
        'a one-type preference, which leaves email on'),
-      (v_owner, true,
-       array[]::text[], 'not_suppressed',
+      (v_owner, true, array[]::text[], v_link, 'not_suppressed',
        'an address nobody suppressed'),
-      (null, true,
-       array[]::text[], 'no_address',
-       'a client with no address')
-    ) as t(contact, confirmed, kinds, want, label)
+      (null, true, array[]::text[], v_link, 'no_address',
+       'a client with no address'),
+      -- The session is the proof (review P2-1): an entry for an emailed link
+      -- or code, dated after the unsubscribe.
+      (v_owner, true, array['G'], v_password, 'needs_link_sign_in',
+       'a password session says nothing about the inbox now'),
+      (v_owner, true, array['G'],
+       jsonb_build_array(jsonb_build_object('method', 'otp', 'timestamp', v_before)),
+       'needs_link_sign_in',
+       'a link opened before the unsubscribe, which proves nothing about the unsubscribe'),
+      (v_owner, true, array['G'], null::jsonb, 'needs_link_sign_in',
+       'a token with no amr claim'),
+      (v_owner, true, array['G'], jsonb_build_object('method', 'otp', 'timestamp', v_later),
+       'needs_link_sign_in',
+       'an amr claim that is not an array'),
+      (v_owner, true, array['G'], '[{"method":"otp","timestamp":"soon"}]'::jsonb,
+       'needs_link_sign_in',
+       'a timestamp that is not a number'),
+      (v_owner, true, array['G'],
+       jsonb_build_array(jsonb_build_object('method', 'totp', 'timestamp', v_later)),
+       'needs_link_sign_in',
+       'a TOTP code, which is not the inbox'),
+      (v_owner, true, array['G'],
+       jsonb_build_array(jsonb_build_object('method', 'otp', 'timestamp', v_before),
+                         jsonb_build_object('method', 'totp', 'timestamp', v_later)),
+       'needs_link_sign_in',
+       'an MFA step since the unsubscribe does not refresh a link opened before it'),
+      (v_owner, true, array['G'],
+       jsonb_build_array(jsonb_build_object('method', 'magiclink', 'timestamp', v_later)),
+       'ready',
+       'the PKCE name for a magic link'),
+      (v_owner, true, array['G'],
+       jsonb_build_array(jsonb_build_object('method', 'recovery', 'timestamp', v_later)),
+       'ready',
+       'a password-reset link'),
+      (v_owner, true, array['G'],
+       jsonb_build_array(jsonb_build_object('method', 'otp', 'timestamp', v_later),
+                         jsonb_build_object('method', 'totp', 'timestamp', v_later)),
+       'ready',
+       'a link with an MFA step after it'),
+      -- The order of the answers, where the remedies differ: each of these
+      -- would read needs_link_sign_in if the session were asked about first.
+      (v_owner, false, array['G'], v_password, 'not_confirmed',
+       'unconfirmed on a password session: confirming comes first'),
+      ('smoke-0054-other@example.test', true, array['G-other'], v_password, 'not_login_address',
+       'another address on a password session: no sign-in link can help'),
+      (v_owner, true, array['G', 'OP1'], v_password, 'not_liftable',
+       'a stop the lift cannot remove, on a password session: no sign-in link can help')
+    ) as t(contact, confirmed, kinds, amr, want, label)
   loop
     reset session authorization;
     delete from email_suppressions where email like 'smoke-0054-%';
@@ -6770,19 +6828,27 @@ begin
     update clients set email = r.contact where id = v_a;
     if 'G' = any(r.kinds) then
       insert into email_suppressions (email, operator_id, notification_type, reason)
-      values (v_owner, null, null, 'smoke: one-click');
+      values (v_owner, null, null, 'one-click unsubscribe');
     end if;
     if 'G-spaced' = any(r.kinds) then
       insert into email_suppressions (email, operator_id, notification_type, reason)
-      values (v_owner || ' ', null, null, 'smoke: one-click');
+      values (v_owner || ' ', null, null, 'one-click unsubscribe');
     end if;
     if 'G-other' = any(r.kinds) then
       insert into email_suppressions (email, operator_id, notification_type, reason)
-      values ('smoke-0054-other@example.test', null, null, 'smoke: one-click');
+      values ('smoke-0054-other@example.test', null, null, 'one-click unsubscribe');
+    end if;
+    if 'G-bounce' = any(r.kinds) then
+      insert into email_suppressions (email, operator_id, notification_type, reason)
+      values (v_owner, null, null, 'smoke: a bounce');
     end if;
     if 'OP1' = any(r.kinds) then
       insert into email_suppressions (email, operator_id, notification_type, reason)
       values (v_owner, v_op1, null, 'smoke: op1 only');
+    end if;
+    if 'OP2' = any(r.kinds) then
+      insert into email_suppressions (email, operator_id, notification_type, reason)
+      values (v_owner, v_op2, null, 'smoke: op2 only');
     end if;
     if 'EVERY-TYPE' = any(r.kinds) then
       insert into email_suppressions (email, operator_id, notification_type, reason)
@@ -6792,9 +6858,15 @@ begin
       insert into email_suppressions (email, operator_id, notification_type, reason)
       values (v_owner, null, 'walk_complete', 'smoke: one type');
     end if;
+    if 'BELL-ONLY' = any(r.kinds) then
+      insert into email_suppressions (email, operator_id, notification_type, reason)
+      values (v_owner, null, 'card_saved', 'smoke: a type never emailed');
+    end if;
 
     perform set_config('request.jwt.claims',
-      format('{"sub":"%s","role":"authenticated"}', v_user)::text, true);
+      (jsonb_build_object('sub', v_user, 'role', 'authenticated')
+       || case when r.amr is null then '{}'::jsonb else jsonb_build_object('amr', r.amr) end)::text,
+      true);
     set local session authorization authenticated;
     begin
       -- Counted on its own: a non-strict SELECT INTO fetches one row and
@@ -6821,35 +6893,42 @@ begin
   -- The operator: not a client, so no row (and the lift says so).
   reset session authorization;
   perform set_config('request.jwt.claims',
-    format('{"sub":"%s","role":"authenticated"}', v_op1)::text, true);
+    jsonb_build_object('sub', v_op1, 'role', 'authenticated', 'amr', v_link)::text, true);
   set local session authorization authenticated;
   select count(*) into v_rows from fn_my_email_status();
-  v_got := fn_lift_my_email_suppression();
+  select o_result, o_email into v_got, v_email from fn_lift_my_email_suppression();
   reset session authorization;
-  if v_rows <> 0 or v_got is distinct from 'not_client' then
-    raise exception 'FAIL: an operator got % status row(s) and the lift answered % (want 0 and not_client) (0054)', v_rows, v_got;
+  if v_rows <> 0 or v_got is distinct from 'not_client' or v_email is not null then
+    raise exception 'FAIL: an operator got % status row(s) and the lift answered %/% (want 0 and not_client with no address) (0054)', v_rows, v_got, v_email;
   end if;
 
   -- An erased client, even in a state the purge never leaves (it nulls
-  -- auth_user_id, so no login reaches the row): the decision states the
-  -- rule itself rather than depending on that.
+  -- auth_user_id, so no login reaches the row): the decision and the lift's
+  -- lock both state the rule themselves rather than depending on that.
   update clients set email = v_owner, purged_at = now() where id = v_a;
+  delete from email_suppressions where email like 'smoke-0054-%';
+  insert into email_suppressions (email, operator_id, notification_type, reason)
+  values (v_owner, null, null, 'one-click unsubscribe');
+  update auth.users set email_confirmed_at = now() where id = v_user;
   perform set_config('request.jwt.claims',
-    format('{"sub":"%s","role":"authenticated"}', v_user)::text, true);
+    jsonb_build_object('sub', v_user, 'role', 'authenticated', 'amr', v_link)::text, true);
   set local session authorization authenticated;
   select count(*) into v_rows from fn_my_email_status();
-  v_got := fn_lift_my_email_suppression();
+  select o_result into v_got from fn_lift_my_email_suppression();
   reset session authorization;
   update clients set purged_at = null where id = v_a;
   if v_rows <> 0 or v_got is distinct from 'not_client' then
     raise exception 'FAIL: an erased client got % status row(s) and the lift answered % (want 0 and not_client) (0054)', v_rows, v_got;
+  end if;
+  if not exists (select 1 from email_suppressions where email = v_owner) then
+    raise exception 'FAIL: a lift for an erased client removed the suppression (0054)';
   end if;
 
   -- anon may call neither (invariant 5: REVOKE from PUBLIC and anon).
   perform set_config('request.jwt.claims', '{"role":"anon"}', true);
   set local session authorization anon;
   begin
-    perform fn_lift_my_email_suppression();
+    perform * from fn_lift_my_email_suppression();
     raise exception 'FAIL: anon can execute fn_lift_my_email_suppression (invariant 5) (0054)';
   exception
     when insufficient_privilege then null;
@@ -6858,7 +6937,7 @@ begin
       raise exception 'FAIL: the anon lift failed for the wrong reason: % (0054)', sqlerrm;
   end;
   begin
-    perform fn_my_email_status();
+    perform * from fn_my_email_status();
     raise exception 'FAIL: anon can execute fn_my_email_status (invariant 5) (0054)';
   exception
     when insufficient_privilege then null;
@@ -6868,44 +6947,70 @@ begin
   end;
   reset session authorization;
 
-  -- The helpers are the definers' own: no API role executes them, and no API
-  -- role reads or writes the lift record.
-  if has_function_privilege('authenticated', 'fn_email_lift_decision(uuid)', 'EXECUTE')
-     or has_function_privilege('anon', 'fn_email_lift_decision(uuid)', 'EXECUTE')
+  -- The helpers are the definers' own: no API role executes them. No API role
+  -- reads or writes the lift record, and the service role may only read it:
+  -- the platform's default privileges would otherwise let any service-role
+  -- path rewrite the consent record (review P3-7).
+  if has_function_privilege('authenticated', 'fn_email_lift_decision(uuid, jsonb)', 'EXECUTE')
+     or has_function_privilege('anon', 'fn_email_lift_decision(uuid, jsonb)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'fn_amr_has_email_link_since(jsonb, timestamptz)', 'EXECUTE')
+     or has_function_privilege('anon', 'fn_amr_has_email_link_since(jsonb, timestamptz)', 'EXECUTE')
      or has_function_privilege('authenticated', 'fn_email_fully_suppressed(text, uuid)', 'EXECUTE')
      or has_function_privilege('anon', 'fn_email_fully_suppressed(text, uuid)', 'EXECUTE') then
-    raise exception 'FAIL: an API role can execute fn_email_lift_decision or fn_email_fully_suppressed directly (0054)';
+    raise exception 'FAIL: an API role can execute fn_email_lift_decision, fn_amr_has_email_link_since or fn_email_fully_suppressed directly (0054)';
   end if;
   if has_table_privilege('anon', 'email_suppression_lifts', 'SELECT, INSERT, UPDATE, DELETE')
      or has_table_privilege('authenticated', 'email_suppression_lifts', 'SELECT, INSERT, UPDATE, DELETE') then
     raise exception 'FAIL: an API role holds a privilege on email_suppression_lifts (0054)';
   end if;
+  if has_table_privilege('service_role', 'email_suppression_lifts', 'INSERT, UPDATE, DELETE, TRUNCATE')
+     or not has_table_privilege('service_role', 'email_suppression_lifts', 'SELECT') then
+    raise exception 'FAIL: the service role may do more than read the lift record, or cannot read it (0054)';
+  end if;
 
-  -- ── Refusals write nothing ─────────────────────────────────────────────
+  -- ── Refusals write nothing, and name the address ───────────────────────
   for r in
     select * from (values
-      (v_owner::text, false, 'not_confirmed'),
-      ('smoke-0054-other@example.test', true, 'not_login_address')
-    ) as t(contact, confirmed, want)
+      (v_owner::text, false, array['G'], v_link, 'not_confirmed'),
+      ('smoke-0054-other@example.test', true, array['G-other'], v_link, 'not_login_address'),
+      (v_owner, true, array['G'], v_password, 'needs_link_sign_in'),
+      (v_owner, true, array['G', 'OP1'], v_link, 'not_liftable'),
+      (v_owner, true, array['G-bounce'], v_link, 'not_liftable')
+    ) as t(contact, confirmed, kinds, amr, want)
   loop
     reset session authorization;
     delete from email_suppressions where email like 'smoke-0054-%';
-    insert into email_suppressions (email, operator_id, notification_type, reason)
-    values (lower(r.contact), null, null, 'smoke: one-click');
+    if 'G' = any(r.kinds) then
+      insert into email_suppressions (email, operator_id, notification_type, reason)
+      values (v_owner, null, null, 'one-click unsubscribe');
+    end if;
+    if 'G-other' = any(r.kinds) then
+      insert into email_suppressions (email, operator_id, notification_type, reason)
+      values ('smoke-0054-other@example.test', null, null, 'one-click unsubscribe');
+    end if;
+    if 'G-bounce' = any(r.kinds) then
+      insert into email_suppressions (email, operator_id, notification_type, reason)
+      values (v_owner, null, null, 'smoke: a bounce');
+    end if;
+    if 'OP1' = any(r.kinds) then
+      insert into email_suppressions (email, operator_id, notification_type, reason)
+      values (v_owner, v_op1, null, 'smoke: op1 only');
+    end if;
     update auth.users set email_confirmed_at = case when r.confirmed then now() end where id = v_user;
     update clients set email = r.contact where id = v_a;
+    select count(*) into v_supp from email_suppressions where email like 'smoke-0054-%';
     select count(*) into v_lifts from email_suppression_lifts;
 
     perform set_config('request.jwt.claims',
-      format('{"sub":"%s","role":"authenticated"}', v_user)::text, true);
+      jsonb_build_object('sub', v_user, 'role', 'authenticated', 'amr', r.amr)::text, true);
     set local session authorization authenticated;
-    v_got := fn_lift_my_email_suppression();
+    select o_result, o_email into v_got, v_email from fn_lift_my_email_suppression();
     reset session authorization;
 
-    if v_got is distinct from r.want then
-      raise exception 'FAIL: the lift for "%" answered %, want % (0054)', r.contact, v_got, r.want;
+    if v_got is distinct from r.want or v_email is distinct from r.contact then
+      raise exception 'FAIL: the lift for "%" answered % naming "%", want % naming the contact address (0054)', r.contact, v_got, v_email, r.want;
     end if;
-    if (select count(*) from email_suppressions where email = lower(r.contact)) <> 1
+    if (select count(*) from email_suppressions where email like 'smoke-0054-%') <> v_supp
        or (select count(*) from email_suppression_lifts) <> v_lifts then
       raise exception 'FAIL: a refused lift (%) changed the suppression list or the lift record (0054)', r.want;
     end if;
@@ -6917,24 +7022,24 @@ begin
   update auth.users set email_confirmed_at = now() where id = v_user;
   update clients set email = v_owner where id = v_a;
   insert into email_suppressions (email, operator_id, notification_type, reason, created_at)
-  values (v_owner, null, null, 'smoke: one-click', now() - interval '40 days')
+  values (v_owner, null, null, 'one-click unsubscribe', now() - interval '40 days')
   returning created_at into v_made;
-  -- Another operator's own stop, and a one-type preference: neither is the
-  -- one-click row, and a lift must leave both.
+  -- Another operator's own stop, and a stop for a type the sender never
+  -- emails: neither holds this client's email off, and a lift must leave both.
   insert into email_suppressions (email, operator_id, notification_type, reason) values
     (v_owner, v_op2, null, 'smoke: op2 only'),
-    (v_owner, null, 'renewal_upcoming', 'smoke: one type');
+    (v_owner, null, 'card_saved', 'smoke: a type never emailed');
   select count(*) into v_lifts from email_suppression_lifts;
 
   perform set_config('request.jwt.claims',
-    format('{"sub":"%s","role":"authenticated"}', v_user)::text, true);
+    jsonb_build_object('sub', v_user, 'role', 'authenticated', 'amr', v_link)::text, true);
   set local session authorization authenticated;
-  v_got := fn_lift_my_email_suppression();
+  select o_result, o_email into v_got, v_email from fn_lift_my_email_suppression();
   select o_state into v_state from fn_my_email_status();
   reset session authorization;
 
-  if v_got is distinct from 'lifted' then
-    raise exception 'FAIL: a ready lift answered % (0054)', v_got;
+  if v_got is distinct from 'lifted' or v_email is distinct from v_owner then
+    raise exception 'FAIL: a ready lift answered % naming "%" (want lifted, naming the contact address) (0054)', v_got, v_email;
   end if;
   if exists (select 1 from email_suppressions
               where email = v_owner and operator_id is null and notification_type is null) then
@@ -6942,23 +7047,25 @@ begin
   end if;
   select count(*) into v_supp from email_suppressions where email = v_owner;
   if v_supp <> 2 then
-    raise exception 'FAIL: the lift removed % of the two rows it must leave (another operator''s stop and a one-type preference) (0054)', 2 - v_supp;
+    raise exception 'FAIL: the lift removed % of the two rows it must leave (another operator''s stop and a stop for a type never emailed) (0054)', 2 - v_supp;
   end if;
-  -- Recorded: the address, the account, and the suppression it replaced.
+  -- Recorded: the address, the client, the account, and the suppression it replaced.
   if (select count(*) from email_suppression_lifts) <> v_lifts + 1 then
     raise exception 'FAIL: a lift wrote % record(s), want 1 (0054)', (select count(*) from email_suppression_lifts) - v_lifts;
   end if;
   select * into v_lift from email_suppression_lifts order by lifted_at desc, id desc limit 1;
-  if v_lift.email <> v_owner or v_lift.lifted_by <> v_user
-     or v_lift.suppressed_at <> v_made or v_lift.suppression_reason <> 'smoke: one-click' then
+  if v_lift.email <> v_owner or v_lift.client_id <> v_a or v_lift.lifted_by <> v_user
+     or v_lift.suppressed_at <> v_made or v_lift.suppression_reason <> 'one-click unsubscribe' then
     raise exception 'FAIL: the lift record is wrong: % (0054)', row_to_json(v_lift);
   end if;
-  -- One-type preference left in place, so email is on again: the status, the
-  -- sender and the operator's notice must all say so.
+  -- Email is on again, for every type the sender emails, which is what the
+  -- portal's confirmation promises: the status, the sender and the operator's
+  -- notice must all say so. bool_or, not bool_and: "fully on", not merely
+  -- "not fully off".
   if v_state is distinct from 'not_suppressed' then
     raise exception 'FAIL: after the lift the client''s status says %, want not_suppressed (0054)', v_state;
   end if;
-  select coalesce(bool_and(fn_email_suppressed(v_owner, v_op1, ty)), false) into v_sender
+  select coalesce(bool_or(fn_email_suppressed(v_owner, v_op1, ty)), false) into v_sender
     from unnest(v_emailed) as ty;
   perform set_config('request.jwt.claims',
     format('{"sub":"%s","role":"authenticated"}', v_op1)::text, true);
@@ -6966,29 +7073,47 @@ begin
   select o_suppressed into v_notice from fn_client_email_suppressed(v_a);
   reset session authorization;
   if v_sender or v_notice then
-    raise exception 'FAIL: after the lift the sender says % and the operator''s notice says %, want both false (0054)', v_sender, v_notice;
+    raise exception 'FAIL: after the lift the sender still suppresses some emailed type (%) or the operator''s notice says % (want both false) (0054)', v_sender, v_notice;
   end if;
 
   -- A second lift finds nothing to remove and records nothing.
   perform set_config('request.jwt.claims',
-    format('{"sub":"%s","role":"authenticated"}', v_user)::text, true);
+    jsonb_build_object('sub', v_user, 'role', 'authenticated', 'amr', v_link)::text, true);
   set local session authorization authenticated;
-  v_got := fn_lift_my_email_suppression();
+  select o_result, o_email into v_got, v_email from fn_lift_my_email_suppression();
   reset session authorization;
-  if v_got is distinct from 'not_suppressed' or (select count(*) from email_suppression_lifts) <> v_lifts + 1 then
+  if v_got is distinct from 'not_suppressed' or v_email is distinct from v_owner
+     or (select count(*) from email_suppression_lifts) <> v_lifts + 1 then
     raise exception 'FAIL: a second lift answered % and changed the record (want not_suppressed, unchanged) (0054)', v_got;
   end if;
 
-  -- ── A lift never weakens the next opt-out ──────────────────────────────
+  -- ── A lift never undoes the next opt-out ───────────────────────────────
+  -- The real writer, so its reason and the one the lift matches are proved
+  -- to be the same literal.
   select unsubscribe_token into v_token from clients where id = v_a;
   perform fn_unsubscribe_by_token(v_token);
+  -- On a session opened before that unsubscribe: the lift that just ran
+  -- cannot be repeated on it (review P2-1).
   perform set_config('request.jwt.claims',
-    format('{"sub":"%s","role":"authenticated"}', v_user)::text, true);
+    jsonb_build_object('sub', v_user, 'role', 'authenticated', 'amr',
+      jsonb_build_array(jsonb_build_object('method', 'otp',
+        'timestamp', extract(epoch from now() - interval '1 minute')::bigint)))::text, true);
+  set local session authorization authenticated;
+  select o_state into v_state from fn_my_email_status();
+  select o_result into v_got from fn_lift_my_email_suppression();
+  reset session authorization;
+  if v_state is distinct from 'needs_link_sign_in' or v_got is distinct from 'needs_link_sign_in'
+     or not exists (select 1 from email_suppressions where email = v_owner and operator_id is null and notification_type is null) then
+    raise exception 'FAIL: after a new unsubscribe, a session opened before it read % and lifted % (want needs_link_sign_in for both, the row intact) (0054)', v_state, v_got;
+  end if;
+  -- On a session opened after it, one-click's row is the one the lift takes.
+  perform set_config('request.jwt.claims',
+    jsonb_build_object('sub', v_user, 'role', 'authenticated', 'amr', v_link)::text, true);
   set local session authorization authenticated;
   select o_state into v_state from fn_my_email_status();
   reset session authorization;
   if v_state is distinct from 'ready' then
-    raise exception 'FAIL: one-click after a lift left the status at %, want ready (suppressed again) (0054)', v_state;
+    raise exception 'FAIL: the row fn_unsubscribe_by_token writes read %, want ready: the reason the lift matches is not the one one-click writes (0054)', v_state;
   end if;
 
   -- ── The lift removes the row the sender matches, not a trimmed one ──────
@@ -6999,49 +7124,84 @@ begin
   delete from email_suppressions where email like 'smoke-0054-%';
   update clients set email = v_owner || ' ' where id = v_a;
   insert into email_suppressions (email, operator_id, notification_type, reason) values
-    (v_owner || ' ', null, null, 'smoke: one-click, spaced'),
-    (v_owner, null, null, 'smoke: one-click, trimmed');
+    (v_owner || ' ', null, null, 'one-click unsubscribe'),
+    (v_owner, null, null, 'one-click unsubscribe');
   perform set_config('request.jwt.claims',
-    format('{"sub":"%s","role":"authenticated"}', v_user)::text, true);
+    jsonb_build_object('sub', v_user, 'role', 'authenticated', 'amr', v_link)::text, true);
   set local session authorization authenticated;
-  v_got := fn_lift_my_email_suppression();
+  select o_result into v_got from fn_lift_my_email_suppression();
   reset session authorization;
   if v_got is distinct from 'lifted'
      or exists (select 1 from email_suppressions where email = v_owner || ' ')
      or not exists (select 1 from email_suppressions where email = v_owner) then
     raise exception 'FAIL: a lift for a contact address with a trailing space answered % and did not remove exactly the row the sender matches (0054)', v_got;
   end if;
+  update clients set email = v_owner where id = v_a;
 
-  -- ── Erasure takes the erased account's lift records, and only those ─────
-  -- Through the real purge, so the trigger is proved against the UPDATE the
-  -- purge actually issues: it nulls auth_user_id in the statement that sets
-  -- purged_at, and a trigger reading NEW, or a purge that nulled it first,
-  -- would erase nothing.
+  -- ── Erasure takes the erased client's lift records, and only those ─────
+  -- Keyed on the client, through the real purge (review P2-2). Keyed on the
+  -- account, it missed a lift made before the operator released the account,
+  -- and it deleted another client's record when the account had since been
+  -- bound elsewhere. Both are set up here with the real functions.
   reset session authorization;
   perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
-  insert into auth.users (id, email, email_confirmed_at)
-  values ('99999999-0000-4000-a000-000000005401', 'smoke-0054-erased@example.test', now());
-  insert into clients (id, operator_id, full_name, status, email, auth_user_id)
-  values ('99999999-0000-4000-c000-000000005401', v_op1, '0054 Erased', 'active',
-          'smoke-0054-erased@example.test', '99999999-0000-4000-a000-000000005401');
-  insert into email_suppression_lifts (email, lifted_by, suppressed_at, suppression_reason) values
-    ('smoke-0054-erased@example.test', '99999999-0000-4000-a000-000000005401', now(), 'smoke: erased account'),
-    (v_owner, v_user, now(), 'smoke: another account');
+  insert into auth.users (id, email, email_confirmed_at) values
+    ('99999999-0000-4000-a000-000000005401', 'smoke-0054-erased@example.test', now()),
+    ('99999999-0000-4000-a000-000000005402', 'smoke-0054-moved@example.test', now());
+  insert into clients (id, operator_id, full_name, status, email, auth_user_id) values
+    ('99999999-0000-4000-c000-000000005401', v_op1, '0054 Erased', 'active',
+     'smoke-0054-erased@example.test', '99999999-0000-4000-a000-000000005401'),
+    ('99999999-0000-4000-c000-000000005402', v_op1, '0054 Released', 'active',
+     'smoke-0054-moved@example.test', '99999999-0000-4000-a000-000000005402'),
+    ('99999999-0000-4000-c000-000000005403', v_op2, '0054 Elsewhere', 'active',
+     null, null);
+  insert into email_suppression_lifts (email, client_id, lifted_by, suppressed_at, suppression_reason) values
+    ('smoke-0054-erased@example.test', '99999999-0000-4000-c000-000000005401',
+     '99999999-0000-4000-a000-000000005401', now(), 'smoke: erased client'),
+    ('smoke-0054-moved@example.test', '99999999-0000-4000-c000-000000005402',
+     '99999999-0000-4000-a000-000000005402', now(), 'smoke: released client');
+
+  -- op1 releases the second client's account, and op2's client claims it.
   perform set_config('request.jwt.claims',
     format('{"sub":"%s","role":"authenticated"}', v_op1)::text, true);
   set local session authorization authenticated;
+  perform fn_unbind_invite('99999999-0000-4000-c000-000000005402');
+  reset session authorization;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  update clients set auth_user_id = '99999999-0000-4000-a000-000000005402'
+   where id = '99999999-0000-4000-c000-000000005403';
+
+  -- op2 erases its client: the lift was the released client's, not this one's.
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op2)::text, true);
+  set local session authorization authenticated;
+  select count(*) into v_rows from fn_purge_client('99999999-0000-4000-c000-000000005403');
+  reset session authorization;
+  if not exists (select 1 from email_suppression_lifts
+                  where client_id = '99999999-0000-4000-c000-000000005402') then
+    raise exception 'FAIL: erasing one client deleted the lift record of another client its account used to belong to (0054)';
+  end if;
+
+  -- op1 erases the released client, whose account is gone from the row.
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op1)::text, true);
+  set local session authorization authenticated;
+  select count(*) into v_rows from fn_purge_client('99999999-0000-4000-c000-000000005402');
   select count(*) into v_rows from fn_purge_client('99999999-0000-4000-c000-000000005401');
   reset session authorization;
   if exists (select 1 from email_suppression_lifts
-              where lifted_by = '99999999-0000-4000-a000-000000005401') then
-    raise exception 'FAIL: erasing a client left the lift records of its account in place (0054)';
+              where client_id = '99999999-0000-4000-c000-000000005402') then
+    raise exception 'FAIL: erasing a client whose account had been released left its lift record in place (0054)';
   end if;
-  if not exists (select 1 from email_suppression_lifts
-                  where lifted_by = v_user and suppression_reason = 'smoke: another account') then
-    raise exception 'FAIL: erasing one client deleted another account''s lift record (0054)';
+  if exists (select 1 from email_suppression_lifts
+              where client_id = '99999999-0000-4000-c000-000000005401') then
+    raise exception 'FAIL: erasing a client left its lift record in place (0054)';
+  end if;
+  if not exists (select 1 from email_suppression_lifts where client_id = v_a) then
+    raise exception 'FAIL: erasing other clients deleted this client''s lift record (0054)';
   end if;
 
-  raise notice 'the address owner can turn email back on, only for their own confirmed address and only the one-click row, and every lift is recorded (0054): OK';
+  raise notice 'the address owner can turn email back on, only on a session opened by a link to their own address since the unsubscribe, only when the one-click row is all that keeps email off, and every lift is recorded and erased with its client (0054): OK';
 end $$;
 
 rollback;

@@ -83,17 +83,16 @@ export const PRIVACY: LegalDocument = {
       heading: "How long it is kept",
       paragraphs: [
         "Route traces are deleted automatically once they pass the window your walker sets — 365 days unless they change it. The visit itself, and its billing record, are kept.",
-        "Everything else is kept while you are a client. When your walker erases your record, your address, entry codes, pet notes, route traces and photos are destroyed. Two things survive on purpose: the billing ledger, because it is a financial record your walker is required to keep, and the log of who viewed your entry codes, because a record of who opened your door is not something the person who opened it should be able to delete.",
-        "If you unsubscribed from Sanpo email, that is kept too, as the address and the date alone, so that erasing a record never starts email to that address again. A record that you turned email back on is destroyed with the rest.",
+        "Everything else is kept while you are a client. When your walker erases your record, your address, entry codes, pet notes, route traces and photos are destroyed, and so is any record that you turned email back on. Three things survive on purpose: the billing ledger, because it is a financial record your walker is required to keep; the log of who viewed your entry codes, because a record of who opened your door is not something the person who opened it should be able to delete; and, if you unsubscribed from Sanpo email, the address and when you asked, so that erasing a record never starts email to that address again.",
       ],
     },
     {
       heading: "Your choices",
       paragraphs: [
-        "You can ask your walker for a copy of everything held about you, and they can produce it as a file in a few seconds.",
+        "You can ask your walker for a copy of your details, your address, your pets, your visits and your billing records, and they can produce it as a file in a few seconds. That file does not hold everything described above yet: route traces, photos and the log of who viewed your entry codes are left out of it. If you have a Sanpo account you can see all three there; otherwise ask your walker.",
         "You can ask them to erase it. Erasure is immediate and cannot be undone.",
         "Every email carries an unsubscribe link that works without signing in, including if you received it by mistake and have no account here.",
-        "If you unsubscribe and later want email again, you can turn it back on from your Sanpo account, as long as you sign in with that address and have confirmed it. Sanpo records when you did.",
+        "If you unsubscribe and later want email again, you can turn it back on from your Sanpo account, as long as it is the address you sign in with and, after unsubscribing, you sign in by opening a link sent to it. Sanpo records the address, the account that turned it back on, when, and when you had unsubscribed.",
       ],
     },
   ],

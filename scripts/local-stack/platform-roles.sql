@@ -126,10 +126,11 @@ alter schema public owner to sb_deploy;
 
 -- Foreign keys to auth.users need REFERENCES on it. The migrations never
 -- select from auth.users at apply time, but two definer functions they create
--- do when they RUN, as their owner: 0035's fn_account_has_password and 0054's
--- email-lift decision. This role reads it through its service_role
--- membership, which shim.sql grants SELECT; db-push-check.sh removes that path
--- and calls both to show the dependency is real.
+-- do when they RUN, as their owner: 0035's fn_account_has_password, and 0054's
+-- email-lift decision inside fn_my_email_status and fn_lift_my_email_suppression.
+-- This role reads it through its service_role membership, which shim.sql
+-- grants SELECT; db-push-check.sh removes that path and calls
+-- fn_account_has_password and fn_my_email_status to show the dependency is real.
 grant references on auth.users to sb_deploy;
 
 grant usage on schema auth, storage, realtime, cron to sb_deploy;

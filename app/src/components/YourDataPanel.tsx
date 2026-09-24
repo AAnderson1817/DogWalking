@@ -35,8 +35,9 @@ export function YourDataPanel({
           : "Route traces are kept until your walker deletes them."}
       </p>
       <p className="your-data__detail">
-        Ask {businessName ?? "your walker"} for a copy of everything held about
-        you, or to erase it. They can do both from within Sanpo.
+        Ask {businessName ?? "your walker"} for a copy of your records, or to
+        erase them. They can do both from within Sanpo, and the privacy notice
+        says what the copy holds.
       </p>
       {noticeAcceptedAt && (
         <p className="your-data__meta">

@@ -361,8 +361,10 @@ architecture takes but not necessarily the one a court would.
 
 Changing the text means bumping the document's `version` — every consent
 already recorded points at the old version, which is what makes the record
-evidence. `app/scripts/legal-version.test.ts` enforces that and prints the new
-hash to paste in.
+evidence. `app/scripts/legal-version.test.ts` fails on a text change under an
+existing version and prints the hash to pin under the NEW one; it cannot see
+the pin for a published version being overwritten instead, so that edit is for
+review to refuse.
 
 ---
 
@@ -552,20 +554,18 @@ dashboard setting no file here records.
 `0048` bounds the *rate* either way. This decides what a single successful
 guess is worth, which is the difference between an annoyance and an incident.
 
-Since `0054` it also decides what a confirmed sign-in proves. A client can turn
-email back on for an address that unsubscribed when that address is the one
-they sign in with and GoTrue has confirmed it. With confirmations ON, that
-confirmation is a click in the inbox. With them OFF, a public-signup account is
-confirmed at creation with no click, so an account made at someone else's
-address that then becomes a client could lift that address's unsubscribe.
-Closing public signup (1b) closes that path. Changing an existing account's
-address does not reopen it, because GoTrue confirms a new address through its
-inbox for every account that is not anonymous (`internal/api/user.go`, read on
-`master`); an anonymous account adding an address is confirmed at once with
-confirmations OFF, so anonymous sign-ins must stay off, as they are in
-`config.toml`. The damage is bounded either way: the address owner can
-unsubscribe again with one click, and every lift is recorded in
-`email_suppression_lifts`.
+`0054` does not depend on this setting, and that was a deliberate change. A
+client can turn email back on for an address that unsubscribed only on a
+session that began with a link sent to that address and opened after the
+unsubscribe, which an account confirmed without a click still has to open.
+The first version proved it with `email_confirmed_at` instead, which this
+setting decides (with confirmations OFF a public-signup account is confirmed at
+creation), and review replaced it. The lift's own residuals are in spec 04: an
+SMS code also reads as a sign-in code, so no SMS provider should be enabled
+without looking at that; an admin email change leaves an existing session
+describing the old inbox; and a link read before the unsubscribe and opened
+after it passes within the link's lifetime, so the deployed `otp_expiry` (one
+hour in `config.toml`) should not be lengthened without looking at that too.
 
 **What is true until this is answered:** the frontend already handles both —
 `ClaimInvite` catches `email_not_confirmed` on the sign-in that follows and
