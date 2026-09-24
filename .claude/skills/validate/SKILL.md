@@ -253,8 +253,10 @@ neither can vouch for the other: counted across all workflows, staging's alone
 once satisfied it (Codex, on #100). A `run:` block is read as bash would run
 it: comments dropped, continued lines joined, quote marks removed, heredoc
 bodies skipped. A deploy counts only as a command, so an `echo` of one, a
-commented-out one and one in a heredoc body are data, and a flag on a
-continued line is still a flag.
+commented-out one, one in a heredoc body and one in an array literal are
+data, and a flag on a continued line is still a flag. A deploy whose flags
+come from a variable (`"${flags[@]}"`) is refused, since the comparison
+cannot see them.
 
 ## 10d. CLAUDE.md's counts match the tree
 ```

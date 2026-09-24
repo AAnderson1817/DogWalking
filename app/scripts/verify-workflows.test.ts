@@ -332,6 +332,10 @@ describe("verify-workflows rule 5: production runs the CLI and the deploy path s
       echo: "echo supabase functions deploy --use-api --project-ref x",
       // Quoted text stays one word: its `;` does not start a second command.
       "separator in a quoted string": 'echo "done; supabase functions deploy --use-api --project-ref x"',
+      // An array literal only builds an array (Codex, on #100, round 4).
+      "array literal": "deploy=(supabase functions deploy --use-api --project-ref x)",
+      "array append": "args+=(supabase functions deploy --use-api --project-ref x)",
+      "declared array": "declare -a d=(supabase functions deploy --use-api --project-ref x)",
       heredoc: "cat <<EOF > notes.txt\nsupabase functions deploy --use-api --project-ref x\nEOF",
       "tab-stripped heredoc": "cat <<-'END'\n\tsupabase functions deploy --use-api --project-ref x\n\tEND",
     };
@@ -349,13 +353,22 @@ describe("verify-workflows rule 5: production runs the CLI and the deploy path s
       '{ supabase functions deploy "--use-api" --project-ref x; }',
       "supabase functions deploy \\",
       "  --use-api --project-ref x",
+      "( supabase functions deploy --use-api --project-ref \"$REF\" )",
+      "flags=(--use-api --project-ref x)",
       "cat <<EOF",
       "not a deploy: supabase functions deploy --other-flag",
       "EOF",
     ].join("\n");
     const result = verify(CHAINED, two({ run }, { run }));
-    expect(result.out).toMatch(/^PASS: .*one function-deploy path \(8 deploys\)/m);
+    expect(result.out).toMatch(/^PASS: .*one function-deploy path \(10 deploys\)/m);
     expect(result.status).toBe(0);
+  });
+
+  it("refuses a deploy whose flags come from a variable, since the comparison cannot see them", () => {
+    const run = verify(CHAINED, two({}, { run: 'supabase functions deploy "${flags[@]}" --project-ref x' }));
+    expect(run.failed).toEqual(["deploy-production"]);
+    expect(run.out).toContain("rule 5 cannot read the flags of `supabase functions deploy`: `${flags[@]}` is expanded");
+    expect(run.status).toBe(1);
   });
 
   it("refuses either deploy workflow showing no CLI pin or no function deploy of its own", () => {

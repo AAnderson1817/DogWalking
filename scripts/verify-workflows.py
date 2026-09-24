@@ -66,7 +66,9 @@ def shell_code(script: str) -> str:
       becomes a command;
     - heredoc bodies are skipped. They are data to the command reading
       them, and a deploy mentioned in one used to be counted (round 3; an
-      earlier version of this docstring claimed the opposite).
+      earlier version of this docstring claimed the opposite);
+    - an array literal (`x=(...)`) is one word of data, so its contents are
+      never read as a command (round 4).
 
     Stated boundary: this reads what a script says, not which branch runs.
     A deploy in an `if false` branch or a function never called still
@@ -153,10 +155,50 @@ def shell_code(script: str) -> str:
             heredocs = []
             word_start = True
             continue
+        if c == "(" and out and out[-1] == "=":
+            # An array literal (`x=(...)`, `x+=(...)`, `declare -a x=(...)`):
+            # its words are data, not a command. Split at `(` like a subshell,
+            # `deploy=(supabase functions deploy --use-api ...)` counted as a
+            # deploy that never ran (Codex on #100, round 4). A `$(...)` inside
+            # one does run, and is missed: the loud direction.
+            end = matching_paren(script, i)
+            out.append(script[i + 1 : end].translate(neutral))
+            i = end + 1
+            word_start = False
+            continue
         out.append(c)
         word_start = c.isspace() or c in ";&|()<>"
         i += 1
     return "".join(out)
+
+
+def matching_paren(script: str, i: int) -> int:
+    """The index of the `)` closing the `(` at `i`, past quoted strings and
+    escapes; the end of the script when it never closes."""
+    depth, j, n = 0, i, len(script)
+    while j < n:
+        ch = script[j]
+        if ch == "\\":
+            j += 2
+            continue
+        if ch == "'":
+            close = script.find("'", j + 1)
+            j = n if close < 0 else close + 1
+            continue
+        if ch == '"':
+            k = j + 1
+            while k < n and script[k] != '"':
+                k += 2 if script[k] == "\\" else 1
+            j = k + 1
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    return n
 
 
 # Words that may stand before a command without being one, so the command is
@@ -164,8 +206,9 @@ def shell_code(script: str) -> str:
 COMMAND_PREFIX = {"if", "then", "else", "elif", "do", "while", "until", "!", "{", "time"}
 
 
-def deploy_invocations(script: str) -> list[frozenset[str]]:
-    """The flags of every `supabase functions deploy` a run: script runs.
+def deploy_invocations(script: str) -> list[tuple[frozenset[str], list[str]]]:
+    """Every `supabase functions deploy` a run: script runs: its flags, and
+    the arguments whose flags cannot be read.
 
     Only in command position: a simple command (split at newlines and
     `; & | ( )`) whose command word, after any prefix word or `NAME=value`
@@ -173,14 +216,28 @@ def deploy_invocations(script: str) -> list[frozenset[str]]:
     `echo supabase functions deploy ...` is an echo, not a deploy (Codex on
     #100, round 3). `x=$(supabase functions deploy ...)` is a deploy: the
     substitution runs.
+
+    An argument holding a `$` expansion is expanded when the step runs, so
+    the flags it supplies are invisible here: `"${flags[@]}"` in both
+    workflows compared equal whatever the arrays held. Those arguments are
+    returned as unreadable, and the caller refuses them. The one exemption
+    is the value of `--project-ref`, which the real workflows take from a
+    secret and which is an argument, not a flag.
     """
-    found: list[frozenset[str]] = []
+    found: list[tuple[frozenset[str], list[str]]] = []
     for segment in re.split(r"[\n;&|()]", shell_code(script)):
         words = segment.split()
         while words and (words[0] in COMMAND_PREFIX or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", words[0])):
             words.pop(0)
         if words[:3] == ["supabase", "functions", "deploy"]:
-            found.append(frozenset(m.group(0) for w in words[3:] if (m := re.match(r"--[a-z][a-z0-9-]*", w))))
+            args = words[3:]
+            flags = frozenset(m.group(0) for w in args if (m := re.match(r"--[a-z][a-z0-9-]*", w)))
+            unreadable = [
+                w
+                for k, w in enumerate(args)
+                if "$" in w and not w.startswith("--project-ref=") and not (k > 0 and args[k - 1] == "--project-ref")
+            ]
+            found.append((flags, unreadable))
     return found
 
 
@@ -444,8 +501,15 @@ def check(path: pathlib.Path) -> None:
             if uses.startswith("supabase/setup-cli@"):
                 version = str((step.get("with") or {}).get("version") or "")
                 cli_pins.append((path.name, name, uses.split("@", 1)[1].strip(), version))
-            for flags in deploy_invocations(str(step.get("run") or "")):
+            for flags, unreadable in deploy_invocations(str(step.get("run") or "")):
                 function_deploys.append((path.name, name, flags))
+                for word in unreadable:
+                    fail(
+                        path.name,
+                        name,
+                        f"rule 5 cannot read the flags of `supabase functions deploy`: `{word}` is expanded when the step "
+                        "runs, so the flags it supplies are invisible to the comparison — write the flags out",
+                    )
 
 
 def main() -> int:
