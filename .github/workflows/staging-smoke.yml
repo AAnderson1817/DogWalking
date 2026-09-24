@@ -116,11 +116,10 @@ jobs:
           # jq, the three defects the claim replay was cured of.
           . scripts/staging-fixtures.sh
 
-          # remove any leftover fixture from a previous run
-          old=$(user_id_for "$email") \
-            || { echo "FAIL: the auth user lookup failed before the replay could start"; exit 1; }
-          delete_operator "$old"
-
+          # No sweep for a previous run's leftover: the address is this run's
+          # alone, so the sweep paged through every auth user in staging to
+          # find nothing. A collision would still be caught: create_user
+          # reports a 422 and says which half of cleanup failed.
           uid=$(create_user "$email" "$pass") || exit 1
           trap 'delete_operator "$uid"' EXIT
           echo "fixture user: $uid"
@@ -164,30 +163,31 @@ jobs:
           op_email="diag-claim-op-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}@sanpo.test"
           cl_email="diag-claim-client-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}@sanpo.test"
           pass="Diag-$(date +%s)-pw"
-          # admin, user_id_for, del, delete_operator, create_user. Each rule in
-          # them was learnt here one failure at a time; they are shared with the
-          # onboard replay now, and driven against a stub by
-          # app/scripts/staging-fixtures.test.ts.
+          # admin, user_id_for, del, delete_operator, create_user, sign_in,
+          # purge_client, erase_client. Each rule in them was learnt here one
+          # failure at a time; they are shared with the onboard replay now, and
+          # driven against a stub by app/scripts/staging-fixtures.test.ts.
           . scripts/staging-fixtures.sh
+          # The teardown, pass or fail. The client goes the way the product
+          # erases one, because nothing else can remove it once it has claimed:
+          # erase_client in the library says why. It purges again after the
+          # replay's own erasure below. The purge is idempotent, and purging
+          # here too means a run that fails before that point still cleans up.
+          # Reads the variables below, set as each fixture comes into being.
           cleanup() {
-            local c
-            for c in $2; do [ -n "$c" ] && del "$base/rest/v1/clients?id=eq.$c" "client $c"; done
-            delete_operator "$1"
-            [ -n "$3" ] && del "$base/auth/v1/admin/users/$3" "auth user $3"
+            erase_client "$op_email" "$pass" "$client_row"
+            delete_operator "$op_uid"
+            [ -n "$cl_uid" ] && del "$base/auth/v1/admin/users/$cl_uid" "auth user $cl_uid"
             return 0
           }
-          # leftovers from a previous run
-          old_op=$(user_id_for "$op_email"); old_cl=$(user_id_for "$cl_email")
-          # `.[0].id` until now, so an operator that had accumulated more than
-          # one client kept the rest — and every `clients.operator_id` is
-          # `on delete restrict`, so the operators row then survived, and so did
-          # the auth user. Deletes them all.
-          old_client_row=$(admin "$base/rest/v1/clients?select=id&operator_id=eq.${old_op:-00000000-0000-4000-8000-000000000000}" | jq -r '.[].id' | tr '\n' ' ')
-          cleanup "$old_op" "$old_client_row" "$old_cl"
-
+          # No sweep for a previous run's leftovers. It searched for this
+          # run's addresses, which no earlier run can have used, so it paged
+          # through every auth user in staging twice per run to find nothing,
+          # and it could not have purged what it found without that run's
+          # password.
+          op_uid=""; client_row=""; cl_uid=""
+          trap cleanup EXIT
           op_uid=$(create_user "$op_email" "$pass") || exit 1
-          client_row=""; cl_uid=""
-          trap 'cleanup "$op_uid" "$client_row" "$cl_uid"' EXIT
 
           admin -X POST "$base/rest/v1/operators" -H "Content-Type: application/json" \
             -d "{\"id\":\"$op_uid\",\"business_name\":\"Diag Claim Walks\",\"display_name\":\"Diag\",\"email\":\"$op_email\"}" >/dev/null
@@ -273,4 +273,26 @@ jobs:
             "$base/rest/v1/clients?select=id,status&auth_user_id=eq.$cl_uid")
           echo "SELECT clients (role resolution) -> HTTP $scode"; cat "$sel"; echo
 
-          [ "$pcode" = "200" ] && [ "$ccode" -lt 300 ] && [ "$scode" = "200" ] && grep -q "$client_row" "$sel"
+          [ "$pcode" = "200" ] && [ "$ccode" -lt 300 ] && [ "$scode" = "200" ] && grep -q "$client_row" "$sel" \
+            || { echo "FAIL: the claim did not bind the client to its account"; exit 1; }
+
+          # Erase the client the way the product does (H5): fn_purge_client,
+          # as its operator. This is the erasure's only run against a hosted
+          # project, and it is what lets the teardown delete a claimed client
+          # at all. So it is asserted here rather than left to the teardown,
+          # where a failure would be one more warning.
+          optok=$(sign_in "$op_email" "$pass") \
+            || { echo "FAIL: the fixture operator could not sign in to erase its client"; exit 1; }
+          echo "::add-mask::$optok"
+          pg=$(mktemp); pgcode=$(purge_client "$optok" "$client_row" "$pg")
+          echo "fn_purge_client -> HTTP $pgcode"; cat "$pg"; echo
+          # An empty list: the purge returns the storage paths still to
+          # delete, and this fixture uploads nothing.
+          [ "$pgcode" = "200" ] && [ "$(jq -c . "$pg" 2>/dev/null)" = "[]" ] \
+            || { echo "FAIL: the operator could not erase its client"; exit 1; }
+          tomb=$(mktemp); tcode=$(admin -o "$tomb" -w '%{http_code}' \
+            "$base/rest/v1/clients?select=purged_at,auth_user_id,email,full_name&id=eq.$client_row")
+          echo "SELECT the erased client -> HTTP $tcode"; cat "$tomb"; echo
+          [ "$tcode" = "200" ] \
+            && jq -e 'length == 1 and (.[0] | .purged_at != null and .auth_user_id == null and .email == null and .full_name == "Deleted client")' "$tomb" >/dev/null \
+            || { echo "FAIL: the purge did not leave a redacted tombstone"; exit 1; }

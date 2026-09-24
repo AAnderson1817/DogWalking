@@ -44,41 +44,7 @@ configure. Not reachable through the product either way: `anon` and
 `authenticated` are NOLOGIN, PostgREST issues no DDL, and no function an API
 role can execute runs dynamic SQL.
 
-### 2. The claim replay's fixtures cannot be deleted, and its warning says they can
-Every staging smoke run creates an operator, a client and two auth users for
-the invite-claim replay, and the cleanup fails on every run: the client
-DELETE answers 409, then the operator 409, then both auth users 500. Each
-failure is a `::warning` ending "Rows accumulate in staging until this is
-fixed." Read off smoke runs 103 and 104, on either side of PR A (#97), so it
-predates the shared fixture library.
-
-The warning promises a fix the schema forbids. A claim, successful or not,
-writes an `invite_claim_attempts` row. That table is append-only by trigger
-(`0039`, the H4 trail), and its `client_id` is `ON DELETE RESTRICT`. So a
-claimed client can never be deleted, by design. `clients.operator_id` then
-keeps the operator, and `operators.id` and `clients.auth_user_id` (both
-RESTRICT to `auth.users`) keep both auth users. Three ways out:
-
-- **Clean up the way the product erases a client.** Call `fn_purge_client`
-  as the fixture operator (the replay holds its password). The purge redacts
-  the client and nulls `auth_user_id`, so the client's auth user can then be
-  deleted. The tombstone, the operator and the operator's auth user remain:
-  three rows per run instead of four.
-- **Keep one long-lived fixture operator**, got or created and never deleted,
-  so only each run's client tombstone accumulates. That brings back the
-  stable identity `ops(smoke-identity)` removed. Get-or-create is no
-  precondition, but a fixture whose state drifts would taint every run.
-- **Accept it and say so.** Replace the warning with a notice naming the
-  design, not a fix that cannot exist.
-
-Whichever lands, the warning must stop promising what the schema forbids:
-four yellow annotations on every green run teach a reader to skip warnings.
-The growth itself is slow and fails loudly. `user_id_for` pages through
-staging's auth users under a 50-page bound, so each run's two permanent users
-add a page every fifty runs, and a lookup that reaches the bound exits 9
-rather than reporting a user absent.
-
-### 3. The client export leaves out much of what Sanpo holds about a client
+### 2. The client export leaves out much of what Sanpo holds about a client
 `fn_export_client_data` (`0040`), the export the operator runs, returns six
 named fields of the client row (name, email, phone, status, credit balance,
 created), the properties' address fields and public access notes, pets, walks
@@ -104,6 +70,19 @@ export lets the notice's promise grow with it (`legal-version.test.ts` keeps
 "everything" out until then).
 
 ## Done
+
+- **The claim replay deletes its fixtures.** Every staging smoke run left an
+  operator, a claimed client and two auth users behind, with four warnings
+  ending "Rows accumulate in staging until this is fixed". The item called
+  that unfixable and said a purge would still leave three of the four.
+  Measured on the local database, a purge leaves none: once `purged_at` is
+  set, 0042 lets `fn_purge_client` delete the client's claim attempts, so
+  nothing references the tombstone. The replay now erases its client as the
+  product does and asserts it, which is the erasure's first run against a
+  hosted project, and its teardown deletes all four. Smoke pins both halves
+  (the claim trail holds the client until the purge, and nothing holds
+  anything after it), and the warning now says a leftover is news. See the
+  `ops(claim-fixtures)` status-log entry.
 
 - **Every function that pins a `search_path` pins `public, pg_temp`** —
   migration `0055`. With `pg_temp` unlisted, PostgreSQL searches temp tables

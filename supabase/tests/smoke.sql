@@ -7303,6 +7303,136 @@ begin
   raise notice 'the address owner can turn email back on, only on a session opened by a link to their own address since the unsubscribe, only when the one-click row is all that keeps email off, and every lift is recorded and erased with its client (0054): OK';
 end $$;
 
+-- ═══ staging smoke: the claim replay's fixture tears down after a purge ═════
+--
+-- The staging smoke's invite-claim replay creates an operator, a client and
+-- two auth users on every run, and its teardown deletes them again. That
+-- teardown failed on every run until the replay began purging first: the
+-- claim writes an `invite_claim_attempts` row, the table is append-only
+-- (0039) and its `client_id` is ON DELETE RESTRICT, so the client could not
+-- be deleted, and the client then pinned its auth user, its operator and the
+-- operator's auth user. `fn_purge_client` clears the attempt rows (0042) and
+-- `auth_user_id`, after which nothing references any of the four.
+--
+-- The same database calls as the replay, in its order and as its roles. Both
+-- halves are asserted: the pin, so the block cannot pass on a fixture that
+-- never claimed, and the clean teardown after the purge, so a migration that
+-- adds a reference the purge does not clear fails here before the staging
+-- teardown starts warning again.
+do $$
+declare
+  v_op_user uuid := '99999999-0000-4000-a000-00000000de01';
+  v_cl_user uuid := '99999999-0000-4000-a000-00000000de02';
+  v_email   text := 'smoke-teardown-client@sanpo.test';
+  v_cl      uuid;
+  v_tok     uuid;
+  v_con     text;
+  v_n       int;
+begin
+  reset session authorization;
+  -- GoTrue's admin create: the operator's account, confirmed.
+  insert into auth.users (id, email, email_confirmed_at)
+  values (v_op_user, 'smoke-teardown-op@sanpo.test', now());
+
+  -- The service key: POST /rest/v1/operators, then /rest/v1/clients.
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  set local session authorization service_role;
+  insert into operators (id, business_name, display_name, email)
+  values (v_op_user, 'Teardown Walks', 'Teardown', 'smoke-teardown-op@sanpo.test');
+  insert into clients (operator_id, full_name, email)
+  values (v_op_user, 'Teardown Client', v_email)
+  returning id, invite_token into v_cl, v_tok;
+  reset session authorization;
+
+  -- claim-signup, which runs as the service role: a dead token, then the live
+  -- one. Then GoTrue creates the client's account and the admin PUT confirms it.
+  if not fn_invite_signup_allow_attempt(p_token => '00000000-0000-4000-8000-00000000dead')
+     or fn_invite_signup_check('00000000-0000-4000-8000-00000000dead', v_email) <> 'not_found'
+     or not fn_invite_signup_allow_attempt(p_token => v_tok)
+     or fn_invite_signup_check(v_tok, v_email) <> 'claimed' then
+    raise exception 'FAIL: the teardown fixture''s signup checks did not answer as the staging replay expects';
+  end if;
+  insert into auth.users (id, email, email_confirmed_at)
+  values (v_cl_user, v_email, now());
+
+  -- The client's session: preview, then claim.
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated","email":"%s"}', v_cl_user, v_email), true);
+  set local session authorization authenticated;
+  perform fn_preview_invite(v_tok);
+  if (select c.outcome from fn_claim_invite(v_tok) c) <> 'claimed' then
+    raise exception 'FAIL: the teardown fixture''s claim did not succeed';
+  end if;
+  reset session authorization;
+
+  -- ── the pin: before the purge, the claim trail holds the client ────────
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  set local session authorization service_role;
+  begin
+    delete from clients where id = v_cl;
+    raise exception 'FAIL: a claimed client was deleted without a purge, so its claim trail no longer pins it';
+  exception when foreign_key_violation then
+    get stacked diagnostics v_con = constraint_name;
+    if v_con <> 'invite_claim_attempts_client_id_fkey' then
+      raise exception 'FAIL: the claimed client was pinned by %, not by its claim trail', v_con;
+    end if;
+  end;
+  reset session authorization;
+  -- GoTrue's admin delete, standing in as the suite's own role.
+  begin
+    delete from auth.users where id = v_cl_user;
+    raise exception 'FAIL: the account bound to a claimed client was deleted';
+  exception when foreign_key_violation then
+    get stacked diagnostics v_con = constraint_name;
+    if v_con <> 'clients_auth_user_id_fkey' then
+      raise exception 'FAIL: the claimed client''s account was pinned by %, not by the client', v_con;
+    end if;
+  end;
+
+  -- ── the purge, as the operator, as the replay asserts it ──────────────
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op_user), true);
+  set local session authorization authenticated;
+  select count(*) into v_n from fn_purge_client(v_cl);
+  reset session authorization;
+  if v_n <> 0 then
+    raise exception 'FAIL: the teardown fixture''s purge returned % storage paths, and it uploads none', v_n;
+  end if;
+
+  -- ── the teardown, as the replay's cleanup performs it ─────────────────
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  set local session authorization service_role;
+  begin
+    delete from clients where id = v_cl;
+    get diagnostics v_n = row_count;
+    if v_n <> 1 then
+      raise exception 'FAIL: deleting the purged client removed % rows, not 1', v_n;
+    end if;
+    delete from service_types where operator_id = v_op_user;
+    delete from operators where id = v_op_user;
+    get diagnostics v_n = row_count;
+    if v_n <> 1 then
+      raise exception 'FAIL: deleting the fixture operator removed % rows, not 1', v_n;
+    end if;
+  exception when foreign_key_violation then
+    get stacked diagnostics v_con = constraint_name;
+    raise exception 'FAIL: after the purge, % still pins the claim replay''s fixture, so the staging teardown cannot delete it', v_con;
+  end;
+  reset session authorization;
+  begin
+    delete from auth.users where id in (v_op_user, v_cl_user);
+    get diagnostics v_n = row_count;
+    if v_n <> 2 then
+      raise exception 'FAIL: deleting the fixture accounts removed % rows, not 2', v_n;
+    end if;
+  exception when foreign_key_violation then
+    get stacked diagnostics v_con = constraint_name;
+    raise exception 'FAIL: after the purge, % still pins a fixture account', v_con;
+  end;
+
+  raise notice 'the claim replay''s fixture is held by its claim trail until the purge, and deletes cleanly after it (staging smoke): OK';
+end $$;
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;
