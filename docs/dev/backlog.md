@@ -109,6 +109,25 @@ admin API (the migrations cannot assume the deploy role may delete from
 `auth.users`), so it is an edge-function step in the erasure flow, ordered
 after the purge commits.
 
+### 6. A stale tab can write personal data back into an erased client's rows
+An erasure redacts the client, property and credential rows in place and
+keeps them, because retained walks reference them. The UI withholds every
+edit surface from an erased client (spec 03), but a tab opened before the
+erasure still holds its edit sheet, and nothing in the database refuses the
+save: the operator policies read only `operator_id`, and the `0004` UPDATE
+grants still cover `full_name`, `email`, `phone` and every address field. So
+a save from that tab puts a name or an address straight back into the
+tombstone, with nothing to show the erasure has come undone.
+
+`0058` closed this for pets with `trg_pets_erased` (Codex on PR #106), since
+0058 is what made the pet rows tombstones. The same shape fits the others: a
+trigger that refuses any change to an erased client's row except the
+bookkeeping, a new row for an erased client, and a deletion. The client row
+is the careful one. System writers still update it after an erasure (the
+Stripe webhook's subscription status, the ledger's balance), so its rule is
+about the personal columns only. The credential row takes its writes through
+`fn_write_credential`, which can refuse an erased client's property itself.
+
 ## Done
 
 - **An erasure removes every photo, and says when it has finished** —
@@ -122,10 +141,11 @@ after the purge commits.
   Storage's answers could not prove an object gone. The purge now reads the
   client's walk and pet folders from `storage.objects`. It redacts the pets in
   its first phase and keeps their rows, since a pet's id is its photo
-  folder's only name. It refuses its second phase while any photo remains,
-  and has a read-only status call that the screen uses to offer "Finish
-  erasing". Removals go in batches of at most 1000. See the `privacy(0058)`
-  status-log entry.
+  folder's only name, and a trigger stops a stale tab writing a pet's details
+  back into them. It refuses its second phase while any photo remains, and
+  has a read-only status call that the screen uses to offer "Finish erasing".
+  Removals go in batches of at most 1000. See the `privacy(0058)` status-log
+  entry.
 
 - **An erasure removes the walker's notices about the client** — migration
   `0057`. `notifications.client_id` says who a row is for, so a row the walker

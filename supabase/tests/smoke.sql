@@ -3787,6 +3787,10 @@ declare
   v_live_prop uuid := '99999999-0000-4000-b000-0000000058c1';
   v_live_walk uuid := '99999999-0000-4000-f000-0000000058c1';
   v_began timestamptz;
+  v_col text;
+  v_type text;
+  v_set text;
+  v_checked text[] := '{}';
 begin
   reset session authorization;
   select id into v_svc from service_types where operator_id = v_op limit 1;
@@ -4039,7 +4043,14 @@ begin
   if v_status is distinct from '{"erased": true, "finished": false, "photos_left": 1}'::jsonb then
     raise exception 'FAIL: a photo uploaded to the erased pet''s folder afterwards reads as %', v_status;
   end if;
-  select array_agg(storage_path) into v_named from fn_purge_client(v_cl);
+  -- A retry runs the pet redaction again over the tombstone; writing back
+  -- what is there must not be refused.
+  begin
+    select array_agg(storage_path) into v_named from fn_purge_client(v_cl);
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    raise exception 'FAIL: retrying the erasure raised: %', v_msg;
+  end;
   if v_named is distinct from array['pet-photos/' || v_op || '/' || v_pet || '/late.jpg'] then
     raise exception 'FAIL: a retry named % instead of the late photo', v_named;
   end if;
@@ -4051,6 +4062,112 @@ begin
   if fn_purge_client_status(v_cl) is distinct from '{"erased": true, "finished": true, "photos_left": 0}'::jsonb then
     raise exception 'FAIL: the retry did not finish the erasure';
   end if;
+
+  -- A tab opened before the erasure still holds the pet's edit sheet, and the
+  -- operator policy on pets reads only operator_id. Saving it must not put
+  -- the details back into the tombstone, where the status, which counts
+  -- photos, would never see them (Codex on PR #106).
+  begin
+    update pets set name = 'Rex', medical_notes = 'diabetic' where id = v_pet;
+    raise exception 'FAIL: a save from a stale tab put the pet''s details back after the erasure';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    if v_msg like 'FAIL:%' then raise; end if;
+    if v_msg not like '%belongs to an erased client, so it stays as the erasure left it%' then
+      raise exception 'FAIL: the stale save was refused for the wrong reason: %', v_msg;
+    end if;
+  end;
+  begin
+    insert into pets (operator_id, client_id, name) values (v_op, v_cl, 'Rex');
+    raise exception 'FAIL: a new pet was added to an erased client';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    if v_msg like 'FAIL:%' then raise; end if;
+    if v_msg not like '%pets: client % has been erased%' then
+      raise exception 'FAIL: a new pet for an erased client was refused for the wrong reason: %', v_msg;
+    end if;
+  end;
+  begin
+    delete from pets where id = v_pet;
+    raise exception 'FAIL: an erased client''s pet was deleted, and its photo folder''s only name with it';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    if v_msg like 'FAIL:%' then raise; end if;
+    if v_msg not like '%the only name of its photo folder%' then
+      raise exception 'FAIL: deleting the tombstone was refused for the wrong reason: %', v_msg;
+    end if;
+  end;
+  -- Moving a live client's pet onto the erased client is an arrival too.
+  begin
+    update pets set client_id = v_cl where id = v_other_pet;
+    raise exception 'FAIL: a pet was moved onto an erased client';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    if v_msg like 'FAIL:%' then raise; end if;
+    if v_msg not like '%pets: client % has been erased%' then
+      raise exception 'FAIL: a pet moved onto an erased client was refused for the wrong reason: %', v_msg;
+    end if;
+  end;
+  -- Writing back what is there is not a change; a purge's retry does exactly
+  -- that. And a live client's pet is still the walker's to edit.
+  update pets set name = name, active = active where id = v_pet;
+  update pets set breed = 'Beagle' where id = v_other_pet;
+  if (select breed from pets where id = v_other_pet) is distinct from 'Beagle' then
+    raise exception 'FAIL: the walker could no longer edit a live client''s pet';
+  end if;
+  reset session authorization;
+
+  -- Every column, not only the ones a stale tab would send: a column added to
+  -- pets later is a change the rule must refuse without anyone listing it.
+  -- Run as the suite's own role, since the rule holds for every role, and a
+  -- column the walker cannot update would otherwise be refused by its grant.
+  for v_col, v_type in
+    select column_name, data_type
+      from information_schema.columns
+     where table_schema = 'public' and table_name = 'pets'
+       and column_name not in ('id', 'updated_at')
+     order by ordinal_position
+  loop
+    v_set := case v_type
+      when 'text' then quote_literal('cc-changed')
+      when 'boolean' then format('coalesce(not %I, true)', v_col)
+      when 'uuid' then 'gen_random_uuid()'
+      when 'timestamp with time zone' then quote_literal('2001-01-01')
+      when 'USER-DEFINED' then format(
+        '(select e from unnest(enum_range(null::%s)) e where e is distinct from pets.%I limit 1)',
+        (select format('%I.%I', udt_schema, udt_name) from information_schema.columns
+          where table_schema = 'public' and table_name = 'pets' and column_name = v_col), v_col)
+    end;
+    if v_set is null then
+      raise exception 'FAIL: pets.% is a %, which this check cannot change; give it a value of that type', v_col, v_type;
+    end if;
+    begin
+      execute format('update pets set %I = %s where id = %L', v_col, v_set, v_pet);
+      raise exception 'FAIL: pets.% of an erased client''s pet could still be changed', v_col;
+    exception when raise_exception then
+      get stacked diagnostics v_msg = message_text;
+      if v_msg like 'FAIL:%' then raise; end if;
+      if v_msg not like '%belongs to an erased client, so it stays as the erasure left it%' then
+        raise exception 'FAIL: changing pets.% was refused for the wrong reason: %', v_col, v_msg;
+      end if;
+    end;
+    v_checked := v_checked || v_col;
+  end loop;
+  if not array['name', 'medical_notes', 'vet_name', 'client_id'] <@ v_checked then
+    raise exception 'FAIL: precondition — the column check read %, not the pets table', v_checked;
+  end if;
+  -- Bookkeeping is not a change. A writer that stamps updated_at itself, or a
+  -- trigger that stamps it before this one reads the row, must not turn a
+  -- purge's retry into a refusal.
+  begin
+    update pets set updated_at = updated_at - interval '1 hour' where id = v_pet;
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    raise exception 'FAIL: stamping updated_at on a tombstone was refused: %', v_msg;
+  end;
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  set local session authorization authenticated;
 
   -- The second phase belongs to an erasure: on a live client it would drop
   -- a photo row nothing has deleted.

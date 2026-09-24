@@ -6,9 +6,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * SQL cannot delete an object from a Supabase bucket: dropping the
  * `storage.objects` row removes the metadata and leaves the file. So
  * `fn_purge_client` returns every object in the client's folders, the browser
- * deletes them, and `fn_purge_client_photos` drops the pet rows that name
- * those folders — but only once the database, counting `storage.objects`
- * itself, says nothing is left. Neither of Storage's own answers can prove an
+ * deletes them, and `fn_purge_client_photos` drops any photo rows written
+ * since — but only once the database, counting `storage.objects` itself, says
+ * nothing is left. Neither of Storage's own answers can prove an
  * object gone: `remove` reports only what it deleted just now, and a HEAD it
  * refuses reads the same as "not found".
  *
@@ -166,6 +166,23 @@ describe("purgeClient", () => {
     ]);
     expect(result).toEqual({ photosDeleted: 2500, photosLeft: 0, finished: true });
   });
+
+  /**
+   * A long-standing client can have tens of thousands of objects, every
+   * replaced pet photo among them. Grouping them by bucket copied the list so
+   * far on every path: 14 s for 50,000 paths, measured, with the tab frozen
+   * the whole time (Codex on PR #106).
+   */
+  it("groups tens of thousands of paths without stalling", async () => {
+    stored.clear();
+    listed = Array.from({ length: 50_000 }, (_, i) => `pet-photos/${OP}/p/${i}.jpg`);
+    for (const p of listed) stored.add(p);
+    const started = performance.now();
+    const result = await purgeClient("c-1");
+    const took = performance.now() - started;
+    expect(result).toEqual({ photosDeleted: 50_000, photosLeft: 0, finished: true });
+    expect(took, `erasing 50,000 objects took ${Math.round(took)} ms`).toBeLessThan(2_000);
+  }, 60_000);
 
   it("keeps going after one batch is refused, and says what is left", async () => {
     stored.clear();

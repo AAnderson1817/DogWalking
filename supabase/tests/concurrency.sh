@@ -1398,6 +1398,87 @@ expect_eq "the erasure still took the notice written before it" \
 
 psql "$DB" -q -c "drop function if exists fn_cc12b_barrier() cascade;" >/dev/null
 
+echo
+echo "== case 13: a pet added while its client is being erased =="
+
+# Codex on #106. A pet's row is its photo folder's only name, so an erased
+# client's pets stay as tombstones, and 0058's trigger refuses a new pet for
+# an erased client. A pet added while the erasure is in flight reads the
+# client FOR KEY SHARE, which waits for the purge's FOR UPDATE, and then sees
+# the erasure.
+#
+# The wait is a PRECONDITION, not the detector, for the reason case 12 gives:
+# without the lock the insert still waits, at the foreign key check at the end
+# of the statement, by which time the trigger has read the client as it was
+# before the erasure. The detector is the outcome.
+psql "$DB" -v ON_ERROR_STOP=1 -q -c "
+  insert into clients (id, operator_id, full_name, status) values
+    ('${NS}-000000000131', '${NS}-000000000001', 'CC Pet Racer', 'active');"
+
+cat >&3 <<SQL
+begin;
+set local request.jwt.claims = '{"sub":"${NS}-000000000001","role":"authenticated"}';
+select count(*) from fn_purge_client('${NS}-000000000131');
+SQL
+expect_eq "PRECONDITION: the erasure has run and holds its transaction open" \
+  "$(wait_until_idle_in_txn fn_purge_client)" "holding"
+
+psql "$DB" -v ON_ERROR_STOP=1 -c "
+  insert into pets (operator_id, client_id, name, medical_notes)
+  values ('${NS}-000000000001', '${NS}-000000000131', 'CC Late Pet', 'cc-case-13');" >"$WORK/b13.out" 2>&1 &
+B13_PID=$!
+expect_eq "PRECONDITION: the new pet is waiting on the erasure" \
+  "$(wait_until_blocked cc-case-13)" "blocked"
+
+echo "commit;" >&3
+B13_RC=0
+wait $B13_PID || B13_RC=$?
+
+expect_eq "no pet arrived at the erased client" \
+  "$(q "select count(*) from pets where client_id = '${NS}-000000000131'")" "0"
+expect_eq "the insert was refused, naming the erasure" \
+  "${B13_RC} $(grep -c 'has been erased' "$WORK/b13.out")" "1 1"
+
+echo
+echo "== case 13b: a stale edit saved while the erasure holds the pet =="
+
+# The erasure's redaction locks each pet row, so a save racing it waits on the
+# row, and the trigger takes no client lock of its own for a change (one would
+# invert the purge's order, client then pets). The claim tested here is that
+# none is needed: once the erasure commits, the trigger's read of the client
+# is a new statement and sees purged_at. A trigger reading the client as of
+# the snapshot its statement began with would let the save through onto the
+# tombstone.
+psql "$DB" -v ON_ERROR_STOP=1 -q -c "
+  insert into clients (id, operator_id, full_name, status) values
+    ('${NS}-000000000132', '${NS}-000000000001', 'CC Pet Keeper', 'active');
+  insert into pets (id, operator_id, client_id, name, medical_notes) values
+    ('${NS}-000000000432', '${NS}-000000000001', '${NS}-000000000132', 'CC Pet', 'cc-original');"
+
+cat >&3 <<SQL
+begin;
+set local request.jwt.claims = '{"sub":"${NS}-000000000001","role":"authenticated"}';
+select count(*) from fn_purge_client('${NS}-000000000132');
+SQL
+expect_eq "PRECONDITION: the erasure has run and holds its transaction open" \
+  "$(wait_until_idle_in_txn fn_purge_client)" "holding"
+
+psql "$DB" -v ON_ERROR_STOP=1 -c "
+  update pets set name = 'CC Pet', medical_notes = 'cc-case-13b'
+   where id = '${NS}-000000000432';" >"$WORK/b13b.out" 2>&1 &
+B13B_PID=$!
+expect_eq "PRECONDITION: the save is waiting on the pet the erasure holds" \
+  "$(wait_until_blocked cc-case-13b)" "blocked"
+
+echo "commit;" >&3
+B13B_RC=0
+wait $B13B_PID || B13B_RC=$?
+
+expect_eq "the pet is still the tombstone the erasure left" \
+  "$(q "select name || ' ' || coalesce(medical_notes, '-') from pets where id = '${NS}-000000000432'")" "Removed -"
+expect_eq "the save was refused, naming the erasure" \
+  "${B13B_RC} $(grep -c 'stays as the erasure left it' "$WORK/b13b.out")" "1 1"
+
 exec 3>&-
 wait $A_PID 2>/dev/null || true
 
