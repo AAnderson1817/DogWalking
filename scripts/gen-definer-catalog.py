@@ -55,6 +55,13 @@ GRANT = re.compile(
     r"grant\s+execute\s+on\s+function\s+(?:public\.)?([a-z0-9_]+)\s*\([^;]*?\)\s*to\s+([^;]+);",
     re.I | re.S,
 )
+# A grantee as PostgreSQL resolves it (Codex, on #97): a quoted name is
+# exact, doubled quotes read as one, and an unquoted one folds to lower case,
+# so `TO PUBLIC` and `TO Anon` are `public` and `anon` (measured). Stored as
+# written, `PUBLIC` was a role no check below recognised. Anything else, such
+# as `GROUP anon` or `anon WITH GRANT OPTION`, is refused by name rather than
+# read as a role; the ACL reader that replaces this one does the same.
+ROLE = re.compile(r'\s*(?:"((?:[^"]|"")+)"|([A-Za-z_][A-Za-z0-9_$]*))\s*')
 
 
 def load_reader():
@@ -111,12 +118,34 @@ def collect() -> tuple[dict[str, bool], dict[str, set[str]], list[str]]:
             if name not in order:
                 order.append(name)
         for m in GRANT.finditer(skel):
-            name = m.group(1)
-            # From the clean text at the same span: a quoted role is masked in
-            # the skeleton.
-            roles = {r.strip().strip('"') for r in clean[m.start(2):m.end(2)].split(",") if r.strip()}
-            grants.setdefault(name, set()).update(roles)
+            grants.setdefault(m.group(1), set()).update(grantees(clean, skel, m.start(2), m.end(2), path))
     return definer, grants, order
+
+
+def grantees(clean: str, skel: str, a: int, b: int, path: pathlib.Path) -> set[str]:
+    """The roles one GRANT names. Split where the skeleton has a comma, which a
+    quoted name cannot supply, and read from the clean text at the same spans,
+    since a quoted name is masked in the skeleton."""
+    out: set[str] = set()
+    start = a
+    for i in range(a, b + 1):
+        if i < b and skel[i] != ",":
+            continue
+        m = ROLE.fullmatch(clean[start:i])
+        if not m:
+            print(
+                f"FAIL: {path.name}: a grantee it cannot read: {' '.join(clean[start:i].split())!r}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        out.add(m.group(1).replace('""', '"') if m.group(1) is not None else m.group(2).lower())
+        start = i + 1
+    return out
+
+
+def exposed(definer: dict[str, bool], grants: dict[str, set[str]], order: list[str]) -> list[str]:
+    """The definer functions PUBLIC or anon can execute: invariant 5's refusal."""
+    return [n for n in order if definer.get(n) and grants.get(n, set()) & {"anon", "public"}]
 
 
 def render(definer: dict[str, bool], grants: dict[str, set[str]], order: list[str]) -> str:
@@ -161,8 +190,9 @@ def main() -> int:
         SPEC.write_text(updated)
     count = sum(1 for n in order if definer.get(n))
     print(f"{count} SECURITY DEFINER functions catalogued in {SPEC.relative_to(ROOT)}")
-    if any(r in grants.get(n, set()) for n in order if definer.get(n) for r in ("anon", "public")):
-        print("FAIL: a definer function grants EXECUTE to anon or PUBLIC", file=sys.stderr)
+    if exposed(definer, grants, order):
+        print("FAIL: a definer function grants EXECUTE to anon or PUBLIC: " + ", ".join(exposed(definer, grants, order)),
+              file=sys.stderr)
         return 1
     return 0
 

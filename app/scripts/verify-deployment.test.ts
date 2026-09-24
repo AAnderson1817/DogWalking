@@ -588,6 +588,46 @@ function denoOf(value: ts.Expression): "deno" | "maybe" | undefined {
 }
 
 /**
+ * Whether a node refers to the Deno namespace itself: the identifier `Deno`
+ * read as a reference (not a name being declared, not a key, not a member of
+ * something else that happens to be named Deno), or the global object's
+ * member of that name.
+ */
+function denoReference(node: ts.Node): boolean {
+  if (ts.isIdentifier(node)) {
+    if (node.text !== "Deno") return false;
+    if (ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) return false;
+    return !declaresName(node) && !aliasSource(node);
+  }
+  return (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && denoOf(node) === "deno";
+}
+
+/**
+ * Why Deno, taken as a value at `held`, can serve, or null if it cannot. A
+ * destructuring is read by its keys: one that takes `serve`, a key the scan
+ * cannot read, or the rest can, and one that takes `env` cannot. Any other
+ * value use hands Deno on whole, out of the scan's sight.
+ */
+function denoValueDoor(held: ts.Expression): string | null {
+  const whole = "Deno taken as a value, so the scan cannot see what is served through it";
+  const parent = held.parent;
+  let keys: (string | typeof UNREADABLE | null)[] | undefined;
+  if ((ts.isVariableDeclaration(parent) || ts.isParameter(parent) || ts.isBindingElement(parent))
+    && parent.initializer === held && ts.isObjectBindingPattern(parent.name)) {
+    keys = parent.name.elements.map((el) => (el.dotDotDotToken ? null
+      : el.propertyName ? keyOf(el.propertyName) : ts.isIdentifier(el.name) ? el.name.text : UNREADABLE));
+  } else if (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken && parent.right === held) {
+    const target = unwrap(parent.left);
+    if (ts.isObjectLiteralExpression(target)) {
+      keys = target.properties.map((p) => (ts.isSpreadAssignment(p) ? null : keyOf(p.name)));
+    }
+  }
+  if (!keys || keys.includes(null)) return whole;
+  if (keys.includes("serve")) return "its own Deno.serve";
+  return keys.includes(UNREADABLE) ? "a member of Deno the scan cannot read" : null;
+}
+
+/**
  * name -> how a GET can reach its code, for every function where it can.
  * A function with neither a `Deno.serve` nor a `serveFunction` call is
  * reported too: the scan cannot see how it serves, which is not "safe".
@@ -604,13 +644,15 @@ function denoOf(value: ts.Expression): "deno" | "maybe" | undefined {
  * member it cannot read could each be serveFunction; and a member of `Deno`
  * the scan cannot read could be `serve`, with `Deno` read as the global or
  * as the global object's member under each name the global object goes by,
- * where a member the scan cannot read could be Deno. What stays outside: a
- * second serve reached through a name the scan never sees at all (`const {
- * serve } = Deno`, an alias of `Deno` itself however it was obtained, the
- * global object reached through one of its own members, `globalThis.self`,
- * a member the scan cannot read taken by indexing and called later) beside
- * a first one it does — one serve per function is the shape the runtime
- * runs, and the fallback covers it.
+ * where a member the scan cannot read could be Deno; and `Deno` taken as a
+ * value, as `serveFunction` referenced without being called, since what is
+ * served through it is out of sight (a destructuring read by its keys, so
+ * `const { env } = Deno` is ordinary). What stays outside: a second serve
+ * reached through a name the scan never sees at all (the global object
+ * itself taken as a value, or reached through one of its own members,
+ * `globalThis.self`; a member the scan cannot read taken by indexing and
+ * called later) beside a first one it does — one serve per function is the
+ * shape the runtime runs, and the fallback covers it.
  */
 function getReachable(root: string): Map<string, string> {
   const found = new Map<string, string>();
@@ -639,6 +681,19 @@ function getReachable(root: string): Map<string, string> {
           // ordinary code — `OUTCOME_MESSAGES[outcome]`, three such reads in
           // the functions today — so only a call counts, and there is none.
           door("a call through a member the scan cannot read could be serveFunction, so the scan cannot see its options");
+        }
+        // Deno taken as a VALUE hides what is served through it (Codex, on
+        // #97: `const d = Deno; d.serve(g)`), the twin of serveFunction
+        // referenced without being called. A member of it is read above,
+        // `typeof` passes nothing on, a name being written is not a read, and
+        // a destructuring is read by its keys.
+        if (runs && denoReference(node) && !isAssignmentTarget(outermost(node as ts.Expression))) {
+          const held = outermost(node as ts.Expression);
+          const parent = held.parent;
+          const asMember = (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent))
+            && parent.expression === held;
+          const why = asMember || ts.isTypeOfExpression(parent) ? null : denoValueDoor(held);
+          if (why) door(why);
         }
         // An alias hides serveFunction's calls when it renames serveFunction
         // AWAY: its source side names serveFunction and its local side does
@@ -982,6 +1037,25 @@ describe("verify-deployment's read-only argument is derived", () => {
     fn("global-indexed", "serveFunction(h);\nconst value = globalThis[name];");
     fn("global-indexed-env", "serveFunction(h);\nconst env = globalThis[name].env;");
     fn("window-deno", "serveFunction(h);\nwindow.Deno.serve(g);");
+    // Deno taken as a VALUE hides what is served through it (Codex, on #97),
+    // the twin of serveFunction referenced without being called. A
+    // destructuring is read by its keys, so one that takes serve, a key the
+    // scan cannot read, or the rest is a door, and one that takes env is not;
+    // typeof passes nothing on; and a key or a member NAMED Deno is not it.
+    fn("deno-value-alias", "serveFunction(h);\nconst d = Deno;\nd.serve(g);");
+    fn("deno-value-global", "serveFunction(h);\nconst d = globalThis.Deno;\nd.serve(g);");
+    fn("deno-value-argument", "serveFunction(h);\nstart(Deno);");
+    fn("deno-value-shorthand", "serveFunction(h);\nconst runtime = { Deno };");
+    fn("deno-destructured-serve", "serveFunction(h);\nconst { serve } = Deno;\nserve(g);");
+    fn("deno-destructured-renamed", "serveFunction(h);\nconst { serve: s } = (Deno as any);\ns(g);");
+    fn("deno-destructured-unreadable", "serveFunction(h);\nconst { [k]: s } = Deno;\ns(g);");
+    fn("deno-destructured-rest", "serveFunction(h);\nconst { env, ...rest } = Deno;\nrest.serve(g);");
+    fn("deno-assigned-serve", "serveFunction(h);\nlet serve;\n({ serve } = Deno);\nserve(g);");
+    fn("deno-destructured-env", 'serveFunction(h);\nconst { env } = Deno;\nconst url = env.get("SUPABASE_URL");');
+    fn("deno-typeof", 'serveFunction(h);\nconst onDeno = typeof Deno !== "undefined";');
+    fn("deno-key", 'serveFunction(h);\nconst names = { Deno: "runtime" };');
+    fn("deno-member-name", "serveFunction(h);\nconst runtime = config.Deno;");
+    fn("deno-written", "serveFunction(h);\nlet Deno;\n({ Deno } = runtime);");
     expect(Object.fromEntries(getReachable(root))).toEqual({
       "element-paren": "serveFunction widened with methods",
       "deno-paren": "its own Deno.serve",
@@ -1020,6 +1094,15 @@ describe("verify-deployment's read-only argument is derived", () => {
       "global-deno-unreadable": "a member of Deno the scan cannot read",
       "global-unreadable-serve": "a member of the global object the scan cannot read could be Deno",
       "global-comma-deno": "its own Deno.serve",
+      "deno-value-alias": "Deno taken as a value, so the scan cannot see what is served through it",
+      "deno-value-global": "Deno taken as a value, so the scan cannot see what is served through it",
+      "deno-value-argument": "Deno taken as a value, so the scan cannot see what is served through it",
+      "deno-value-shorthand": "Deno taken as a value, so the scan cannot see what is served through it",
+      "deno-destructured-serve": "its own Deno.serve",
+      "deno-destructured-renamed": "its own Deno.serve",
+      "deno-destructured-unreadable": "a member of Deno the scan cannot read",
+      "deno-destructured-rest": "Deno taken as a value, so the scan cannot see what is served through it",
+      "deno-assigned-serve": "its own Deno.serve",
     });
   });
 });
