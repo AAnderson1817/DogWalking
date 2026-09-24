@@ -25,9 +25,10 @@
 --
 --   1. What describes someone else: the walker's IP address and device on
 --      the entry-code log (0056), whether the walker read their own notices,
---      and the address typed and network address used on each attempt at the
---      invite link (the client's own included; the copy says whether each
---      attempt came from the client's account).
+--      and the address typed on every claim of the account through the
+--      invite link and on every attempt the invite refused (the client's own
+--      included; the copy says when each was made, how it ended, and whether
+--      it came from the client's account).
 --   2. Secrets whose copy is a liability: the vault ciphertext (invariant 2),
 --      the invite and unsubscribe links' keys, a device's push keys.
 --   3. What the walker must not learn: the messages Sanpo sent the client,
@@ -35,7 +36,13 @@
 --      shown one bit, 0052, and the copy carries that bit), and the client's
 --      devices. The client can read the messages in their own account. The
 --      opt-out and lift record reaches them by no path yet: `fn_my_email_status`
---      answers only the address and a state (docs/dev/backlog.md).
+--      answers only the address and a state (docs/dev/backlog.md). Also
+--      0048's rate-limit ledger: the time and network address of each request
+--      to create an account through the invite link, which no API role reads.
+--      The check logs only refusals (0045), so a request it passed that no
+--      claim followed is recorded there and nowhere else. The copy's list
+--      therefore gives times only for the claims and refusals the file holds,
+--      and names the ledger in a sentence of its own.
 --   4. What is about the system rather than the person: delivery bookkeeping,
 --      claim tokens, `updated_at`, Stripe's identifiers, and how a plan change
 --      was carried out (the plans before and after it, and every charge, are
@@ -329,7 +336,8 @@ begin
     'not_included', jsonb_build_array(
       'The entry codes themselves: they are encrypted, and only the vault can read them.',
       'Your walker''s IP address and device on the entry-code log, and whether your walker has read their notifications about you: those describe your walker, not you.',
-      'The address typed, and the network address used, on each attempt to use your invite link, yours included. The file says when each attempt was made, how it ended, and whether it came from your account.',
+      'The address typed on every claim of your account through your invite link, and on every attempt your invite refused, yours included. The file says when each was made, how it ended, and whether it came from your account.',
+      'The time and network address Sanpo keeps for requests to create an account through your invite link, yours included, to limit how often the link can be tried. Your walker cannot read them; ask them to ask Sanpo.',
       'The messages Sanpo sent you, the record of when and why your email was turned off or back on, and the devices you turned notifications on for: your walker cannot see these, so a copy your walker makes cannot hold them. The file says only whether email to you is turned off, which is all your walker is shown. You can read your messages in your Sanpo account; for the rest, ask your walker to ask Sanpo.',
       'Keys that only work inside Sanpo or Stripe: the keys in your invite and unsubscribe links, your devices'' notification keys, and Stripe''s identifiers for you and your payments. A note on a credit entry is copied as it was written, and sometimes names the payment it came from.',
       'Bookkeeping: when each notification was delivered, when each row last changed, and how a plan change was carried out. The plans before and after each change, and every charge, are in the file.',

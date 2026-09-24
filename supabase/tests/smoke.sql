@@ -8304,6 +8304,9 @@ declare
   v_found  boolean;
   v_unfound text[];
   v_leaked text[];
+  v_readable text[];
+  v_wcr    text[][];
+  v_i      int;
   v_bad    text[];
 begin
   reset session authorization;
@@ -8414,6 +8417,12 @@ begin
   insert into email_suppressions (email, operator_id, reason, created_at, last_requested_at)
   values ('n59-manifest@sanpo.test', v_op, 'n59 suppression reason',
           '2005-06-07 08:09:10+00', '2005-06-07 08:09:11+00');
+  -- A type-scoped one too, so every column of the opt-out holds a value for
+  -- (3b) to read back as the walker. The row above keeps all email off.
+  insert into email_suppressions (email, operator_id, notification_type, reason, created_at,
+                                  last_requested_at)
+  values ('n59-manifest@sanpo.test', v_op, 'low_credit', 'n59 type-scoped reason',
+          '2005-06-08 08:09:10+00', '2005-06-08 08:09:11+00');
   insert into email_suppression_lifts (email, client_id, lifted_by, lifted_at, suppressed_at,
                                        last_requested_at, suppression_reason)
   values ('n59-manifest@sanpo.test', v_cl, v_user, '2004-05-06 07:08:09+00',
@@ -8724,11 +8733,16 @@ begin
     ('invite_claim_attempts','attempted_email','someone_else','the address typed by whoever tried the link',true),
     ('invite_claim_attempts','outcome','exported','$.record.invite_claims[*].outcome',false),
     ('invite_claim_attempts','created_at','exported','$.record.invite_claims[*].at',false),
-    -- invite_signup_attempts
-    ('invite_signup_attempts','id','system','a rate-limit ledger kept for the hour (0048)',false),
-    ('invite_signup_attempts','client_id','system','a rate-limit ledger kept for the hour (0048)',false),
-    ('invite_signup_attempts','ip','someone_else','the IP address of whoever tried the link',true),
-    ('invite_signup_attempts','attempted_at','system','a rate-limit ledger kept for the hour (0048)',true),
+    -- invite_signup_attempts: 0048's rate-limit ledger. Its rows last until
+    -- the link is next tried after the window, or is reissued, so a claimed
+    -- client's can last for good. No API role reads it. A request that
+    -- passed the check and was never followed by a claim is recorded here
+    -- and nowhere else (0045 logs only refusals), which is why the copy's
+    -- list names it rather than saying the file holds every attempt.
+    ('invite_signup_attempts','id','walker_cannot_read','the rate-limit ledger (0048), which no API role reads',false),
+    ('invite_signup_attempts','client_id','walker_cannot_read','the rate-limit ledger (0048), which no API role reads',false),
+    ('invite_signup_attempts','ip','walker_cannot_read','the rate-limit ledger (0048), which no API role reads',true),
+    ('invite_signup_attempts','attempted_at','walker_cannot_read','the rate-limit ledger (0048), which no API role reads',true),
     -- notifications
     ('notifications','id','system','Sanpo''s key for the row',false),
     ('notifications','operator_id','system','the walker',false),
@@ -9077,6 +9091,60 @@ begin
   end loop;
   if v_leaked is not null then
     raise exception 'FAIL: the copy holds % (%)', v_leaked, 'values the manifest keeps out';
+  end if;
+
+  -- (3b) "The walker cannot read it" is a reason only while it is true, and
+  -- the copy's list gives it to the client as a fact. Each column left out
+  -- for it is read back as the walker: no grant may reach the column, or no
+  -- policy the fixture's row. The fixture must hold a value there, or the
+  -- read would find nothing for a reason that proves nothing.
+  for r in select m.tbl, m.col, f.pred from export_manifest m join export_fixture f using (tbl)
+            where m.decision = 'walker_cannot_read' order by m.tbl, m.col loop
+    execute format('select count(*) from %I where (%s) and %I is not null', r.tbl, r.pred, r.col)
+      into v_n;
+    if v_n = 0 then
+      v_empty := v_empty || (r.tbl || '.' || r.col);
+    end if;
+  end loop;
+  if cardinality(v_empty) > 0 then
+    raise exception 'FAIL: the fixture leaves % empty, so nothing proves the walker cannot read them', v_empty;
+  end if;
+  -- Gathered first: the manifest is the suite's temp table, which the walker
+  -- cannot read.
+  select array_agg(array[m.tbl, m.col, f.pred] order by m.tbl, m.col) into v_wcr
+    from export_manifest m join export_fixture f using (tbl)
+   where m.decision = 'walker_cannot_read';
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  set local session authorization authenticated;
+  -- The control: the same read reaches the walker's own client, so a zero
+  -- below is the walker being refused, not the read reaching nobody.
+  select count(*) into v_n from clients where id = v_cl;
+  if v_n <> 1 then
+    raise exception 'FAIL: precondition — read as the walker, their own client is not there (%), so the reads below prove nothing', v_n;
+  end if;
+  for v_i in 1 .. coalesce(array_length(v_wcr, 1), 0) loop
+    if has_column_privilege(v_wcr[v_i][1], v_wcr[v_i][2], 'SELECT') then
+      begin
+        execute format('select count(*) from %I where (%s) and %I is not null',
+                       v_wcr[v_i][1], v_wcr[v_i][3], v_wcr[v_i][2])
+          into v_n;
+      exception when insufficient_privilege then
+        -- The column is granted and the fixture's predicate is not, so the
+        -- walker might still reach the value another way.
+        v_n := -1;
+      end;
+      if v_n <> 0 then
+        v_readable := coalesce(v_readable, '{}')
+                      || (v_wcr[v_i][1] || '.' || v_wcr[v_i][2]
+                          || case when v_n < 0 then ' (cannot tell)' else '' end);
+      end if;
+    end if;
+  end loop;
+  reset session authorization;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  if v_readable is not null then
+    raise exception 'FAIL: the manifest says the walker cannot read %, and the walker can', v_readable;
   end if;
 
   -- (4) an erased client's copy is refused, both halves of it: what is left
