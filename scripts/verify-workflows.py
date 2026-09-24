@@ -7,8 +7,10 @@ The deploy workflows are the least-exercised code in the project — production
 has never run at all, and staging runs once per merge with nobody reading the
 log unless it goes red. So a mistake in their gating is both easy to make and
 slow to find. All four rules below were written after a real failure, and each
-one is checked against the shipped files by `verify-workflows.test.py`-style
-sabotage in the PR that introduced it.
+was proven by sabotage against the shipped files in the PR that introduced it.
+Rule 4 is also driven by `app/scripts/verify-workflows.test.ts`, which runs
+this script over fixture workflows, because a rule that reads an expression
+has more ways to be wrong than any file in the tree exercises.
 
 Run: python3 scripts/verify-workflows.py
 """
@@ -31,6 +33,117 @@ STATUS_FUNCS = ("success(", "failure(", "cancelled(", "always(")
 failures: list[str] = []
 # Checkouts rule 4 inspected: its eyesight precondition (see main).
 chained_checkouts = 0
+
+# The value a chained checkout must choose first: the commit the upstream run
+# tested or deployed. And what to write, which every chained checkout uses.
+UPSTREAM_SHA = "github.event.workflow_run.head_sha"
+PIN = "${{ github.event.workflow_run.head_sha || github.sha }}"
+
+
+def skip_string(expr: str, i: int) -> int | None:
+    """The index just past the single-quoted string starting at `i`, or None if it never closes.
+
+    Neither a `||` nor a parenthesis inside a string is structure. A GitHub
+    expression writes a quote inside a string as `''`, which needs no case of
+    its own here: read as one string closing and the next opening, it covers
+    exactly the same characters.
+    """
+    end = expr.find("'", i + 1)
+    return None if end < 0 else end + 1
+
+
+def split_or(expr: str) -> list[str] | None:
+    """An expression split on its top-level `||`, or None if its brackets or strings never close."""
+    parts: list[str] = []
+    depth = start = i = 0
+    while i < len(expr):
+        c = expr[i]
+        if c == "'":
+            end = skip_string(expr, i)
+            if end is None:
+                return None
+            i = end
+            continue
+        if c in "([":
+            depth += 1
+        elif c in ")]":
+            depth -= 1
+            if depth < 0:
+                return None
+        elif depth == 0 and expr.startswith("||", i):
+            parts.append(expr[start:i])
+            i += 2
+            start = i
+            continue
+        i += 1
+    if depth != 0:
+        return None
+    parts.append(expr[start:])
+    return parts
+
+
+def unparen(expr: str) -> str:
+    """An expression without the parentheses that wrap ALL of it: `(a || b)` is `a || b`, `(a) || (b)` stays."""
+    s = expr.strip()
+    while s.startswith("(") and s.endswith(")"):
+        depth, i = 0, 0
+        while i < len(s):
+            if s[i] == "'":
+                end = skip_string(s, i)
+                if end is None:
+                    return s
+                i = end
+                continue
+            if s[i] == "(":
+                depth += 1
+            elif s[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        if i != len(s) - 1:
+            return s  # the first parenthesis closes early, so it wraps only part
+        s = s[1:-1].strip()
+    return s
+
+
+def first_choice(expr: str) -> str | None:
+    """What a `||` chain evaluates first, through wrapping parentheses and nested chains; None if unreadable."""
+    s = expr
+    while True:
+        parts = split_or(unparen(s))
+        if parts is None:
+            return None
+        if len(parts) == 1:
+            return unparen(parts[0])
+        s = parts[0]
+
+
+def pin_problem(ref: str) -> str | None:
+    """Why a chained checkout's `ref` may not select the upstream run's commit, or None if it does.
+
+    `||` yields its first truthy operand, and on a `workflow_run` event
+    head_sha is always set, so it must be the FIRST choice: anything before it
+    wins over it (Codex, on #97: `${{ github.sha || … head_sha }}` passed a
+    substring test while `github.sha`, always set, was the value chosen). What
+    follows it is the fallback for a manual dispatch, where head_sha is empty.
+    The ref must be one `${{ }}` expression and nothing else, since text
+    around it becomes part of the ref. Only the canonical spelling is read:
+    another case, index syntax or a function of the SHA is refused rather than
+    guessed at, and the message says what to write instead.
+    """
+    text = ref.strip()
+    if not text:
+        return "checks out without a `ref`"
+    whole = re.fullmatch(r"\$\{\{(.*)\}\}", text, re.S)
+    if not whole or "${{" in whole.group(1) or "}}" in whole.group(1):
+        return f"checks out `ref: {text}`, which is not one `${{{{ }}}}` expression the check can read"
+    first = first_choice(whole.group(1))
+    if first is None:
+        return f"checks out `ref: {text}`, whose brackets or strings never close"
+    if first != UPSTREAM_SHA:
+        return f"checks out `ref: {text}`, whose first choice is `{first}`, not `{UPSTREAM_SHA}`"
+    return None
 
 
 def fail(workflow: str, job: str, message: str) -> None:
@@ -128,20 +241,20 @@ def check(path: pathlib.Path) -> None:
         # against an older deployment, or a posture check running a script the
         # deploy never shipped. `deploy-staging.yml` pinned all five of its
         # checkouts from the start; the two workflows chained after it did not
-        # (Codex, on #97, named one; the other is its sibling).
+        # (Codex, on #97, named one; the other is its sibling). The ref is read
+        # as an expression, not searched for a name: see `pin_problem`.
         if chained:
             for step in steps:
                 if not (isinstance(step, dict) and str(step.get("uses") or "").startswith("actions/checkout")):
                     continue
                 chained_checkouts += 1
-                ref = str((step.get("with") or {}).get("ref") or "")
-                if "github.event.workflow_run.head_sha" not in ref:
+                why = pin_problem(str((step.get("with") or {}).get("ref") or ""))
+                if why:
                     fail(
                         path.name,
                         name,
-                        "checks out without `ref: ${{ github.event.workflow_run.head_sha || github.sha }}` in a "
-                        "workflow_run-triggered workflow, so it runs main's newest commit rather than the one the "
-                        "upstream run tested or deployed",
+                        f"{why} in a workflow_run-triggered workflow, so it may run main's newest commit rather "
+                        f"than the one the upstream run tested or deployed — write `ref: {PIN}`",
                     )
 
 
