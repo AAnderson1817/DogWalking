@@ -134,6 +134,61 @@ definer, grants, _ = collect_with(
 check('a quoted role is read as its name', "authenticated" in grants.get("fn_probe_quoted", set()),
       f"granted to {sorted(grants.get('fn_probe_quoted', set())) or 'nothing'}")
 
+# ── A role is read as PostgreSQL resolves it (Codex, on #97) ──────────────
+# An unquoted name folds to lower case, so `TO PUBLIC` and `TO Anon` grant
+# exactly `public` and `anon` (measured). A quoted name is exact, doubled
+# quotes read as one, and a comma inside one separates nothing: `"PUBLIC"` is
+# not the PUBLIC pseudo-role (PostgreSQL refuses it as a role that does not
+# exist). Stored as written, `PUBLIC` rendered as **none** and passed the
+# invariant-5 check.
+# A refusal here is a reading gone wrong (a quoted name split at its comma
+# reads as an unreadable fragment), so it is reported as a named failure and
+# every check below fails with it, rather than ending the run as a traceback.
+err = io.StringIO()
+try:
+    with contextlib.redirect_stderr(err):
+        definer, grants, order = collect_with(
+            FN.format(name="fn_probe_upper", definer="security definer")
+            + "grant execute on function fn_probe_upper() to PUBLIC;\n"
+            + FN.format(name="fn_probe_mixed", definer="security definer")
+            + "grant execute on function fn_probe_mixed() to Anon;\n"
+            + FN.format(name="fn_probe_qpublic", definer="security definer")
+            + 'grant execute on function fn_probe_qpublic() to "public";\n'
+            + FN.format(name="fn_probe_exact", definer="security definer")
+            + 'grant execute on function fn_probe_exact() to "PUBLIC", "we""ird", "a,b";\n'
+        )
+except SystemExit:
+    definer, grants, order = {}, {}, []
+check("the role probes are read, not refused", bool(order), err.getvalue().strip()[:160])
+for name, want in (("fn_probe_upper", {"public"}), ("fn_probe_mixed", {"anon"}), ("fn_probe_qpublic", {"public"}),
+                   ("fn_probe_exact", {"PUBLIC", 'we"ird', "a,b"})):
+    check(f"{name} is granted to {sorted(want)}", grants.get(name) == want,
+          f"read as {sorted(grants.get(name, set()))}")
+check("a definer function granted TO PUBLIC renders public, not none",
+      "| `fn_probe_upper` | `public` |" in gen.render(definer, grants, order))
+exposed = getattr(gen, "exposed", None)
+check("the invariant-5 check names the definer functions TO PUBLIC and TO Anon expose",
+      callable(exposed) and {"fn_probe_upper", "fn_probe_mixed", "fn_probe_qpublic"} <= set(exposed(definer, grants, order))
+      and "fn_probe_exact" not in exposed(definer, grants, order),
+      "no exposed()" if not callable(exposed) else f"named {sorted(exposed(definer, grants, order))}")
+
+# ── A grantee the reader cannot read is refused, not read as some role ────
+# `GROUP` is noise PostgreSQL accepts and `WITH GRANT OPTION` is a clause, so
+# each read as a role no check recognises; the ACL reader that replaces this
+# one refuses both, and so does this one.
+for label, tail in (("GROUP", "to group anon"), ("WITH GRANT OPTION", "to anon with grant option")):
+    err = io.StringIO()
+    code = None
+    with contextlib.redirect_stderr(err):
+        try:
+            collect_with(FN.format(name="fn_probe_refused", definer="security definer")
+                         + f"grant execute on function fn_probe_refused() {tail};\n")
+        except SystemExit as e:
+            code = e.code
+    check(f"a grantee with {label} is refused by name",
+          code == 1 and "grantee" in err.getvalue() and f"{NEXT:04d}_probe.sql" in err.getvalue(),
+          f"exit {code}, stderr {err.getvalue().strip()[:120]!r}")
+
 # ── A migration the shared reader refuses is a named FAIL, not a traceback ─
 err = io.StringIO()
 code = None
