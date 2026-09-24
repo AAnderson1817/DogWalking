@@ -33,6 +33,20 @@ interface Stub {
   create?: { status: number; body: unknown };
   /** DELETE answers, by path prefix; default 204 */
   deletes?: Record<string, number>;
+  /** POST auth/v1/token (password grant) answer; default a session */
+  token?: { status: number; body: unknown };
+  /** POST rest/v1/rpc/fn_purge_client answer; default 200 [] */
+  purge?: { status: number; body: unknown };
+  /** drop the fn_purge_client connection without answering */
+  purgeDrop?: boolean;
+}
+
+/** What a request carried: the credentials and the body a test may pin. */
+interface Seen {
+  line: string;
+  apikey?: string;
+  authorization?: string;
+  body: string;
 }
 
 let server: Server | undefined;
@@ -41,44 +55,62 @@ afterEach(() => {
   server = undefined;
 });
 
-async function stub(s: Stub): Promise<{ base: string; requests: string[] }> {
+async function stub(s: Stub): Promise<{ base: string; requests: string[]; seen: Seen[] }> {
   const requests: string[] = [];
+  const seen: Seen[] = [];
   const users = s.users ?? [];
   const cap = s.cap ?? 100;
   server = createServer((req, res) => {
-    const url = new URL(req.url ?? "/", "http://localhost");
-    requests.push(`${req.method} ${url.pathname}${url.search}`);
     const json = (status: number, body: unknown) => {
       res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify(body));
     };
-    if (req.method === "GET" && url.pathname === "/auth/v1/admin/users") {
-      if (s.listStatus) return json(s.listStatus, { msg: "Invalid API key" });
-      if (s.listBodyless) return json(200, { msg: "ok" });
-      const per = Math.min(Number(url.searchParams.get("per_page") ?? 50), cap);
-      const page = s.ignorePage ? 1 : Number(url.searchParams.get("page") ?? 1);
-      return json(200, { users: users.slice((page - 1) * per, page * per) });
-    }
-    if (req.method === "POST" && url.pathname === "/auth/v1/admin/users") {
-      const c = s.create ?? { status: 200, body: { id: "new-user-id" } };
-      // A string is sent as it is — a gateway's HTML error page is not JSON.
-      if (typeof c.body === "string") {
-        res.writeHead(c.status, { "content-type": "text/html" });
-        res.end(c.body);
+    const header = (h: string | string[] | undefined) => (Array.isArray(h) ? h.join(",") : h);
+    // Routed once the body has arrived, so a test can pin what a POST sent.
+    const route = (method: string, url: URL, body: string) => {
+      const line = `${method} ${url.pathname}${url.search}`;
+      requests.push(line);
+      seen.push({ line, apikey: header(req.headers.apikey), authorization: header(req.headers.authorization), body });
+      if (method === "GET" && url.pathname === "/auth/v1/admin/users") {
+        if (s.listStatus) return json(s.listStatus, { msg: "Invalid API key" });
+        if (s.listBodyless) return json(200, { msg: "ok" });
+        const per = Math.min(Number(url.searchParams.get("per_page") ?? 50), cap);
+        const page = s.ignorePage ? 1 : Number(url.searchParams.get("page") ?? 1);
+        return json(200, { users: users.slice((page - 1) * per, page * per) });
+      }
+      if (method === "POST" && url.pathname === "/auth/v1/admin/users") {
+        const c = s.create ?? { status: 200, body: { id: "new-user-id" } };
+        // A string is sent as it is — a gateway's HTML error page is not JSON.
+        if (typeof c.body === "string") {
+          res.writeHead(c.status, { "content-type": "text/html" });
+          res.end(c.body);
+          return;
+        }
+        return json(c.status, c.body);
+      }
+      if (method === "POST" && url.pathname === "/auth/v1/token") {
+        const tk = s.token ?? { status: 200, body: { access_token: "op-session-token" } };
+        return json(tk.status, tk.body);
+      }
+      if (method === "POST" && url.pathname === "/rest/v1/rpc/fn_purge_client") {
+        if (s.purgeDrop) return void req.socket.destroy();
+        const pg = s.purge ?? { status: 200, body: [] };
+        return json(pg.status, pg.body);
+      }
+      if (method === "DELETE") {
+        const status = Object.entries(s.deletes ?? {}).find(([p]) => url.pathname.startsWith(p))?.[1] ?? 204;
+        res.writeHead(status).end();
         return;
       }
-      return json(c.status, c.body);
-    }
-    if (req.method === "DELETE") {
-      const status = Object.entries(s.deletes ?? {}).find(([p]) => url.pathname.startsWith(p))?.[1] ?? 204;
-      res.writeHead(status).end();
-      return;
-    }
-    res.writeHead(404).end();
+      res.writeHead(404).end();
+    };
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => route(req.method ?? "", new URL(req.url ?? "/", "http://localhost"), body));
   });
   await new Promise<void>((ok) => server!.listen(0, "127.0.0.1", ok));
   const port = (server!.address() as { port: number }).port;
-  return { base: `http://127.0.0.1:${port}`, requests };
+  return { base: `http://127.0.0.1:${port}`, requests, seen };
 }
 
 /**
@@ -97,6 +129,7 @@ function sh(base: string, script: string): Promise<{ code: number; out: string; 
         env: {
           ...process.env,
           SERVICE_KEY: "stub-service-key",
+          ANON_KEY: "stub-anon-key",
           http_proxy: "",
           https_proxy: "",
           HTTP_PROXY: "",
@@ -192,7 +225,11 @@ describe("del and delete_operator", () => {
     const { base } = await stub({ deletes: { "/rest/v1/operators": 409 } });
     const r = await sh(base, 'delete_operator "op-1"; echo "[after]"');
     expect(r.code).toBe(0);
-    expect(r.out).toContain("::warning title=Fixture cleanup left something behind::DELETE operator op-1 -> HTTP 409");
+    // Not "Rows accumulate in staging until this is fixed", which every run
+    // printed four times for a fixture no delete could remove.
+    expect(r.out).toContain(
+      "::warning title=Fixture cleanup left something behind::DELETE operator op-1 -> HTTP 409, so it stays in staging. On a healthy run nothing does.",
+    );
     expect(r.out).toContain("[after]");
   });
 
@@ -209,6 +246,125 @@ describe("del and delete_operator", () => {
   it("do nothing at all for an empty id", async () => {
     const { base, requests } = await stub({});
     await sh(base, 'delete_operator ""');
+    expect(requests).toEqual([]);
+  });
+});
+
+describe("sign_in and purge_client", () => {
+  it("sign in with the anon key, as the app does, and print only the token", async () => {
+    const { base, seen } = await stub({});
+    const r = await sh(base, 'tok=$(sign_in "op@sanpo.test" "pw"); echo "[$tok]"');
+    expect(r.out).toBe("[op-session-token]\n");
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ line: "POST /auth/v1/token?grant_type=password", apikey: "stub-anon-key" });
+    expect(seen[0]!.authorization).toBeUndefined();
+    expect(JSON.parse(seen[0]!.body)).toEqual({ email: "op@sanpo.test", password: "pw" });
+  });
+
+  it("name GoTrue's own refusal when the sign-in fails", async () => {
+    const { base } = await stub({ token: { status: 400, body: { error_description: "Invalid login credentials" } } });
+    const r = await sh(base, 'rc=0; tok=$(sign_in "op@sanpo.test" "pw") || rc=$?; echo "[$tok][exit $rc]"');
+    expect(r.out).toBe("[][exit 1]\n");
+    expect(r.err).toContain("sign-in as op@sanpo.test refused: HTTP 400 — Invalid login credentials");
+  });
+
+  it("do not take a 2xx that carries no token as a session", async () => {
+    const { base } = await stub({ token: { status: 200, body: { msg: "ok" } } });
+    const r = await sh(base, 'rc=0; tok=$(sign_in "op@sanpo.test" "pw") || rc=$?; echo "[$tok][exit $rc]"');
+    expect(r.out).toBe("[][exit 1]\n");
+    expect(r.err).toContain("HTTP 200");
+  });
+
+  it("purge with the caller's session, not the service key", async () => {
+    // fn_purge_client answers only the client's own operator, so the service
+    // key would be refused as "no such client": the session is the point.
+    const { base, seen } = await stub({});
+    const r = await sh(base, 'f=$(mktemp); code=$(purge_client "op-session-token" "cl-1" "$f"); echo "[$code]"; cat "$f"');
+    expect(r.out).toBe("[200]\n[]");
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      line: "POST /rest/v1/rpc/fn_purge_client",
+      apikey: "stub-anon-key",
+      authorization: "Bearer op-session-token",
+    });
+    expect(JSON.parse(seen[0]!.body)).toEqual({ p_client: "cl-1" });
+  });
+});
+
+describe("erase_client", () => {
+  it("purges as the operator, then deletes the client, and says nothing else", async () => {
+    const { base, requests, seen } = await stub({});
+    const r = await sh(base, 'erase_client "op@sanpo.test" "pw" "cl-1"');
+    expect(r.code).toBe(0);
+    expect(requests).toEqual([
+      "POST /auth/v1/token?grant_type=password",
+      "POST /rest/v1/rpc/fn_purge_client",
+      "DELETE /rest/v1/clients?id=eq.cl-1",
+    ]);
+    expect(seen[1]!.authorization).toBe("Bearer op-session-token");
+    // The row goes with the service key, like every other fixture row: the
+    // delete is housekeeping, and only the purge has to be the operator's.
+    expect(seen[2]!.authorization).toBe("Bearer stub-service-key");
+    // The operator's session is masked before anything could print it.
+    expect(r.out).toBe("::add-mask::op-session-token\n");
+  });
+
+  it("reports a refused sign-in, and still tries the delete", async () => {
+    // A client that never claimed has no attempt rows, and deletes without a
+    // purge: the warning is for the purge, not a reason to stop.
+    const { base, requests } = await stub({ token: { status: 400, body: { error_description: "Invalid login credentials" } } });
+    const r = await sh(base, 'erase_client "op@sanpo.test" "pw" "cl-1"; echo "[after]"');
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(
+      "::warning title=Fixture cleanup left something behind::could not sign in as op@sanpo.test to purge client cl-1",
+    );
+    expect(r.err).toContain("HTTP 400 — Invalid login credentials");
+    expect(requests).toEqual(["POST /auth/v1/token?grant_type=password", "DELETE /rest/v1/clients?id=eq.cl-1"]);
+    expect(r.out).toContain("[after]");
+  });
+
+  it("reports a refused purge with the database's own message, and still tries the delete", async () => {
+    const { base, requests } = await stub({
+      purge: { status: 400, body: { code: "P0001", message: "fn_purge_client: no such client" } },
+      deletes: { "/rest/v1/clients": 409 },
+    });
+    const r = await sh(base, 'erase_client "op@sanpo.test" "pw" "cl-1"; echo "[after]"');
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("fn_purge_client for client cl-1 -> HTTP 400 — fn_purge_client: no such client.");
+    expect(r.out).toContain("DELETE client cl-1 -> HTTP 409, so it stays in staging.");
+    expect(requests.at(-1)).toBe("DELETE /rest/v1/clients?id=eq.cl-1");
+    expect(r.out).toContain("[after]");
+  });
+
+  it("reports an unreachable API instead of aborting the teardown", async () => {
+    // The teardown runs from an EXIT trap under `bash -e`: a curl that cannot
+    // connect must not end it before the operator and accounts are reached.
+    const r = await sh(
+      "http://127.0.0.1:1",
+      'shopt -s inherit_errexit; erase_client "op@sanpo.test" "pw" "cl-1"; echo "[after]"',
+    );
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("could not sign in as op@sanpo.test to purge client cl-1");
+    expect(r.out).toContain("DELETE client cl-1 -> HTTP 000");
+    expect(r.out).toContain("[after]");
+  });
+
+  it("reports a purge whose connection dropped, and still tries the delete", async () => {
+    // Signed in, then nothing: curl exits non-zero with no answer. Under
+    // `bash -e` that would end the teardown here, before the operator and
+    // the accounts, unless purge_client still prints a status (000).
+    const { base, requests } = await stub({ purgeDrop: true });
+    const r = await sh(base, 'shopt -s inherit_errexit; erase_client "op@sanpo.test" "pw" "cl-1"; echo "[after]"');
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("fn_purge_client for client cl-1 -> HTTP 000 — no answer.");
+    expect(requests.at(-1)).toBe("DELETE /rest/v1/clients?id=eq.cl-1");
+    expect(r.out).toContain("[after]");
+  });
+
+  it("does nothing at all for an empty client id", async () => {
+    const { base, requests } = await stub({});
+    const r = await sh(base, 'erase_client "op@sanpo.test" "pw" ""');
+    expect(r).toMatchObject({ code: 0, out: "" });
     expect(requests).toEqual([]);
   });
 });
@@ -297,6 +453,12 @@ describe("create_user", () => {
     const { base } = await stub({ create: { status: 502, body: "<html>bad gateway</html>" } });
     const r = await sh(base, 'rc=0; create_user "a@sanpo.test" "pw" || rc=$?; echo "[exit $rc]"');
     expect(r.out).toContain("[exit 1]");
-    expect(r.err).toContain("HTTP 502");
+    expect(r.err).toContain("HTTP 502 — an unreadable body");
+  });
+
+  it("says there was no answer, rather than printing a blank, when the connection fails", async () => {
+    const r = await sh("http://127.0.0.1:1", 'rc=0; create_user "a@sanpo.test" "pw" || rc=$?; echo "[exit $rc]"');
+    expect(r.out).toContain("[exit 1]");
+    expect(r.err).toContain("HTTP 000 — no answer");
   });
 });
