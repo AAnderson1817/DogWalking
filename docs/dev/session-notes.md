@@ -127,6 +127,21 @@ With all of the above exported, `bash scripts/validate.sh` runs the full gate.
   client has to ask about `purged_at`, under a lock that waits for a purge in
   flight: 0057's first version asked only whether the row existed, and a
   notice written during an erasure survived it (Codex on PR #105).
+- **A deploy migrates before it deploys functions, so a migration meets the
+  old edge code first.** Both deploy workflows run `migrate`, then
+  `deploy-functions`. In between, for minutes or for as long as a failed
+  function deploy stays failed, the previous bundle runs against the new
+  schema. That is safe for an additive change, and it is why the order is
+  database-first (H16). It is not safe when the migration makes the edge code
+  supply a value the database cannot derive: the old code writes rows without
+  it, and nothing can add it afterwards. 0057's subject column is the example
+  (Codex on PR #105): the deployed webhook wrote walker notices with no
+  subject during that window. That was accepted only because production's
+  first deploy applies 0057 to an empty database. Once production holds data,
+  a change of this shape needs a plan for the window. Either the old writers
+  fail instead of writing, which works only where the new code's retry does
+  the work (a retry that takes an idempotent no-op branch writes nothing),
+  or the gap is stated where the guarantee is.
 - **A vitest file claimed by neither project runs nowhere, silently.** `node`
   takes `src/lib/**/*.test.ts` and `scripts/**/*.test.ts`; `dom` takes
   components / screens / hooks / prototypes plus `src/lib/**/*.test.tsx`. The
