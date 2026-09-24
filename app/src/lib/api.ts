@@ -893,10 +893,14 @@ export async function purgeClient(clientId: string): Promise<PurgeResult> {
   // Group by the bucket each path names; `remove` is per bucket. A path
   // naming no bucket this app knows is left alone, never sent to a bucket
   // chosen by its shape — and the count below still sees its object.
+  // Appended in place: copying the list on every path took 14 s for 50,000.
   const byBucket = new Map<PhotoBucket, string[]>();
   for (const path of paths) {
     const at = splitBucket(path);
-    if (at) byBucket.set(at.bucket, [...(byBucket.get(at.bucket) ?? []), at.name]);
+    if (!at) continue;
+    const names = byBucket.get(at.bucket);
+    if (names) names.push(at.name);
+    else byBucket.set(at.bucket, [at.name]);
   }
 
   let photosDeleted = 0;

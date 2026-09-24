@@ -1439,6 +1439,10 @@ export type Database = {
         Args: Record<string, never>;
         Returns: unknown;
       };
+      fn_guard_erased_pet: {
+        Args: Record<string, never>;
+        Returns: unknown;
+      };
       fn_guard_pets_update: {
         Args: Record<string, never>;
         Returns: unknown;

@@ -47,6 +47,12 @@
 -- already are: a row holding no personal data, kept because something else
 -- needs its id.
 --
+-- And a pet's tombstone stays one. An edit sheet left open in another tab
+-- while the erasure ran would otherwise save the pet's name and medical notes
+-- straight back into it, and the status, which counts photos, would still
+-- read finished. A trigger refuses that save, a new pet for an erased client,
+-- and the deletion of an erased client's pet (the last section below).
+--
 -- What this cannot find: a photo in the folder of a pet or walk whose row was
 -- deleted outside the product. Nothing in the app deletes either, and an
 -- object names no client, so there is nothing to attribute it by.
@@ -293,6 +299,75 @@ update pets p
 delete from walk_photos wph
  using walks w, clients c
  where wph.walk_id = w.id and w.client_id = c.id and c.purged_at is not null;
+
+-- ── A pet's tombstone stays one ──────────────────────────────────────────
+-- The operator policy on pets reads only `operator_id`, so nothing in the
+-- database stopped a save from a tab opened before the erasure (Codex on PR
+-- #106). An erased client's pet does not change, no pet arrives at an erased
+-- client, and an erased client's pet is never deleted: its row is its photo
+-- folder's only name.
+--
+-- "Does not change" rather than "must look redacted": comparing the whole row
+-- keeps one definition of the tombstone, the purge's own, instead of a second
+-- copy here that a column added later could slip past. The purge redacts the
+-- pets before it sets `purged_at`, so its first pass is untouched by this, and
+-- a retry writes back what is already there. The repair above is the one
+-- statement that turns an erased client's pet into a tombstone after the
+-- fact, which is why this is created after it.
+--
+-- A pet arriving at an erased client reads the client FOR KEY SHARE, as 0057's
+-- notices do: the purge holds that row FOR UPDATE until it commits, so a pet
+-- added while an erasure is in flight waits for it and then sees it. A change
+-- to an erased client's pet needs no lock of its own. The purge's redaction
+-- locks each pet row, a save racing it waits on that row, and the read below
+-- is a new statement, so it sees the committed erasure. Taking the client
+-- lock there would also invert the purge's order, client then pets.
+create function fn_guard_erased_pet()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $function$
+declare
+  v_erased boolean;
+begin
+  if tg_op in ('UPDATE', 'DELETE') then
+    select purged_at is not null into v_erased from clients where id = old.client_id;
+    if v_erased then
+      if tg_op = 'DELETE' then
+        raise exception 'pets: % belongs to an erased client, and its row is the only name of its photo folder', old.id;
+      end if;
+      if (to_jsonb(new) - 'updated_at') is distinct from (to_jsonb(old) - 'updated_at') then
+        raise exception 'pets: % belongs to an erased client, so it stays as the erasure left it', old.id;
+      end if;
+      return new;
+    end if;
+    if tg_op = 'DELETE' then
+      return old;
+    end if;
+  end if;
+
+  if tg_op = 'INSERT' or new.client_id is distinct from old.client_id then
+    select purged_at is not null into v_erased
+      from clients where id = new.client_id
+       for key share;
+    if v_erased then
+      raise exception 'pets: client % has been erased', new.client_id;
+    end if;
+  end if;
+  return new;
+end;
+$function$;
+
+-- Never called directly, and EXECUTE is checked when the trigger is created,
+-- not when it fires (0053).
+revoke all on function fn_guard_erased_pet() from public, anon, authenticated;
+
+-- No `OF` column list: it is evaluated against the columns a statement names,
+-- and this must see every change (the 0046 lesson, as 0057 applies it).
+create trigger trg_pets_erased
+  before insert or update or delete on pets
+  for each row execute function fn_guard_erased_pet();
 
 -- ── Refuse if the owner cannot see the photos ────────────────────────────
 do $$
