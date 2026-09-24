@@ -29,7 +29,8 @@ import { describe, expect, it } from "vitest";
  * Rule 5 is pinned here too. Staging is the only place a Supabase CLI release
  * or a function-deploy path runs before production does, so every
  * `supabase/setup-cli` step must pin one commit and one exact release, and
- * every `supabase functions deploy` must run with the same flags. It compares
+ * every `supabase functions deploy` must run with the same arguments, word for
+ * word apart from the project ref's value. It compares
  * workflows with one another, and the real tree agrees, so only fixtures can
  * show it a disagreement: the owner's 4c45ab1 moved staging's deploy to
  * `--use-api` and left production on the Docker bundler, which is the drift
@@ -261,10 +262,41 @@ describe("verify-workflows rule 5: production runs the CLI and the deploy path s
 
   it("refuses production deploying by a path staging does not run (the drift 4c45ab1 left)", () => {
     const run = verify(CHAINED, two({ flags: "--use-api" }, { flags: "" }));
-    expect(run.out).toContain("`supabase functions deploy` runs with different flags");
-    expect(run.out).toContain("deploy-production.yml :: functions = --project-ref");
-    expect(run.out).toContain("deploy-staging.yml :: functions = --project-ref --use-api");
+    expect(run.out).toContain("`supabase functions deploy` runs with different arguments");
+    expect(run.out).toContain("deploy-production.yml :: functions = --project-ref <project-ref>;");
+    expect(run.out).toContain("deploy-staging.yml :: functions = --use-api --project-ref <project-ref>");
     expect(run.status).toBe(1);
+  });
+
+  it("compares a deploy's whole argument list, not only its flag names (Codex, on #100)", () => {
+    const staging = "supabase functions deploy --use-api --project-ref x";
+    const drifts = {
+      // One positional name deploys that function alone.
+      "a positional target": "supabase functions deploy stripe-webhook --use-api --project-ref x",
+      "a flag's value": ["--import-map a.json", "--import-map b.json"],
+      "a flag's value after =": ["--import-map=a.json", "--import-map=b.json"],
+      // The stated price of comparing in order: the remedy is to write the two alike.
+      "the same flags in another order": "supabase functions deploy --project-ref x --use-api",
+    };
+    for (const [drift, shape] of Object.entries(drifts)) {
+      const [one, other] = typeof shape === "string" ? [staging, shape] : shape.map((a) => `supabase functions deploy --use-api ${a} --project-ref x`);
+      const result = verify(CHAINED, two({ run: one }, { run: other }));
+      expect(result.out, drift).toContain("`supabase functions deploy` runs with different arguments");
+      expect(result.status, drift).toBe(1);
+    }
+    const named = verify(CHAINED, two({ run: staging }, { run: drifts["a positional target"] }));
+    expect(named.out).toContain("deploy-production.yml :: functions = stripe-webhook --use-api --project-ref <project-ref>;");
+  });
+
+  it("leaves out only the project ref's value, in either spelling, since each workflow deploys to its own project", () => {
+    for (const [staging, production] of [
+      ["--project-ref staging-ref", "--project-ref production-ref"],
+      ["--project-ref=staging-ref", "--project-ref=production-ref"],
+    ]) {
+      const run = verify(CHAINED, two({ run: `supabase functions deploy --use-api ${staging}` }, { run: `supabase functions deploy --use-api ${production}` }));
+      expect(run.out, staging).toMatch(/^PASS: .*one function-deploy path \(2 deploys\)/m);
+      expect(run.status, staging).toBe(0);
+    }
   });
 
   it("refuses two CLI releases, naming each job's", () => {
@@ -340,9 +372,9 @@ describe("verify-workflows rule 5: production runs the CLI and the deploy path s
     const staging = "supabase functions deploy \\\n  --use-api --project-ref x";
     const production = "supabase functions deploy \\\n  --project-ref x";
     const run = verify(CHAINED, two({ run: staging }, { run: production }));
-    expect(run.out).toContain("`supabase functions deploy` runs with different flags");
-    expect(run.out).toContain("deploy-production.yml :: functions = --project-ref;");
-    expect(run.out).toContain("deploy-staging.yml :: functions = --project-ref --use-api");
+    expect(run.out).toContain("`supabase functions deploy` runs with different arguments");
+    expect(run.out).toContain("deploy-production.yml :: functions = --project-ref <project-ref>;");
+    expect(run.out).toContain("deploy-staging.yml :: functions = --use-api --project-ref <project-ref>");
     expect(run.status).toBe(1);
   });
 
@@ -383,10 +415,10 @@ describe("verify-workflows rule 5: production runs the CLI and the deploy path s
     expect(result.status).toBe(0);
   });
 
-  it("refuses a deploy whose flags come from a variable, since the comparison cannot see them", () => {
+  it("refuses a deploy whose arguments come from a variable, since the comparison cannot see them", () => {
     const run = verify(CHAINED, two({}, { run: 'supabase functions deploy "${flags[@]}" --project-ref x' }));
     expect(run.failed).toEqual(["deploy-production"]);
-    expect(run.out).toContain("rule 5 cannot read the flags of `supabase functions deploy`: `${flags[@]}` is expanded");
+    expect(run.out).toContain("rule 5 cannot read the arguments of `supabase functions deploy`: `${flags[@]}` is expanded");
     expect(run.status).toBe(1);
   });
 
