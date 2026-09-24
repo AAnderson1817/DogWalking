@@ -541,15 +541,25 @@ function widening(call: ts.CallExpression): string | null {
   const options = call.arguments[1] && unwrap(call.arguments[1]);
   if (!options) return null;
   if (!ts.isObjectLiteralExpression(options)) return "serveFunction options the scan cannot read";
-  const keys = options.properties.map((p) => (ts.isSpreadAssignment(p) ? null : keyOf(p.name)));
-  if (keys.includes(null)) return "serveFunction options spread from elsewhere";
-  if (keys.includes(UNREADABLE)) return "serveFunction options with a key the scan cannot read";
-  for (const p of options.properties) {
-    if (ts.isSpreadAssignment(p) || keyOf(p.name) !== "methods") continue;
+  // The LAST definition of `methods` is the one handleRequest reads, so the
+  // properties are read from the end (Codex, on #97: `{ ...OPTIONS, methods:
+  // ["POST"] }` is POST-only). Anything after that definition could redefine
+  // it — a spread, a key the scan cannot read — and anything before it is
+  // overridden. With no `methods` at all, a spread or an unreadable key could
+  // supply one, and so could the prototype: `options.methods` reads through it
+  // when no own `methods` is defined, and `__proto__:` in a literal (named,
+  // not computed or shorthand) sets it.
+  let prototype = false;
+  for (const p of [...options.properties].reverse()) {
+    if (ts.isSpreadAssignment(p)) return "serveFunction options spread from elsewhere";
+    const key = keyOf(p.name);
+    if (key === UNREADABLE) return "serveFunction options with a key the scan cannot read";
+    if (key === "__proto__" && ts.isPropertyAssignment(p) && !ts.isComputedPropertyName(p.name)) prototype = true;
+    if (key !== "methods") continue;
     // A shorthand, a method or an accessor supplies a value the scan cannot read.
-    if (!ts.isPropertyAssignment(p) || admitsGet(p.initializer)) return "serveFunction widened with methods";
+    return !ts.isPropertyAssignment(p) || admitsGet(p.initializer) ? "serveFunction widened with methods" : null;
   }
-  return null;
+  return prototype ? "serveFunction options with a prototype the scan does not read" : null;
 }
 
 /**
@@ -776,6 +786,25 @@ describe("verify-deployment's read-only argument is derived", () => {
     fn("options-paren-get", 'serveFunction(h, ({ methods: ["GET"] }));');
     fn("key-paren-post", 'serveFunction(h, { [("methods")]: ["POST"] });');
     fn("key-paren-get", 'serveFunction(h, { [("methods")]: ["GET"] });');
+    // The LAST definition of `methods` is the one handleRequest reads, so what
+    // comes before it is overridden (Codex, on #97): a spread or a key the
+    // scan cannot read earlier in the object is no door. Only one after the
+    // last `methods` could redefine it.
+    fn("spread-then-post", 'serveFunction(h, { ...OPTIONS, methods: ["POST"] });');
+    fn("unreadable-then-post", 'serveFunction(h, { [KEY]: ["GET"], methods: ["POST"] });');
+    fn("get-then-post", 'serveFunction(h, { methods: ["GET"], methods: ["POST"] });');
+    fn("post-then-spread", 'serveFunction(h, { methods: ["POST"], ...OPTIONS });');
+    fn("post-then-unreadable", 'serveFunction(h, { methods: ["POST"], [KEY]: ["GET"] });');
+    fn("post-then-get", 'serveFunction(h, { methods: ["POST"], methods: ["GET"] });');
+    // `__proto__:` in a literal sets the prototype, which handleRequest's
+    // `options.methods` reads when no own `methods` is defined; a computed or
+    // shorthand `__proto__` is an ordinary own property and sets nothing.
+    fn("proto-get", 'serveFunction(h, { __proto__: { methods: ["GET"] } });');
+    fn("proto-string-get", 'serveFunction(h, { "__proto__": { methods: ["GET"] } });');
+    fn("proto-then-post", 'serveFunction(h, { __proto__: { methods: ["GET"] }, methods: ["POST"] });');
+    fn("post-then-proto", 'serveFunction(h, { methods: ["POST"], __proto__: { methods: ["GET"] } });');
+    fn("computed-proto", 'serveFunction(h, { ["__proto__"]: { methods: ["GET"] } });');
+    fn("shorthand-proto", 'serveFunction(h, { __proto__ });');
     expect(Object.fromEntries(getReachable(root))).toEqual({
       "options-paren-get": "serveFunction widened with methods",
       "key-paren-get": "serveFunction widened with methods",
@@ -786,6 +815,11 @@ describe("verify-deployment's read-only argument is derived", () => {
       "spread-entry": "serveFunction widened with methods",
       variable: "serveFunction widened with methods",
       accessor: "serveFunction widened with methods",
+      "post-then-spread": "serveFunction options spread from elsewhere",
+      "post-then-unreadable": "serveFunction options with a key the scan cannot read",
+      "post-then-get": "serveFunction widened with methods",
+      "proto-get": "serveFunction options with a prototype the scan does not read",
+      "proto-string-get": "serveFunction options with a prototype the scan does not read",
     });
   });
 
