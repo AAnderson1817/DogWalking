@@ -209,6 +209,33 @@ export type Database = {
         };
         Relationships: [];
       };
+      email_suppression_lifts: {
+        Row: {
+          id: string;
+          email: string;
+          lifted_by: string;
+          lifted_at: string;
+          suppressed_at: string;
+          suppression_reason: string;
+        };
+        Insert: {
+          id?: string;
+          email: string;
+          lifted_by: string;
+          lifted_at?: string;
+          suppressed_at: string;
+          suppression_reason: string;
+        };
+        Update: {
+          id?: string;
+          email?: string;
+          lifted_by?: string;
+          lifted_at?: string;
+          suppressed_at?: string;
+          suppression_reason?: string;
+        };
+        Relationships: [];
+      };
       email_suppressions: {
         Row: {
           id: string;
@@ -1319,6 +1346,19 @@ export type Database = {
         Args: Record<string, never>;
         Returns: unknown;
       };
+      fn_email_fully_suppressed: {
+        Args: {
+          p_email: string;
+          p_operator: string;
+        };
+        Returns: boolean;
+      };
+      fn_email_lift_decision: {
+        Args: {
+          p_user: string;
+        };
+        Returns: Array<{ o_state: string; o_email: string }>;
+      };
       fn_email_suppressed: {
         Args: {
           p_email: string;
@@ -1343,6 +1383,10 @@ export type Database = {
           p_client: string;
         };
         Returns: Json;
+      };
+      fn_forget_purged_email_lifts: {
+        Args: Record<string, never>;
+        Returns: unknown;
       };
       fn_forget_purged_push_subscriptions: {
         Args: Record<string, never>;
@@ -1421,6 +1465,10 @@ export type Database = {
         Args: Record<string, never>;
         Returns: unknown;
       };
+      fn_lift_my_email_suppression: {
+        Args: Record<string, never>;
+        Returns: string;
+      };
       fn_log_credential_action: {
         Args: {
           p_credential: string;
@@ -1438,6 +1486,10 @@ export type Database = {
           p_horizon_days: number;
         };
         Returns: number;
+      };
+      fn_my_email_status: {
+        Args: Record<string, never>;
+        Returns: Array<{ o_email: string; o_state: string }>;
       };
       fn_note_push_failure: {
         Args: {
@@ -1736,6 +1788,7 @@ export type AccessCredentials = Database["public"]["Tables"]["access_credentials
 export type Clients = Database["public"]["Tables"]["clients"]["Row"];
 export type CredentialAccessLog = Database["public"]["Tables"]["credential_access_log"]["Row"];
 export type CreditLedger = Database["public"]["Tables"]["credit_ledger"]["Row"];
+export type EmailSuppressionLifts = Database["public"]["Tables"]["email_suppression_lifts"]["Row"];
 export type EmailSuppressions = Database["public"]["Tables"]["email_suppressions"]["Row"];
 export type InviteClaimAttempts = Database["public"]["Tables"]["invite_claim_attempts"]["Row"];
 export type InviteSignupAttempts = Database["public"]["Tables"]["invite_signup_attempts"]["Row"];

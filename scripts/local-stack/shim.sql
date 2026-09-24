@@ -27,11 +27,16 @@ create table if not exists auth.users (
   id uuid primary key,
   email text unique,
   encrypted_password text,
+  -- Set by GoTrue when a link it sent to the address is clicked. 0054 reads it
+  -- as the proof that an account's holder controls its inbox.
+  email_confirmed_at timestamptz,
   raw_app_meta_data jsonb default '{}'::jsonb,
   raw_user_meta_data jsonb default '{}'::jsonb,
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
+-- For a cluster whose auth.users predates the column.
+alter table auth.users add column if not exists email_confirmed_at timestamptz;
 
 -- auth.uid()/role()/jwt() exactly as the platform defines them: driven by
 -- the request.jwt.claims GUC, which PostgREST (and our smoke tests, via

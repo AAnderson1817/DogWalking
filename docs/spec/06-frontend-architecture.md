@@ -904,3 +904,39 @@ The stated cost: a session ending for any reason now costs this device its
 registration, so the person turns notifications back on. That is already true
 of every deliberate sign-out, and the alternative is a live subscription owned
 by an account with no session.
+
+## Turning email back on (0054)
+
+PortalHome carries an **Email** section beside the push opt-in, and it renders
+nothing unless email to the client's contact address is off. A section
+announcing that email works would be one more thing to read on every visit,
+for the case where nobody has anything to do.
+
+When it is off, the server's `fn_my_email_status` decides what the section
+offers, and the page only says what each answer means and whose move it is:
+the **Turn email back on** button appears for `ready` alone, because a button
+the server would refuse looks like it works and then does nothing. The other
+off states each name their remedy: `not_confirmed` says to sign in with a link
+sent to the address (opening one confirms it), `not_login_address` says to ask
+the walker to change the address to the one the client signs in with, and
+`not_liftable` says plainly that this page cannot change it. Spec 04 has the
+rules behind each state.
+
+- **A failed status read renders nothing**, as the operator's notice does
+  (0052): the section is advisory, and an error in its place would make a
+  working portal look broken.
+- **The lift's answer is the new state.** `lifted` and `not_suppressed` (another
+  tab got there first) both confirm, with no second read that could fail and
+  put an error beside the confirmation. Any other answer means the server
+  decided differently from the offer, so the section says the lift did not
+  happen and re-reads the status to show the new reason.
+- **The confirmation's live region is mounted before its text**, the FormError
+  rule: it is a `.form-note` that collapses out of flow while empty.
+- **An unknown state throws** in `api.ts` rather than being guessed. Read as
+  email-on it would hide the notice, and read as `ready` it would offer a
+  button the server refuses.
+
+The operator's notice in ClientDetail gains one sentence for a client with a
+login: if it is the address they sign in with, they can turn email back on
+from their portal. A client with no login has no portal, so the sentence would
+promise a path that does not exist for them.

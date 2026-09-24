@@ -25,23 +25,7 @@ before you hit them.
 
 ## Open
 
-### 1. Let the address owner turn email back on
-`0052` tells the operator when a client's address has unsubscribed, and the
-notice deliberately promises no way back, because none exists: a suppression
-is permanent, an operator must never be able to lift one (0038), and the
-address owner has no path either. So a client who unsubscribed from one
-walker's mail and later hires another gets no email from anyone, forever.
-
-The one honest proof of ownership available is a claimed client whose login
-email — confirmed by GoTrue — equals the suppressed address. A definer
-function callable only by that client, deleting only the platform-wide rows
-for `lower(auth.users.email)` and only when `email_confirmed_at` is set, would
-let them opt back in from the portal without anything ever emailing a
-suppressed address. Product surface rather than a fix, which is why it is its
-own item; the trust questions (what a shared login proves, whether to log
-lifts) want a written argument before code.
-
-### 2. TEMP, and the `search_path` that lets a temp table shadow `public`
+### 1. TEMP, and the `search_path` that lets a temp table shadow `public`
 `PUBLIC` holds TEMP on the database (PostgreSQL's default), and a definer
 function whose `search_path` is `public` alone searches `pg_temp` FIRST for
 relations. So a SQL session holding a role with EXECUTE on a definer function
@@ -64,7 +48,7 @@ so each wants the money-path argument:
 - `revoke temporary on database … from public`, once it is measured on a real
   project that nothing the platform runs as an API role needs a temp table.
 
-### 3. The claim replay's fixtures cannot be deleted, and its warning says they can
+### 2. The claim replay's fixtures cannot be deleted, and its warning says they can
 Every staging smoke run creates an operator, a client and two auth users for
 the invite-claim replay, and the cleanup fails on every run: the client
 DELETE answers 409, then the operator 409, then both auth users 500. Each
@@ -98,7 +82,37 @@ staging's auth users under a 50-page bound, so each run's two permanent users
 add a page every fifty runs, and a lookup that reaches the bound exits 9
 rather than reporting a user absent.
 
+### 3. The client export is narrower than the privacy notice says
+The notice tells a client that their walker can give them "a copy of
+everything held about you". `fn_export_client_data` (`0040`), the export the
+operator runs, returns the client row, properties, pets, walks, credential
+labels, the ledger and payments. It leaves out route traces
+(`walk_gps_points`), photos (`walk_photos`, `pets.photo_path`), notifications,
+the credential access log, the consent record (`notice_accepted_at`,
+`notice_version`), invite claim attempts, and anything about the client's
+address on the suppression list. Found while deciding what erasure does to a
+lift record (`0054`); not introduced by it.
+
+Either the export grows or the sentence shrinks, and they are different
+decisions. Growing it is not free: route traces and the access log are the
+operator's evidence as well as the client's data, and suppression history is
+the one thing `0052` deliberately tells an operator almost nothing about, so
+it belongs in a copy the client receives and not one the operator can read.
+Shrinking the sentence is a notice version bump. Either is a written argument
+before code.
+
 ## Done
+
+- **The address owner can turn email back on** — migration `0054`. A client
+  whose contact address unsubscribed can lift the suppression from the portal,
+  and only when that address is the one they sign in with and GoTrue has
+  confirmed it: the trust argument the item asked for is in the migration's
+  header and spec 03. Only the one-click row goes, each lift is recorded in
+  `email_suppression_lifts`, and an erased client's records go with the rest
+  of the record. The proof is as strong as the deployed confirmation setting,
+  which owner action 16 now says. See the `feat(email-owner-lift)` status-log
+  entry.
+
 
 - **The Supabase CLI, 2.109.1 → 2.117.0, and production's function deploy
   onto `--use-api`.** Read against the 420 commits in the range, and both

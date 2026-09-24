@@ -10,6 +10,7 @@ import { AccessTrail } from "@/components/AccessTrail";
 import { NotificationBell, NotificationList } from "@/components/NotificationInbox";
 import { LoadingState } from "@/components/StateField";
 import { WalkCard } from "@/components/WalkCard";
+import { EmailSection } from "@/components/EmailSection";
 import { PushSection } from "@/components/PushSection";
 import { YourDataPanel } from "@/components/YourDataPanel";
 import {
@@ -223,6 +224,7 @@ export default function PortalHome() {
           </div>
         </section>
       )}
+      <EmailSection walkerName={operator?.business_name ?? null} />
       <PushSection heading="Notifications on this device" />
       <YourDataPanel
         businessName={operator?.business_name ?? null}

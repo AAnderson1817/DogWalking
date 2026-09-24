@@ -190,6 +190,16 @@ describe("suppressedEmailNotice", () => {
     expect(text).toMatch(/If the address has a typo, fix it with Edit details\.$/);
   });
 
+  it("tells the operator a client with a login can turn email back on, and only then", () => {
+    // 0054: the address owner can lift it from the portal when it is the
+    // address they sign in with. A client with no login has no portal, so the
+    // same sentence there would promise a path that does not exist.
+    expect(suppressedEmailNotice(client({ auth_user_id: "u-1" }))).toMatch(
+      /Edit details\. If it's the address they sign in with, they can turn email back on from their portal\.$/,
+    );
+    expect(suppressedEmailNotice(client())).not.toMatch(/turn (it|email) back on/i);
+  });
+
   it("points a client who has claimed their account at the portal, and only them", () => {
     // The notification rows are written whatever happens to the email, and the
     // portal inbox reads them — but only for a client with a login. Telling
@@ -199,13 +209,13 @@ describe("suppressedEmailNotice", () => {
     expect(suppressedEmailNotice(client())).not.toMatch(/portal/);
   });
 
-  it("names no business, no date, and no way to turn email back on", () => {
+  it("names no business and no date, and offers the operator no way to lift it", () => {
     // One boolean comes back from the database, deliberately: the suppression
-    // is usually platform-wide and nobody's list. And no path to re-enable
-    // exists — an operator must never lift one — so the copy promises none.
+    // is usually platform-wide and nobody's list. And an operator must never
+    // lift one, so nothing here addresses the operator as the one who could.
     for (const c of [client(), client({ auth_user_id: "u-1" })]) {
       const text = suppressedEmailNotice(c);
-      expect(text).not.toMatch(/turn (it|email) back on|re-?subscribe|contact support/i);
+      expect(text).not.toMatch(/re-?subscribe|contact support|you can turn/i);
       expect(text).not.toMatch(/\d/);
     }
   });

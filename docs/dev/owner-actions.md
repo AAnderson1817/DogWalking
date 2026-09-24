@@ -552,6 +552,21 @@ dashboard setting no file here records.
 `0048` bounds the *rate* either way. This decides what a single successful
 guess is worth, which is the difference between an annoyance and an incident.
 
+Since `0054` it also decides what a confirmed sign-in proves. A client can turn
+email back on for an address that unsubscribed when that address is the one
+they sign in with and GoTrue has confirmed it. With confirmations ON, that
+confirmation is a click in the inbox. With them OFF, a public-signup account is
+confirmed at creation with no click, so an account made at someone else's
+address that then becomes a client could lift that address's unsubscribe.
+Closing public signup (1b) closes that path. Changing an existing account's
+address does not reopen it, because GoTrue confirms a new address through its
+inbox for every account that is not anonymous (`internal/api/user.go`, read on
+`master`); an anonymous account adding an address is confirmed at once with
+confirmations OFF, so anonymous sign-ins must stay off, as they are in
+`config.toml`. The damage is bounded either way: the address owner can
+unsubscribe again with one click, and every lift is recorded in
+`email_suppression_lifts`.
+
 **What is true until this is answered:** the frontend already handles both —
 `ClaimInvite` catches `email_not_confirmed` on the sign-in that follows and
 offers a resend — so nothing is broken in either configuration. What is

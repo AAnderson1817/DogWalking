@@ -75,6 +75,7 @@ select
                                                            as owns_realtime_messages,
   pg_catalog.has_schema_privilege('public', 'CREATE')       as can_create_in_public,
   has_table_privilege('auth.users', 'REFERENCES')          as references_auth_users,
+  has_table_privilege('auth.users', 'SELECT')              as selects_auth_users,
   has_schema_privilege('cron', 'USAGE')                    as usage_on_cron,
   has_table_privilege('cron.job', 'INSERT')                as can_write_cron_job,
   exists (select 1 from pg_extension where extname = 'pgcrypto')
@@ -93,6 +94,7 @@ from pg_roles where rolname = current_user;
 | membership in the owner of `realtime.messages` | `create policy` on it in 0020. Same error, and never mentioned anywhere before. |
 | CREATE on `public` | Every table. |
 | REFERENCES on `auth.users` | The `auth_user_id` foreign keys in 0002. |
+| SELECT on `auth.users`, directly or through a role it inherits | Nothing at apply time, which is why a replay cannot find it. At run time, two definer functions read it as their owner: 0035's `fn_account_has_password` (the vault's set-a-password check) and 0054's lift decision (the portal's email switch). Both raise `permission denied` on every call without it. The modelled role gets it through `service_role`; `db-push-check.sh` removes every path and shows both refused. |
 | USAGE on `cron` + INSERT on `cron.job` | 0028's `cron.schedule()`, which inserts as the **calling** role — it is not a definer function. |
 | `pgcrypto` installed | 0001 opens with `create extension if not exists pgcrypto`. `IF NOT EXISTS` returns before the privilege check when the extension is already there, so this only works because the platform installed it first. |
 

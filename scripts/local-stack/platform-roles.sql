@@ -124,9 +124,12 @@ grant supabase_storage_admin, supabase_realtime_admin to sb_deploy;
 -- it, as on hosted.
 alter schema public owner to sb_deploy;
 
--- Foreign keys to auth.users need REFERENCES on it — nothing more. The
--- migrations never select from auth.users at apply time; 0035's read of
--- encrypted_password is inside a function body, resolved at execution.
+-- Foreign keys to auth.users need REFERENCES on it. The migrations never
+-- select from auth.users at apply time, but two definer functions they create
+-- do when they RUN, as their owner: 0035's fn_account_has_password and 0054's
+-- email-lift decision. This role reads it through its service_role
+-- membership, which shim.sql grants SELECT; db-push-check.sh removes that path
+-- and calls both to show the dependency is real.
 grant references on auth.users to sb_deploy;
 
 grant usage on schema auth, storage, realtime, cron to sb_deploy;

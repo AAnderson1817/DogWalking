@@ -206,9 +206,11 @@ export const isEditable = (c: ClientEditable): boolean => !c.purged_at;
  * (a typo — 0038 exists because operators mistype addresses) and, for a
  * client who has claimed their account, where the updates still arrive: the
  * notification rows are written whatever happens to the email, and the portal
- * inbox reads them. It does not promise a way to turn email back on, because
- * none exists yet — an operator must never be able to lift a suppression, and
- * the address owner has no path either.
+ * inbox reads them. An operator must never be able to lift a suppression, so
+ * the notice offers them no way to. The address owner can, from the portal,
+ * when it is the address they sign in with (`0054`), so for a client with a
+ * login the notice says that, and for a client without one it says nothing,
+ * because no such path exists for them.
  *
  * "Unsubscribed from Sanpo email" is true of the only rows anything writes
  * today: one-click suppresses the address for every operator. A writer of
@@ -219,9 +221,12 @@ export function suppressedEmailNotice(
   c: Pick<ClientEditable, "auth_user_id" | "full_name">,
 ): string {
   const portal = c.auth_user_id ? ", but they'll still see them in their Sanpo portal" : "";
+  const liftable = c.auth_user_id
+    ? " If it's the address they sign in with, they can turn email back on from their portal."
+    : "";
   return (
     "Email to this address is turned off: someone using it unsubscribed from "
     + `Sanpo email. ${c.full_name} won't get walk updates or billing notices by `
-    + `email${portal}. If the address has a typo, fix it with Edit details.`
+    + `email${portal}. If the address has a typo, fix it with Edit details.${liftable}`
   );
 }

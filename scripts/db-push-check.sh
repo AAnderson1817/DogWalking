@@ -210,6 +210,53 @@ end
 $outer$;
 SQL
 
+# ── 4b. the definer layer's reads of auth.users, exercised ───────────────
+# Two definer functions read auth.users when they RUN, as their owner: 0035's
+# fn_account_has_password and 0054's lift decision behind fn_my_email_status.
+# Applying them needs nothing on the table, so the replay above cannot see the
+# dependency, and neither can smoke, where the owner is a superuser. Shown the
+# way BYPASSRLS is: each is called as the model grants it (SELECT arrives
+# through the role's service_role membership), then with every path to SELECT
+# removed. A new runtime reader of auth.users belongs in this list.
+echo "== the definer layer's reads of auth.users =="
+psql "$CHECK_URL" -v ON_ERROR_STOP=1 -q <<'SQL'
+do $outer$
+declare
+  v_denied int := 0;
+begin
+  -- This session is the check database's superuser, which
+  -- fn_is_service_session() admits, so 0035's caller check passes.
+  begin
+    perform fn_account_has_password('00000000-0000-4000-8000-000000000001');
+    perform count(*) from fn_my_email_status();
+  exception when insufficient_privilege then
+    raise exception 'FAIL: a definer function owned by the deploy role cannot read auth.users (%). The real project must grant it too: list it in docs/dev/db-push-requirements.md', sqlerrm;
+  end;
+
+  revoke select on auth.users from sb_deploy, service_role;
+  -- Precondition: with another path still granting SELECT, the calls below
+  -- would succeed and say nothing about the dependency.
+  if has_table_privilege('sb_deploy', 'auth.users', 'SELECT') then
+    raise exception 'FAIL: the deploy role still reads auth.users after SELECT was revoked from it and from service_role, so another grant reaches it and this demonstration cannot remove the dependency';
+  end if;
+  begin
+    perform fn_account_has_password('00000000-0000-4000-8000-000000000001');
+  exception when insufficient_privilege then v_denied := v_denied + 1;
+  end;
+  begin
+    perform count(*) from fn_my_email_status();
+  exception when insufficient_privilege then v_denied := v_denied + 1;
+  end;
+  grant select on auth.users to service_role;
+
+  if v_denied <> 2 then
+    raise exception 'FAIL: without SELECT on auth.users, % of the 2 runtime readers were refused, expected 2. The dependency this check documents does not behave as described, so the requirement list is wrong', v_denied;
+  end if;
+  raise notice 'demonstrated: fn_account_has_password and fn_my_email_status read auth.users as their owner, and are refused without SELECT on it';
+end
+$outer$;
+SQL
+
 # ── every object the sender reaches must be granted, not inherited ───────
 #
 # This database is the one place that can ask the question. Objects here are
@@ -464,7 +511,7 @@ cat <<'EOF'
   * member of anon, authenticated, service_role
   * member of the role owning storage.objects   (supabase_storage_admin)
   * member of the role owning realtime.messages (supabase_realtime_admin)
-  * REFERENCES on auth.users
+  * REFERENCES and SELECT on auth.users -- SELECT is read at run time
   * USAGE on auth, storage, realtime, cron
   * privileges on cron.job         -- cron.schedule() inserts as the caller
   * pgcrypto already installed
