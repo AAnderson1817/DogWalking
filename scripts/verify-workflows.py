@@ -51,60 +51,137 @@ PIN = "${{ github.event.workflow_run.head_sha || github.sha }}"
 
 
 def shell_code(script: str) -> str:
-    """A `run:` script as bash would execute it, for rule 5's deploy scan.
+    """A `run:` script reduced to the commands bash would run, for rule 5.
 
-    Comments are dropped, and the contents of quoted strings are blanked
-    (their quote marks kept, so the words either side stay separate). A
-    commented-out `# supabase functions deploy ...` used to count as the
-    workflow's deploy, flags and all, so production's invocation could be
-    commented out during troubleshooting and still vouch for itself (Codex,
-    on #100). A quoted mention, as in `echo "supabase functions deploy"`, is
-    data for the same reason.
+    What bash does before it runs anything, done here too:
+    - comments are dropped. `#` starts one only at the start of a word, so
+      `${#fns[@]}`, `$#` and `a#b` are code;
+    - a backslash-newline is removed, joining a continued command into one
+      line. Codex on #100 (round 3): `supabase functions deploy \` with its
+      flags on the next line read as a deploy with NO flags, so staging's
+      `--use-api` against production's nothing compared equal;
+    - quote marks are removed and the quoted text stays in its word, so
+      `"--use-api"` is still a flag. Whitespace and operators inside it are
+      neutralised, so a quoted `a; supabase ...` stays one word and never
+      becomes a command;
+    - heredoc bodies are skipped. They are data to the command reading
+      them, and a deploy mentioned in one used to be counted (round 3; an
+      earlier version of this docstring claimed the opposite).
 
-    `#` starts a comment only at the start of a word: at the start of a
-    line, after whitespace, or after an operator. So `${#fns[@]}`, `$#` and
-    `a#b` are code. A backslash escapes the next character outside single
-    quotes.
-
-    Stated boundary: this reads what a script says, not what bash runs. A
-    deploy inside a heredoc body, a `bash -c "..."` string, a function never
-    called or an `if false` branch is outside it. A quoted or heredoc deploy
-    that really runs is missed, which fails loudly as "no deploy" when it is
-    the workflow's only one; the silent direction, text counted as a deploy
-    that never runs, is the one closed here.
+    Stated boundary: this reads what a script says, not which branch runs.
+    A deploy in an `if false` branch or a function never called still
+    counts. A deploy run through a heredoc fed to bash, a `bash -c` string,
+    a wrapper (`timeout 300 supabase ...`) or an unquoted variable
+    (`$SB functions deploy`) is missed, which fails loudly as "no deploy"
+    when it is the workflow's only one.
     """
+    neutral = str.maketrans({ch: "_" for ch in " \t\n;&|()<>#"})
     out: list[str] = []
     i, n = 0, len(script)
     word_start = True
+    heredocs: list[tuple[str, bool]] = []  # (delimiter, strip tabs), pending until the line ends
     while i < n:
         c = script[i]
         if c == "\\" and i + 1 < n:
-            out.append(script[i : i + 2])
+            if script[i + 1] == "\n":
+                i += 2
+                continue
+            out.append(script[i + 1].translate(neutral))
             i += 2
             word_start = False
             continue
         if c == "'":
             end = script.find("'", i + 1)
-            i = n if end < 0 else end + 1
-            out.append("''")
+            end = n if end < 0 else end
+            out.append(script[i + 1 : end].translate(neutral))
+            i = end + 1
             word_start = False
             continue
         if c == '"':
-            j = i + 1
+            j, text = i + 1, []
             while j < n and script[j] != '"':
-                j += 2 if script[j] == "\\" else 1
+                if script[j] == "\\" and j + 1 < n:
+                    text.append(script[j + 1])
+                    j += 2
+                else:
+                    text.append(script[j])
+                    j += 1
+            out.append("".join(text).translate(neutral))
             i = j + 1
-            out.append('""')
             word_start = False
             continue
         if c == "#" and word_start:
             end = script.find("\n", i)
             i = n if end < 0 else end
             continue
+        if script.startswith("<<", i) and not script.startswith("<<<", i):
+            j = i + 2
+            strip_tabs = j < n and script[j] == "-"
+            j += 1 if strip_tabs else 0
+            while j < n and script[j] in " \t":
+                j += 1
+            delim: list[str] = []
+            while j < n and not script[j].isspace() and script[j] not in ";&|()<>":
+                ch = script[j]
+                if ch in "'\"":
+                    close = script.find(ch, j + 1)
+                    close = n if close < 0 else close
+                    delim.append(script[j + 1 : close])
+                    j = close + 1
+                elif ch == "\\" and j + 1 < n:
+                    delim.append(script[j + 1])
+                    j += 2
+                else:
+                    delim.append(ch)
+                    j += 1
+            heredocs.append(("".join(delim), strip_tabs))
+            out.append("<< ")
+            i = j
+            word_start = False
+            continue
+        if c == "\n" and heredocs:
+            out.append("\n")
+            i += 1
+            for delimiter, strip_tabs in heredocs:
+                while i < n:
+                    end = script.find("\n", i)
+                    end = n if end < 0 else end
+                    line = script[i:end]
+                    i = end + 1
+                    if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                        break
+            heredocs = []
+            word_start = True
+            continue
         out.append(c)
         word_start = c.isspace() or c in ";&|()<>"
         i += 1
     return "".join(out)
+
+
+# Words that may stand before a command without being one, so the command is
+# the next word: `if supabase functions deploy ...; then`.
+COMMAND_PREFIX = {"if", "then", "else", "elif", "do", "while", "until", "!", "{", "time"}
+
+
+def deploy_invocations(script: str) -> list[frozenset[str]]:
+    """The flags of every `supabase functions deploy` a run: script runs.
+
+    Only in command position: a simple command (split at newlines and
+    `; & | ( )`) whose command word, after any prefix word or `NAME=value`
+    assignment, is `supabase` followed by `functions deploy`. So
+    `echo supabase functions deploy ...` is an echo, not a deploy (Codex on
+    #100, round 3). `x=$(supabase functions deploy ...)` is a deploy: the
+    substitution runs.
+    """
+    found: list[frozenset[str]] = []
+    for segment in re.split(r"[\n;&|()]", shell_code(script)):
+        words = segment.split()
+        while words and (words[0] in COMMAND_PREFIX or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", words[0])):
+            words.pop(0)
+        if words[:3] == ["supabase", "functions", "deploy"]:
+            found.append(frozenset(m.group(0) for w in words[3:] if (m := re.match(r"--[a-z][a-z0-9-]*", w))))
+    return found
 
 
 def skip_string(expr: str, i: int) -> int | None:
@@ -367,8 +444,7 @@ def check(path: pathlib.Path) -> None:
             if uses.startswith("supabase/setup-cli@"):
                 version = str((step.get("with") or {}).get("version") or "")
                 cli_pins.append((path.name, name, uses.split("@", 1)[1].strip(), version))
-            for m in re.finditer(r"\bsupabase\s+functions\s+deploy\b([^\n;|&]*)", shell_code(str(step.get("run") or ""))):
-                flags = frozenset(re.findall(r"(?<!\S)--[a-z][a-z0-9-]*", m.group(1)))
+            for flags in deploy_invocations(str(step.get("run") or "")):
                 function_deploys.append((path.name, name, flags))
 
 
