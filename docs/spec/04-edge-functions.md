@@ -1282,7 +1282,10 @@ client, plus one on the credential metadata so the trail has something to name.
 The ciphertext column stays revoked from every API role (invariant 2). Surfaced
 read-only on the portal home as *Entry code activity*, showing no IP or user
 agent — those describe the operator's device, and a client does not need their
-walker's IP to know their door was opened.
+walker's IP to know their door was opened. Until 0056 that was a choice of
+columns in one query and nothing more: 0004's table-level SELECT covered both,
+so a client session could ask for them and get them. The grant is a column list
+now, and no API role can select either.
 
 ## billing-portal — POST, client JWT (phase 07)
 Body: none. Returns `{ url }` — a Stripe customer-portal session for

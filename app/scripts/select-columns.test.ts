@@ -30,7 +30,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { firstSelectArg } from "./column-grants.test.ts";
+import { firstSelectArg, resolveConst } from "./column-grants.test.ts";
 
 const ROOT = join(import.meta.dirname, "..", "..");
 const MIGRATIONS = join(ROOT, "supabase", "migrations");
@@ -164,27 +164,6 @@ interface Sel {
   file: string;
   table: string;
   arg: string;
-}
-
-/**
- * Resolve `.select(COLS)` where COLS is a module-level string const in the
- * same file, including one built by `+`-concatenating literals.
- *
- * Load-bearing rather than a nicety: `send-notification` selects a const, so
- * without this the gate would have skipped the exact query it was written to
- * catch and passed for the wrong reason.
- */
-export function resolveConst(src: string, name: string): string | null {
-  const re = new RegExp(`const\\s+${name}\\s*(?::[^=]+)?=\\s*([\\s\\S]*?);`, "m");
-  const m = re.exec(src);
-  if (!m) return null;
-  const expr = m[1].trim();
-  // Only a chain of string literals joined by `+`. Anything else (a call, a
-  // template with a hole, an array join) is not statically knowable, and
-  // guessing would produce false failures on healthy code.
-  const parts = expr.split("+").map((p) => p.trim());
-  if (!parts.every((p) => /^(["'`])[^"'`]*\1$/.test(p))) return null;
-  return parts.map((p) => p.slice(1, -1)).join("");
 }
 
 /** Every `from("<table>") … .select(<arg>)` in the app AND the edge functions. */
