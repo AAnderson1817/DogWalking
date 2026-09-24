@@ -12,9 +12,9 @@
 -- Control of the inbox NOW, shown by the session the request arrives on. The
 -- lift is offered only to a claimed client whose sign-in address is the
 -- suppressed address and whose current session began with a link GoTrue sent
--- to that address, opened AFTER the suppression was made. Sanpo never emails
--- a suppressed address itself: GoTrue's sign-in mail does not go through the
--- sender, so the link still arrives.
+-- to that address, opened AFTER the address last asked us to stop. Sanpo
+-- never emails a suppressed address itself: GoTrue's sign-in mail does not go
+-- through the sender, so the link still arrives.
 --
 -- GoTrue records how a session began in the access token's `amr` claim, one
 -- entry per method with the time it was used (auth-js `AMREntry`: `method`,
@@ -27,8 +27,9 @@
 -- restamping them (`internal/tokens/service.go`: the refresh grant calls
 -- `GenerateAccessToken`, which reads `CalculateAALAndAMR`; only a new session
 -- or an MFA step adds an entry). So an entry of one of those methods dated
--- after the suppression says the holder of this session opened a link from
--- that inbox after somebody asked us to stop. All read on GoTrue `master`.
+-- after the address's latest request to stop says the holder of this session
+-- opened a link from that inbox after that request. All read on GoTrue
+-- `master`.
 --
 -- The first version of this file proved ownership with `email_confirmed_at`,
 -- and a review showed why that is not enough. A confirmation is history: it
@@ -87,8 +88,26 @@
 -- the sender's own match (`fn_email_suppressed`, 0038): same operator scope,
 -- same type scope. Smoke ties the two by asking the sender after every lift.
 --
--- A later one-click unsubscribe inserts a fresh row, so a lift never weakens
--- the next opt-out, and lifting that one needs a fresh link again.
+-- ── Every opt-out moves the boundary ────────────────────────────────────
+--
+-- The link has to be newer than the address's LATEST request to stop, not
+-- its first. One-click used to write its row once and do nothing when asked
+-- again (`on conflict do nothing`, 0038), so the row kept the time of the
+-- first request, and a session whose link was opened between two requests
+-- could undo the second (Codex on #101). One-click now records every request
+-- in `last_requested_at`: a new row gets it when inserted, and a repeated
+-- request moves it on the row already there. The row's reason, and when it
+-- was first made, are kept. Rows that existed before this migration read the
+-- migration's own time, which is later than any request they record: lifting
+-- one needs a link opened after this migration. That is the safe direction,
+-- and the only one available, because the requests `do nothing` swallowed
+-- cannot be recovered.
+--
+-- The lift checks the boundary again in the statement that deletes the row,
+-- not only in the decision. A repeated request that lands between the two
+-- holds the row until it commits. The delete waits for it, reads the row it
+-- wrote, and leaves it; the lift then answers a fresh decision
+-- (`needs_link_sign_in`). `concurrency.sh` case 11c.
 --
 -- ── Whether a lift is logged ─────────────────────────────────────────────
 --
@@ -97,7 +116,8 @@
 -- when" must have an answer. Each removed row is copied into
 -- `email_suppression_lifts` in the same statement that deletes it. The row
 -- holds the address, the client it was lifted for, the account that lifted
--- it, when, and when and why the removed suppression was made. No operator
+-- it, when, and when and why the removed suppression was made and when the
+-- address last asked us to stop. No operator
 -- reads it: it belongs to the address, not to a tenant. `lifted_by` is
 -- deliberately not a foreign key: an account deleted later must not be
 -- blocked by the record of what it once did, and the claim replay's
@@ -170,6 +190,61 @@
 -- `fn_client_email_suppressed` keeps `public`, which smoke pins for it; that
 -- item moves it with the rest.
 
+-- ── 0. When the address last asked us to stop ───────────────────────────
+-- A default, not a backfill: an existing row reads this migration's time,
+-- later than any request it records (the header says why that is the safe
+-- direction). `now()` is STABLE, so it is evaluated once and stored as the
+-- column's missing value; the table is not rewritten.
+alter table email_suppressions
+  add column last_requested_at timestamptz not null default now();
+
+comment on column email_suppressions.last_requested_at is
+  'When the address last asked us to stop through this row. One-click moves it on every request, including a repeated one that finds the row already there; a lift must be newer than it (0054). Rows older than 0054 read the migration''s time.';
+
+-- `0038`'s one-click writer, with one clause changed: a repeated request
+-- moves `last_requested_at` instead of doing nothing. Built from
+-- `pg_get_functiondef` of the live function, not from 0038's text; the
+-- signature, `security definer` and `search_path` are the ones it had, and
+-- `create or replace` keeps its grants (0050's to service_role) and comment.
+create or replace function fn_unsubscribe_by_token(p_token uuid)
+returns table (o_applied boolean, o_email text)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text;
+begin
+  if not fn_is_service_session() then
+    raise exception 'fn_unsubscribe_by_token: service role required';
+  end if;
+
+  select lower(c.email) into v_email
+    from clients c
+   where c.unsubscribe_token = p_token
+     and c.email is not null;
+
+  -- Deliberately NOT an error, and deliberately indistinguishable from a
+  -- token that does exist. An unauthenticated endpoint that says "no such
+  -- token" is an oracle for guessing them, and a person who clicks
+  -- unsubscribe twice should see the same thing both times.
+  if v_email is null then
+    return query select false, null::text;
+    return;
+  end if;
+
+  insert into email_suppressions (email, operator_id, notification_type, reason)
+  values (v_email, null, null, 'one-click unsubscribe')
+  -- A repeated request is still a request: it moves the time the address last
+  -- asked us to stop, which a lift must be newer than (0054). The row, its
+  -- reason and when it was first made are kept, so a second click still
+  -- writes no second row.
+  on conflict (email, operator_id, notification_type)
+  do update set last_requested_at = now();
+
+  return query select true, v_email;
+end $$;
+
 -- ── 1. The aggregation both notices share ────────────────────────────────
 create function fn_email_fully_suppressed(p_email text, p_operator uuid)
 returns boolean
@@ -225,8 +300,11 @@ create table email_suppression_lifts (
   -- The account that lifted it. Not a foreign key: see the header.
   lifted_by uuid not null,
   lifted_at timestamptz not null default now(),
-  -- The suppression that was removed: when it was made, and why.
+  -- The suppression that was removed: when it was made, when the address
+  -- last asked us to stop (the boundary the lift was checked against), and
+  -- why.
   suppressed_at timestamptz not null,
+  last_requested_at timestamptz not null,
   suppression_reason text not null
 );
 
@@ -283,7 +361,7 @@ comment on function fn_amr_has_email_link_since(jsonb, timestamptz) is
 --   not_login_address   it is not the address this account signs in with
 --   not_confirmed       it is, but GoTrue has not confirmed it
 --   needs_link_sign_in  this session did not begin with a link sent to it
---                       and opened after the unsubscribe
+--                       and opened after the latest unsubscribe
 --   ready               the lift will remove it
 --
 -- The suppression checks compare the address exactly as the sender does:
@@ -300,7 +378,7 @@ as $$
            when c.email is null then 'no_address'
            when not fn_email_fully_suppressed(c.email, c.operator_id) then 'not_suppressed'
            -- No row that one-click wrote: nothing here is a lift's to remove.
-           when g.created_at is null then 'not_liftable'
+           when g.last_requested_at is null then 'not_liftable'
            -- Another row that also applies to this client's email: the
            -- sender's own match, without the one-click row.
            when exists (
@@ -314,7 +392,7 @@ as $$
            when u.email is null
              or lower(trim(u.email)) <> lower(trim(c.email)) then 'not_login_address'
            when u.email_confirmed_at is null then 'not_confirmed'
-           when not fn_amr_has_email_link_since(p_amr, g.created_at) then 'needs_link_sign_in'
+           when not fn_amr_has_email_link_since(p_amr, g.last_requested_at) then 'needs_link_sign_in'
            else 'ready'
          end,
          c.email,
@@ -322,7 +400,7 @@ as $$
     from clients c
     left join auth.users u on u.id = c.auth_user_id
     left join lateral (
-      select s.created_at
+      select s.last_requested_at
         from email_suppressions s
        where s.email = lower(c.email)
          and s.operator_id is null
@@ -374,6 +452,8 @@ set search_path = public, pg_temp
 as $$
 declare
   v_user uuid := (select auth.uid());
+  -- Read once: the decision and the delete judge the same session.
+  v_amr jsonb := (select auth.jwt()) -> 'amr';
   v_client uuid;
   v_state text;
   v_email text;
@@ -394,7 +474,7 @@ begin
   end if;
 
   select d.o_state, d.o_email into v_state, v_email
-    from fn_email_lift_decision(v_user, (select auth.jwt()) -> 'amr') d
+    from fn_email_lift_decision(v_user, v_amr) d
    where d.o_client = v_client;
   if not found then
     return query select 'not_client'::text, null::text;
@@ -406,34 +486,49 @@ begin
   end if;
 
   -- The address the decision validated, not a second read of the row, and
-  -- compared as the sender compares it; and the row one-click wrote, by
-  -- shape and by reason, as the decision matched it.
+  -- compared as the sender compares it; the row one-click wrote, by shape
+  -- and by reason, as the decision matched it; and only while this session's
+  -- link is still newer than the address's latest request. That last test is
+  -- repeated here because a repeated one-click request can land between the
+  -- decision and this statement: it holds the row until it commits, so this
+  -- delete waits, re-reads the row it wrote, and leaves it (the header's
+  -- section on the boundary; `concurrency.sh` case 11c).
   with lifted as (
     delete from email_suppressions s
      where s.email = lower(v_email)
        and s.operator_id is null
        and s.notification_type is null
        and s.reason = 'one-click unsubscribe'
-    returning s.email, s.created_at, s.reason
+       and fn_amr_has_email_link_since(v_amr, s.last_requested_at)
+    returning s.email, s.created_at, s.last_requested_at, s.reason
   )
   insert into email_suppression_lifts
-    (email, client_id, lifted_by, suppressed_at, suppression_reason)
-  select l.email, v_client, v_user, l.created_at, l.reason from lifted l;
+    (email, client_id, lifted_by, suppressed_at, last_requested_at, suppression_reason)
+  select l.email, v_client, v_user, l.created_at, l.last_requested_at, l.reason
+    from lifted l;
   get diagnostics v_lifted = row_count;
 
-  -- Zero here means the row went between the decision and the delete. The
-  -- client row is held, so not by another lift for this client; by something
-  -- that does not take that lock. The address is not suppressed by a row this
-  -- removes, which is what the answer says.
-  return query
-    select case when v_lifted > 0 then 'lifted' else 'not_suppressed' end, v_email;
+  if v_lifted > 0 then
+    return query select 'lifted'::text, v_email;
+    return;
+  end if;
+
+  -- Nothing was removed, so the row changed between the decision and the
+  -- delete: it went, or a repeated request moved it past this session's link.
+  -- The client row is held, so not by another lift for this client or by an
+  -- edit of the address. Decide again and answer that, rather than a state
+  -- from before the change.
+  select d.o_state into v_state
+    from fn_email_lift_decision(v_user, v_amr) d
+   where d.o_client = v_client;
+  return query select coalesce(v_state, 'not_client'), v_email;
 end $$;
 
 revoke all on function fn_lift_my_email_suppression() from public, anon, authenticated;
 grant execute on function fn_lift_my_email_suppression() to authenticated;
 
 comment on function fn_lift_my_email_suppression() is
-  'Turns email back on for the calling client''s contact address when it is the address the account signs in with and this session began with a link sent to it and opened after the unsubscribe: removes the one-click suppression and records the lift in email_suppression_lifts. Answers lifted, or the reason it did not, with the address it was about (0054).';
+  'Turns email back on for the calling client''s contact address when it is the address the account signs in with and this session began with a link sent to it and opened after the latest unsubscribe: removes the one-click suppression and records the lift in email_suppression_lifts. Answers lifted, or the reason it did not, with the address it was about (0054).';
 
 -- ── 6. An erased client's lifts go with them ─────────────────────────────
 -- A trigger, as 0049's `fn_forget_purged_push_subscriptions` is, rather than

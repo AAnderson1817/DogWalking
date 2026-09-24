@@ -252,16 +252,21 @@ lowercased and not trimmed, and the sender compares it the same way),
 `operator_id uuid null references operators on delete cascade` (null = every
 operator),
 `notification_type notification_type null` (null = every type), `reason text`,
-`created_at timestamptz`. Unique on `(email, operator_id, notification_type)`
-with `NULLS NOT DISTINCT`. One-click unsubscribe (`fn_unsubscribe_by_token`)
-writes the platform-wide, every-type row; nothing writes the narrower kinds yet.
+`created_at timestamptz`, `last_requested_at timestamptz not null default now()`
+(0054: when the address last asked to stop through this row, which a lift must
+be newer than; rows older than 0054 read the migration's time). Unique on
+`(email, operator_id, notification_type)` with `NULLS NOT DISTINCT`. One-click
+unsubscribe (`fn_unsubscribe_by_token`) writes the platform-wide, every-type row,
+and on a repeated request moves that row's `last_requested_at` instead of
+writing a second one; nothing writes the narrower kinds yet.
 It survives a client's erasure on purpose (spec 03).
 
 **email_suppression_lifts** — `email text` (`check (email = lower(email))`),
 `client_id uuid references clients on delete cascade` (the client it was lifted
 for), `lifted_by uuid` (the account that lifted it; deliberately not a foreign
 key), `lifted_at timestamptz`, and the suppression it replaced: `suppressed_at
-timestamptz`, `suppression_reason text`. Written only by
+timestamptz`, `last_requested_at timestamptz` (the boundary the lift was checked
+against), `suppression_reason text`. Written only by
 `fn_lift_my_email_suppression`, in the statement that deletes the row it
 records, and readable by the service role alone. Deleted, by
 `trg_clients_forget_email_lifts`, when that client is erased: keyed on the

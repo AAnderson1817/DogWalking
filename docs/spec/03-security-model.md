@@ -769,9 +769,11 @@ operator can never lift one; the address owner can, and the proof of ownership
 is control of the inbox NOW, shown by the session the request arrives on. The
 caller must be the claimed client whose contact address is their own sign-in
 address, and the access token's `amr` claim must record an emailed link or code
-opened after the suppression was made: `otp` in the implicit flow this app uses,
-or the PKCE names `magiclink`, `recovery`, `email/signup`, `invite` and
-`email_change` (GoTrue `internal/api/verify.go`, read on `master`). Refreshing a
+opened after the address last asked us to stop (`last_requested_at`, which
+one-click moves on every request, a repeated one included): `otp` in the
+implicit flow this app uses, or the PKCE names `magiclink`, `recovery`,
+`email/signup`, `invite` and `email_change` (GoTrue `internal/api/verify.go`,
+read on `master`). Refreshing a
 token rebuilds the claim from the session's stored entries without restamping
 them (`internal/tokens/service.go`), so the entry dates the link, not the last
 refresh. Sanpo never emails a suppressed address itself; GoTrue's sign-in mail
@@ -802,8 +804,13 @@ replaced), a table no API role can read or write and the service role may only
 read. An erased client's records go with the rest of the record, keyed on the
 client (above). The lift takes the client row `for no key update` before it
 decides, so a lift and an erasure of the same client serialize in either order
-(`concurrency.sh` case 11). The suppression list itself survives erasure, as it
-always has: erasing a record must never start email to an address again.
+(`concurrency.sh` cases 11a and 11b). It checks the session against the latest
+request twice, in the decision and again in the statement that deletes the row,
+so a repeated request that lands between the two wins (case 11c). One-click
+used to do nothing on a repeated request, which left the row at its first
+request's time and let a session opened between two requests undo the second.
+The suppression list itself survives erasure, as it always has: erasing a
+record must never start email to an address again.
 
 What a client can learn: `fn_my_email_status` answers about the client's own
 contact address, and a client may edit that field (`clients_self_update`), so,

@@ -1432,8 +1432,9 @@ Three deliberate non-features:
 - **It takes no other input.** No address, no client id, no scope. A public
   endpoint that accepts an address is a way to unsubscribe somebody else.
 - **It is not rate-limited.** A valid token only ever suppresses its own
-  address and the operation is idempotent, so there is nothing to gain by
-  calling it repeatedly.
+  address. A repeated call writes no second row and only moves the time the
+  address last asked to stop (0054), which is what one call already records,
+  so there is nothing to gain by calling it repeatedly.
 
 Suppression is keyed on the **address**, not the client, and defaults to every
 operator and every type. The wrong recipient has no client row of their own, so
@@ -1541,11 +1542,12 @@ would refuse. It is `ready` only when all of these hold:
   compared lowercased and trimmed as the claim ladders compare);
 - GoTrue has confirmed that address (`email_confirmed_at`);
 - the session began with a link or code GoTrue emailed to it, opened after the
-  one-click row was made: the access token's `amr` claim records `otp` (the
-  implicit flow this app uses) or one of `magiclink`, `recovery`,
-  `email/signup`, `invite`, `email_change` (PKCE), dated after the row. A
-  refreshed token keeps the original date. A password, a TOTP code or an
-  anonymous sign-in is not such a link.
+  address last asked us to stop: the access token's `amr` claim records `otp`
+  (the implicit flow this app uses) or one of `magiclink`, `recovery`,
+  `email/signup`, `invite`, `email_change` (PKCE), dated after the row's
+  `last_requested_at`, which one-click moves on every request, a repeated one
+  included. A refreshed token keeps the original date. A password, a TOTP code
+  or an anonymous sign-in is not such a link.
 
 Otherwise it answers why, in this order: `no_address`, `not_suppressed`,
 `not_liftable` (no one-click row, or another row that applies),
@@ -1560,16 +1562,22 @@ about.
 A lift takes the client row `for no key update`, then deletes only the one-click
 row for the address the decision checked, compared exactly as the sender
 compares (lowercased, not trimmed), and copies it into `email_suppression_lifts`
-in the same statement: the address, the client, the account, and when and why
-the suppression was made. That table is the consent record for mailing an
+in the same statement: the address, the client, the account, when and why the
+suppression was made, and when the address last asked to stop. That table is
+the consent record for mailing an
 address that once asked us to stop, which no API role can read and the service
 role can only read, and it goes when that client is erased
 (`fn_forget_purged_email_lifts`, keyed on the client). The row lock makes a lift
 and an erasure of the same client wait for each other (`concurrency.sh` case 11).
 The lift answers with the address it decided on, and the portal names that
 address, since the contact address can change between the offer and the press.
-The next one-click unsubscribe writes a fresh row, and lifting it needs a fresh
-link again: a lift never undoes a later opt-out.
+A later one-click request, whether it writes a fresh row or finds one already
+there, moves the boundary, and lifting it needs a fresh link again: a lift never
+undoes a later opt-out. The delete checks the boundary again itself, so a request
+that lands between the decision and the delete wins (`concurrency.sh` case 11c).
+One-click used to do nothing on a repeated request, which left the row at its
+first request's time and let a session opened between two requests undo the
+second.
 
 **Stated limits.** The session proof does not rest on GoTrue's confirmation
 setting or on anonymous sign-ins being off: an account confirmed without a
