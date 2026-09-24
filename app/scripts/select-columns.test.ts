@@ -202,7 +202,7 @@ describe("every selected column exists", () => {
       "email_claimed_at", "email_last_error", "email_sent_at", "email_status",
       "id", "operator_id", "push_attempts", "push_claim_token",
       "push_claimed_at", "push_last_error", "push_sent_at", "push_status",
-      "read_at", "title", "type", "updated_at", "walk_id",
+      "read_at", "subject_client_id", "title", "type", "updated_at", "walk_id",
     ]);
     // The trap this file is named after: the ENUM TYPE 0029 created shares a
     // prefix with the column and is NOT one.

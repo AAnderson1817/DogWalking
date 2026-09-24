@@ -4,6 +4,7 @@
 // notification → low-credit check → Realtime broadcast. Idempotent: re-POST
 // on a completed walk returns the stored result without re-billing.
 
+import type { NotificationRow } from "../_lib/notification_row.ts";
 import { HttpError } from "../_lib/http.ts";
 
 export interface CompleteWalkBody {
@@ -51,14 +52,7 @@ export interface CompleteWalkDeps {
   getOveragePayment(
     walkId: string,
   ): Promise<{ amount_pence: number; status: string } | null>;
-  insertNotification(row: {
-    operator_id: string;
-    client_id: string | null;
-    type: string;
-    title: string;
-    body: string;
-    walk_id: string | null;
-  }): Promise<void>;
+  insertNotification(row: NotificationRow): Promise<void>;
   /** True when a walk_complete notification already exists for the walk. */
   hasCompleteNotification(walkId: string): Promise<boolean>;
   notifyLowCredit(clientId: string): Promise<boolean>;
@@ -93,6 +87,7 @@ export async function completeWalk(
       await deps.insertNotification({
         operator_id: walk.operator_id,
         client_id: walk.client_id,
+        subject_client_id: walk.client_id,
         type: "walk_complete",
         title: "Walk complete",
         body: "Your walk report card is ready.",
@@ -142,6 +137,7 @@ export async function completeWalk(
   await deps.insertNotification({
     operator_id: walk.operator_id,
     client_id: walk.client_id,
+    subject_client_id: walk.client_id,
     type: "walk_complete",
     title: "Walk complete",
     body: "Your walk report card is ready.",

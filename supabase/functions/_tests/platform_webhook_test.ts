@@ -3,6 +3,8 @@
 // the failure modes pinned here: a Connect event reaching this endpoint is
 // ignored before any effect, a dunning redelivery rings no second bell, and
 // an unfinished checkout never downgrades a live subscription.
+import { checkSubject } from "./notification_subject.ts";
+import type { NotificationRow } from "../_lib/notification_row.ts";
 import { assert, assertEquals, assertRejects } from "./asserts.ts";
 import {
   assertFilterSafeId,
@@ -60,7 +62,8 @@ function makeDeps(opts: {
       },
       insertNotification(row) {
         recorded.push({ call: "insertNotification", args: [row] });
-        return Promise.resolve();
+        // The walker's own Sanpo subscription: a notice about no client.
+        return checkSubject(row, null);
       },
     },
   };
@@ -87,8 +90,8 @@ function makeStatefulDeps(row: {
     platform_subscription_id: string | null;
     platform_subscription_status: string;
   }) => void;
-} = {}): { deps: PlatformWebhookDeps; row: typeof row; bells: Array<Record<string, unknown>> } {
-  const bells: Array<Record<string, unknown>> = [];
+} = {}): { deps: PlatformWebhookDeps; row: typeof row; bells: NotificationRow[] } {
+  const bells: NotificationRow[] = [];
   let findSeen = false;
   const raced = <T>(v: T): T => {
     if (!findSeen) {
@@ -134,7 +137,7 @@ function makeStatefulDeps(row: {
       },
       insertNotification(r) {
         bells.push(r);
-        return Promise.resolve();
+        return checkSubject(r, null);
       },
     },
   };

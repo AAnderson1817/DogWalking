@@ -2,6 +2,7 @@
 // (mocked deps). The claim redesign (0013) is pinned here: duplicates of an
 // unfinished claim are NOT acked, failures leave the claim re-processable,
 // and invoice effects are atomic behind applyInvoicePaid.
+import { checkSubject } from "./notification_subject.ts";
 import { assert, assertEquals, assertFalse, assertRejects } from "./asserts.ts";
 import {
   handleStripeEvent,
@@ -119,7 +120,8 @@ function makeMockDeps(
     },
     insertNotification(row) {
       calls.push({ fn: "insertNotification", args: [row] });
-      return Promise.resolve();
+      // Every notice this webhook writes is about the fixture's client.
+      return checkSubject(row, "client-1");
     },
     findPaymentForReversal(ref) {
       calls.push({ fn: "findPaymentForReversal", args: [ref] });

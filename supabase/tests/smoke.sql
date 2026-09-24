@@ -7521,6 +7521,190 @@ begin
   raise notice 'the entry-code trail reads without the walker''s IP address or device, for both personas (0056): OK';
 end $$;
 
+-- ═══ An erasure removes the walker's notices about the client (0057) ════
+-- An operator-facing notification carries client_id NULL (that is how RLS
+-- knows the walker may read it), so a row about a client recorded that
+-- client only in its words, and fn_purge_client, deleting by client_id,
+-- left "Jane Doe is low on credits" in the walker's inbox after Jane's
+-- record had been erased on request. Each SQL writer that names a client is
+-- exercised here, plus a row shaped as the Stripe webhook writes it; the
+-- purge must remove every one of them and nothing belonging to another
+-- client.
+do $$
+declare
+  v_op     uuid := '99999999-0000-4000-a000-0000000057a1';
+  v_user   uuid := '99999999-0000-4000-a000-0000000057c1';
+  v_client uuid := '99999999-0000-4000-c000-0000000057c1';
+  v_other  uuid := '99999999-0000-4000-c000-0000000057c2';
+  v_prop   uuid := '99999999-0000-4000-d000-0000000057d1';
+  v_walk   uuid;
+  v_n      int;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  insert into auth.users (id, email) values
+    (v_op, 'n57-op@sanpo.test'), (v_user, 'n57-client@sanpo.test');
+  insert into operators (id, business_name, display_name, email)
+    values (v_op, 'N57 Walks', 'N57', 'n57-op@sanpo.test');
+  insert into clients (id, operator_id, full_name, email, auth_user_id, credit_balance)
+    values (v_client, v_op, 'Wilhelmina Erasure', 'n57-client@sanpo.test', v_user, 0),
+           (v_other,  v_op, 'Theodora Keeps',     'n57-other@sanpo.test',  null,   0);
+  insert into properties (id, operator_id, client_id, label, address_line1, city, postcode)
+    values (v_prop, v_op, v_client, 'Home', '1 N57 St', 'Chicago', '60601');
+
+  -- 1. The SQL writer whose rows name no walk: the low-credit notice.
+  perform fn_notify_low_credit(v_client);
+  perform fn_notify_low_credit(v_other);
+
+  -- 2. The walk trigger's notice: the client booking a walk themselves is what
+  -- makes it write "<name> booked a walk" for the walker.
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_user), true);
+  insert into walks (operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status)
+  select v_op, v_client, v_prop, st.id, current_date + 3, '10:00', '11:00', 'scheduled'
+    from service_types st where st.operator_id = v_op and st.is_default
+  returning id into v_walk;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+
+  -- 3. A row as the Stripe webhook writes it: no walk, the subject named.
+  insert into notifications (operator_id, client_id, subject_client_id, type, title, body)
+    values (v_op, null, v_client, 'card_saved', 'Wilhelmina Erasure saved a card',
+            'Wilhelmina Erasure can now be charged for visits their credits do not cover.');
+
+  -- The premise: the walker holds notices naming the client, from all three.
+  select count(*) into v_n from notifications
+   where operator_id = v_op and client_id is null
+     and (title like '%Wilhelmina Erasure%' or body like '%Wilhelmina Erasure%');
+  if v_n <> 3 then
+    raise exception 'FAIL: precondition — expected 3 of the walker''s notices to name the client, found %', v_n;
+  end if;
+
+  -- The fill: every one of them now says who it is about.
+  if exists (select 1 from notifications
+              where operator_id = v_op
+                and (title like '%Wilhelmina Erasure%' or body like '%Wilhelmina Erasure%')
+                and subject_client_id is distinct from v_client) then
+    raise exception 'FAIL: a notice naming the client does not record that it is about them';
+  end if;
+
+  -- Erase, as the walker does.
+  set local role authenticated;
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  perform count(*) from fn_purge_client(v_client);
+  reset role;
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+
+  select count(*) into v_n from notifications
+   where operator_id = v_op
+     and (title like '%Wilhelmina%' or body like '%Wilhelmina%');
+  if v_n > 0 then
+    raise exception 'FAIL: % of the walker''s notices still name the client after the erasure', v_n;
+  end if;
+  if exists (select 1 from notifications where subject_client_id = v_client) then
+    raise exception 'FAIL: a notice about the erased client survived the erasure';
+  end if;
+
+  -- And nothing about the other client went with it: their own notice and
+  -- the walker's notice about them are both still there.
+  select count(*) into v_n from notifications where subject_client_id = v_other;
+  if v_n <> 2 then
+    raise exception 'FAIL: erasing one client removed notices about another (% of 2 left)', v_n;
+  end if;
+
+  raise notice 'an erasure removes the walker''s notices about the client, and only theirs (0057): OK';
+end $$;
+
+-- The subject is checked on the way in: a wrong one would make an erasure
+-- delete another client's notices and keep this one's.
+do $$
+declare
+  v_op     uuid := '99999999-0000-4000-a000-0000000057a1';
+  v_foreign_client uuid;
+  v_client uuid := '99999999-0000-4000-c000-0000000057c2';
+  v_walk   uuid;
+  v_msg    text;
+begin
+  perform set_config('request.jwt.claims', '{"role":"service_role"}', true);
+  select id into v_foreign_client from clients where operator_id <> v_op limit 1;
+  select id into v_walk from walks where operator_id = v_op limit 1;
+
+  -- A client-facing row is about its own client, filled in by the trigger.
+  insert into notifications (operator_id, client_id, type, title, body)
+    values (v_op, v_client, 'renewal_upcoming', 'Your plan renews soon', 'b');
+  if not exists (select 1 from notifications
+                  where client_id = v_client and type = 'renewal_upcoming'
+                    and subject_client_id = v_client) then
+    raise exception 'FAIL: a client-facing notice did not record its own client as its subject';
+  end if;
+
+  begin
+    insert into notifications (operator_id, client_id, subject_client_id, type, title, body)
+      values (v_op, null, v_foreign_client, 'card_saved', 't', 'b');
+    raise exception 'FAIL: a notice was filed about another walker''s client';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    if v_msg like 'FAIL:%' then raise; end if;
+    if v_msg not like 'tenant consistency: notification subject must belong to operator%' then
+      raise exception 'FAIL: a foreign subject was refused for the wrong reason: %', v_msg;
+    end if;
+  end;
+
+  begin
+    insert into notifications (operator_id, client_id, subject_client_id, type, title, body)
+      values (v_op, v_client, '99999999-0000-4000-c000-0000000057c1', 'low_credit', 't', 'b');
+    raise exception 'FAIL: a client-facing notice was filed about a different client';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    if v_msg like 'FAIL:%' then raise; end if;
+    if v_msg not like '%a client-facing notification is about its own client%' then
+      raise exception 'FAIL: a mismatched client-facing subject was refused for the wrong reason: %', v_msg;
+    end if;
+  end;
+
+  -- A row naming a walk is about the walk's client, filled in the same way,
+  -- and a subject that disagrees with the walk is refused.
+  select id into v_walk from walks
+   where client_id = '99999999-0000-4000-c000-0000000057c1' limit 1;
+  if v_walk is null then
+    raise exception 'FAIL: precondition — the previous block''s walk is missing';
+  end if;
+  insert into notifications (operator_id, client_id, type, title, body, walk_id)
+    values (v_op, null, 'walk_cancelled', 't', 'b', v_walk);
+  if not exists (select 1 from notifications
+                  where walk_id = v_walk and client_id is null and type = 'walk_cancelled'
+                    and subject_client_id = '99999999-0000-4000-c000-0000000057c1') then
+    raise exception 'FAIL: a notice naming a walk did not record the walk''s client as its subject';
+  end if;
+  begin
+    insert into notifications (operator_id, client_id, subject_client_id, type, title, body, walk_id)
+      values (v_op, null, v_client, 'walk_cancelled', 't', 'b', v_walk);
+    raise exception 'FAIL: a notice was filed about a client other than the one its walk belongs to';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    if v_msg like 'FAIL:%' then raise; end if;
+    if v_msg not like '%the walk it names belongs to client%' then
+      raise exception 'FAIL: a subject disagreeing with the walk was refused for the wrong reason: %', v_msg;
+    end if;
+  end;
+
+  -- An update that touches none of those columns is not re-checked: marking a
+  -- notification read must not fail on a subject check. The row below is
+  -- written with the trigger off, so it is one the check would refuse.
+  alter table notifications disable trigger trg_notifications_subject;
+  insert into notifications (operator_id, client_id, subject_client_id, type, title, body, walk_id)
+    values (v_op, null, v_client, 'walk_cancelled', 'n57 skip', 'b', v_walk);
+  alter table notifications enable trigger trg_notifications_subject;
+  begin
+    update notifications set read_at = now() where title = 'n57 skip';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    raise exception 'FAIL: marking a notification read re-ran the subject check: %', v_msg;
+  end;
+
+  raise notice 'a notification''s subject is filled from what the row records, and checked (0057): OK';
+end $$;
+
 rollback;
 
 do $$ begin raise notice 'SMOKE PASS'; end $$;

@@ -377,6 +377,7 @@ export type Database = {
           push_claimed_at: string | null;
           email_claim_token: string | null;
           push_claim_token: string | null;
+          subject_client_id: string | null;
         };
         Insert: {
           id?: string;
@@ -401,6 +402,7 @@ export type Database = {
           push_claimed_at?: string | null;
           email_claim_token?: string | null;
           push_claim_token?: string | null;
+          subject_client_id?: string | null;
         };
         Update: {
           id?: string;
@@ -425,6 +427,7 @@ export type Database = {
           push_claimed_at?: string | null;
           email_claim_token?: string | null;
           push_claim_token?: string | null;
+          subject_client_id?: string | null;
         };
         Relationships: [];
       };
@@ -1523,6 +1526,10 @@ export type Database = {
         Returns: Array<{ id: string; email_status: Database["public"]["Enums"]["email_delivery_status"]; email_attempts: number; created_at: string }>;
       };
       fn_notification_claim_lease: {
+        Args: Record<string, never>;
+        Returns: unknown;
+      };
+      fn_notification_subject: {
         Args: Record<string, never>;
         Returns: unknown;
       };
