@@ -250,7 +250,8 @@ it. The owner's `4c45ab1` had already moved staging's function deploy to
 `--use-api` while production stayed on the Docker bundler. Each of the two
 deploy workflows must show rule 5 its own pin and its own function deploy, so
 neither can vouch for the other: counted across all workflows, staging's alone
-once satisfied it (Codex, on #100).
+once satisfied it (Codex, on #100). A `run:` block is read as shell, so a
+commented-out or quoted `supabase functions deploy` is not a deploy.
 
 ## 10d. CLAUDE.md's counts match the tree
 ```

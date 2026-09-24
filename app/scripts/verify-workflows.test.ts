@@ -84,7 +84,9 @@ function deploying(job: string, opts: Deploying = {}): string {
     if (version !== null) lines.push("        with:", `          version: ${version}`);
   }
   const run = command ?? (deploy ? `supabase functions deploy ${flags} --project-ref x`.replace(/ {2,}/g, " ") : "echo nothing to deploy");
-  lines.push(`      - run: ${run}`);
+  // A block scalar, as the real workflows write it: a plain scalar starting
+  // with `#` would be a YAML comment, and the step would have no run at all.
+  lines.push("      - run: |", ...run.split("\n").map((line) => `          ${line}`));
   return `${lines.join("\n")}\n`;
 }
 
@@ -287,6 +289,32 @@ describe("verify-workflows rule 5: production runs the CLI and the deploy path s
     const run = verify(CHAINED, two({}, { run: "${SB:-supabase} functions deploy --use-api --project-ref x" }));
     expect(run.out).toContain("rule 5 read no `supabase functions deploy` in deploy-production.yml");
     expect(run.status).toBe(1);
+  });
+
+  it("reads a run block as shell: a commented-out or quoted deploy is not a deploy (Codex, on #100)", () => {
+    const shapes = {
+      "commented out": "# supabase functions deploy --use-api --project-ref x\necho deploy skipped",
+      "trailing comment": "echo skipped # supabase functions deploy --use-api --project-ref x",
+      "double-quoted": 'echo "supabase functions deploy --use-api --project-ref x"',
+      "single-quoted": "echo 'supabase functions deploy --use-api --project-ref x'",
+    };
+    for (const [shape, run] of Object.entries(shapes)) {
+      const result = verify(CHAINED, two({}, { run }));
+      expect(result.out, shape).toContain("rule 5 read no `supabase functions deploy` in deploy-production.yml");
+      expect(result.status, shape).toBe(1);
+    }
+  });
+
+  it("keeps the code around a comment or a quote: `${#x}`, `a#b` and a quoted argument are not comments or mentions", () => {
+    // One line, so a stripper that cuts at any `#` loses the deploy with it.
+    const run = [
+      'n=${#fns[@]}; echo a#b; if supabase functions deploy --use-api --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"; then # retried below',
+      "  echo deployed",
+      "fi",
+    ].join("\n");
+    const result = verify(CHAINED, two({ run }, { run }));
+    expect(result.out).toMatch(/^PASS: .*one function-deploy path \(2 deploys\)/m);
+    expect(result.status).toBe(0);
   });
 
   it("refuses either deploy workflow showing no CLI pin or no function deploy of its own", () => {
