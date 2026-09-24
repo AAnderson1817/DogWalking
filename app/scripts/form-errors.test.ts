@@ -123,8 +123,11 @@ function moduleOf(specifier: string, file: string): string | undefined {
  * member, a string — is null.
  */
 function approvedAs(type: ts.Node, file: string, checker: ts.TypeChecker): string | null {
-  if (!ts.isIdentifier(type)) return null;
-  const decl = checker.getSymbolAtLocation(type)?.declarations?.[0];
+  // Read through what hands a value on, as every other value is: a wrapped
+  // `createElement((StateField), …)` renders StateField (Codex, on #97).
+  const id = ts.isExpression(type) ? unwrapValue(type) : type;
+  if (!ts.isIdentifier(id)) return null;
+  const decl = checker.getSymbolAtLocation(id)?.declarations?.[0];
   if (!decl || !ts.isImportSpecifier(decl) || typeOnlySpecifier(decl)) return null;
   const spec = decl.parent.parent.parent.moduleSpecifier;
   if (!ts.isStringLiteral(spec)) return null;
@@ -280,6 +283,26 @@ function objectsOf(node: ts.Expression, resolve: Resolve, seen = new Set<ts.Node
     }
   }
   return undefined;
+}
+
+/**
+ * The object literals WRITTEN in an expression: the shapes `objectsOf`
+ * follows, without following a name to its binding. A literal written where
+ * it is applied can be applied nowhere else; one reached through a name can.
+ */
+function inlineObjects(node: ts.Expression): ts.ObjectLiteralExpression[] {
+  if (ts.isObjectLiteralExpression(node)) return [node];
+  const inner = through(node);
+  if (inner) return inlineObjects(inner);
+  if (ts.isConditionalExpression(node)) return [...inlineObjects(node.whenTrue), ...inlineObjects(node.whenFalse)];
+  if (ts.isBinaryExpression(node)) {
+    const op = node.operatorToken.kind;
+    if (op === ts.SyntaxKind.AmpersandAmpersandToken) return inlineObjects(node.right);
+    if (op === ts.SyntaxKind.BarBarToken || op === ts.SyntaxKind.QuestionQuestionToken) {
+      return [...inlineObjects(node.left), ...inlineObjects(node.right)];
+    }
+  }
+  return [];
 }
 
 /** The name a function can be used under as a JSX tag, if it has one. */
@@ -680,20 +703,33 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
   // unreadable; a method or a setter supplies no string at all. A spread
   // whose objects the scan cannot see could carry either attribute, so it is
   // judged as both — unless it forwards the component's own props.
-  const visitSpread = (owner: string, expr: ts.Expression, site: ts.Node, seen = new Set<ts.Node>()) => {
+  //
+  // A literal WRITTEN where an approved component is applied —
+  // `createElement(StateField, { role: "alert" })`, `<StateField {...{ role:
+  // "alert" }} />` — can be applied nowhere else, so it is judged there, once,
+  // with that owner, and the pass over every object literal below skips it
+  // (Codex, on #97: that pass judged it again with no owner, refusing a
+  // spelling of `<StateField role="alert" />`). A literal reached through a
+  // name is judged where it is written too, since another use of the name may
+  // apply it elsewhere; so is one written inside such a literal.
+  const judgedWithOwner = new Set<ts.Node>();
+  const visitSpread = (owner: string, expr: ts.Expression, site: ts.Node, seen = new Set<ts.Node>(), written = true) => {
     const objects = objectsOf(expr, resolve);
     if (objects === undefined) {
       if (!forwardsProps(expr, checker)) for (const each of ["role", "aria-live"]) visitProps(owner, each, expr, site);
       return;
     }
+    const inPlace = new Set<ts.Node>(written ? inlineObjects(expr) : []);
     for (const obj of objects) {
       if (seen.has(obj)) continue;
       seen.add(obj);
+      const here = inPlace.has(obj);
+      if (here && Object.hasOwn(APPROVED, owner)) judgedWithOwner.add(obj);
       for (const prop of obj.properties) {
         if (ts.isPropertyAssignment(prop)) visitMember(owner, prop.name, prop.initializer, site);
         else if (ts.isShorthandPropertyAssignment(prop)) visitProps(owner, prop.name.text, prop.name, site);
         else if (ts.isGetAccessorDeclaration(prop)) visitMember(owner, prop.name, prop, site);
-        else if (ts.isSpreadAssignment(prop)) visitSpread(owner, prop.expression, site, seen);
+        else if (ts.isSpreadAssignment(prop)) visitSpread(owner, prop.expression, site, seen, here);
       }
     }
   };
@@ -725,9 +761,9 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
       if (factoryCall(node) === "maybe") {
         for (const f of findings.slice(before)) f.note = "a call through a member the scan cannot read, judged as the element factory it could be";
       }
-    } else if (ts.isPropertyAssignment(node)) {
+    } else if (ts.isPropertyAssignment(node) && !judgedWithOwner.has(node.parent)) {
       visitMember(null, node.name, node.initializer, node);
-    } else if (ts.isShorthandPropertyAssignment(node)) {
+    } else if (ts.isShorthandPropertyAssignment(node) && !judgedWithOwner.has(node.parent)) {
       // `{ role }`: the value is the binding of the same name.
       visitProps(null, node.name.text, node.name, node);
     }
@@ -1134,6 +1170,43 @@ describe("what the scan refuses and admits", () => {
     // The components themselves keep them.
     expect(rules(APPROVED_IMPORTS + `createElement(StateField, { role: getRole() });`)).toEqual([]);
     expect(rules(APPROVED_IMPORTS + `createElement(FormError, { message: m, className: "claim-invite__error" });`)).toEqual([]);
+  });
+
+  it("judges props written inline for an approved component once, with that owner (Codex, on #97)", () => {
+    // `createElement(StateField, { role: "alert" })` is `<StateField
+    // role="alert" />`: the call judged it with its owner, and the pass over
+    // every object literal judged it again with none. So did a spread written
+    // in place, the JSX spelling of the same props.
+    expect(rules(APPROVED_IMPORTS + `createElement(StateField, { role: "alert", title: "x" });`)).toEqual([]);
+    expect(rules(APPROVED_IMPORTS + `jsx(StateField, { role: "alert", title: "x" });`)).toEqual([]);
+    expect(rules(APPROVED_IMPORTS + `export const X = () => <StateField {...{ role: "alert" }} title="x" />;`)).toEqual([]);
+    expect(rules(APPROVED_IMPORTS + `createElement(StateField, { ...{ role: "alert" }, title: "x" });`)).toEqual([]);
+    expect(rules(APPROVED_IMPORTS + `createElement(StateField, big ? { role: "alert" } : { role: "status" });`)).toEqual([]);
+    expect(rules(APPROVED_IMPORTS + `createElement(StateField, ({ role: "alert", title: "x" } as Props));`)).toEqual([]);
+    // The element type is read through what hands its value on, as every
+    // other value is: a wrapped StateField is StateField.
+    expect(rules(APPROVED_IMPORTS + `createElement((StateField), { role: getRole() });`)).toEqual([]);
+    expect(rules(APPROVED_IMPORTS + `createElement(StateField as any, { role: getRole() });`)).toEqual([]);
+    expect(rules(APPROVED_IMPORTS + `createElement((0, StateField), { role: getRole() });`)).toEqual([]);
+    // Judged once, not waved through: FormError carries no role, so its
+    // inline props are still refused, at the call.
+    expect(rules(APPROVED_IMPORTS + `createElement(FormError, { role: "alert", message: m });`)).toEqual(["role"]);
+    // A string names a host element, so it takes no owner and both passes judge it.
+    expect(rules(`createElement("StateField", { role: "alert" });`)).toEqual(["role", "role"]);
+    // A literal reached through a name is judged where it is written too, since
+    // another use of the name may apply it elsewhere; the remedy is to write
+    // the role on StateField, as above. That holds for a literal spread inside one.
+    expect(rules(APPROVED_IMPORTS + `const props = { role: "alert" }; export const X = () => <StateField {...props} title="x" />;`))
+      .toEqual(["role"]);
+    expect(rules(APPROVED_IMPORTS + `const p = { ...{ role: "alert" } }; export const X = () => <StateField {...p} title="x" />;`))
+      .toEqual(["role"]);
+    // The walk is one pass in source order, so a name used before it is
+    // declared is the order that tests the rule: written first, the literal
+    // would be judged before any owner was recorded, whatever the rule said.
+    expect(rules(APPROVED_IMPORTS + `export const X = () => <StateField {...props} title="x" />; const props = { role: "alert" };`))
+      .toEqual(["role"]);
+    expect(rules(APPROVED_IMPORTS + `export const X = () => <StateField {...p} title="x" />; const p = { ...{ role: "alert" } };`))
+      .toEqual(["role"]);
   });
 
   it("gives the exemptions to the approved components by binding, not by spelling (Codex, on #97)", () => {
