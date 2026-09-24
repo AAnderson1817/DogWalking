@@ -128,6 +128,19 @@ Stripe webhook's subscription status, the ledger's balance), so its rule is
 about the personal columns only. The credential row takes its writes through
 `fn_write_credential`, which can refuse an erased client's property itself.
 
+### 7. A walk deleted through the API leaves its photos with no name
+`0058` made the rows the index of the photo folders: an erasure finds a
+client's photos through the folders of their walks and pets. A pet row can no
+longer be deleted (`trg_pets_erased`, Codex's third round on PR #106), and
+most walks cannot be either, since the ledger, payments, notices and the
+entry-code log hold them with RESTRICT keys. But `authenticated` holds DELETE
+on `walks` (0004), and a walk with none of those rows, such as one still in
+progress, can be deleted through the API. Its `walk_photos` rows cascade away
+and its objects stay in Storage with nothing that names them, so a later
+erasure of the client cannot find them. Nothing in the product deletes a
+walk. The fix is the pet rule's shape: refuse deleting a walk whose folder
+could hold photos, or revoke the grant, which nothing uses.
+
 ## Done
 
 - **An erasure removes every photo, and says when it has finished** —

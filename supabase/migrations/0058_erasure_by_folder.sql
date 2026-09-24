@@ -50,11 +50,15 @@
 -- And a pet's tombstone stays one. An edit sheet left open in another tab
 -- while the erasure ran would otherwise save the pet's name and medical notes
 -- straight back into it, and the status, which counts photos, would still
--- read finished. A trigger refuses that save, a new pet for an erased client,
--- and the deletion of an erased client's pet (the last section below).
+-- read finished. A trigger refuses that save and a new pet for an erased
+-- client, and it refuses the deletion of any pet, erased or not (the last
+-- section below).
 --
--- What this cannot find: a photo in the folder of a pet or walk whose row was
--- deleted outside the product. Nothing in the app deletes either, and an
+-- What this cannot find: a photo in the folder of a walk whose row was
+-- deleted outside the product. Nothing in the app deletes a walk, and most
+-- cannot be: the ledger, payments, notices and the entry-code log hold them
+-- with RESTRICT keys. One with none of those, such as a walk still in
+-- progress, can still be deleted through the API (docs/dev/backlog.md). An
 -- object names no client, so there is nothing to attribute it by.
 --
 -- ── Reading storage.objects ──────────────────────────────────────────────
@@ -303,9 +307,18 @@ delete from walk_photos wph
 -- ── A pet's tombstone stays one ──────────────────────────────────────────
 -- The operator policy on pets reads only `operator_id`, so nothing in the
 -- database stopped a save from a tab opened before the erasure (Codex on PR
--- #106). An erased client's pet does not change, no pet arrives at an erased
--- client, and an erased client's pet is never deleted: its row is its photo
--- folder's only name.
+-- #106). An erased client's pet does not change, and no pet arrives at an
+-- erased client.
+--
+-- No pet is deleted, erased or not: its row is its photo folder's only name.
+-- Refusing only an erased client's pet read the client unlocked, and an
+-- erasure between locking the client and redacting the pets had not yet
+-- marked it, so a pet deleted in that window vanished with its folder's name
+-- and the erasure reported finished over its photos (Codex, the third round).
+-- The same was true without any race: delete a pet, then erase its client.
+-- Nothing in the product deletes a pet; one is retired by marking it
+-- inactive, which the pet list already hides. So the refusal reads nothing
+-- and has no window.
 --
 -- "Does not change" rather than "must look redacted": comparing the whole row
 -- keeps one definition of the tombstone, the purge's own, instead of a second
@@ -318,10 +331,12 @@ delete from walk_photos wph
 -- A pet arriving at an erased client reads the client FOR KEY SHARE, as 0057's
 -- notices do: the purge holds that row FOR UPDATE until it commits, so a pet
 -- added while an erasure is in flight waits for it and then sees it. A change
--- to an erased client's pet needs no lock of its own. The purge's redaction
--- locks each pet row, a save racing it waits on that row, and the read below
--- is a new statement, so it sees the committed erasure. Taking the client
--- lock there would also invert the purge's order, client then pets.
+-- to an erased client's pet needs no lock of its own. A save that reaches the
+-- pet row after the purge has redacted it waits on that row, and the read
+-- below is a new statement, so it sees the committed erasure. One that
+-- reaches the row first commits, and the purge's redaction, waiting on the
+-- same row, then overwrites it. Taking the client lock here would invert the
+-- purge's order, client then pets.
 create function fn_guard_erased_pet()
 returns trigger
 language plpgsql
@@ -331,19 +346,17 @@ as $function$
 declare
   v_erased boolean;
 begin
-  if tg_op in ('UPDATE', 'DELETE') then
+  if tg_op = 'DELETE' then
+    raise exception 'pets: % cannot be deleted: a pet''s row is the only name of its photo folder (make it inactive instead)', old.id;
+  end if;
+
+  if tg_op = 'UPDATE' then
     select purged_at is not null into v_erased from clients where id = old.client_id;
     if v_erased then
-      if tg_op = 'DELETE' then
-        raise exception 'pets: % belongs to an erased client, and its row is the only name of its photo folder', old.id;
-      end if;
       if (to_jsonb(new) - 'updated_at') is distinct from (to_jsonb(old) - 'updated_at') then
         raise exception 'pets: % belongs to an erased client, so it stays as the erasure left it', old.id;
       end if;
       return new;
-    end if;
-    if tg_op = 'DELETE' then
-      return old;
     end if;
   end if;
 
