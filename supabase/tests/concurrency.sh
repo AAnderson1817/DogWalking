@@ -105,6 +105,7 @@ db_cleanup() {
     drop function if exists fn_debit_walk_barrier(uuid);
     drop function if exists fn_invite_signup_allow_attempt_barrier(uuid, inet, int, int);
     drop function if exists fn_register_push_subscription_barrier(text, text, text, text);
+    drop function if exists fn_cc12b_barrier() cascade;
     delete from invite_signup_attempts where client_id in
       (select id from clients where operator_id::text like '${NS}%');
     -- Case 11 commits a lift record and its suppressions; replica mode above
@@ -1240,6 +1241,162 @@ expect_eq "the row the repeated request moved survived the lift that waited on i
   "$(q "select count(*) from email_suppressions where email = 'cc-lift3@sanpo.test'")" "1"
 expect_eq "no lift was recorded" \
   "$(q "select count(*) from email_suppression_lifts where client_id = '${NS}-000000000113'")" "0"
+
+echo
+echo "== case 12: a notice written while its client is being erased =="
+
+# Codex on #105. 0057 made the erasure delete the walker's notices about a
+# client by subject, and the subject check asked only whether the client
+# existed. The purge keeps the client row, so a writer that read the client
+# before an erasure and inserted after it (the Stripe webhook looks the
+# client up, then inserts) left a notice behind carrying the name the
+# erasure had just removed. The trigger now takes the client row FOR KEY
+# SHARE, which waits for the purge's FOR UPDATE, and then refuses a notice
+# about an erased client.
+#
+# The wait below is a PRECONDITION, not the detector: with the lock removed
+# from the trigger the insert still waits, because the foreign key check on
+# subject_client_id takes the same lock at the end of the statement. By then
+# the trigger has already read the row as it was before the erasure, so the
+# notice is written. The detector is the outcome.
+psql "$DB" -v ON_ERROR_STOP=1 -q -c "
+  insert into clients (id, operator_id, full_name, status) values
+    ('${NS}-000000000121', '${NS}-000000000001', 'CC Erasure Racer', 'active');"
+
+cat >&3 <<SQL
+begin;
+set local request.jwt.claims = '{"sub":"${NS}-000000000001","role":"authenticated"}';
+select count(*) from fn_purge_client('${NS}-000000000121');
+SQL
+expect_eq "PRECONDITION: the erasure has run and holds its transaction open" \
+  "$(wait_until_idle_in_txn fn_purge_client)" "holding"
+
+# B is the webhook's insert: operator-facing, the subject named, the name it
+# read before the erasure in the title.
+psql "$DB" -v ON_ERROR_STOP=1 -c "
+  insert into notifications (operator_id, client_id, subject_client_id, type, title, body)
+  values ('${NS}-000000000001', null, '${NS}-000000000121', 'card_saved',
+          'CC Erasure Racer saved a card', 'cc-case-12');" >"$WORK/b12.out" 2>&1 &
+B12_PID=$!
+expect_eq "PRECONDITION: the notice is waiting on the erasure" \
+  "$(wait_until_blocked cc-case-12)" "blocked"
+
+echo "commit;" >&3
+B12_RC=0
+wait $B12_PID || B12_RC=$?
+
+expect_eq "no notice about the erased client survived" \
+  "$(q "select count(*) from notifications
+         where subject_client_id = '${NS}-000000000121' or title like 'CC Erasure Racer%'")" "0"
+# Skipped, not refused: the writers are money paths, and a failed insert
+# would fail the payment work around it.
+expect_eq "the insert wrote no row and reported no error" \
+  "${B12_RC} $(grep -c '^INSERT 0 0$' "$WORK/b12.out")" "0 1"
+
+echo
+echo "== case 12b: the notice takes the walk before the client, as the erasure does =="
+
+# The foreign key checks on notifications take KEY SHARE on the rows they
+# reference at the end of the statement, in the order of their trigger
+# names, and on a database built from these migrations the client_id check
+# comes before the walk_id check. So before 0057 a client-facing notice
+# naming a walk (complete-walk's "walk complete") locked the client, then
+# the walk; the erasure locks the walk, then the client (0037). A notice and
+# an erasure of the same client could each take their first lock and wait
+# on the other's.
+#
+# The trigger now takes both locks itself, walk first, before either check
+# runs. To show the order rather than assert it, a barrier trigger is placed
+# between the two checks by name, so the notice stops holding whatever it
+# took before the walk_id check; the erasure then starts. Before the fix the
+# notice holds only the client there, the erasure takes the walk and waits
+# for the client, and releasing the barrier completes the cycle.
+psql "$DB" -v ON_ERROR_STOP=1 -q -c "
+  insert into clients (id, operator_id, full_name, status) values
+    ('${NS}-000000000122', '${NS}-000000000001', 'CC Lock Order', 'active');
+  insert into properties (id, operator_id, client_id, label, address_line1, city, postcode)
+    values ('${NS}-000000000222', '${NS}-000000000001', '${NS}-000000000122',
+            'Home', '2 CC St', 'Chicago', '60601');
+  insert into walks (id, operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, origin_date, window_start, window_end, status)
+    values ('${NS}-000000000322', '${NS}-000000000001', '${NS}-000000000122',
+            '${NS}-000000000222', '${NS}-000000000020', current_date, current_date,
+            '19:00', '20:00', 'scheduled');"
+
+psql "$DB" -v ON_ERROR_STOP=1 -q -c "
+create function fn_cc12b_barrier() returns trigger language plpgsql as \$f\$
+begin
+  perform pg_advisory_xact_lock(1212);
+  return null;
+end \$f\$;
+do \$outer\$
+declare
+  v_client_check text;
+  v_walk_check   text;
+  v_barrier      text;
+begin
+  select t.tgname into v_client_check
+    from pg_trigger t join pg_constraint c on c.oid = t.tgconstraint
+   where t.tgrelid = 'public.notifications'::regclass
+     and c.conname = 'notifications_client_id_fkey' and t.tgtype & 4 = 4;
+  select t.tgname into v_walk_check
+    from pg_trigger t join pg_constraint c on c.oid = t.tgconstraint
+   where t.tgrelid = 'public.notifications'::regclass
+     and c.conname = 'notifications_walk_id_fkey' and t.tgtype & 4 = 4;
+  v_barrier := v_client_check || '_cc12b';
+  -- Triggers fire in byte order of their names. If the walk_id check comes
+  -- first here, the premise does not hold on this database and the case
+  -- says so rather than proving nothing.
+  if v_client_check is null or v_walk_check is null
+     or not (v_client_check collate \"C\" < v_barrier collate \"C\"
+             and v_barrier collate \"C\" < v_walk_check collate \"C\") then
+    raise exception 'case 12b: cannot place a barrier between the client_id check (%) and the walk_id check (%)',
+      v_client_check, v_walk_check;
+  end if;
+  execute format('create trigger %I after insert on notifications for each row '
+                 'when (new.body = %L) execute function fn_cc12b_barrier()',
+                 v_barrier, 'cc-case-12b');
+end \$outer\$;"
+
+echo "select pg_advisory_lock(1212);" >&3
+for _ in $(seq 1 50); do
+  [ "$(q "select count(*) from pg_locks where locktype = 'advisory' and objid = 1212 and granted")" != "0" ] && break
+  sleep 0.1
+done
+
+# B is complete-walk's notice: client-facing, naming the walk.
+psql "$DB" -v ON_ERROR_STOP=1 -c "
+  insert into notifications (operator_id, client_id, type, title, body, walk_id)
+  values ('${NS}-000000000001', '${NS}-000000000122', 'walk_complete',
+          'Walk complete', 'cc-case-12b', '${NS}-000000000322');" >"$WORK/b12b.out" 2>&1 &
+B12B_PID=$!
+expect_eq "PRECONDITION: the notice stopped between its client_id and walk_id checks" \
+  "$(wait_until_blocked cc-case-12b)" "blocked"
+
+# C is the erasure of that client.
+psql "$DB" -v ON_ERROR_STOP=1 -c "
+  set local request.jwt.claims = '{\"sub\":\"${NS}-000000000001\",\"role\":\"authenticated\"}';
+  select count(*) from fn_purge_client('${NS}-000000000122');" >"$WORK/c12b.out" 2>&1 &
+C12B_PID=$!
+expect_eq "PRECONDITION: the erasure is waiting on the notice" \
+  "$(wait_until_blocked fn_purge_client)" "blocked"
+
+echo "select pg_advisory_unlock(1212);" >&3
+B12B_RC=0; C12B_RC=0
+wait $B12B_PID || B12B_RC=$?
+wait $C12B_PID || C12B_RC=$?
+
+if grep -qi "deadlock detected" "$WORK/b12b.out" "$WORK/c12b.out"; then
+  fail "no deadlock was detected" "$(grep -ih "deadlock detected" "$WORK/b12b.out" "$WORK/c12b.out" | head -1)"
+else
+  pass "no deadlock was detected"
+fi
+expect_eq "neither the notice nor the erasure was aborted" "${B12B_RC} ${C12B_RC}" "0 0"
+# The notice committed first, so the erasure that waited on it deleted it.
+expect_eq "the erasure still took the notice written before it" \
+  "$(q "select count(*) from notifications where subject_client_id = '${NS}-000000000122'")" "0"
+
+psql "$DB" -q -c "drop function if exists fn_cc12b_barrier() cascade;" >/dev/null
 
 exec 3>&-
 wait $A_PID 2>/dev/null || true
