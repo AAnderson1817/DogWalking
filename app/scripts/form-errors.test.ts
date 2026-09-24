@@ -658,6 +658,40 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
     return undefined;
   };
 
+  // The approved component an ELEMENT renders: a JSX element of one, read
+  // through what hands a value on and a `const`. Anything else is none the
+  // scan can name.
+  const elementOwner = (expr: ts.Expression): string | null => {
+    const seen = new Set<ts.Node>();
+    let e = unwrapValue(expr);
+    while (ts.isIdentifier(e) && !seen.has(e)) {
+      seen.add(e);
+      const init = resolve(e);
+      if (!init) return null;
+      e = unwrapValue(init);
+    }
+    if (ts.isJsxElement(e)) return approvedAs(e.openingElement.tagName, file, checker);
+    if (ts.isJsxSelfClosingElement(e)) return approvedAs(e.tagName, file, checker);
+    return null;
+  };
+
+  // The approved component a factory call renders. createElement and the
+  // automatic runtime's jsx take a component TYPE first; cloneElement takes
+  // an ELEMENT, whose type is the owner (Codex, on #97: `cloneElement(
+  // <StateField … />, …)` was judged as a generic element). A call that could
+  // be either — a ternary member, or one the scan cannot read — takes an owner
+  // only when both readings name the same one.
+  const factoryOwner = (call: ts.CallExpression, first: ts.Expression): string | null => {
+    const callee = calleeOf(call);
+    const names = ts.isIdentifier(callee) ? [callee.text]
+      : ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee) ? memberNames(callee, resolve) : [];
+    const readings: (string | null)[] = [];
+    if (names.some((n) => n === "cloneElement" || n === UNREADABLE)) readings.push(elementOwner(first));
+    if (names.some((n) => n !== "cloneElement")) readings.push(approvedAs(first, file, checker));
+    const [one] = readings;
+    return one !== undefined && one !== null && readings.every((r) => r === one) ? one : null;
+  };
+
   // String literals that are FormError's own `className` — the one place an
   // `__error` class may be written outside fields.tsx.
   const formErrorClass = new Set<ts.Node>();
@@ -752,7 +786,7 @@ function scan(file: string, text: string): { findings: Finding[]; alertRoles: nu
       // list the scan cannot see is props it cannot see.
       const before = findings.length;
       const [type, props] = node.arguments;
-      const owner = (type && approvedAs(type, file, checker)) ?? "<element>";
+      const owner = (type && factoryOwner(node, type)) ?? "<element>";
       if (node.arguments.some(ts.isSpreadElement)) {
         for (const each of ["role", "aria-live"]) visitProps("<element>", each, node, node);
       } else if (props) {
@@ -1207,6 +1241,28 @@ describe("what the scan refuses and admits", () => {
       .toEqual(["role"]);
     expect(rules(APPROVED_IMPORTS + `export const X = () => <StateField {...p} title="x" />; const p = { ...{ role: "alert" } };`))
       .toEqual(["role"]);
+  });
+
+  it("reads cloneElement's owner from the element it clones (Codex, on #97)", () => {
+    // cloneElement takes an ELEMENT, not a component type, so its owner is the
+    // element's: an approved StateField keeps its exemption however the element
+    // is written, and its props are judged once, with that owner.
+    expect(rules(APPROVED_IMPORTS + `cloneElement(<StateField title="x" />, { role: "alert" });`)).toEqual([]);
+    expect(rules(APPROVED_IMPORTS + `React.cloneElement(<StateField title="x" />, { role: getRole() });`)).toEqual([]);
+    expect(rules(APPROVED_IMPORTS + `cloneElement((<StateField title="x" />), { role: "alert" });`)).toEqual([]);
+    expect(rules(APPROVED_IMPORTS + `const field = <StateField title="x" />; cloneElement(field, { role: "alert" });`)).toEqual([]);
+    // Any other element is the host it renders, and one the scan cannot see is
+    // none it can exempt. A component is not an element, so cloning one is not
+    // StateField either, and createElement still reads its first argument as a type.
+    expect(rules(`cloneElement(<span />, { role: "alert" });`)).toEqual(["role", "role"]);
+    expect(rules(APPROVED_IMPORTS + `cloneElement(el, { role: "alert" });`)).toEqual(["role", "role"]);
+    expect(rules(APPROVED_IMPORTS + `cloneElement(StateField, { role: "alert" });`)).toEqual(["role", "role"]);
+    expect(rules(APPROVED_IMPORTS + `createElement(StateField, { role: "alert", title: "x" });`)).toEqual([]);
+    // A call that could be either reads its first argument both ways, and one
+    // reading that names no approved component leaves the call a generic element.
+    expect(rules(APPROVED_IMPORTS + `React[c ? "cloneElement" : "createElement"](StateField, { role: "alert" });`)).toEqual(["role", "role"]);
+    expect(rules(APPROVED_IMPORTS + `React[c ? "cloneElement" : "createElement"](<StateField />, { role: "alert" });`)).toEqual(["role", "role"]);
+    expect(rules(APPROVED_IMPORTS + `React[k](StateField, { role: "alert" });`)).toEqual(["role", "role"]);
   });
 
   it("gives the exemptions to the approved components by binding, not by spelling (Codex, on #97)", () => {
