@@ -107,42 +107,80 @@ def unparen(expr: str) -> str:
     return s
 
 
-def first_choice(expr: str) -> str | None:
-    """What a `||` chain evaluates first, through wrapping parentheses and nested chains; None if unreadable."""
-    s = expr
-    while True:
-        parts = split_or(unparen(s))
-        if parts is None:
+def choices(expr: str) -> list[str] | None:
+    """The operands of a `||` chain in the order they are tried, through wrapping parentheses and nested chains.
+
+    None if the chain is unreadable: a bracket or string that never closes, or
+    a `||` with nothing on one side.
+    """
+    parts = split_or(unparen(expr))
+    if parts is None:
+        return None
+    if len(parts) == 1:
+        operand = unparen(parts[0])
+        return [operand] if operand else None
+    out: list[str] = []
+    for part in parts:
+        sub = choices(part)
+        if sub is None:
             return None
-        if len(parts) == 1:
-            return unparen(parts[0])
-        s = parts[0]
+        out.extend(sub)
+    return out
 
 
 def pin_problem(ref: str) -> str | None:
-    """Why a chained checkout's `ref` may not select the upstream run's commit, or None if it does.
+    """Why a chained checkout's `ref` may check out the wrong commit, or None if it cannot.
 
     `||` yields its first truthy operand, and on a `workflow_run` event
     head_sha is always set, so it must be the FIRST choice: anything before it
     wins over it (Codex, on #97: `${{ github.sha || … head_sha }}` passed a
     substring test while `github.sha`, always set, was the value chosen). What
-    follows it is the fallback for a manual dispatch, where head_sha is empty.
+    follows it is the fallback, chosen on any other event, where head_sha is
+    empty; every chained workflow here can also be dispatched by hand, and a
+    dispatch should check out the commit it was dispatched on, which is
+    `github.sha`. So each later choice must be exactly that (Codex, on #97,
+    one round later: `head_sha || inputs.ref` checked out whatever ref the
+    dispatcher typed). The fallback is required, not just checked when
+    present: with none, a dispatch checks out an empty ref, and what that
+    means is actions/checkout's default rather than anything this file can
+    read. It is checked even where nothing but `workflow_run` triggers the
+    workflow, where it is dead code — one trigger away from not being.
+
     The ref must be one `${{ }}` expression and nothing else, since text
     around it becomes part of the ref. Only the canonical spelling is read:
     another case, index syntax or a function of the SHA is refused rather than
     guessed at, and the message says what to write instead.
     """
+    run_commit = (
+        "so on a workflow_run event it may run main's newest commit rather than the one the upstream run "
+        "tested or deployed"
+    )
+    dispatch = "so on a manual dispatch, where the upstream SHA is empty,"
     text = ref.strip()
     if not text:
-        return "checks out without a `ref`"
+        return f"checks out without a `ref`, {run_commit}"
     whole = re.fullmatch(r"\$\{\{(.*)\}\}", text, re.S)
     if not whole or "${{" in whole.group(1) or "}}" in whole.group(1):
-        return f"checks out `ref: {text}`, which is not one `${{{{ }}}}` expression the check can read"
-    first = first_choice(whole.group(1))
-    if first is None:
-        return f"checks out `ref: {text}`, whose brackets or strings never close"
-    if first != UPSTREAM_SHA:
-        return f"checks out `ref: {text}`, whose first choice is `{first}`, not `{UPSTREAM_SHA}`"
+        return f"checks out `ref: {text}`, which is not one `${{{{ }}}}` expression the check can read, {run_commit}"
+    chain = choices(whole.group(1))
+    if chain is None:
+        return (
+            f"checks out `ref: {text}`, which the check cannot read as a `||` chain (a bracket or string "
+            f"never closes, or a `||` has no operand), {run_commit}"
+        )
+    if chain[0] != UPSTREAM_SHA:
+        return f"checks out `ref: {text}`, whose first choice is `{chain[0]}`, not `{UPSTREAM_SHA}`, {run_commit}"
+    if len(chain) == 1:
+        return (
+            f"checks out `ref: {text}`, which has no fallback, {dispatch} the ref is empty too, and what is "
+            "checked out is actions/checkout's default rather than anything this ref names"
+        )
+    for fallback in chain[1:]:
+        if fallback != "github.sha":
+            return (
+                f"checks out `ref: {text}`, whose fallback is `{fallback}`, not `github.sha`, {dispatch} it may "
+                "check out a commit other than the one it was dispatched on"
+            )
     return None
 
 
@@ -242,7 +280,8 @@ def check(path: pathlib.Path) -> None:
         # deploy never shipped. `deploy-staging.yml` pinned all five of its
         # checkouts from the start; the two workflows chained after it did not
         # (Codex, on #97, named one; the other is its sibling). The ref is read
-        # as an expression, not searched for a name: see `pin_problem`.
+        # as an expression, not searched for a name, and the fallback a manual
+        # dispatch checks out is read with it: see `pin_problem`.
         if chained:
             for step in steps:
                 if not (isinstance(step, dict) and str(step.get("uses") or "").startswith("actions/checkout")):
@@ -250,12 +289,7 @@ def check(path: pathlib.Path) -> None:
                 chained_checkouts += 1
                 why = pin_problem(str((step.get("with") or {}).get("ref") or ""))
                 if why:
-                    fail(
-                        path.name,
-                        name,
-                        f"{why} in a workflow_run-triggered workflow, so it may run main's newest commit rather "
-                        f"than the one the upstream run tested or deployed — write `ref: {PIN}`",
-                    )
+                    fail(path.name, name, f"{why} — write `ref: {PIN}`")
 
 
 def main() -> int:

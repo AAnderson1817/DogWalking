@@ -255,6 +255,44 @@ describe("create_user", () => {
     expect(r.err).not.toContain("cannot see the leftover");
   });
 
+  it("does not take an id from a response that failed (Codex, on #97)", async () => {
+    // A collision that names the EXISTING user: the replay would have adopted
+    // it as its fixture and its EXIT trap would have deleted it.
+    const { base } = await stub({
+      users: [{ id: "someone-else", email: "a@sanpo.test" }],
+      create: {
+        status: 422,
+        body: { id: "someone-else", msg: "A user with this email address has already been registered" },
+      },
+    });
+    const r = await sh(base, 'rc=0; uid=$(create_user "a@sanpo.test" "pw") || rc=$?; echo "[$uid][exit $rc]"');
+    expect(r.out).toBe("[][exit 1]\n");
+    expect(r.err).toContain("HTTP 422 — A user with this email address has already been registered");
+    expect(r.err).toContain("names user someone-else, which is not taken as this run's fixture");
+    // The collision diagnosis still runs: it is what a 422 exists to trigger.
+    expect(r.err).toContain("Cleanup did not delete the leftover");
+  });
+
+  it("does not take an id from a gateway error either", async () => {
+    const { base } = await stub({ create: { status: 502, body: { id: "cached-id", message: "upstream timed out" } } });
+    const r = await sh(base, 'rc=0; uid=$(create_user "a@sanpo.test" "pw") || rc=$?; echo "[$uid][exit $rc]"');
+    expect(r.out).toBe("[][exit 1]\n");
+    expect(r.err).toContain("HTTP 502 — upstream timed out");
+  });
+
+  it("takes the id from any 2xx, not only a 200", async () => {
+    const { base } = await stub({ create: { status: 201, body: { id: "created" } } });
+    const r = await sh(base, 'uid=$(create_user "a@sanpo.test" "pw"); echo "[$uid]"');
+    expect(r.out).toBe("[created]\n");
+  });
+
+  it("does not report success for a 2xx that names no user", async () => {
+    const { base } = await stub({ create: { status: 200, body: { msg: "ok" } } });
+    const r = await sh(base, 'rc=0; uid=$(create_user "a@sanpo.test" "pw") || rc=$?; echo "[$uid][exit $rc]"');
+    expect(r.out).toBe("[][exit 1]\n");
+    expect(r.err).toContain("HTTP 200");
+  });
+
   it("survives a body that is not JSON under bash -e", async () => {
     const { base } = await stub({ create: { status: 502, body: "<html>bad gateway</html>" } });
     const r = await sh(base, 'rc=0; create_user "a@sanpo.test" "pw" || rc=$?; echo "[exit $rc]"');
