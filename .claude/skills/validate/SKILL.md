@@ -230,19 +230,25 @@ python3 scripts/gen-types.py && git diff --exit-code -- app/src/lib/types.ts
 ```
 python3 scripts/verify-workflows.py
 ```
-Four rules that YAML validity cannot express, each written after the thing it
-forbids shipped: no job may gate on its own result (it can then never run); a
-job whose `if` uses a status function must re-state every `needs` it dropped the
-implicit `success()` for; a job that runs `git push` needs `fetch-depth: 0`,
-because git cannot prove a fast-forward from a shallow clone; and every checkout
-in a `workflow_run`-triggered workflow pins
-`ref: ${{ github.event.workflow_run.head_sha || github.sha }}`. The upstream SHA
-must be chosen first, because on that event `github.sha` is main's newest commit
-rather than the one the upstream run tested or deployed. The fallback must be
-`github.sha`, because on a manual dispatch the upstream SHA is empty and the
-fallback is what gets checked out. The last rule fails if it inspected no such
-checkout, since a trigger parse that read nothing would report every checkout
-pinned.
+Five rules that YAML validity cannot express, each written after the thing it
+forbids shipped, or (rule 5) after a drift that had not failed yet. No job may
+gate on its own result (it can then never run). A job whose `if` uses a status
+function must re-state every `needs` it dropped the implicit `success()` for. A
+job that runs `git push` needs `fetch-depth: 0`, because git cannot prove a
+fast-forward from a shallow clone. Every checkout in a `workflow_run`-triggered
+workflow pins `ref: ${{ github.event.workflow_run.head_sha || github.sha }}`.
+The upstream SHA must be chosen first, because on that event `github.sha` is
+main's newest commit rather than the one the upstream run tested or deployed.
+The fallback must be `github.sha`, because on a manual dispatch the upstream
+SHA is empty and the fallback is what gets checked out. Rule 4 fails if it
+inspected no such checkout, since a trigger parse that read nothing would
+report every checkout pinned. And rule 5: every `supabase/setup-cli` step pins
+one commit SHA and one exact `X.Y.Z` CLI release, and every
+`supabase functions deploy` runs with the same flags, because staging is the
+only place a CLI version or a deploy path is exercised before production runs
+it. The owner's `4c45ab1` had already moved staging's function deploy to
+`--use-api` while production stayed on the Docker bundler. Each half fails if
+it saw nothing.
 
 ## 10d. CLAUDE.md's counts match the tree
 ```
@@ -295,6 +301,22 @@ an unchecked list does: gates 7b and 8b were each missing from `validate.sh`
 until a green local run that CI refused, and this file's own §13 ended "read
 the workflow rather than trusting this list to stay complete". Must end with
 `GATE LOCKSTEP PASS`.
+
+## 10h. Every function setting is one the CLI applies
+```
+python3 scripts/check-function-config.py
+```
+`supabase functions deploy` reads `[functions.<name>]` from `config.toml` and
+ignores a key it does not know. Measured on CLI 2.109.1 and 2.117.0 alike: a
+`verfy_jwt = false` typo on a public function deploys with exit 0, no warning,
+and `verify_jwt` unset, which the platform reads as on, so the gateway answers
+every caller 401. The deploy probe
+cannot see it, because it authenticates with the service-role key, which the
+gateway accepts either way. So every key must be one the CLI's schema declares
+(read from the pinned release, which the gate also checks has not moved), and
+every table must name a function `scripts/repo-functions.sh` ships. Values are
+not checked: the CLI coerces `env(VAR)` and comma lists, and a value it cannot
+decode is a loud deploy failure anyway. It re-checks its own probes every run.
 
 ## 11. Secret-leak grep
 ```
@@ -391,6 +413,7 @@ are; a pair that differs in any of the three is refused too.
 | `Every test file is claimed by a vitest project` | CI only |
 | `The deployed frontend sets its security headers` | CI only |
 | `Deploy workflow gating` | 10c |
+| `Every function setting is one the CLI applies` | 10h |
 | `CLAUDE.md's counts match the tree` | 10d |
 | `The CI, SKILL.md and validate.sh gate lists agree` | 10g |
 | `Secret-leak grep` | 11 |

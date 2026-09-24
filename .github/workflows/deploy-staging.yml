@@ -95,7 +95,7 @@ jobs:
 
       - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0 — composite since v2, so it no longer carries a Node runtime at all
         with:
-          version: 2.109.1  # pinned to current latest; 2.99.0 predates the local_smtp config key and broke `supabase link`
+          version: 2.117.0  # rule 5 of scripts/verify-workflows.py holds every pin to one release
 
       # A dead SUPABASE_ACCESS_TOKEN surfaces here as a bare
       # {"message":"Unauthorized"} — which reads like a code or migration
@@ -148,7 +148,7 @@ jobs:
 
       - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0 — composite since v2, so it no longer carries a Node runtime at all
         with:
-          version: 2.109.1  # pinned to current latest; 2.99.0 predates the local_smtp config key and broke `supabase link`
+          version: 2.117.0  # rule 5 of scripts/verify-workflows.py holds every pin to one release
 
       # Deploys every function directory; config.toml carries
       # verify_jwt=false for stripe-webhook and the materializer cron note.
@@ -408,7 +408,7 @@ jobs:
 
       - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0 — composite since v2, so it no longer carries a Node runtime at all
         with:
-          version: 2.109.1  # pinned to current latest; 2.99.0 predates the local_smtp config key and broke `supabase link`
+          version: 2.117.0  # rule 5 of scripts/verify-workflows.py holds every pin to one release
 
       - name: Push edge-function secrets
         run: |
