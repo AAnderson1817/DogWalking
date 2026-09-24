@@ -212,10 +212,13 @@ job whose `if` uses a status function must re-state every `needs` it dropped the
 implicit `success()` for; a job that runs `git push` needs `fetch-depth: 0`,
 because git cannot prove a fast-forward from a shallow clone; and every checkout
 in a `workflow_run`-triggered workflow pins
-`ref: ${{ github.event.workflow_run.head_sha || github.sha }}`, because on that
-event `github.sha` is main's newest commit rather than the one the upstream run
-tested or deployed. The last one fails if it inspected no such checkout, since
-a trigger parse that read nothing would report every checkout pinned.
+`ref: ${{ github.event.workflow_run.head_sha || github.sha }}`. The upstream SHA
+must be chosen first, because on that event `github.sha` is main's newest commit
+rather than the one the upstream run tested or deployed. The fallback must be
+`github.sha`, because on a manual dispatch the upstream SHA is empty and the
+fallback is what gets checked out. The last rule fails if it inspected no such
+checkout, since a trigger parse that read nothing would report every checkout
+pinned.
 
 ## 10d. CLAUDE.md's counts match the tree
 ```

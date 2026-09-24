@@ -113,6 +113,13 @@ delete_operator() {
 # rejected" were one indistinguishable red. Only `error_description`/`msg`/
 # `message` are printed, never the whole body.
 #
+# Success is a 2xx AND an id. An id alone used to be enough, so a refusal
+# whose body named a user — a collision identifying the EXISTING account —
+# was reported as the new fixture: both replays would then have used that
+# account, and each one's EXIT trap passes the id to `delete_operator`, which
+# would have deleted it (Codex, on #97). A 2xx with no id is a failure too:
+# there is no fixture to use or clean up.
+#
 # A 422 means cleanup left the previous run's user behind, and which half
 # failed is one lookup away: if the search CAN see it, the delete is what is
 # broken; if it cannot, the search is. Without this the two look identical.
@@ -125,8 +132,11 @@ create_user() {
     -H "Content-Type: application/json" \
     -d "{\"email\":\"$1\",\"password\":\"$2\",\"email_confirm\":true}") || true
   id=$(jq -r '.id // empty' "$body" 2>/dev/null) || true
-  if [ -n "$id" ]; then printf '%s' "$id"; return 0; fi
+  case "$code" in
+    2??) if [ -n "$id" ]; then printf '%s' "$id"; return 0; fi ;;
+  esac
   msg=$(jq -r '.error_description // .msg // .message // "no message"' "$body" 2>/dev/null || echo "an unreadable body")
+  [ -z "$id" ] || msg="$msg (the response names user $id, which is not taken as this run's fixture without a 2xx)"
   echo "::error title=Could not create the fixture user $1::HTTP $code — $msg" >&2
   if [ "$code" = "422" ]; then
     rc=0; stale=$(user_id_for "$1") || rc=$?
