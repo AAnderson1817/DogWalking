@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { firstSelectArg, fromSelects, resolveConst } from "./select-scan.ts";
 
 /**
  * A wildcard select against a table with column-level grants is a 42501.
@@ -178,80 +179,10 @@ function sourceFiles(dir: string): string[] {
   });
 }
 
-/**
- * The first argument of the next `.select(` — captured with a balanced scan.
- *
- * A `/\.select\(([^)]*)\)/` stops at the FIRST `)`, so
- * `.select("*, client:clients(*)")` yields the truncated `"*, client:clients(*`
- * and the embed inside it is never seen. That is the exact query this guard
- * exists to catch, so the cheap regex was a hole in the middle of it.
- */
-export function firstSelectArg(region: string): string | null {
-  const at = region.indexOf(".select(");
-  if (at === -1) return null;
-  let depth = 0;
-  let quote: string | null = null;
-  let out = "";
-  for (let i = at + ".select(".length; i < region.length; i++) {
-    const ch = region[i];
-    if (quote) {
-      if (ch === quote && region[i - 1] !== "\\") quote = null;
-      out += ch;
-      continue;
-    }
-    if (ch === '"' || ch === "'" || ch === "`") { quote = ch; out += ch; continue; }
-    if (ch === "(") depth++;
-    if (ch === ")") {
-      if (depth === 0) return out.trim();
-      depth--;
-    }
-    // Only the FIRST argument: `.select(cols, { head: true })` must not let an
-    // options object mask the wildcard in front of it.
-    if (ch === "," && depth === 0) return out.trim();
-    out += ch;
-  }
-  return out.trim();
-}
-
-/**
- * Resolve `.select(COLS)` where COLS is a module-level string const in the
- * same file, including one built by `+`-concatenating literals.
- *
- * Load-bearing rather than a nicety, twice over. `send-notification` selects a
- * const, so without this `select-columns.test.ts` would have skipped the exact
- * query it was written to catch. And `api.ts` reads the entry-code trail
- * through `CRED_LOG`, so without it the check below could not see that list
- * name a column 0056 withholds.
- */
-export function resolveConst(src: string, name: string): string | null {
-  const re = new RegExp(`const\\s+${name}\\s*(?::[^=]+)?=\\s*([\\s\\S]*?);`, "m");
-  const m = re.exec(src);
-  if (!m) return null;
-  const expr = m[1].trim();
-  // Only a chain of string literals joined by `+`. Anything else (a call, a
-  // template with a hole, an array join) is not statically knowable, and
-  // guessing would produce false failures on healthy code.
-  const parts = expr.split("+").map((p) => p.trim());
-  if (!parts.every((p) => /^(["'`])[^"'`]*\1$/.test(p))) return null;
-  return parts.map((p) => p.slice(1, -1)).join("");
-}
-
 /** Every `from("<table>") … .select(<arg>)` reachable in the app source. */
 function selectsByTable(): Array<{ file: string; table: string; arg: string }> {
-  const found: Array<{ file: string; table: string; arg: string }> = [];
-  for (const file of sourceFiles(APP_SRC)) {
-    const src = readFileSync(file, "utf8");
-    const from = /\.from\(\s*"([a-z_]+)"\s*\)/g;
-    let m: RegExpExecArray | null;
-    while ((m = from.exec(src))) {
-      // The first `.select(` after this `.from(` and before the next one.
-      const nextFrom = src.indexOf('.from("', m.index + 1);
-      const region = src.slice(m.index, nextFrom === -1 ? undefined : nextFrom);
-      const sel = firstSelectArg(region);
-      if (sel !== null) found.push({ file, table: m[1], arg: sel });
-    }
-  }
-  return found;
+  return sourceFiles(APP_SRC).flatMap((file) =>
+    fromSelects(readFileSync(file, "utf8")).map((s) => ({ file, ...s })));
 }
 
 /**
@@ -408,6 +339,30 @@ describe("column-level SELECT grants and wildcard selects", () => {
       for (const [table, innerSel] of embedsOf(arg)) check(s.file, table, innerSel);
     }
     expect(offenders).toEqual([]);
+  });
+
+  it("reaches both reads of the entry-code trail", () => {
+    // The check above passes by seeing nothing if the scan stops reaching
+    // these: a single-quoted `.from('credential_access_log')` walked past the
+    // first version of it with every test green. The trail's callers swallow
+    // a failed read into an empty list, so a 42501 there would show both
+    // personas no activity rather than an error.
+    const trail = selectsByTable().filter((s) => s.table === "credential_access_log");
+    expect(trail.map((s) => s.arg)).toEqual(["CRED_LOG", "CRED_LOG"]);
+  });
+
+  it("finds a .from() written with either quote", () => {
+    const src = `db.from('credential_access_log').select(CRED_LOG); db.from("walks").select("id");`;
+    expect(fromSelects(src)).toEqual([
+      { table: "credential_access_log", arg: "CRED_LOG" },
+      { table: "walks", arg: '"id"' },
+    ]);
+    // The region stops at the next .from( whatever its quote, so a select is
+    // never credited to the table before it.
+    expect(fromSelects(`db.from("a").eq("x", 1); db.from('b').select("id");`))
+      .toEqual([{ table: "b", arg: '"id"' }]);
+    // A mismatched pair names no table.
+    expect(fromSelects(`db.from("a').select("id")`)).toEqual([]);
   });
 
   it("checks a select list read through a const", () => {

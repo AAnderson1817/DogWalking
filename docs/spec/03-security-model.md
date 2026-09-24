@@ -33,7 +33,7 @@ assertions.
 | clients | select/insert/update by COLUMN LIST, delete | select own row; update own contact fields only (column grants) | — |
 | properties | select/insert/delete; update all but `operator_id`/timestamps | select own; update `access_notes_public` only | — |
 | access_credentials | insert/update/delete metadata; **no select on `ciphertext`** | select own property's METADATA only (0030); **never `ciphertext`** | — |
-| credential_access_log | select own; **no insert/update/delete at all** (0030) | select own property's trail (0030) | — |
+| credential_access_log | select own by **column list**, never `ip`/`user_agent` (0056); **no insert/update/delete at all** (0030) | select own property's trail (0030) by the same column list: never `ip`/`user_agent`, which describe the walker's device (0056) | — |
 | pets | full CRUD | select own; update care fields (temperament, feeding, medical, vet, photo) | — |
 | service_types | full CRUD | select (for booking UI) | — |
 | plans | full CRUD | select own plan | — |
@@ -478,6 +478,12 @@ billing decision.
   `BEFORE UPDATE OR DELETE` block trigger (0030). Append via definer fn only — and INSERT is
   revoked too, because an operator forging a `read` row would attribute an entry to a time,
   which is worse than a missing trail.
+- `GRANT SELECT (id, operator_id, credential_id, accessed_by, action, purpose, accessed_at,
+  walk_id, created_at) ON credential_access_log TO authenticated;` in place of 0004's
+  table-level SELECT (0056). `ip` and `user_agent` describe the walker's device, and the
+  table grant handed both to every client whose door a row names; a column REVOKE would have
+  been a no-op against it. A column added to the table later is withheld until a migration
+  grants it by name.
 - `REVOKE ALL ON stripe_events, payments FROM authenticated` except `GRANT SELECT ON payments`.
 - `walks.credits_debited`, `walks.is_overage`: no UPDATE grant to authenticated — set only inside `fn_debit_walk`.
 
