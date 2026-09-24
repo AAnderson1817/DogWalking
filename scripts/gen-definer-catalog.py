@@ -65,20 +65,16 @@ only known at run time — and the statements that change functions without
 naming them: a DROP … CASCADE on a type, table, schema or anything else a
 function can depend on, a range type (whose constructors no statement names),
 and a `drop function if exists` of a signature it does not know while the name
-exists with another. What it cannot see is dynamic SQL inside a body — the
-reader blanks bodies. Gate 8e is the backstop for both kinds of blindness: it
-compares this model with a reset database, so a grant made in a body, or a
-statement this model misread, fails the build there by name.
-
-The reader blanks every DO and function body, which hid a function created and
-granted by dynamic SQL inside one: a publicly executable definer function this
-catalogue never saw (Codex, on #97). So the reader refuses a body that creates,
-alters or drops a routine, or grants or revokes on one, by name, and the
-statement belongs at top level, where this file reads it. At top level it reads
-`create [or replace] function` and `grant execute on function <name>(…) to …`,
-and nothing else: revokes are not applied, which over-reports rather than
-hides, while ALTER FUNCTION, a grant in any other shape, ALTER DEFAULT
-PRIVILEGES and procedures are not modelled at all.
+exists with another. A body is the one place it does not read, since the
+shared reader blanks every DO and function body; so the reader REFUSES a body
+that creates, alters or drops a routine, or grants or revokes on one, by name
+(Codex, on #97: a DO block that created a definer function and granted it to
+PUBLIC was otherwise invisible here), and the statement belongs at top level,
+where this model reads it. What stays unseen is SQL assembled to evade that
+refusal, such as a verb supplied through a `format()` placeholder. Gate 8e is
+the backstop for both kinds of blindness: it compares this model with a reset
+database, so a grant assembled in a body, or a statement this model misread,
+fails the build there by name.
 
 Writes between the markers in docs/spec/03-security-model.md. Idempotent.
 """
