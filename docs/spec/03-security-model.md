@@ -244,15 +244,23 @@ from a tab opened before the erasure a way to put a pet's name, medical notes
 and vet details straight back, where `fn_purge_client_status`, which counts
 photos, would never see them (Codex on #106). `trg_pets_erased` refuses it: an
 erased client's pet does not change, no pet arrives at an erased client, new
-or moved, and an erased client's pet is never deleted. "Does not change"
+or moved, and no pet is deleted, an erased client's or anyone else's. "Does not change"
 compares the whole row except `updated_at`, so the tombstone has one
 definition, the purge's own, and a column added to `pets` later is covered
 without being listed; smoke tries a change to every column and expects each
 refused. A new pet waits for an erasure in flight (it reads the client
 `FOR KEY SHARE`, as 0057's notices do); a change needs no lock, because the
 purge's redaction locks each pet row and the trigger's read, a new statement,
-then sees the committed erasure. Concurrency cases 13 and 13b hold an erasure
-open and prove each.
+then sees the committed erasure, while a save that reached the row first is
+overwritten by that redaction. Concurrency cases 13 and 13b hold an erasure
+open and prove each. A deletion is refused whatever the client, because it
+has no such second chance: the first version refused only an erased client's
+pet, read the client unlocked, and so let a pet go that was deleted while an
+erasure had locked the client but not yet redacted the pets, taking its
+folder's only name with it (Codex, the third round). Deleting a pet and then
+erasing its client did the same without any race. Nothing in the product
+deletes a pet; one is retired by marking it inactive, which the pet list
+already hides.
 
 What remains UI-only is the client, property and credential rows in the
 table above: a stale tab can still write an address or a name back into
@@ -308,8 +316,12 @@ Reading `storage.objects` is a run-time dependency on the role migrations run
 as: membership of its owner (already needed for the storage policies) and
 BYPASSRLS. 0058 refuses to deploy without both. One pass over the bucket per
 call: 0.12 s over 200,000 objects, measured locally. What it cannot find is a
-photo in the folder of a pet or walk whose row was deleted outside the
-product; nothing in the app deletes either, and an object names no client.
+photo in the folder of a walk whose row was deleted outside the product. A
+pet row cannot be deleted at all (above), and nothing in the app deletes a
+walk; most walks cannot be deleted either, because the ledger, payments,
+notices and the entry-code log hold them with RESTRICT keys. One with none of
+those, such as a walk still in progress, can still be deleted through the API,
+and an object names no client (backlog).
 
 `fn_sweep_gps_retention` runs on the nightly job and drops traces for
 **completed** walks past `operators.gps_retention_days` (default 365; 0

@@ -3782,6 +3782,7 @@ declare
   v_msg text;
   v_other_walk uuid;
   v_other_pet uuid;
+  v_spare_pet uuid;
   v_other_client uuid;
   v_live  uuid := '99999999-0000-4000-c000-0000000058c1';
   v_live_prop uuid := '99999999-0000-4000-b000-0000000058c1';
@@ -4115,6 +4116,25 @@ begin
   if (select breed from pets where id = v_other_pet) is distinct from 'Beagle' then
     raise exception 'FAIL: the walker could no longer edit a live client''s pet';
   end if;
+  -- No pet is deleted, a live client's included (Codex, the third round).
+  -- Refusing only an erased client's left two ways to lose a folder's only
+  -- name: delete the pet while an erasure is between locking the client and
+  -- redacting the pets, or delete it and then erase the client. The pet is
+  -- new and nothing references it, so a delete the rule let through would
+  -- succeed rather than fail on a foreign key.
+  insert into pets (operator_id, client_id, name)
+  values (v_op, (select client_id from pets where id = v_other_pet), 'Spare')
+  returning id into v_spare_pet;
+  begin
+    delete from pets where id = v_spare_pet;
+    raise exception 'FAIL: a live client''s pet was deleted, and its photo folder''s only name with it';
+  exception when raise_exception then
+    get stacked diagnostics v_msg = message_text;
+    if v_msg like 'FAIL:%' then raise; end if;
+    if v_msg not like '%the only name of its photo folder%' then
+      raise exception 'FAIL: deleting a live client''s pet was refused for the wrong reason: %', v_msg;
+    end if;
+  end;
   reset session authorization;
 
   -- Every column, not only the ones a stale tab would send: a column added to
