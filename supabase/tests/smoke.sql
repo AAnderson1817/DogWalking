@@ -3784,6 +3784,8 @@ declare
   v_other_pet uuid;
   v_other_client uuid;
   v_live  uuid := '99999999-0000-4000-c000-0000000058c1';
+  v_live_prop uuid := '99999999-0000-4000-b000-0000000058c1';
+  v_live_walk uuid := '99999999-0000-4000-f000-0000000058c1';
   v_began timestamptz;
 begin
   reset session authorization;
@@ -3826,11 +3828,19 @@ begin
   -- phase still drops the row.
   insert into walk_photos (walk_id, operator_id, storage_path)
   values (v_walk, v_op, '99999999-0000-4000-a000-000000000002/' || v_walk || '/stray.jpg');
-  -- A live client with a pet and no photos: the one thing standing between
-  -- the second phase and their pet is that they have not been erased.
+  -- A live client with a photo row and nothing in storage: the one thing
+  -- standing between the second phase and that row is that they have not
+  -- been erased.
   insert into clients (id, operator_id, full_name, status)
   values (v_live, v_op, 'Still Here', 'active');
-  insert into pets (operator_id, client_id, name) values (v_op, v_live, 'Biscuit');
+  insert into properties (id, operator_id, client_id, label, address_line1, city, postcode)
+  values (v_live_prop, v_op, v_live, 'Home', '3 Live Lane', 'Chicago', '60601');
+  insert into walks (id, operator_id, client_id, property_id, service_type_id,
+                     scheduled_date, window_start, window_end, status, origin_date)
+  values (v_live_walk, v_op, v_live, v_live_prop, v_svc, current_date - 1,
+          '09:00', '10:00', 'completed', current_date - 1);
+  insert into walk_photos (walk_id, operator_id, storage_path)
+  values (v_live_walk, v_op, v_op || '/' || v_live_walk || '/not-yet-uploaded.jpg');
   -- The objects, as Storage holds them (0058). Two more of the client's than
   -- the rows name: the pet's previous photo, which replacing it left behind,
   -- and a walk photo whose row was never written. The last four are not the
@@ -3951,8 +3961,7 @@ begin
     raise exception 'FAIL: an erasure with four photos still stored reads as %', v_status;
   end if;
 
-  -- The second phase refuses while any of them is there: the pet's row is
-  -- its folder's only name.
+  -- The second phase refuses while any of them is there.
   begin
     perform fn_purge_client_photos(v_cl);
     raise exception 'FAIL: the second phase dropped the rows over photos still in storage';
@@ -3963,9 +3972,6 @@ begin
       raise exception 'FAIL: the second phase refused for the wrong reason: %', v_msg;
     end if;
   end;
-  if not exists (select 1 from pets where client_id = v_cl) then
-    raise exception 'FAIL: the second phase refused and dropped the pet rows anyway';
-  end if;
   reset session authorization;
 
   -- The browser deletes them; Storage's API deletes the object's row.
@@ -3995,17 +4001,59 @@ begin
     format('{"sub":"%s","role":"authenticated"}', v_op), true);
   set local session authorization authenticated;
   v_status := fn_purge_client_status(v_cl);
-  if v_status is distinct from '{"erased": true, "finished": false, "photos_left": 0}'::jsonb then
-    raise exception 'FAIL: an erasure whose second phase has not run reads as %', v_status;
+  if v_status is distinct from '{"erased": true, "finished": true, "photos_left": 0}'::jsonb then
+    raise exception 'FAIL: an erasure with every photo gone reads as %', v_status;
   end if;
   perform fn_purge_client_photos(v_cl);
-  v_status := fn_purge_client_status(v_cl);
-  if v_status is distinct from '{"erased": true, "finished": true, "photos_left": 0}'::jsonb then
-    raise exception 'FAIL: a finished erasure reads as %', v_status;
+  reset session authorization;
+
+  -- The pet's row outlives the erasure, redacted: it is the only name of its
+  -- folder, and a photo can still land there (0058).
+  if not exists (select 1 from pets where client_id = v_cl) then
+    raise exception 'FAIL: the pet''s row was deleted, so a photo uploaded to its folder later could never be found';
   end if;
 
-  -- The second phase belongs to an erasure: on a live client it would
-  -- delete their pets.
+  -- Late uploads. The storage policy lets a walker write anywhere in their
+  -- own folder, so a photo can arrive after (or during) the erasure: here a
+  -- photo row whose object never landed, and a photo in the pet's folder.
+  insert into walk_photos (walk_id, operator_id, storage_path)
+  values (v_walk, v_op, v_op || '/' || v_walk || '/late-row.jpg');
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  set local session authorization authenticated;
+  v_status := fn_purge_client_status(v_cl);
+  if v_status is distinct from '{"erased": true, "finished": false, "photos_left": 0}'::jsonb then
+    raise exception 'FAIL: a photo row written after the first phase reads as %', v_status;
+  end if;
+  if fn_purge_client_photos(v_cl) <> 1 then
+    raise exception 'FAIL: the second phase did not drop the photo row written after the first';
+  end if;
+  reset session authorization;
+
+  insert into storage.objects (bucket_id, name)
+  values ('pet-photos', v_op || '/' || v_pet || '/late.jpg');
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  set local session authorization authenticated;
+  v_status := fn_purge_client_status(v_cl);
+  if v_status is distinct from '{"erased": true, "finished": false, "photos_left": 1}'::jsonb then
+    raise exception 'FAIL: a photo uploaded to the erased pet''s folder afterwards reads as %', v_status;
+  end if;
+  select array_agg(storage_path) into v_named from fn_purge_client(v_cl);
+  if v_named is distinct from array['pet-photos/' || v_op || '/' || v_pet || '/late.jpg'] then
+    raise exception 'FAIL: a retry named % instead of the late photo', v_named;
+  end if;
+  reset session authorization;
+  delete from storage.objects where bucket_id || '/' || name = any (v_named);
+  perform set_config('request.jwt.claims',
+    format('{"sub":"%s","role":"authenticated"}', v_op), true);
+  set local session authorization authenticated;
+  if fn_purge_client_status(v_cl) is distinct from '{"erased": true, "finished": true, "photos_left": 0}'::jsonb then
+    raise exception 'FAIL: the retry did not finish the erasure';
+  end if;
+
+  -- The second phase belongs to an erasure: on a live client it would drop
+  -- a photo row nothing has deleted.
   begin
     perform fn_purge_client_photos(v_live);
     raise exception 'FAIL: the second phase ran on a client that has not been erased';
@@ -4019,8 +4067,8 @@ begin
   if (fn_purge_client_status(v_live) ->> 'erased')::boolean then
     raise exception 'FAIL: a live client reads as erased';
   end if;
-  if not exists (select 1 from pets where client_id = v_live) then
-    raise exception 'FAIL: the second phase refused a live client and deleted their pet anyway';
+  if not exists (select 1 from walk_photos where walk_id = v_live_walk) then
+    raise exception 'FAIL: the second phase refused a live client and dropped their photo row anyway';
   end if;
   reset session authorization;
 
@@ -4056,7 +4104,10 @@ begin
   if not exists (select 1 from credential_access_log where credential_id = v_cred) then
     raise exception 'FAIL: the purge erased the credential audit trail';
   end if;
-  if exists (select 1 from pets where client_id = v_cl) then
+  if exists (select 1 from pets where client_id = v_cl
+              and (name <> 'Removed' or medical_notes is not null
+                   or medication_notes is not null or vet_name is not null
+                   or vet_phone is not null or photo_path is not null)) then
     raise exception 'FAIL: the medical notes survived the purge';
   end if;
   if exists (select 1 from walk_photos where walk_id = v_walk) then

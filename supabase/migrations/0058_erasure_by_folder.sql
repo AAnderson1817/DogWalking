@@ -35,13 +35,17 @@
 --    and the pets rows — names, medical and medication notes, vet details —
 --    waited for a second phase nobody could start again. The first phase now
 --    redacts the pets rows and deletes the photo rows itself, so an unfinished
---    erasure leaves only the photos and the redacted pet rows that key their
---    folders. The screen asks `fn_purge_client_status`, and a retry keeps the
---    original `purged_at`.
+--    erasure leaves only photos. The screen asks `fn_purge_client_status`,
+--    and a retry keeps the original `purged_at`.
 --
--- The rows stay the work queue only in one sense: a pet's id names its
--- folder, so its redacted row is kept until that folder is empty. Walk rows
--- survive an erasure anyway (they carry the billing record).
+-- A folder stays findable for good. A pet's id is its folder's only name, so
+-- its redacted row is never deleted: the storage policy lets a walker write
+-- anywhere in their own folder, so a photo can land in an erased client's pet
+-- folder after the erasure — or during it — and the next status check must
+-- still find it. Walk rows survive an erasure anyway (they carry the billing
+-- record). Both are tombstones, as the client, property and credential rows
+-- already are: a row holding no personal data, kept because something else
+-- needs its id.
 --
 -- What this cannot find: a photo in the folder of a pet or walk whose row was
 -- deleted outside the product. Nothing in the app deletes either, and an
@@ -152,8 +156,8 @@ begin
    where client_id = p_client;
 
   -- The photo rows go now (0058): the walks that name their folders survive
-  -- the erasure. A pet's row is its folder's only name, so it stays, redacted,
-  -- until the second phase finds that folder empty.
+  -- the erasure. A pet's row is its folder's only name, so it stays for good,
+  -- redacted: a photo that lands in that folder later is still found.
   delete from walk_photos wph
    using walks w where wph.walk_id = w.id and w.client_id = p_client;
 
@@ -205,7 +209,6 @@ declare
   v_op   uuid := (select auth.uid());
   v_left int;
   v_n    int := 0;
-  v_m    int := 0;
 begin
   if not exists (
     select 1 from clients where id = p_client and operator_id = v_op
@@ -216,13 +219,15 @@ begin
     raise exception 'fn_purge_client_photos: this client has not been erased';
   end if;
 
-  -- The pets rows name the folders; dropping one while its folder still
-  -- holds a photo would leave that photo nameless for good (0058).
+  -- Nothing is finished while a photo remains (0058).
   select count(*) into v_left from fn_client_photo_objects(p_client);
   if v_left > 0 then
     raise exception 'fn_purge_client_photos: % photo(s) are still in storage', v_left;
   end if;
 
+  -- The first phase deleted the photo rows; these are any written since, by
+  -- an upload that finished after it. The pets rows are not deleted: each is
+  -- its folder's only name (0058).
   with gone as (
     delete from walk_photos wp
      using walks w
@@ -230,17 +235,14 @@ begin
     returning 1
   ) select count(*) into v_n from gone;
 
-  delete from pets where client_id = p_client;
-  get diagnostics v_m = row_count;
-
-  return v_n + v_m;
+  return v_n;
 end;
 $function$;
 
 -- ── Has the erasure finished? ────────────────────────────────────────────
 -- Read-only, so the screen can ask on load. `photos_left` is what storage
--- still holds in the client's folders; `finished` means the second phase has
--- run as well.
+-- still holds in the client's folders; `finished` also needs every photo row
+-- gone, which a photo row written after the first phase is not.
 create function fn_purge_client_status(p_client uuid)
 returns jsonb
 language plpgsql
@@ -264,7 +266,6 @@ begin
     'erased', v_purged,
     'photos_left', v_left,
     'finished', v_purged and v_left = 0
-                and not exists (select 1 from pets where client_id = p_client)
                 and not exists (select 1 from walk_photos wp join walks w on w.id = wp.walk_id
                                  where w.client_id = p_client));
 end;
@@ -272,6 +273,26 @@ $function$;
 
 revoke all on function fn_purge_client_status(uuid) from public, anon, authenticated;
 grant execute on function fn_purge_client_status(uuid) to authenticated;
+
+-- ── Erasures that stopped before their second phase ─────────────────────
+-- Every erasure of a client whose pet had a photo stopped after its first
+-- phase (defect 1), and that phase did not touch the pets, so those clients'
+-- pets still carry their names, medical notes and vet details, and their photo
+-- rows are still there. Bring each erased client to where the first phase
+-- now leaves one. Their photos cannot be deleted from SQL; the screen's status
+-- check finds them and offers "Finish erasing". Only staging can hold such a
+-- client: production has never run.
+update pets p
+   set name = 'Removed', breed = null, size = null, temperament = null,
+       medical_notes = null, feeding_notes = null, medication_notes = null,
+       vet_name = null, vet_phone = null, photo_path = null,
+       is_reactive = false, is_escape_risk = false, active = false
+  from clients c
+ where p.client_id = c.id and c.purged_at is not null;
+
+delete from walk_photos wph
+ using walks w, clients c
+ where wph.walk_id = w.id and w.client_id = c.id and c.purged_at is not null;
 
 -- ── Refuse if the owner cannot see the photos ────────────────────────────
 do $$

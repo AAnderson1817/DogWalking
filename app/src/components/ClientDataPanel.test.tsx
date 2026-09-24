@@ -3,7 +3,7 @@
 // the client erased before any photo is deleted, so `purged_at` alone used to
 // read as "finished": the button went away, and the photos waited for a
 // retry nobody could start once the page had reloaded.
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ClientRecord } from "@/lib/api";
@@ -22,9 +22,9 @@ vi.mock("@/lib/api", async (importOriginal) => ({
   exportClientData: API.exportClientData,
 }));
 
-const client = (purged: boolean) =>
+const client = (purged: boolean, id = "c-1") =>
   ({
-    id: "c-1",
+    id,
     full_name: purged ? "Deleted client" : "Jane Doe",
     purged_at: purged ? "2026-09-24T10:00:00Z" : null,
   }) as unknown as ClientRecord;
@@ -80,6 +80,38 @@ describe("ClientDataPanel, an erased client", () => {
   it("claims nothing while it is still asking", async () => {
     API.getErasureStatus.mockReturnValue(new Promise(() => {}));
     render(<ClientDataPanel client={client(true)} onPurged={() => {}} />);
+    expect(screen.getByText(/Checking whether erasing this client's data finished/)).toBeInTheDocument();
+    expect(screen.queryByText(/personal data was erased/)).toBeNull();
+  });
+
+  /**
+   * The screen can hand this panel another client without remounting it.
+   * One client's "finished" must not stand for the next one's while that
+   * answer is on its way — least of all by hiding the button that finishes it.
+   */
+  it("never shows one client's answer for another", async () => {
+    API.getErasureStatus.mockResolvedValueOnce({ erased: true, finished: true, photosLeft: 0 });
+    const { rerender } = render(<ClientDataPanel client={client(true, "c-1")} onPurged={() => {}} />);
+    expect(await screen.findByText(/personal data was erased/)).toBeInTheDocument();
+    API.getErasureStatus.mockReturnValueOnce(new Promise(() => {}));
+    rerender(<ClientDataPanel client={client(true, "c-2")} onPurged={() => {}} />);
+    expect(screen.getByText(/Checking whether erasing this client's data finished/)).toBeInTheDocument();
+    expect(screen.queryByText(/personal data was erased/)).toBeNull();
+  });
+
+  /**
+   * Two things keep this out: the request's own cancellation when the client
+   * changes, and the answer's record of which client it is about. Either
+   * alone holds this test; with both removed it goes red (measured).
+   */
+  it("ignores an answer that arrives for the client it has left", async () => {
+    let answerFirst: (s: unknown) => void = () => {};
+    API.getErasureStatus
+      .mockReturnValueOnce(new Promise((r) => { answerFirst = r; }))
+      .mockReturnValueOnce(new Promise(() => {}));
+    const { rerender } = render(<ClientDataPanel client={client(true, "c-1")} onPurged={() => {}} />);
+    rerender(<ClientDataPanel client={client(true, "c-2")} onPurged={() => {}} />);
+    await act(async () => answerFirst({ erased: true, finished: true, photosLeft: 0 }));
     expect(screen.getByText(/Checking whether erasing this client's data finished/)).toBeInTheDocument();
     expect(screen.queryByText(/personal data was erased/)).toBeNull();
   });

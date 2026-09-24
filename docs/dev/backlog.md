@@ -121,10 +121,11 @@ after the purge commits.
   retry hidden and the pets' medical notes still in the database. And
   Storage's answers could not prove an object gone. The purge now reads the
   client's walk and pet folders from `storage.objects`. It redacts the pets in
-  its first phase, refuses its second while any photo remains, and has a
-  read-only status call that the screen uses to offer "Finish erasing".
-  Removals go in batches of at most 1000. See the `privacy(0058)` status-log
-  entry.
+  its first phase and keeps their rows, since a pet's id is its photo
+  folder's only name. It refuses its second phase while any photo remains,
+  and has a read-only status call that the screen uses to offer "Finish
+  erasing". Removals go in batches of at most 1000. See the `privacy(0058)`
+  status-log entry.
 
 - **An erasure removes the walker's notices about the client** — migration
   `0057`. `notifications.client_id` says who a row is for, so a row the walker

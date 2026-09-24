@@ -125,8 +125,8 @@ So four things are redacted in place (`clients` to a tombstone, `walks.notes`,
 the property address and access notes, the credential ciphertext) and
 everything else is destroyed: `walk_gps_points`, `walk_photos`, `walk_pets`,
 `schedule_pets`, `recurring_schedules`, `plan_change_intents`, `notifications`,
-`invite_claim_attempts`, and `pets` (redacted in the first phase and deleted in
-the second, 0058). Notifications go by SUBJECT as well as
+`invite_claim_attempts`, and `pets`, which is redacted and kept, because a
+pet's id is the only name of its photo folder (0058). Notifications go by SUBJECT as well as
 by `client_id` (0057). `client_id` says who may read a row, so a row the walker
 reads carries NULL there. Until 0057 such a row named its client only in its
 title, and the purge, deleting by `client_id`, left "<name> is low on credits"
@@ -266,18 +266,27 @@ reports only what it deleted just now, and Storage answers a HEAD it refuses
 (an expired token, a missing bucket) with the same 400 it uses for "not
 found", so neither answer can prove an object absent. `fn_purge_client_status`
 counts what `storage.objects` still holds in the client's folders, and
-`fn_purge_client_photos` refuses while that count is above zero: the pet rows
-it drops are the only names of their folders, so dropping one early would
-leave its photos unfindable. It also refuses a client that has not been
-erased, where it would simply delete their pets.
+`fn_purge_client_photos` refuses while that count is above zero, and refuses a
+client that has not been erased.
+
+**A folder stays findable for good.** A pet's id is the only name of its
+photo folder, so the pet row is never deleted: it is redacted in the first
+phase and kept as a tombstone, as the client, property and credential rows
+already are. The storage insert policy lets a walker write anywhere in their
+own folder, so a photo can land in an erased client's pet folder during the
+erasure or after it, and the next status check finds it. Deleting the row once
+the folder was empty, as the first version of 0058 did, left any photo that
+arrived later with nothing that named it (Codex on #106).
 
 **An unfinished erasure holds only photos, and says so.** The first phase
-redacts the pet rows and deletes the photo rows itself, so what waits for the
-second phase is the photos and the redacted rows that key their folders. The
-first phase marks the client erased before any photo is deleted, so the
-screen asks `fn_purge_client_status` rather than reading `purged_at`, and
-offers "Finish erasing" until it says finished. A retry keeps the original
-`purged_at`.
+redacts the pet rows and deletes the photo rows itself, so all that can
+remain is photos (and a photo row written after it, which the second phase
+drops). The first phase marks the client erased before any photo is deleted,
+so the screen asks `fn_purge_client_status` rather than reading `purged_at`,
+and offers "Finish erasing" until it says finished. A retry keeps the
+original `purged_at`. Clients erased before 0058 whose second phase never ran
+(every one whose pet had a photo) still had their pets' names, medical notes
+and vet details; 0058 brought each to where the first phase now leaves one.
 
 Reading `storage.objects` is a run-time dependency on the role migrations run
 as: membership of its owner (already needed for the storage policies) and
