@@ -25,53 +25,7 @@ before you hit them.
 
 ## Open
 
-### 1. The pinned Supabase CLI is behind, and `db push` warns every deploy
-Read off the `24c74bd` staging deploy (run 33537033230, `Apply migrations`),
-not recalled:
-
-```
-Warning: failed to cache migrations catalog: error exporting pg-delta catalog:
-edge-runtime script produced no output:
-runtime has escaped from the event loop unexpectedly: event loop error:
-Error: Failed to read certificate file
-'/workspace/supabase/.temp/pgdelta/pgdelta-target-ca.crt': ENOENT
-...
-Finished supabase db push.
-A new version of Supabase CLI is available: v2.116.0 (currently installed v2.109.1)
-```
-
-What it is **not**: a failed migration. The line is prefixed `Warning`, the
-failing step is an optional *catalog cache*, `db push` reports `Finished`, and
-the job is green — `0051` applied on this exact run. What it is: recurring
-noise in the log a reader consults when a deploy genuinely breaks, which is
-the `ops(gate-noise)` failure mode — a red (or a scary stack trace) that
-means nothing spends the credibility of one that does.
-
-The pin is six places across the two deploy workflows and is deliberate: it
-was raised to 2.109.1 because 2.99.0 predated the `local_smtp` config key and
-broke `supabase link`. So this is a **deploy-workflow change** — a raise-the-bar
-path — and wants its own argument, not a drive-by bump. Before moving it, read
-2.109.1 → current release notes for `db push` and `functions deploy` changes;
-`supabase.com` is blocked by the egress proxy from this container, so that
-reading has to come from somewhere reachable. The version to move to must be
-read at the time, not taken from this file.
-
-Not urgent: nothing is broken, and the cost of being wrong here is a deploy
-that fails at `link` or `push`, which is exactly the failure 2.109.1 was
-pinned to avoid.
-
-**Unblocked 2026-09-23.** The only real test of a CLI bump is a staging
-deploy, and staging was down from run 101 (2026-09-15) on the expired
-`SUPABASE_ACCESS_TOKEN` until the owner renewed it; run 105 on `4c45ab1` was
-green end to end (owner-actions §2a). That commit also moved the STAGING
-function deploy to `supabase functions deploy --use-api`, bundling server-side
-because GHCR rate limits blocked the Docker bundler image on two fresh runners
-(`docs/dev/staging-recovery-2026-09-23.md`). `deploy-production.yml` still
-bundles with Docker, deliberately, until staging has demonstrated the new path;
-run 105 is one demonstration. Moving production to `--use-api` belongs with this
-item: same workflows, same raise-the-bar argument, same staging-first test.
-
-### 2. Let the address owner turn email back on
+### 1. Let the address owner turn email back on
 `0052` tells the operator when a client's address has unsubscribed, and the
 notice deliberately promises no way back, because none exists: a suppression
 is permanent, an operator must never be able to lift one (0038), and the
@@ -87,7 +41,7 @@ suppressed address. Product surface rather than a fix, which is why it is its
 own item; the trust questions (what a shared login proves, whether to log
 lifts) want a written argument before code.
 
-### 3. TEMP, and the `search_path` that lets a temp table shadow `public`
+### 2. TEMP, and the `search_path` that lets a temp table shadow `public`
 `PUBLIC` holds TEMP on the database (PostgreSQL's default), and a definer
 function whose `search_path` is `public` alone searches `pg_temp` FIRST for
 relations. So a SQL session holding a role with EXECUTE on a definer function
@@ -110,7 +64,57 @@ so each wants the money-path argument:
 - `revoke temporary on database … from public`, once it is measured on a real
   project that nothing the platform runs as an API role needs a temp table.
 
+### 3. The claim replay's fixtures cannot be deleted, and its warning says they can
+Every staging smoke run creates an operator, a client and two auth users for
+the invite-claim replay, and the cleanup fails on every run: the client
+DELETE answers 409, then the operator 409, then both auth users 500. Each
+failure is a `::warning` ending "Rows accumulate in staging until this is
+fixed." Read off smoke runs 103 and 104, on either side of PR A (#97), so it
+predates the shared fixture library.
+
+The warning promises a fix the schema forbids. A claim, successful or not,
+writes an `invite_claim_attempts` row. That table is append-only by trigger
+(`0039`, the H4 trail), and its `client_id` is `ON DELETE RESTRICT`. So a
+claimed client can never be deleted, by design. `clients.operator_id` then
+keeps the operator, and `operators.id` and `clients.auth_user_id` (both
+RESTRICT to `auth.users`) keep both auth users. Three ways out:
+
+- **Clean up the way the product erases a client.** Call `fn_purge_client`
+  as the fixture operator (the replay holds its password). The purge redacts
+  the client and nulls `auth_user_id`, so the client's auth user can then be
+  deleted. The tombstone, the operator and the operator's auth user remain:
+  three rows per run instead of four.
+- **Keep one long-lived fixture operator**, got or created and never deleted,
+  so only each run's client tombstone accumulates. That brings back the
+  stable identity `ops(smoke-identity)` removed. Get-or-create is no
+  precondition, but a fixture whose state drifts would taint every run.
+- **Accept it and say so.** Replace the warning with a notice naming the
+  design, not a fix that cannot exist.
+
+Whichever lands, the warning must stop promising what the schema forbids:
+four yellow annotations on every green run teach a reader to skip warnings.
+The growth itself is slow and fails loudly. `user_id_for` pages through
+staging's auth users under a 50-page bound, so each run's two permanent users
+add a page every fifty runs, and a lookup that reaches the bound exits 9
+rather than reporting a user absent.
+
 ## Done
+
+- **The Supabase CLI, 2.109.1 → 2.117.0, and production's function deploy
+  onto `--use-api`.** Read against the 420 commits in the range, and both
+  releases pushed this tree's 52 migrations before moving. The pg-delta
+  catalog warning is gone: 2.109.1 printed it, 2.117.0 did not. The
+  API-deploy abort that left stale metadata (INC-699) is fixed in the range,
+  so it no longer threatens staging's retry loop, and dashboard-issued
+  `sbp_v0_` tokens are accepted. One loss, recorded rather than papered over:
+  `db push` no longer prints a migration's NOTICE, WARNING or INFO. And one
+  hole the bump did not open but vetting it found: `functions deploy` ignores
+  an unknown key in `[functions.<name>]` on both releases, so a `verify_jwt`
+  typo deploys a public function behind the JWT check with no warning. Gate
+  10h now refuses it.
+  `scripts/verify-workflows.py` rule 5 now holds both deploy workflows to one
+  CLI release and one function-deploy invocation. See the `ops(cli-2.117)`
+  status-log entry.
 
 - **Spec-drift PR B — invariant 5's REVOKE half.** Migration `0053` revokes
   EXECUTE on the four definer trigger functions that had kept the platform
@@ -123,7 +127,8 @@ so each wants the money-path argument:
   that model to a reset database. Its review found the four reachable from any
   SQL session holding an API role (never through the product), a grant pattern
   that leaves `authenticated` on the platform default (refused now), and
-  healthy SQL the model misread (item 3 is what it left). See the
+  healthy SQL the model misread (the TEMP and `search_path` item is what it
+  left). See the
   `security(0053)+ci(definer-acl)` status-log entry.
 
 - **Spec-drift PR A — the gates that passed for the wrong reason.** Eight
